@@ -51,7 +51,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "codeapi.fullname" . }}-secrets
                   key: redis-password
-            # Service URLs
+            - name: USE_REDIS_CLUSTER
+              value: {{ include "codeapi.redis.clusterEnabled" . | quote }}
+            {{- include "codeapi.redis.tlsEnv" . | nindent 12 }}
             - name: FILE_SERVER_URL
               value: "http://{{ include "codeapi.fullname" . }}-file-server:{{ .Values.fileServer.service.port }}"
             - name: TOOL_CALL_SERVER_URL
@@ -87,6 +89,14 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
+          {{- with (include "codeapi.redis.caVolumeMount" . | trim) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
+      {{- with (include "codeapi.redis.caVolume" . | trim) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

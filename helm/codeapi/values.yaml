@@ -9,37 +9,37 @@
 # GLOBAL SETTINGS
 # =============================================================================
 global:
-  # Image pull secrets (if using private registry)
-  imagePullSecrets: []
-  # Storage class for persistent volumes
-  storageClass: ""
+    # Image pull secrets (if using private registry)
+    imagePullSecrets: []
+    # Storage class for persistent volumes
+    storageClass: ''
 
 # Shared token for internal service-to-service requests between the public API,
 # file-server, tool-call-server, worker, and sandbox API. Override for every
 # production install.
 internalServiceAuth:
-  token: "changeme-in-production"
+    token: 'changeme-in-production'
 
 hardenedSandboxMode: true
 
 otel:
-  enabled: false
-  # OTLP/HTTP collector endpoint, e.g. "http://opentelemetry-collector.observability:4318".
-  # Required when enabled=true.
-  exporterOtlpEndpoint: ""
-  exporterOtlpTracesEndpoint: ""
-  # Comma-separated OTLP headers. Percent-encode commas and equals signs in
-  # values, matching the OTLP env-var convention.
-  exporterOtlpHeaders: ""
-  resourceAttributes: ""
+    enabled: false
+    # OTLP/HTTP collector endpoint, e.g. "http://opentelemetry-collector.observability:4318".
+    # Required when enabled=true.
+    exporterOtlpEndpoint: ''
+    exporterOtlpTracesEndpoint: ''
+    # Comma-separated OTLP headers. Percent-encode commas and equals signs in
+    # values, matching the OTLP env-var convention.
+    exporterOtlpHeaders: ''
+    resourceAttributes: ''
 
 # Encrypted grants/handles owned by the egress gateway. Sandbox-runner,
 # service-api, and service-worker never receive this secret.
 egressGrant:
-  secret: "changeme-egress-grant-secret-32-bytes-minimum"
-  ttlSeconds: 900
-  ledgerRequired: true
-  ledgerTtlGraceSeconds: 300
+    secret: 'changeme-egress-grant-secret-32-bytes-minimum'
+    ttlSeconds: 900
+    ledgerRequired: true
+    ledgerTtlGraceSeconds: 300
 
 # Worker signs sandbox execute requests with this private key; sandbox-runner
 # receives only the public verifier so a runner compromise cannot mint new
@@ -51,59 +51,59 @@ egressGrant:
 # workerSandbox.enabled=true and these are unset. For minikube local dev,
 # values-local.yaml ships a test-only keypair.
 executionManifest:
-  privateKey: ""
-  publicKey: ""
-  ttlSeconds: 300
+    privateKey: ''
+    publicKey: ''
+    ttlSeconds: 300
 
 # =============================================================================
 # API SERVICE (HTTP handlers, scales based on traffic)
 # =============================================================================
 api:
-  enabled: true
-  replicaCount: 2  # Start with 2 API pods
+    enabled: true
+    replicaCount: 2 # Start with 2 API pods
 
-  image:
-    repository: codeapi-api
-    tag: latest
-    pullPolicy: IfNotPresent  # Use Always in production
+    image:
+        repository: codeapi-api
+        tag: latest
+        pullPolicy: IfNotPresent # Use Always in production
 
-  # Resource limits
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
+    # Resource limits
+    resources:
+        requests:
+            cpu: 100m
+            memory: 256Mi
+        limits:
+            cpu: 500m
+            memory: 512Mi
 
-  # Service configuration
-  service:
-    type: ClusterIP
-    port: 3112
+    # Service configuration
+    service:
+        type: ClusterIP
+        port: 3112
 
-  httpJsonLimit: 50mb
+    httpJsonLimit: 50mb
 
-  # Ingress (optional, for external access)
-  ingress:
-    enabled: false
-    className: ""
-    annotations: {}
-    hosts:
-      - host: codeapi.local
-        paths:
-          - path: /
-            pathType: Prefix
-    tls: []
+    # Ingress (optional, for external access)
+    ingress:
+        enabled: false
+        className: ''
+        annotations: {}
+        hosts:
+            - host: codeapi.local
+              paths:
+                  - path: /
+                    pathType: Prefix
+        tls: []
 
-  # Horizontal Pod Autoscaler
-  autoscaling:
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 10
-    targetCPUUtilizationPercentage: 70
+    # Horizontal Pod Autoscaler
+    autoscaling:
+        enabled: false
+        minReplicas: 2
+        maxReplicas: 10
+        targetCPUUtilizationPercentage: 70
 
-  # Extra environment variables
-  extraEnv: []
+    # Extra environment variables
+    extraEnv: []
 
 # =============================================================================
 # WORKER-SANDBOX (Job processors + MicroVM Sandbox, scales based on queue depth)
@@ -111,350 +111,376 @@ api:
 # Only requires /dev/kvm — no privileged mode, no Linux capabilities.
 # =============================================================================
 workerSandbox:
-  enabled: true
-  replicaCount: 3
+    enabled: true
+    replicaCount: 3
 
-  workerImage:
-    repository: codeapi-worker
-    tag: latest
-    pullPolicy: IfNotPresent
-
-  sandboxImage:
-    # With packages.source=image, build the api/Dockerfile default (or
-    # sandbox-runner-baked). With source=pvc/direct mode, build
-    # --target sandbox-runner under the same configured repository/tag.
-    repository: codeapi-sandbox-runner
-    tag: latest
-    pullPolicy: IfNotPresent
-
-  # Enable libkrun microVM isolation. Requires /dev/kvm on the node.
-  # Set to false to fall back to chroot + NsJail (no guest kernel).
-  # Override to false until the node group has nested virtualisation enabled.
-  kvmEnabled: true
-
-  # KVM device group ID for legacy hostPath mode.
-  kvmGid: 108
-
-  # Custom seccomp profile (defense-in-depth on top of NsJail's inner Kafel
-  # policy). When enabled, pods reference Localhost: profiles/nsjail.json,
-  # which must be pre-installed on every node at
-  # /var/lib/kubelet/seccomp/profiles/nsjail.json - see seccomp/README.md
-  # for the DaemonSet installer pattern. When disabled, KVM-mode pods use
-  # RuntimeDefault (still safer than no profile) and non-KVM-mode pods use
-  # Unconfined (forced by NsJail's pivot_root requirement).
-  seccomp:
-    enabled: false
-
-  # Optional Kubernetes device-plugin path for non-privileged KVM access. The
-  # device plugin should be deployed separately; this chart only requests its
-  # extended resource for sandbox-runner.
-  kvmDevicePlugin:
-    enabled: false
-    # Extended resource advertised by your KVM device plugin, e.g.
-    # "devices.kubevirt.io/kvm". Required when enabled=true (install fails
-    # fast when unset).
-    resourceName: ""
-
-  # MicroVM launcher configuration (only used when kvmEnabled: true)
-  launcher:
-    vcpus: 2
-    ramMib: 2048
-    logLevel: 3
-    filterVsockEnotconn: true
-
-  # Resource limits (higher because it runs code + microVM)
-  resources:
-    requests:
-      cpu: 500m
-      memory: 1Gi
-    limits:
-      cpu: 2000m
-      memory: 3Gi
-
-  serviceAccount:
-    create: true
-    name: ""
-    annotations: {}
-
-  sandboxServiceAccount:
-    create: true
-    name: ""
-    automountServiceAccountToken: false
-    annotations: {}
-
-  # Optional per-deployment scheduling. Empty values fall back to the chart-wide
-  # nodeSelector/tolerations/affinity below. Use sandboxRunner to place only the
-  # untrusted-code tier on KVM-capable nodes.
-  serviceWorker:
-    # Defaults to workerSandbox.replicaCount when unset.
-    # Keep this as fixed HA capacity; scale sandboxRunner for execution throughput.
-    replicaCount: null
-    inheritSharedScheduling: true
-    nodeSelector: {}
-    tolerations: []
-    affinity: {}
-
-  sandboxRunner:
-    # Defaults to workerSandbox.replicaCount when unset.
-    replicaCount: null
-    # Restart a sandbox-runner before launcher/VMM host-side fd retention can
-    # exhaust the process file descriptor limit. Set 0 to disable.
-    fdLivenessLimit: 40000
-    # Restart a sandbox-runner when its microVM guest wall clock differs from
-    # the host by this many seconds. This must remain comfortably below the
-    # 30-second execution-manifest clock tolerance; the chart reserves the
-    # five-second probe timeout and accepts at most 24. Set 0 to disable.
-    clockSkewLivenessLimitSeconds: 10
-    # Subtract a stable 0..N-second offset from each pod's clock-skew limit so
-    # replicas created together do not all recycle at once. Must be less than
-    # clockSkewLivenessLimitSeconds.
-    clockSkewLivenessJitterSeconds: 2
-    inheritSharedScheduling: true
-    nodeSelector: {}
-    tolerations: []
-    affinity: {}
-    autoscaling:
-      enabled: false
-      minReplicas: 1
-      maxReplicas: 20
-      targetCPUUtilizationPercentage: 70
-      targetMemoryUtilizationPercentage: 80
-
-  # Worker configuration
-  config:
-    # Throughput-mode defaults for launcher.vcpus=2. Bash/Node/Bun and
-    # bash-launched Python run through the "other" queue; direct Python is kept
-    # as a small compatibility lane.
-    pythonConcurrency: 1
-    otherConcurrency: 8
-    jobWindow: 1000
-    jobTimeout: 25000       # 25 seconds
-
-  # Health check port for the worker
-  healthPort: 3113
-
-  # Sandbox configuration (NsJail-based, uses SANDBOX_* env vars)
-  sandbox:
-    port: 2000
-    maxProcessCount: 100
-    runCpuTime: 15000
-    runTimeout: 15000
-    compileCpuTime: 10000
-    compileTimeout: 10000
-    outputMaxSize: 65536
-    maxOpenFiles: 2048
-    executeBodyLimit: 50mb
-    disableNetworking: true
-    maxConcurrentJobs: 8
-    perJobUids: true
-    jobUidBase: 200000
-    jobGidBase: 200000
-    # Defaults to maxConcurrentJobs when unset.
-    jobUidCount: null
-    workspaceReaperMaxAgeSeconds: 3600
-
-  # Language runtime package delivery
-  packages:
-    # image (default): boot a baked /pkgs tree from a read-only ext4 block root.
-    # This avoids long-lived virtio-fs inode handles exhausting the launcher FD
-    # limit. Requires kvmEnabled=true and sandboxImage built from the
-    # sandbox-runner-baked target (the api/Dockerfile default).
-    #
-    # pvc: legacy compatibility mode. Mount a host/PVC package tree through
-    # virtio-fs and recycle runners with the FD liveness guard before exhaustion.
-    source: image
-
-    # Used only when source=pvc.
-    persistence:
-      enabled: true
-      size: 10Gi
-      accessMode: ReadWriteOnce
-      storageClass: ""
-      # If you have pre-built packages, specify the existing claim
-      existingClaim: ""
-
-    # Used only when source=pvc. Populates packages on first install.
-    # Runs as a Helm pre-install/pre-upgrade hook
-    # Compiles Python from source and downloads Node/Bun binaries
-    initJob:
-      enabled: true
-      forceRebuild: false
-      image:
-        repository: codeapi-package-init
+    workerImage:
+        repository: codeapi-worker
         tag: latest
         pullPolicy: IfNotPresent
-      pythonVersion: "3.14.4"
-      nodeVersion: "24.15.0"
-      bunVersion: "1.3.14"
-      bashPackageVersion: "5.2.0"
-      backoffLimit: 2
-      ttlSecondsAfterFinished: 3600
-      resources:
+
+    sandboxImage:
+        # With packages.source=image, build the api/Dockerfile default (or
+        # sandbox-runner-baked). With source=pvc/direct mode, build
+        # --target sandbox-runner under the same configured repository/tag.
+        repository: codeapi-sandbox-runner
+        tag: latest
+        pullPolicy: IfNotPresent
+
+    # Enable libkrun microVM isolation. Requires /dev/kvm on the node.
+    # Set to false to fall back to chroot + NsJail (no guest kernel).
+    # Override to false until the node group has nested virtualisation enabled.
+    kvmEnabled: true
+
+    # KVM device group ID for legacy hostPath mode.
+    kvmGid: 108
+
+    # Custom seccomp profile (defense-in-depth on top of NsJail's inner Kafel
+    # policy). When enabled, pods reference Localhost: profiles/nsjail.json,
+    # which must be pre-installed on every node at
+    # /var/lib/kubelet/seccomp/profiles/nsjail.json - see seccomp/README.md
+    # for the DaemonSet installer pattern. When disabled, KVM-mode pods use
+    # RuntimeDefault (still safer than no profile) and non-KVM-mode pods use
+    # Unconfined (forced by NsJail's pivot_root requirement).
+    seccomp:
+        enabled: false
+
+    # Optional Kubernetes device-plugin path for non-privileged KVM access. The
+    # device plugin should be deployed separately; this chart only requests its
+    # extended resource for sandbox-runner.
+    kvmDevicePlugin:
+        enabled: false
+        # Extended resource advertised by your KVM device plugin, e.g.
+        # "devices.kubevirt.io/kvm". Required when enabled=true (install fails
+        # fast when unset).
+        resourceName: ''
+
+    # MicroVM launcher configuration (only used when kvmEnabled: true)
+    launcher:
+        vcpus: 2
+        ramMib: 2048
+        logLevel: 3
+        filterVsockEnotconn: true
+
+    # Resource limits (higher because it runs code + microVM)
+    resources:
         requests:
-          cpu: 500m
-          memory: 1Gi
+            cpu: 500m
+            memory: 1Gi
         limits:
-          cpu: 2000m
-          memory: 4Gi
+            cpu: 2000m
+            memory: 3Gi
 
-  # Extra environment variables for worker containers
-  extraEnv: []
+    serviceAccount:
+        create: true
+        name: ''
+        annotations: {}
 
-  # Extra environment variables for the sandbox-runner container only. Keep
-  # control-plane, storage, Redis, and gateway encryption secrets out of this
-  # list; use it only for sandbox verifier/runtime knobs such as
-  # SANDBOX_LOG_LEVEL. Secret/token-like names are rejected by template
-  # validation; the manifest public verifier is chart-managed.
-  sandboxExtraEnv: []
+    sandboxServiceAccount:
+        create: true
+        name: ''
+        automountServiceAccountToken: false
+        annotations: {}
+
+    # Optional per-deployment scheduling. Empty values fall back to the chart-wide
+    # nodeSelector/tolerations/affinity below. Use sandboxRunner to place only the
+    # untrusted-code tier on KVM-capable nodes.
+    serviceWorker:
+        # Defaults to workerSandbox.replicaCount when unset.
+        # Keep this as fixed HA capacity; scale sandboxRunner for execution throughput.
+        replicaCount: null
+        inheritSharedScheduling: true
+        nodeSelector: {}
+        tolerations: []
+        affinity: {}
+
+    sandboxRunner:
+        # Defaults to workerSandbox.replicaCount when unset.
+        replicaCount: null
+        # Restart a sandbox-runner before launcher/VMM host-side fd retention can
+        # exhaust the process file descriptor limit. Set 0 to disable.
+        fdLivenessLimit: 40000
+        # Restart a sandbox-runner when its microVM guest wall clock differs from
+        # the host by this many seconds. This must remain comfortably below the
+        # 30-second execution-manifest clock tolerance; the chart reserves the
+        # five-second probe timeout and accepts at most 24. Set 0 to disable.
+        clockSkewLivenessLimitSeconds: 10
+        # Subtract a stable 0..N-second offset from each pod's clock-skew limit so
+        # replicas created together do not all recycle at once. Must be less than
+        # clockSkewLivenessLimitSeconds.
+        clockSkewLivenessJitterSeconds: 2
+        inheritSharedScheduling: true
+        nodeSelector: {}
+        tolerations: []
+        affinity: {}
+        autoscaling:
+            enabled: false
+            minReplicas: 1
+            maxReplicas: 20
+            targetCPUUtilizationPercentage: 70
+            targetMemoryUtilizationPercentage: 80
+
+    # Worker configuration
+    config:
+        # Throughput-mode defaults for launcher.vcpus=2. Bash/Node/Bun and
+        # bash-launched Python run through the "other" queue; direct Python is kept
+        # as a small compatibility lane.
+        pythonConcurrency: 1
+        otherConcurrency: 8
+        jobWindow: 1000
+        jobTimeout: 25000 # 25 seconds
+
+    # Health check port for the worker
+    healthPort: 3113
+
+    # Sandbox configuration (NsJail-based, uses SANDBOX_* env vars)
+    sandbox:
+        port: 2000
+        maxProcessCount: 100
+        runCpuTime: 15000
+        runTimeout: 15000
+        compileCpuTime: 10000
+        compileTimeout: 10000
+        outputMaxSize: 65536
+        maxOpenFiles: 2048
+        executeBodyLimit: 50mb
+        disableNetworking: true
+        maxConcurrentJobs: 8
+        perJobUids: true
+        jobUidBase: 200000
+        jobGidBase: 200000
+        # Defaults to maxConcurrentJobs when unset.
+        jobUidCount: null
+        workspaceReaperMaxAgeSeconds: 3600
+
+    # Language runtime package delivery
+    packages:
+        # image (default): boot a baked /pkgs tree from a read-only ext4 block root.
+        # This avoids long-lived virtio-fs inode handles exhausting the launcher FD
+        # limit. Requires kvmEnabled=true and sandboxImage built from the
+        # sandbox-runner-baked target (the api/Dockerfile default).
+        #
+        # pvc: legacy compatibility mode. Mount a host/PVC package tree through
+        # virtio-fs and recycle runners with the FD liveness guard before exhaustion.
+        source: image
+
+        # Used only when source=pvc.
+        persistence:
+            enabled: true
+            size: 10Gi
+            accessMode: ReadWriteOnce
+            storageClass: ''
+            # If you have pre-built packages, specify the existing claim
+            existingClaim: ''
+
+        # Used only when source=pvc. Populates packages on first install.
+        # Runs as a Helm pre-install/pre-upgrade hook
+        # Compiles Python from source and downloads Node/Bun binaries
+        initJob:
+            enabled: true
+            forceRebuild: false
+            image:
+                repository: codeapi-package-init
+                tag: latest
+                pullPolicy: IfNotPresent
+            pythonVersion: '3.14.4'
+            nodeVersion: '24.15.0'
+            bunVersion: '1.3.14'
+            bashPackageVersion: '5.2.0'
+            backoffLimit: 2
+            ttlSecondsAfterFinished: 3600
+            resources:
+                requests:
+                    cpu: 500m
+                    memory: 1Gi
+                limits:
+                    cpu: 2000m
+                    memory: 4Gi
+
+    # Extra environment variables for worker containers
+    extraEnv: []
+
+    # Extra environment variables for the sandbox-runner container only. Keep
+    # control-plane, storage, Redis, and gateway encryption secrets out of this
+    # list; use it only for sandbox verifier/runtime knobs such as
+    # SANDBOX_LOG_LEVEL. Secret/token-like names are rejected by template
+    # validation; the manifest public verifier is chart-managed.
+    sandboxExtraEnv: []
 
 # =============================================================================
 # FILE SERVER (S3/MinIO integration, stateless)
 # =============================================================================
 fileServer:
-  enabled: true
-  replicaCount: 1
+    enabled: true
+    replicaCount: 1
 
-  image:
-    repository: codeapi-file-server
-    tag: latest
-    pullPolicy: IfNotPresent
+    image:
+        repository: codeapi-file-server
+        tag: latest
+        pullPolicy: IfNotPresent
 
-  resources:
-    requests:
-      cpu: 50m
-      memory: 128Mi
-    limits:
-      cpu: 200m
-      memory: 256Mi
+    resources:
+        requests:
+            cpu: 50m
+            memory: 128Mi
+        limits:
+            cpu: 200m
+            memory: 256Mi
 
-  service:
-    type: ClusterIP
-    port: 3000
+    service:
+        type: ClusterIP
+        port: 3000
 
-  # ServiceAccount for IRSA (IAM Roles for Service Accounts) on EKS
-  # See: documentation/services/codeapi/deployment/irsa.md
-  serviceAccount:
-    create: true
-    name: ""
-    annotations: {}
-    # For IRSA on EKS, add:
-    # annotations:
-    #   eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT_ID:role/codeapi-fileserver-role"
+    # ServiceAccount for IRSA (IAM Roles for Service Accounts) on EKS
+    # See: documentation/services/codeapi/deployment/irsa.md
+    serviceAccount:
+        create: true
+        name: ''
+        annotations: {}
+        # For IRSA on EKS, add:
+        # annotations:
+        #   eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT_ID:role/codeapi-fileserver-role"
 
-  # S3 configuration (when using AWS S3 instead of MinIO)
-  # Set minio.enabled=false when using external S3
-  s3:
-    enabled: false
-    endpoint: "s3.amazonaws.com"
-    region: "us-east-1"
-    bucket: ""
-    useSSL: true
-    # Use IRSA for authentication (no static credentials needed)
-    useIrsa: false
+    # S3 configuration (when using AWS S3 instead of MinIO)
+    # Set minio.enabled=false when using external S3
+    s3:
+        enabled: false
+        endpoint: 's3.amazonaws.com'
+        region: 'us-east-1'
+        bucket: ''
+        useSSL: true
+        # Use IRSA for authentication (no static credentials needed)
+        useIrsa: false
 
 # =============================================================================
 # TOOL CALL SERVER (programmatic tool calling, stateless)
 # =============================================================================
 toolCallServer:
-  enabled: true
-  replicaCount: 1
+    enabled: true
+    replicaCount: 1
 
-  image:
-    repository: codeapi-tool-call-server
-    tag: latest
-    pullPolicy: IfNotPresent
+    image:
+        repository: codeapi-tool-call-server
+        tag: latest
+        pullPolicy: IfNotPresent
 
-  resources:
-    requests:
-      cpu: 50m
-      memory: 128Mi
-    limits:
-      cpu: 200m
-      memory: 256Mi
+    resources:
+        requests:
+            cpu: 50m
+            memory: 128Mi
+        limits:
+            cpu: 200m
+            memory: 256Mi
 
-  service:
-    type: ClusterIP
-    port: 3033
+    service:
+        type: ClusterIP
+        port: 3033
 
-  config:
-    requestTimeout: 300000
-    sessionExpiry: 600
+    config:
+        requestTimeout: 300000
+        sessionExpiry: 600
 
 # =============================================================================
 # EGRESS GATEWAY (only sandbox-runner outbound capability endpoint)
 # =============================================================================
 egressGateway:
-  enabled: true
-  replicaCount: 1
+    enabled: true
+    replicaCount: 1
 
-  image:
-    repository: codeapi-egress-gateway
-    tag: latest
-    pullPolicy: IfNotPresent
+    image:
+        repository: codeapi-egress-gateway
+        tag: latest
+        pullPolicy: IfNotPresent
 
-  resources:
-    requests:
-      cpu: 50m
-      memory: 128Mi
-    limits:
-      cpu: 200m
-      memory: 256Mi
+    resources:
+        requests:
+            cpu: 50m
+            memory: 128Mi
+        limits:
+            cpu: 200m
+            memory: 256Mi
 
-  service:
-    type: ClusterIP
-    port: 3190
+    service:
+        type: ClusterIP
+        port: 3190
 
-  config:
-    maxToolCallBytes: 1048576
+    config:
+        maxToolCallBytes: 1048576
 
 # =============================================================================
 # REDIS (Job queue and state store)
 # =============================================================================
 redis:
-  enabled: true  # Set to false if using external Redis
+    enabled: true # Set to false if using external Redis
 
-  # Bitnami Redis chart configuration
-  architecture: standalone  # Use 'replication' for HA
-  auth:
-    enabled: true
-    password: "changeme-in-production"
+    # Bitnami Redis chart configuration
+    architecture: standalone # Use 'replication' for HA
+    auth:
+        enabled: true
+        password: 'changeme-in-production'
 
-  master:
-    persistence:
-      enabled: true
-      size: 1Gi
+    master:
+        persistence:
+            enabled: true
+            size: 1Gi
 
-  # If using external Redis, configure here:
-  # external:
-  #   host: redis.example.com
-  #   port: 6379
-  #   password: secret
+    # If using external Redis, configure here:
+    # external:
+    #   host: redis.example.com
+    #   port: 6379
+    #   password: secret
+
+    # Redis Cluster mode (e.g. GCP Memorystore cluster, AWS ElastiCache cluster).
+    # When enabled the service components connect using ioredis Cluster mode.
+    cluster:
+        enabled: false
+        # Comma-separated list of "host:port" startup nodes for ioredis Cluster
+        # discovery.  Populate this when redis.enabled=false and the external Redis
+        # is a cluster endpoint.  Example:
+        #   nodes: "node1.example.com:6379,node2.example.com:6379,node3.example.com:6379"
+        nodes: ''
+
+    # TLS settings for external managed Redis (e.g. GCP Memorystore with TLS).
+    # Ignored when redis.enabled=true (in-cluster Redis uses plain TCP).
+    tls:
+        enabled: false
+        # Name of a Kubernetes Secret that holds the CA certificate.
+        # The Secret must contain the key specified in caKey.
+        caSecretName: ''
+        caKey: 'ca'
+        # Mount path inside each pod for the CA certificate file.
+        caMountPath: '/etc/redis-tls/ca.crt'
+
+    # Alternative DNS lookup – set to true for GCP Memorystore cluster or
+    # AWS ElastiCache clusters where standard DNS resolution causes TLS
+    # hostname-mismatch errors.  Mirrors REDIS_USE_ALTERNATIVE_DNS_LOOKUP.
+    useAlternativeDnsLookup: false
 
 # =============================================================================
 # MINIO (S3-compatible storage)
 # =============================================================================
 minio:
-  enabled: true  # Set to false if using external S3/MinIO
+    enabled: true # Set to false if using external S3/MinIO
 
-  # Bitnami MinIO chart configuration
-  mode: standalone  # Use 'distributed' for HA
-  auth:
-    rootUser: minioadmin
-    rootPassword: "changeme-in-production"
+    # Bitnami MinIO chart configuration
+    mode: standalone # Use 'distributed' for HA
+    auth:
+        rootUser: minioadmin
+        rootPassword: 'changeme-in-production'
 
-  persistence:
-    enabled: true
-    size: 10Gi
+    persistence:
+        enabled: true
+        size: 10Gi
 
-  defaultBuckets: "codeapi-files"
+    defaultBuckets: 'codeapi-files'
 
-  # If using external MinIO/S3:
-  # external:
-  #   endpoint: s3.amazonaws.com
-  #   accessKey: AKIAXXXXXXXX
-  #   secretKey: xxxxxxxx
-  #   bucket: my-bucket
-  #   useSSL: true
+    # If using external MinIO/S3:
+    # external:
+    #   endpoint: s3.amazonaws.com
+    #   accessKey: AKIAXXXXXXXX
+    #   secretKey: xxxxxxxx
+    #   bucket: my-bucket
+    #   useSSL: true
 
 # =============================================================================
 # COMMON SETTINGS
@@ -471,40 +497,40 @@ affinity: {}
 
 # Pod disruption budgets
 podDisruptionBudget:
-  api:
-    enabled: false
-    minAvailable: 1
-  workerSandbox:
-    enabled: false
-    minAvailable: 2
+    api:
+        enabled: false
+        minAvailable: 1
+    workerSandbox:
+        enabled: false
+        minAvailable: 2
 
 # =============================================================================
 # PROMETHEUS METRICS
 # =============================================================================
 metrics:
-  enabled: false    # Set to true to create PodMonitors for Prometheus scraping
-  interval: "30s"
-  scrapeTimeout: "10s"
+    enabled: false # Set to true to create PodMonitors for Prometheus scraping
+    interval: '30s'
+    scrapeTimeout: '10s'
 
 # =============================================================================
 # NETWORK POLICIES
 # =============================================================================
 networkPolicy:
-  enabled: true
-  otel:
     enabled: true
-    port: 4318
-    # Match these to your collector's namespace and pod labels.
-    namespaceSelector:
-      matchLabels:
-        kubernetes.io/metadata.name: observability
-    podSelector:
-      matchLabels:
-        app.kubernetes.io/name: opentelemetry-collector
-  redis:
-    # Used only when redis.enabled=false. If empty, NetworkPolicy permits TCP
-    # egress on the configured Redis port to any destination because standard
-    # Kubernetes NetworkPolicy cannot target redis.external.host by DNS name.
-    externalCIDRs: []
-  toolCallServer:
-    allowExternalEgress: false  # Allow tool call server to reach external APIs
+    otel:
+        enabled: true
+        port: 4318
+        # Match these to your collector's namespace and pod labels.
+        namespaceSelector:
+            matchLabels:
+                kubernetes.io/metadata.name: observability
+        podSelector:
+            matchLabels:
+                app.kubernetes.io/name: opentelemetry-collector
+    redis:
+        # Used only when redis.enabled=false. If empty, NetworkPolicy permits TCP
+        # egress on the configured Redis port to any destination because standard
+        # Kubernetes NetworkPolicy cannot target redis.external.host by DNS name.
+        externalCIDRs: []
+    toolCallServer:
+        allowExternalEgress: false # Allow tool call server to reach external APIs

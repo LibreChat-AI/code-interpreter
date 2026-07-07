@@ -110,6 +110,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "codeapi.fullname" . }}-secrets
                   key: redis-password
+            - name: USE_REDIS_CLUSTER
+              value: {{ include "codeapi.redis.clusterEnabled" . | quote }}
+            {{- include "codeapi.redis.tlsEnv" . | nindent 12 }}
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -135,6 +138,14 @@ spec:
             timeoutSeconds: 5
           resources:
             {{- toYaml .Values.fileServer.resources | nindent 12 }}
+          {{- with (include "codeapi.redis.caVolumeMount" . | trim) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
+      {{- with (include "codeapi.redis.caVolume" . | trim) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

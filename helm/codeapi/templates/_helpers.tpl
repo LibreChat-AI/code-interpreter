@@ -152,11 +152,15 @@ app.kubernetes.io/component: tool-call-server
 {{- end }}
 
 {{/*
-Redis host - either from subchart or external
+Redis host - either from subchart or external.
+In cluster mode this renders the comma-separated node list from redis.cluster.nodes
+(falling back to redis.external.host for single-node external deployments).
 */}}
 {{- define "codeapi.redis.host" -}}
 {{- if .Values.redis.enabled }}
 {{- printf "%s-redis-master" .Release.Name }}
+{{- else if and .Values.redis.cluster.enabled .Values.redis.cluster.nodes }}
+{{- .Values.redis.cluster.nodes }}
 {{- else }}
 {{- .Values.redis.external.host }}
 {{- end }}
@@ -170,6 +174,70 @@ Redis port
 {{- "6379" }}
 {{- else }}
 {{- .Values.redis.external.port | default "6379" }}
+{{- end }}
+{{- end }}
+
+{{/*
+USE_REDIS_CLUSTER value – "true" when redis.cluster.enabled or when
+redis.cluster.nodes contains a comma (auto-detect multiple nodes).
+*/}}
+{{- define "codeapi.redis.clusterEnabled" -}}
+{{- if .Values.redis.cluster.enabled }}
+{{- "true" }}
+{{- else if and .Values.redis.cluster.nodes (contains "," .Values.redis.cluster.nodes) }}
+{{- "true" }}
+{{- else }}
+{{- "false" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Emit the Redis TLS + CA environment variables and volume mount for each
+component that needs it.  Renders nothing when redis.tls.enabled is false.
+Usage: {{ include "codeapi.redis.tlsEnv" . }}
+*/}}
+{{- define "codeapi.redis.tlsEnv" -}}
+{{- if .Values.redis.tls.enabled }}
+- name: REDIS_TLS
+  value: "true"
+{{- if .Values.redis.tls.caSecretName }}
+- name: REDIS_CA
+  value: {{ .Values.redis.tls.caMountPath | quote }}
+{{- end }}
+{{- end }}
+{{- if .Values.redis.useAlternativeDnsLookup }}
+- name: REDIS_USE_ALTERNATIVE_DNS_LOOKUP
+  value: "true"
+{{- end }}
+{{- end }}
+
+{{/*
+Volume definition for the Redis CA certificate secret.
+Renders nothing when redis.tls.caSecretName is empty.
+Usage: {{ include "codeapi.redis.caVolume" . }}
+*/}}
+{{- define "codeapi.redis.caVolume" -}}
+{{- if and .Values.redis.tls.enabled .Values.redis.tls.caSecretName }}
+- name: redis-ca
+  secret:
+    secretName: {{ .Values.redis.tls.caSecretName }}
+    items:
+      - key: {{ .Values.redis.tls.caKey }}
+        path: ca.crt
+{{- end }}
+{{- end }}
+
+{{/*
+VolumeMount for the Redis CA certificate inside a container.
+Renders nothing when redis.tls.caSecretName is empty.
+Usage: {{ include "codeapi.redis.caVolumeMount" . }}
+*/}}
+{{- define "codeapi.redis.caVolumeMount" -}}
+{{- if and .Values.redis.tls.enabled .Values.redis.tls.caSecretName }}
+- name: redis-ca
+  mountPath: {{ .Values.redis.tls.caMountPath | quote }}
+  subPath: ca.crt
+  readOnly: true
 {{- end }}
 {{- end }}
 
