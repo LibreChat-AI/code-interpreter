@@ -20,7 +20,7 @@ import {
     withTraceContext,
 } from './telemetry';
 import logger from './toolCallServerLogger';
-import { createRedisConnection } from './redis-connection';
+import { createRedisConnection, hashTag, scanKeys } from './redis-connection';
 
 const INSTANCE_ID = process.env.INSTANCE_ID ?? nanoid();
 const PORT = Number(process.env.TOOL_CALL_SERVER_PORT) || 3033;
@@ -103,16 +103,39 @@ function errorResponse(error: string, status = 400): Response {
     return jsonResponse({ error }, status);
 }
 
+/** All `tool_call:*` keys for a session are hash-tagged with the execution
+ * id (see `hashTag`) so they land on the same Redis Cluster slot, letting
+ * `handleDeleteSession` clean them up with a single multi-key `DEL`. */
+function sessionKey(executionId: string): string {
+    return `tool_call:session:${hashTag(executionId)}`;
+}
+
+function pendingKey(executionId: string): string {
+    return `tool_call:pending:${hashTag(executionId)}`;
+}
+
+function resultKey(executionId: string, callId: string): string {
+    return `tool_call:result:${hashTag(executionId)}:${callId}`;
+}
+
+function completeKey(executionId: string): string {
+    return `tool_call:complete:${hashTag(executionId)}`;
+}
+
+function errorKey(executionId: string): string {
+    return `tool_call:error:${hashTag(executionId)}`;
+}
+
 async function getSession(
     executionId: string,
 ): Promise<ToolCallSession | null> {
-    const data = await redis.get(`tool_call:session:${executionId}`);
+    const data = await redis.get(sessionKey(executionId));
     return data != null && data !== '' ? JSON.parse(data) : null;
 }
 
 async function setSession(session: ToolCallSession): Promise<void> {
     await redis.set(
-        `tool_call:session:${session.execution_id}`,
+        sessionKey(session.execution_id),
         JSON.stringify(session),
         'EX',
         SESSION_EXPIRY,
@@ -181,11 +204,7 @@ async function handleGetPending(executionId: string): Promise<Response> {
         }
 
         // Get pending calls from Redis list
-        const pendingData = await redis.lrange(
-            `tool_call:pending:${executionId}`,
-            0,
-            -1,
-        );
+        const pendingData = await redis.lrange(pendingKey(executionId), 0, -1);
         const pendingCalls: ToolCallRequest[] = pendingData.map(d =>
             JSON.parse(d),
         );
@@ -222,11 +241,7 @@ async function handleSubmitResults(
         let processed = 0;
 
         // Get all pending calls once
-        const pendingData = await redis.lrange(
-            `tool_call:pending:${executionId}`,
-            0,
-            -1,
-        );
+        const pendingData = await redis.lrange(pendingKey(executionId), 0, -1);
 
         for (const result of results) {
             const resultData: ToolCallResult = {
@@ -239,7 +254,7 @@ async function handleSubmitResults(
 
             // Store result
             await redis.set(
-                `tool_call:result:${executionId}:${result.call_id}`,
+                resultKey(executionId, result.call_id),
                 JSON.stringify(resultData),
                 'EX',
                 SESSION_EXPIRY,
@@ -247,7 +262,7 @@ async function handleSubmitResults(
 
             // Publish for waiting subscribers
             await redis.publish(
-                `tool_call:result:${executionId}:${result.call_id}`,
+                resultKey(executionId, result.call_id),
                 JSON.stringify(resultData),
             );
 
@@ -261,11 +276,7 @@ async function handleSubmitResults(
             });
 
             if (pendingToRemove != null && pendingToRemove !== '') {
-                await redis.lrem(
-                    `tool_call:pending:${executionId}`,
-                    1,
-                    pendingToRemove,
-                );
+                await redis.lrem(pendingKey(executionId), 1, pendingToRemove);
                 logger.info(
                     `[${INSTANCE_ID}] Removed pending call ${result.call_id} from ${executionId}`,
                 );
@@ -275,9 +286,7 @@ async function handleSubmitResults(
         }
 
         // Update session status
-        const remainingPending = await redis.llen(
-            `tool_call:pending:${executionId}`,
-        );
+        const remainingPending = await redis.llen(pendingKey(executionId));
         if (remainingPending === 0) {
             session.status = 'running';
             session.updated_at = Date.now();
@@ -342,7 +351,7 @@ async function handleComplete(
 
         // Store completion data
         await redis.set(
-            `tool_call:complete:${executionId}`,
+            completeKey(executionId),
             JSON.stringify({
                 ...body,
                 completed_at: Date.now(),
@@ -387,7 +396,7 @@ async function handleError(
 
         // Store error data
         await redis.set(
-            `tool_call:error:${executionId}`,
+            errorKey(executionId),
             JSON.stringify({
                 ...body,
                 error_at: Date.now(),
@@ -414,7 +423,10 @@ async function handleDeleteSession(executionId: string): Promise<Response> {
             session.status !== 'completed' &&
             session.status !== 'error';
 
-        const keys = await redis.keys(`tool_call:*:${executionId}*`);
+        const keys = await scanKeys(
+            redis,
+            `tool_call:*${hashTag(executionId)}*`,
+        );
         if (keys.length > 0) {
             await redis.del(...keys);
         }
@@ -480,10 +492,7 @@ async function handleToolCall(req: Request): Promise<Response> {
         };
 
         // Add to pending list
-        await redis.rpush(
-            `tool_call:pending:${executionId}`,
-            JSON.stringify(toolCall),
-        );
+        await redis.rpush(pendingKey(executionId), JSON.stringify(toolCall));
 
         // Update session status
         session.status = 'waiting';
@@ -531,14 +540,14 @@ async function waitForResult(
     callId: string,
     timeout: number,
 ): Promise<ToolCallResult | null> {
-    const resultKey = `tool_call:result:${executionId}:${callId}`;
+    const resultKeyName = resultKey(executionId, callId);
     const startTime = Date.now();
     const pollInterval = 100; // 100ms
 
     while (Date.now() - startTime < timeout) {
-        const result = await redis.get(resultKey);
+        const result = await redis.get(resultKeyName);
         if (result != null && result !== '') {
-            await redis.del(resultKey); // Consume the result
+            await redis.del(resultKeyName); // Consume the result
             return JSON.parse(result);
         }
         await new Promise(resolve => setTimeout(resolve, pollInterval));

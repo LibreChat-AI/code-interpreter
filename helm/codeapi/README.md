@@ -79,13 +79,18 @@ For development only, `LOCAL_MODE=true` bypasses authentication — see
 your Redis (e.g. a managed cache) requires TLS.
 
 **Redis Cluster mode (GCP Memorystore cluster, AWS ElastiCache cluster).** Set
-`redis.cluster.enabled=true` and provide the comma-separated startup nodes in
-`redis.cluster.nodes`. The chart will set `USE_REDIS_CLUSTER=true` and populate
-`REDIS_HOST` with the node list on every component. For TLS with a CA certificate
-(recommended for GCP Memorystore), also set:
+`redis.enabled=false` (so the bundled Redis subchart doesn't take precedence)
+and `redis.cluster.enabled=true`, and provide the comma-separated startup nodes
+in `redis.cluster.nodes`. The chart will set `USE_REDIS_CLUSTER=true` and
+populate `REDIS_HOST` with the node list on every component. For TLS with a CA
+certificate (recommended for GCP Memorystore), also set:
 
 ```yaml
 redis:
+    enabled: false # required — otherwise the bundled subchart is used instead
+    cluster:
+        enabled: true
+        nodes: 'node-1:6379,node-2:6379,node-3:6379'
     tls:
         enabled: true
         caSecretName: my-memorystore-secret # Secret that holds the CA cert

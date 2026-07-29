@@ -92,6 +92,70 @@ export function bullmqPrefix(): string | undefined {
     return isClusterMode() ? '{codeapi}' : undefined;
 }
 
+/**
+ * Wrap an id in a Redis Cluster hash tag so every key built from it — no
+ * matter the prefix — hashes to the same slot. Required for any multi-key
+ * Lua script or MULTI/EXEC transaction that touches several keys sharing
+ * this id; harmless in standalone mode. Redis Cluster hashes only the
+ * substring between the first `{` and the following `}` in a key.
+ */
+export function hashTag(id: string): string {
+    return `{${id}}`;
+}
+
+/** Reverse of `hashTag`: strips the surrounding `{}` if present, otherwise
+ * returns the input unchanged. Used to recover the raw id from a key that
+ * was built with `hashTag`. */
+export function stripHashTag(raw: string): string {
+    return raw.startsWith('{') && raw.endsWith('}') ? raw.slice(1, -1) : raw;
+}
+
+/** Default cap on keys returned by `scanKeys` in a single call, bounding
+ * memory usage on a pathological keyspace. */
+export const SCAN_KEYS_DEFAULT_LIMIT = 10_000;
+
+/** Iterate matching Redis keys with SCAN instead of the blocking KEYS
+ * command. Stops collecting once `limit` keys have been gathered. In
+ * cluster mode, SCAN is issued against every master node individually
+ * because `Cluster` has no top-level `scanStream`; each node owns a
+ * disjoint set of hash slots so there are no duplicates across nodes. */
+export async function scanKeys(
+    client: RedisClient,
+    match: string,
+    count = 200,
+    limit = SCAN_KEYS_DEFAULT_LIMIT,
+): Promise<string[]> {
+    const out: string[] = [];
+
+    const collect = async (node: Redis): Promise<void> => {
+        const stream = node.scanStream({ match, count });
+        for await (const batch of stream as AsyncIterable<string[]>) {
+            for (const key of batch) {
+                out.push(key);
+                if (out.length >= limit) {
+                    stream.destroy();
+                    logger.warn(
+                        'scanKeys hit limit; remaining keys deferred to next pass',
+                        { match, limit },
+                    );
+                    return;
+                }
+            }
+        }
+    };
+
+    if (client instanceof Cluster) {
+        for (const node of client.nodes('master')) {
+            if (out.length >= limit) break;
+            await collect(node);
+        }
+    } else {
+        await collect(client);
+    }
+
+    return out;
+}
+
 type ConnectionOverrides = Partial<
     Pick<
         CommonRedisOptions,
