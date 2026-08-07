@@ -33,6 +33,10 @@ import {
 } from '../bridge/selection';
 import logger from '../logger';
 import { resolveQueuedSandboxBackend } from '../execution-profile';
+import {
+  resolveShellOutputFilter,
+  ShellOutputFilterError,
+} from '../../../shared/shell-output-filter';
 
 const { INSTANCE_ID } = env;
 const JOB_COMPLETION_WAIT_TIMEOUT_MS = jobCompletionWaitTimeoutMs(
@@ -145,6 +149,14 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
   const language = resolveLanguage(rawLang);
   if (language == null) {
     return res.status(400).json({ error: `Unsupported language: ${rawLang}` });
+  }
+  try {
+    body.shell_output_filter = resolveShellOutputFilter(body.shell_output_filter, language);
+  } catch (error) {
+    if (error instanceof ShellOutputFilterError) {
+      return res.status(400).json({ error: error.message });
+    }
+    throw error;
   }
 
   let bridgeWorkerId: string | undefined;

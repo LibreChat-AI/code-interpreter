@@ -14,7 +14,11 @@ import {
 import { EXECUTION_MANIFEST_HEADER, ExecutionManifestError, type ExecutionManifestClaims } from '../execution-manifest';
 import { verifyExecuteRequestManifest } from '../execution-manifest-request';
 import { EGRESS_GRANT_HEADER } from '../egress';
-import { activeSandboxExecutions, recordSandboxExecution } from '../metrics';
+import {
+  activeSandboxExecutions,
+  recordSandboxExecution,
+  recordSandboxOutputBytes,
+} from '../metrics';
 import { classifySandboxSafeError } from '../safe-error';
 import { withSpan } from '../telemetry';
 import { checkSandboxWorkspaceHealth } from '../workspace-isolation';
@@ -41,6 +45,10 @@ import {
   hasWorkspaceCommandToken,
   WorkspaceCommandRequestError,
 } from '../workspace-command';
+import {
+  resolveShellOutputFilter,
+  type ShellOutputFilter,
+} from '../../../shared/shell-output-filter';
 
 const router = express.Router();
 const SYNTHETIC_PRINCIPAL_SOURCE = 'synthetic_test';
@@ -142,6 +150,7 @@ export interface ExecuteRequestBody {
   output_session_id?: string;
   language: string;
   version: string;
+  shell_output_filter?: ShellOutputFilter;
   args?: string[];
   stdin?: string;
   files: TFile[];
@@ -276,6 +285,7 @@ function getJob(
   if (!rt) {
     throw { message: `${language}-${version} runtime is unknown` };
   }
+  const shellOutputFilter = resolveShellOutputFilter(body.shell_output_filter, rt.language);
 
   /* Reject a request with nothing runnable BEFORE anything is primed. This
    * gate used to count a lone `.dirkeep` as a utf8 source, so such a request
@@ -340,6 +350,7 @@ function getJob(
       compile: compile_memory_limit ?? rt.memory_limits.compile,
     },
     extra_env_vars: sanitizeEnvVars(env_vars),
+    shell_output_filter: shellOutputFilter,
     output_session_id: body.output_session_id,
     egress_grant: egressGrantToken,
     tool_call_socket_enabled: toolCallSocketEnabled,
@@ -435,6 +446,7 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
   let cleanedUp = false;
   let activeExecution = false;
   let metricsLanguage = 'unknown';
+  let metricsOutputFilter: ShellOutputFilter = 'raw';
   let metricsOutcome: Parameters<typeof recordSandboxExecution>[0]['outcome'] = 'execution_error';
   let primeCompleted = false;
 
@@ -503,6 +515,7 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
         req.headers[RUNTIME_SESSION_ID_HEADER],
       );
       metricsLanguage = job.runtime.language;
+      metricsOutputFilter = job.shellOutputFilter;
       markActiveExecution();
     } catch (error) {
       metricsOutcome = 'bad_request';
@@ -546,6 +559,13 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
       if (result.run === undefined) {
         result.run = result.compile;
       }
+
+      recordSandboxOutputBytes({
+        language: job.runtime.language,
+        outputFilter: job.shellOutputFilter,
+        stdout: result.run?.stdout ?? '',
+        stderr: result.run?.stderr ?? '',
+      });
 
       if (result.files && result.files.length > 0) {
         /* Upload returns the set of file IDs that were actually transferred to
@@ -627,6 +647,7 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
     }
     recordSandboxExecution({
       language: metricsLanguage,
+      outputFilter: metricsOutputFilter,
       outcome: metricsOutcome,
       durationSeconds: (performance.now() - started) / 1000,
     });
