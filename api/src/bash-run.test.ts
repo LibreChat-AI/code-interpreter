@@ -55,6 +55,26 @@ exit "\${MOCK_RTK_STATUS:-0}"
     expect(run({ filter: 'rtk', args: ['argument'] })).toBe('filtered:argument\n');
   });
 
+  it('preserves the submitted path as $0 and BASH_ARGV0 for rewrites', () => {
+    fs.writeFileSync(path.join(mockBin, 'rtk'), `#!/bin/bash
+printf '%s\\n' 'printf "identity:%s:%s:%s\\n" "$0" "$BASH_ARGV0" "$1"'
+`);
+    fs.chmodSync(path.join(mockBin, 'rtk'), 0o755);
+
+    expect(run({ filter: 'rtk', args: ['argument'] })).toBe(
+      `identity:${sourcePath}:${sourcePath}:argument\n`,
+    );
+  });
+
+  it('preserves file execution for scripts that inspect BASH_SOURCE', () => {
+    fs.writeFileSync(
+      sourcePath,
+      'printf \'identity:%s:%s\\n\' "${BASH_SOURCE[0]}" "$0"\n',
+    );
+
+    expect(run({ filter: 'rtk' })).toBe(`identity:${sourcePath}:${sourcePath}\n`);
+  });
+
   it('accepts RTK ask rewrites because the API request already authorizes execution', () => {
     expect(run({ filter: 'rtk', status: 3 })).toBe('filtered:\n');
   });

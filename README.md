@@ -154,7 +154,7 @@ rewriting per request by setting `shell_output_filter` to `rtk`:
 ```json
 {
   "lang": "bash",
-  "code": "git status && git diff",
+  "code": "ls -la",
   "shell_output_filter": "rtk"
 }
 ```
