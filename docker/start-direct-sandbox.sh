@@ -74,6 +74,26 @@ exec unshare --mount bash -c '
         export LD_LIBRARY_PATH="/host-tools/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     fi
 
+    # ⚠️ On this image'"'"'s base (fedora:43), /usr/sbin is a SYMLINK to
+    # `bin` (i.e. /usr/sbin and /usr/bin are the SAME underlying directory)
+    # — live-incident fix, 2026-08-10. Binding $ROOTFS/usr/sbin onto
+    # /usr/sbin therefore actually lands the bind on /usr/bin (mount
+    # resolves the symlink); the LATER bind of $ROOTFS/usr/bin onto
+    # /usr/bin then stacks on top and shadows it, so nsjail — which lives
+    # only in $ROOTFS/usr/sbin (a real, separate directory on the target
+    # rootfs, e.g. Debian) — silently disappears again by the time
+    # /sandbox_api/entrypoint.sh runs its smoke test. Confirmed live:
+    # nsjail is present and executable right after the /usr/sbin bind, and
+    # gone ("No such file or directory") after the /usr/bin bind that
+    # follows. Fix: if /usr/sbin is a symlink, replace it with a real
+    # (empty) directory INSIDE this private mount namespace before
+    # binding, so it becomes an independent mount point that the later
+    # /usr/bin bind cannot shadow. Namespace-local — never touches the
+    # actual node or any other container.
+    if [ -L /usr/sbin ]; then
+        rm /usr/sbin && mkdir /usr/sbin
+    fi
+
     "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/sbin"     /usr/sbin    || { echo "FATAL: cannot bind /usr/sbin"; exit 1; }
     "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/lib"      /usr/lib     || { echo "FATAL: cannot bind /usr/lib"; exit 1; }
 
