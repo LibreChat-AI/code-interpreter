@@ -48,17 +48,31 @@ export SANDBOX_ROOTFS="$ROOTFS"
 exec unshare --mount bash -c '
     ROOTFS="${SANDBOX_ROOTFS:-/sandbox-rootfs}"
 
-    # ⚠️ Resolve mount to an absolute path BEFORE any bind-mount runs, and
-    # use that variable for every call below (live-incident fix,
-    # 2026-08-10). Bash caches a bare command word to the absolute path it
-    # first resolved via PATH (its hash table) and does NOT re-search PATH
-    # on later invocations. The very first bind-mount below replaces
-    # /usr/sbin'"'"'s CONTENT with $ROOTFS/usr/sbin (a different rootfs,
-    # e.g. Debian, which may not ship a mount binary at that exact path) —
-    # so a later bare `mount` call can still be hashed to the pre-bind-mount
-    # /usr/sbin/mount and fail with "No such file or directory" even though
-    # a working mount binary exists elsewhere on $PATH. Confirmed live.
-    MOUNT_BIN="$(command -v mount)"
+    # ⚠️ Copy mount (and its full shared-library closure) to a path none of
+    # the bind-mounts below ever touch, BEFORE the first bind-mount runs
+    # (live-incident fix, 2026-08-10, supersedes an earlier same-day
+    # attempt that only cached mount'"'"'s pre-bind PATH in a variable — that
+    # does NOT work: a bind-mount replaces the file *content* visible at a
+    # path system-wide, so a variable still holding that same path (e.g.
+    # /usr/sbin/mount) breaks identically once /usr/sbin is bound over,
+    # regardless of caching). The very first bind-mount below replaces
+    # /usr/sbin'"'"'s content with $ROOTFS/usr/sbin (a different rootfs, e.g.
+    # Debian, which does not ship a mount binary at that exact path) — so
+    # ANY subsequent reference to the original /usr/sbin/mount path, cached
+    # or not, becomes "No such file or directory". Copying the binary
+    # itself (plus every .so it dlopens, via ldd) to /host-tools — never a
+    # bind-mount target — makes it immune to all the binds that follow.
+    mkdir -p /host-tools/lib
+    _mount_src="$(command -v mount)"
+    cp "$_mount_src" /host-tools/mount
+    chmod +x /host-tools/mount
+    for _lib in $(ldd "$_mount_src" 2>/dev/null | awk "{print \$3}" | grep "^/"); do
+        cp -n "$_lib" /host-tools/lib/ 2>/dev/null || true
+    done
+    MOUNT_BIN=/host-tools/mount
+    if [ -n "$(ls -A /host-tools/lib 2>/dev/null)" ]; then
+        export LD_LIBRARY_PATH="/host-tools/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
 
     "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/sbin"     /usr/sbin    || { echo "FATAL: cannot bind /usr/sbin"; exit 1; }
     "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/lib"      /usr/lib     || { echo "FATAL: cannot bind /usr/lib"; exit 1; }
@@ -78,6 +92,11 @@ exec unshare --mount bash -c '
     fi
 
     "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/bin" /usr/bin || { echo "FATAL: cannot bind /usr/bin"; exit 1; }
+
+    # Done with our host-side mount(1) — unset LD_LIBRARY_PATH before the
+    # sandboxed entrypoint sets its own below, so /host-tools/lib (Fedora
+    # libs) never shadows the guest rootfs'"'"'s own libraries for it.
+    unset LD_LIBRARY_PATH
 
     multiarch_libdir=$(find /usr/lib -maxdepth 1 -type d -name "*-linux-gnu" -print -quit)
     if [ -n "$multiarch_libdir" ]; then
