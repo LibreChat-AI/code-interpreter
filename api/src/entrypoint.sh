@@ -177,17 +177,27 @@ if [ "$SANDBOX_USE_CGROUPV2" = "true" ]; then
     NSJAIL_CGROUP_ARGS=(--use_cgroupv2)
 fi
 
+SMOKE_STDIO=$(mktemp)
 if timeout 10 /usr/sbin/nsjail --config "${NSJAIL_CONFIG:-/sandbox_api/config/sandbox.cfg}" \
     "${NSJAIL_CGROUP_ARGS[@]}" --log "$SMOKE_LOG" \
     --user "65534:${SMOKE_OUTSIDE_UID}:1" --group "65534:${SMOKE_OUTSIDE_GID}:1" \
     -s /usr/bin:/bin -s /usr/lib:/lib -s /usr/lib64:/lib64 \
     -B "$SMOKE_DIR:/mnt/data" \
-    -- /bin/sh -c 'printf "%s\n" sandbox_ok > /mnt/data/smoke.txt && test "$(cat /mnt/data/smoke.txt)" = sandbox_ok' > /dev/null 2>&1; then
+    -- /bin/sh -c 'printf "%s\n" sandbox_ok > /mnt/data/smoke.txt && test "$(cat /mnt/data/smoke.txt)" = sandbox_ok' > "$SMOKE_STDIO" 2>&1; then
     echo "NsJail smoke test passed"
+    rm -f "$SMOKE_STDIO"
 else
+    # ⚠️ Live-incident diagnostic (2026-08-10): --log alone can come back
+    # empty on some failure modes (e.g. an nsjail exit before its internal
+    # logger initializes), silently swallowing the real cause under the
+    # old `> /dev/null 2>&1`. Capture nsjail's own stdout/stderr too and
+    # always print both, so a smoke-test failure is actually diagnosable.
     echo "FATAL: NsJail smoke test failed — sandbox cannot start"
-    echo "NsJail log output:"
+    echo "NsJail log output (--log):"
     cat "$SMOKE_LOG" 2>/dev/null || true
+    echo "NsJail stdout/stderr:"
+    cat "$SMOKE_STDIO" 2>/dev/null || true
+    rm -f "$SMOKE_STDIO"
     rm -f "$SMOKE_LOG"
     rm -rf "$SMOKE_DIR"
     exit 1
