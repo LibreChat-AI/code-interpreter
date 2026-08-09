@@ -48,24 +48,36 @@ export SANDBOX_ROOTFS="$ROOTFS"
 exec unshare --mount bash -c '
     ROOTFS="${SANDBOX_ROOTFS:-/sandbox-rootfs}"
 
-    mount -o bind,ro "$ROOTFS/usr/sbin"     /usr/sbin    || { echo "FATAL: cannot bind /usr/sbin"; exit 1; }
-    mount -o bind,ro "$ROOTFS/usr/lib"      /usr/lib     || { echo "FATAL: cannot bind /usr/lib"; exit 1; }
+    # ⚠️ Resolve mount to an absolute path BEFORE any bind-mount runs, and
+    # use that variable for every call below (live-incident fix,
+    # 2026-08-10). Bash caches a bare command word to the absolute path it
+    # first resolved via PATH (its hash table) and does NOT re-search PATH
+    # on later invocations. The very first bind-mount below replaces
+    # /usr/sbin'"'"'s CONTENT with $ROOTFS/usr/sbin (a different rootfs,
+    # e.g. Debian, which may not ship a mount binary at that exact path) —
+    # so a later bare `mount` call can still be hashed to the pre-bind-mount
+    # /usr/sbin/mount and fail with "No such file or directory" even though
+    # a working mount binary exists elsewhere on $PATH. Confirmed live.
+    MOUNT_BIN="$(command -v mount)"
+
+    "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/sbin"     /usr/sbin    || { echo "FATAL: cannot bind /usr/sbin"; exit 1; }
+    "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/lib"      /usr/lib     || { echo "FATAL: cannot bind /usr/lib"; exit 1; }
 
     if [ -d "$ROOTFS/usr/lib64" ] && ! [ -L "$ROOTFS/usr/lib64" ]; then
-        mount -o bind,ro "$ROOTFS/usr/lib64" /usr/lib64 2>/dev/null || \
+        "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/lib64" /usr/lib64 2>/dev/null || \
             echo "[sandbox] WARNING: could not bind /usr/lib64 - sandboxed binaries may fail to exec"
     fi
 
-    mount -o bind,ro "$ROOTFS/usr/local"    /usr/local   || { echo "FATAL: cannot bind /usr/local"; exit 1; }
-    mount -o bind,ro "$ROOTFS/sandbox_api"  /sandbox_api || { echo "FATAL: cannot bind /sandbox_api"; exit 1; }
-    mount -o bind,ro "$ROOTFS/pkgs"       /pkgs      || { echo "FATAL: cannot bind /pkgs"; exit 1; }
+    "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/local"    /usr/local   || { echo "FATAL: cannot bind /usr/local"; exit 1; }
+    "$MOUNT_BIN" -o bind,ro "$ROOTFS/sandbox_api"  /sandbox_api || { echo "FATAL: cannot bind /sandbox_api"; exit 1; }
+    "$MOUNT_BIN" -o bind,ro "$ROOTFS/pkgs"       /pkgs      || { echo "FATAL: cannot bind /pkgs"; exit 1; }
 
     if [ -d /host-packages ]; then
-        mount --bind /host-packages /pkgs 2>/dev/null || \
+        "$MOUNT_BIN" --bind /host-packages /pkgs 2>/dev/null || \
             echo "WARNING: could not bind /host-packages - sandbox will run without packages"
     fi
 
-    mount -o bind,ro "$ROOTFS/usr/bin" /usr/bin || { echo "FATAL: cannot bind /usr/bin"; exit 1; }
+    "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/bin" /usr/bin || { echo "FATAL: cannot bind /usr/bin"; exit 1; }
 
     multiarch_libdir=$(find /usr/lib -maxdepth 1 -type d -name "*-linux-gnu" -print -quit)
     if [ -n "$multiarch_libdir" ]; then
