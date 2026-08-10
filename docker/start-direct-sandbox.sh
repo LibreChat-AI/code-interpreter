@@ -91,7 +91,14 @@ exec unshare --mount bash -c '
     # /usr/bin bind cannot shadow. Namespace-local — never touches the
     # actual node or any other container.
     if [ -L /usr/sbin ]; then
-        rm /usr/sbin && mkdir /usr/sbin
+        # `hash -r` between rm and mkdir: without it, bash'"'"'s cached
+        # resolution of a bare `mkdir` (from the mkdir call on line ~65
+        # above, which still saw /usr/sbin as a valid symlink to bin) goes
+        # stale the instant `rm /usr/sbin` removes that symlink — the
+        # exact same class of bug this whole fix is about, self-inflicted
+        # here. Confirmed live: "bash: line N: /usr/sbin/mkdir: No such
+        # file or directory" right on this rm+mkdir pair.
+        rm /usr/sbin && hash -r && mkdir /usr/sbin
     fi
 
     "$MOUNT_BIN" -o bind,ro "$ROOTFS/usr/sbin"     /usr/sbin    || { echo "FATAL: cannot bind /usr/sbin"; exit 1; }
