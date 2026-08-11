@@ -417,18 +417,20 @@ _ptc_next_call_id() {
 
 _ptc_history_matches_by_signature() {
     local _ptc_name="$1"
-    local _ptc_input="$2"
+    local _ptc_input_file="$2"
     local _ptc_input_hash="$3"
     local _ptc_call_site="$4"
     if [ ! -r "$_PTC_HISTORY_PATH" ]; then
         return 0
     fi
+    # Path, not inline: large input can exceed ARG_MAX via --argjson.
     jq -c \\
         --arg nm "$_ptc_name" \\
         --arg site "$_ptc_call_site" \\
         --arg hash "$_ptc_input_hash" \\
-        --argjson inp "$_ptc_input" \\
-        'to_entries
+        --slurpfile inp_arr "$_ptc_input_file" \\
+        '($inp_arr[0]) as $inp
+         | to_entries
          | map(select((.value | type) == "object"
              and .value.tool_name == $nm
              and ((.value.input_hash == $hash) or (.value.input == $inp))))
@@ -474,13 +476,15 @@ _ptc_print_history_entry() {
 _ptc_history_entry_matches_current_call() {
     local _ptc_entry="$1"
     local _ptc_name="$2"
-    local _ptc_input="$3"
+    local _ptc_input_file="$3"
     local _ptc_input_hash="$4"
+    # Path, same ARG_MAX reason as above.
     printf '%s' "$_ptc_entry" | jq -e \\
         --arg nm "$_ptc_name" \\
         --arg hash "$_ptc_input_hash" \\
-        --argjson inp "$_ptc_input" \\
-        'if type != "object" then true
+        --slurpfile inp_arr "$_ptc_input_file" \\
+        '($inp_arr[0]) as $inp
+         | if type != "object" then true
          elif (has("tool_name") and .tool_name != $nm) then false
          elif (has("input_hash") or has("input")) then
            ((.input_hash == $hash) or (.input == $inp))
@@ -505,8 +509,13 @@ _ptc_call_tool() {
         exit 1
     fi
 
+    # Large input can exceed ARG_MAX via --argjson; write once, reuse path below.
+    local _ptc_input_tmp
+    _ptc_input_tmp="$(mktemp -t _ptc_input.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_input.XXXXXX)"
+    printf '%s' "$_ptc_input" > "$_ptc_input_tmp"
+
     local _ptc_matches
-    _ptc_matches=$(_ptc_history_matches_by_signature "$_ptc_name" "$_ptc_input" "$_ptc_input_hash" "$_ptc_call_site")
+    _ptc_matches=$(_ptc_history_matches_by_signature "$_ptc_name" "$_ptc_input_tmp" "$_ptc_input_hash" "$_ptc_call_site")
 
     if ! _ptc_acquire_lock; then
         exit 1
@@ -522,6 +531,7 @@ _ptc_call_tool() {
         printf '%s\\n' "$_ptc_matched_call_id" >> "$_PTC_CONSUMED_FILE"
         _ptc_mark_counter_at_least "$_ptc_matched_call_id"
         _ptc_release_lock
+        rm -f "$_ptc_input_tmp"
         _ptc_print_history_entry "$_ptc_matched_entry"
         return $?
     fi
@@ -538,26 +548,28 @@ _ptc_call_tool() {
         if [ -z "$_ptc_entry" ] || [ "$_ptc_entry" = "null" ]; then
             break
         fi
-        if _ptc_history_entry_matches_current_call "$_ptc_entry" "$_ptc_name" "$_ptc_input" "$_ptc_input_hash"; then
+        if _ptc_history_entry_matches_current_call "$_ptc_entry" "$_ptc_name" "$_ptc_input_tmp" "$_ptc_input_hash"; then
             printf '%s\\n' "$_ptc_call_id" >> "$_PTC_CONSUMED_FILE"
             _ptc_release_lock
+            rm -f "$_ptc_input_tmp"
             _ptc_print_history_entry "$_ptc_entry"
             return $?
         fi
     done
 
-    if ! jq -c -n \\
+    if ! printf '%s' "$_ptc_input" | jq -c -n \\
         --arg cid "$_ptc_call_id" \\
         --arg nm "$_ptc_name" \\
         --arg hash "$_ptc_input_hash" \\
         --arg site "$_ptc_call_site" \\
-        --argjson inp "$_ptc_input" \\
-        '{call_id:$cid,tool_name:$nm,input:$inp,input_hash:$hash,call_site:$site}' >> "$_PTC_PENDING_FILE"; then
+        '{call_id:$cid,tool_name:$nm,input:input,input_hash:$hash,call_site:$site}' >> "$_PTC_PENDING_FILE"; then
         _ptc_write_error "failed to serialize pending tool call for $_ptc_name"
         _ptc_release_lock
+        rm -f "$_ptc_input_tmp"
         exit 1
     fi
     _ptc_release_lock
+    rm -f "$_ptc_input_tmp"
     exit 0
 }
 

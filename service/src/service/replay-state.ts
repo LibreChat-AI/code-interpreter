@@ -60,13 +60,13 @@ export const REPLAY_LOCK_TTL_MS = Math.max(10 * 60 * 1000, env.JOB_TIMEOUT * 2 +
  * Redis hash and the `_ptc_history.json` injected into the sandbox bounded
  * regardless of how pathological a single tool result is. Scaled
  * proportionally with `MAX_EXECUTION_STATE_BYTES` (ratio 1:2 vs exec_state). */
-export const MAX_TOOL_RESULT_BYTES = 5_000_000;
+export const MAX_TOOL_RESULT_BYTES = env.PTC_MAX_TOOL_RESULT_BYTES;
 
 /** Aggregate cap across ALL results persisted for a single execution. Scaled
  * proportionally with `MAX_EXECUTION_STATE_BYTES` (ratio 4:1 vs exec_state)
  * so a long replay flow can accumulate ~8 saturating tool results before
  * being asked to break work into a fresh execution. */
-export const MAX_TOOL_HISTORY_TOTAL_BYTES = 40_000_000;
+export const MAX_TOOL_HISTORY_TOTAL_BYTES = env.PTC_MAX_TOOL_HISTORY_TOTAL_BYTES;
 
 /** Maximum number of keys `scanKeys` will return in a single call. The janitor
  * runs every `STALE_CLEANUP_INTERVAL` and processes whatever this yields; if
