@@ -414,6 +414,7 @@ fn is_allowed_guest_env_key(key: &str, egress_gateway_enabled: bool) -> bool {
         "PATH",
         "PORT",
         "SANDBOX_ALLOWED_LOCAL_NETWORK_PORT",
+        "SANDBOX_BIND_HOST",
         "SANDBOX_COMPILE_CPU_TIME",
         "SANDBOX_COMPILE_MEMORY_LIMIT",
         "SANDBOX_COMPILE_TIMEOUT",
@@ -644,6 +645,7 @@ mod tests {
             "SANDBOX_ALLOWED_LOCAL_NETWORK_PORT",
             "SANDBOX_FORWARD_TARGET",
             "SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY",
+            "SANDBOX_BIND_HOST",
             "SANDBOX_RUN_TIMEOUT",
             "NSJAIL_CONFIG",
             "PORT",
@@ -679,3 +681,4 @@ mod tests {
         assert_eq!(guest_nofile_rlimit(65_536).to_str().unwrap(), "7=65536:65536");
     }
 }
+
