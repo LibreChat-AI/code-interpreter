@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   parsePlanLimits,
   resolveBridgeAuthMode,
+  resolvePositiveIntEnv,
   resolveRuntimeSessionMode,
   resolveSandboxBackend,
 } from './config';
@@ -38,6 +39,28 @@ describe('sandbox execution configuration', () => {
     expect(() => resolveBridgeAuthMode('token')).toThrow(
       'CODEAPI_BRIDGE_AUTH_MODE must be one of: static, paired',
     );
+  });
+});
+
+describe('resolvePositiveIntEnv', () => {
+  test('falls back to the default when unset or blank', () => {
+    expect(resolvePositiveIntEnv(undefined, 42)).toBe(42);
+    expect(resolvePositiveIntEnv('', 42)).toBe(42);
+    expect(resolvePositiveIntEnv('   ', 42)).toBe(42);
+  });
+
+  test('accepts positive finite values and floors them', () => {
+    expect(resolvePositiveIntEnv('100', 42)).toBe(100);
+    expect(resolvePositiveIntEnv('100.9', 42)).toBe(100);
+  });
+
+  test('falls back to the default for zero, negative, non-finite, or non-numeric values', () => {
+    expect(resolvePositiveIntEnv('0', 42)).toBe(42);
+    expect(resolvePositiveIntEnv('-5', 42)).toBe(42);
+    expect(resolvePositiveIntEnv('Infinity', 42)).toBe(42);
+    expect(resolvePositiveIntEnv('-Infinity', 42)).toBe(42);
+    expect(resolvePositiveIntEnv('NaN', 42)).toBe(42);
+    expect(resolvePositiveIntEnv('not-a-number', 42)).toBe(42);
   });
 });
 

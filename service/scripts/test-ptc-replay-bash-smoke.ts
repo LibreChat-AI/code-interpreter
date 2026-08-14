@@ -551,5 +551,14 @@ echo "Result: $result"
   assert(p2.stdout.includes('Result: "ok-large"'), 'large_input_replay: cached result used instead of re-invoking');
 }
 
+{
+  // Regression: a stray second JSON document must be rejected, not silently
+  // truncated to the first one.
+  const user = `calculate '{"expression":"1+1"} {"expression":"2+2"}'`;
+  const r = runBash(assemble(user), {});
+  assert(r.exitCode === 1, 'multi_doc_input: exit 1');
+  assert(r.stderr.includes('must be a single JSON object'), 'multi_doc_input: stderr explains the rejection');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
