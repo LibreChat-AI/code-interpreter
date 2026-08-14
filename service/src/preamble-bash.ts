@@ -498,8 +498,9 @@ _ptc_call_tool() {
     local _ptc_input="\${2:-\$_ptc_default_input}"
     local _ptc_call_site="\${BASH_LINENO[1]:-\${BASH_LINENO[0]:-0}}"
 
-    if ! printf '%s' "$_ptc_input" | jq -e 'type == "object"' >/dev/null 2>&1; then
-        _ptc_write_error "tool input for $_ptc_name must be a JSON object, got: $_ptc_input"
+    # Reject extra trailing JSON values instead of silently dropping them.
+    if ! printf '%s' "$_ptc_input" | jq -e -n '[inputs] as $docs | ($docs | length) == 1 and ($docs[0] | type) == "object"' >/dev/null 2>&1; then
+        _ptc_write_error "tool input for $_ptc_name must be a single JSON object, got: $_ptc_input"
         exit 1
     fi
 
