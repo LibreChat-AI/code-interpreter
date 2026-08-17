@@ -1,297 +1,297 @@
 openapi: '3.0.0'
 info:
-  title: LibreChat Code Interpreter API
-  version: '1.0.0'
-  description: API for sandbox code execution and file management
+    title: LibreChat Code Interpreter API
+    version: '1.0.0'
+    description: API for sandbox code execution and file management
 servers:
-  - url: https://api.librechat.ai/v1
-    description: LibreChat API server
+    - url: https://api.librechat.ai/v1
+      description: LibreChat API server
 
 security:
-  - BearerAuth: []
+    - BearerAuth: []
 
 components:
-  securitySchemes:
-    BearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
+    securitySchemes:
+        BearerAuth:
+            type: http
+            scheme: bearer
+            bearerFormat: JWT
 
-  schemas:
-    FileRef:
-      type: object
-      properties:
-        id:
-          type: string
-        name:
-          type: string
-        path:
-          type: string
+    schemas:
+        FileRef:
+            type: object
+            properties:
+                id:
+                    type: string
+                name:
+                    type: string
+                path:
+                    type: string
 
-    RequestFile:
-      type: object
-      properties:
-        id:
-          type: string
-        session_id:
-          type: string
-        name:
-          type: string
-      required:
-        - id
-        - session_id
-        - name
+        RequestFile:
+            type: object
+            properties:
+                id:
+                    type: string
+                session_id:
+                    type: string
+                name:
+                    type: string
+            required:
+                - id
+                - session_id
+                - name
 
-    ExecuteResponse:
-      type: object
-      properties:
-        run:
-          type: object
-          properties:
-            stdout:
-              type: string
-            stderr:
-              type: string
-            code:
-              type: integer
-              nullable: true
-            signal:
-              type: string
-              nullable: true
-            output:
-              type: string
-            memory:
-              type: integer
-              nullable: true
-            message:
-              type: string
-              nullable: true
-            status:
-              type: string
-              nullable: true
-            cpu_time:
-              type: number
-              nullable: true
-            wall_time:
-              type: number
-              nullable: true
-        language:
-          type: string
-        version:
-          type: string
-        session_id:
-          type: string
-        files:
-          type: array
-          items:
-            $ref: '#/components/schemas/FileRef'
+        ExecuteResponse:
+            type: object
+            properties:
+                run:
+                    type: object
+                    properties:
+                        stdout:
+                            type: string
+                        stderr:
+                            type: string
+                        code:
+                            type: integer
+                            nullable: true
+                        signal:
+                            type: string
+                            nullable: true
+                        output:
+                            type: string
+                        memory:
+                            type: integer
+                            nullable: true
+                        message:
+                            type: string
+                            nullable: true
+                        status:
+                            type: string
+                            nullable: true
+                        cpu_time:
+                            type: number
+                            nullable: true
+                        wall_time:
+                            type: number
+                            nullable: true
+                language:
+                    type: string
+                version:
+                    type: string
+                session_id:
+                    type: string
+                files:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/FileRef'
 
-    RequestBody:
-      type: object
-      required:
-        - code
-        - lang
-      properties:
-        code:
-          type: string
-        lang:
-          type: string
-        args:
-          type: array
-          items:
-            type: string
-        user_id:
-          type: string
-        entity_id:
-          type: string
-        files:
-          type: array
-          items:
-            $ref: '#/components/schemas/RequestFile'
+        RequestBody:
+            type: object
+            required:
+                - code
+                - lang
+            properties:
+                code:
+                    type: string
+                lang:
+                    type: string
+                args:
+                    type: array
+                    items:
+                        type: string
+                user_id:
+                    type: string
+                entity_id:
+                    type: string
+                files:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/RequestFile'
 
-    FileObject:
-      type: object
-      properties:
-        name:
-          type: string
-        id:
-          type: string
-        session_id:
-          type: string
-        content:
-          type: string
-        size:
-          type: number
-        lastModified:
-          type: string
-        etag:
-          type: string
-        metadata:
-          type: object
-          properties:
-            content-type:
-              type: string
-            original-filename:
-              type: string
-        contentType:
-          type: string
+        FileObject:
+            type: object
+            properties:
+                name:
+                    type: string
+                id:
+                    type: string
+                session_id:
+                    type: string
+                content:
+                    type: string
+                size:
+                    type: number
+                lastModified:
+                    type: string
+                etag:
+                    type: string
+                metadata:
+                    type: object
+                    properties:
+                        content-type:
+                            type: string
+                        original-filename:
+                            type: string
+                contentType:
+                    type: string
 
-    UploadResponse:
-      type: object
-      properties:
-        message:
-          type: string
-        session_id:
-          type: string
-        files:
-          type: array
-          items:
-            $ref: '#/components/schemas/FileObject'
+        UploadResponse:
+            type: object
+            properties:
+                message:
+                    type: string
+                session_id:
+                    type: string
+                files:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/FileObject'
 
-    Error:
-      type: object
-      properties:
-        error:
-          type: string
-        details:
-          type: string
+        Error:
+            type: object
+            properties:
+                error:
+                    type: string
+                details:
+                    type: string
 
 paths:
-  /exec:
-    post:
-      summary: Execute code
-      description: Execute code with specified language and parameters
-      operationId: executeCode
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RequestBody'
-      responses:
-        '200':
-          description: Successful execution
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExecuteResponse'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+    /exec:
+        post:
+            summary: Execute code
+            description: Execute code with specified language and parameters
+            operationId: executeCode
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/RequestBody'
+            responses:
+                '200':
+                    description: Successful execution
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ExecuteResponse'
+                '401':
+                    description: Unauthorized
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                '503':
+                    description: Service unavailable
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
 
-  /download/{session_id}/{fileId}:
-    get:
-      summary: Download a file
-      parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: fileId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        '200':
-          description: File content
-          content:
-            application/octet-stream:
-              schema:
-                type: string
-                format: binary
-        '404':
-          description: File not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+    /download/{session_id}/{fileId}:
+        get:
+            summary: Download a file
+            parameters:
+                - name: session_id
+                  in: path
+                  required: true
+                  schema:
+                      type: string
+                - name: fileId
+                  in: path
+                  required: true
+                  schema:
+                      type: string
+            responses:
+                '200':
+                    description: File content
+                    content:
+                        application/octet-stream:
+                            schema:
+                                type: string
+                                format: binary
+                '404':
+                    description: File not found
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
 
-  /upload:
-    post:
-      summary: Upload files
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                entity_id:
-                  type: string
-                files:
-                  type: array
-                  items:
-                    type: string
-                    format: binary
-      responses:
-        '200':
-          description: Successful upload
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/UploadResponse'
-        '413':
-          description: File size limit exceeded
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+    /upload:
+        post:
+            summary: Upload files
+            requestBody:
+                required: true
+                content:
+                    multipart/form-data:
+                        schema:
+                            type: object
+                            properties:
+                                entity_id:
+                                    type: string
+                                files:
+                                    type: array
+                                    items:
+                                        type: string
+                                        format: binary
+            responses:
+                '200':
+                    description: Successful upload
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/UploadResponse'
+                '413':
+                    description: File size limit exceeded
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
 
-  /files/{session_id}:
-    get:
-      summary: Get files information
-      parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: detail
-          in: query
-          schema:
-            type: string
-            default: simple
-      responses:
-        '200':
-          description: Files information
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/FileObject'
+    /files/{session_id}:
+        get:
+            summary: Get files information
+            parameters:
+                - name: session_id
+                  in: path
+                  required: true
+                  schema:
+                      type: string
+                - name: detail
+                  in: query
+                  schema:
+                      type: string
+                      default: simple
+            responses:
+                '200':
+                    description: Files information
+                    content:
+                        application/json:
+                            schema:
+                                type: array
+                                items:
+                                    $ref: '#/components/schemas/FileObject'
 
-  /files/{session_id}/{fileId}:
-    delete:
-      summary: Delete a file
-      parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: fileId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        '200':
-          description: File deleted successfully
-        '500':
-          description: Error deleting file
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+    /files/{session_id}/{fileId}:
+        delete:
+            summary: Delete a file
+            parameters:
+                - name: session_id
+                  in: path
+                  required: true
+                  schema:
+                      type: string
+                - name: fileId
+                  in: path
+                  required: true
+                  schema:
+                      type: string
+            responses:
+                '200':
+                    description: File deleted successfully
+                '500':
+                    description: Error deleting file
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'

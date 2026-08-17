@@ -1,19 +1,17 @@
-import type {
-  RuntimeSessionExemption,
-  RuntimeSessionMode,
-} from '../types';
+import type { RuntimeSessionExemption, RuntimeSessionMode } from '../types';
 
-export const PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION: RuntimeSessionExemption = 'programmatic';
+export const PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION: RuntimeSessionExemption =
+    'programmatic';
 
 export type RuntimeSessionJobDecision = {
-  runtimeSessionId?: string;
-  runtimeSessionMode: RuntimeSessionMode;
+    runtimeSessionId?: string;
+    runtimeSessionMode: RuntimeSessionMode;
 };
 
 type SandboxBackendName = 'http' | 'lambda-microvm';
 
 function isRuntimeSessionMode(value: unknown): value is RuntimeSessionMode {
-  return value === 'stateless' || value === 'affinity' || value === 'strict';
+    return value === 'stateless' || value === 'affinity' || value === 'strict';
 }
 
 /**
@@ -29,56 +27,67 @@ function isRuntimeSessionMode(value: unknown): value is RuntimeSessionMode {
  * request router rejected it first.
  */
 export function resolveRuntimeSessionForJob(args: {
-  workerMode: RuntimeSessionMode;
-  workerBackend: SandboxBackendName;
-  runtimeSessionMode?: unknown;
-  runtimeSessionId?: unknown;
-  runtimeSessionExemption?: RuntimeSessionExemption;
-  isSynthetic: boolean;
+    workerMode: RuntimeSessionMode;
+    workerBackend: SandboxBackendName;
+    runtimeSessionMode?: unknown;
+    runtimeSessionId?: unknown;
+    runtimeSessionExemption?: RuntimeSessionExemption;
+    isSynthetic: boolean;
 }): RuntimeSessionJobDecision {
-  if (
-    args.isSynthetic
-    || args.runtimeSessionExemption === PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION
-  ) {
-    return { runtimeSessionMode: 'stateless' };
-  }
-
-  if (
-    args.runtimeSessionId !== undefined
-    && (typeof args.runtimeSessionId !== 'string' || args.runtimeSessionId.length === 0)
-  ) {
-    throw new Error('queued runtimeSessionId must be a non-empty string');
-  }
-  const runtimeSessionId = args.runtimeSessionId;
-
-  let runtimeSessionMode: RuntimeSessionMode;
-  if (args.runtimeSessionMode === undefined) {
-    runtimeSessionMode = runtimeSessionId === undefined ? 'stateless' : 'affinity';
-  } else if (isRuntimeSessionMode(args.runtimeSessionMode)) {
-    runtimeSessionMode = args.runtimeSessionMode;
-  } else {
-    throw new Error('queued runtimeSessionMode must be one of: stateless, affinity, strict');
-  }
-
-  if (runtimeSessionMode === 'stateless') {
-    if (runtimeSessionId !== undefined) {
-      throw new Error('stateless queued job must not carry a runtimeSessionId');
+    if (
+        args.isSynthetic ||
+        args.runtimeSessionExemption === PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION
+    ) {
+        return { runtimeSessionMode: 'stateless' };
     }
-    return { runtimeSessionMode };
-  }
 
-  if (runtimeSessionId === undefined) {
-    throw new Error(`${runtimeSessionMode} queued job requires a runtimeSessionId`);
-  }
-  if (args.workerMode === 'stateless' || args.workerBackend !== 'lambda-microvm') {
-    throw new Error(
-      `${args.workerBackend}/${args.workerMode} worker cannot honor queued `
-        + `${runtimeSessionMode} runtime session`,
-    );
-  }
+    if (
+        args.runtimeSessionId !== undefined &&
+        (typeof args.runtimeSessionId !== 'string' ||
+            args.runtimeSessionId.length === 0)
+    ) {
+        throw new Error('queued runtimeSessionId must be a non-empty string');
+    }
+    const runtimeSessionId = args.runtimeSessionId;
 
-  return {
-    runtimeSessionId,
-    runtimeSessionMode,
-  };
+    let runtimeSessionMode: RuntimeSessionMode;
+    if (args.runtimeSessionMode === undefined) {
+        runtimeSessionMode =
+            runtimeSessionId === undefined ? 'stateless' : 'affinity';
+    } else if (isRuntimeSessionMode(args.runtimeSessionMode)) {
+        runtimeSessionMode = args.runtimeSessionMode;
+    } else {
+        throw new Error(
+            'queued runtimeSessionMode must be one of: stateless, affinity, strict',
+        );
+    }
+
+    if (runtimeSessionMode === 'stateless') {
+        if (runtimeSessionId !== undefined) {
+            throw new Error(
+                'stateless queued job must not carry a runtimeSessionId',
+            );
+        }
+        return { runtimeSessionMode };
+    }
+
+    if (runtimeSessionId === undefined) {
+        throw new Error(
+            `${runtimeSessionMode} queued job requires a runtimeSessionId`,
+        );
+    }
+    if (
+        args.workerMode === 'stateless' ||
+        args.workerBackend !== 'lambda-microvm'
+    ) {
+        throw new Error(
+            `${args.workerBackend}/${args.workerMode} worker cannot honor queued ` +
+                `${runtimeSessionMode} runtime session`,
+        );
+    }
+
+    return {
+        runtimeSessionId,
+        runtimeSessionMode,
+    };
 }

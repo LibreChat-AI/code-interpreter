@@ -12,11 +12,11 @@ The sandbox currently runs with `privileged: true` which grants full host capabi
 
 ## Security Layers
 
-| Layer | Current | With AppArmor |
-|-------|---------|---------------|
-| Container | `privileged: true` | Explicit capabilities + AppArmor MAC |
-| Process | NsJail namespaces + seccomp | NsJail + AppArmor deny rules |
-| Syscalls | seccomp-bpf filtering | seccomp + AppArmor restrictions |
+| Layer     | Current                     | With AppArmor                        |
+| --------- | --------------------------- | ------------------------------------ |
+| Container | `privileged: true`          | Explicit capabilities + AppArmor MAC |
+| Process   | NsJail namespaces + seccomp | NsJail + AppArmor deny rules         |
+| Syscalls  | seccomp-bpf filtering       | seccomp + AppArmor restrictions      |
 
 ## Testing
 
@@ -64,54 +64,54 @@ Create a DaemonSet to load the profile:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: apparmor-loader
-  namespace: kube-system
+    name: apparmor-loader
+    namespace: kube-system
 spec:
-  selector:
-    matchLabels:
-      app: apparmor-loader
-  template:
-    metadata:
-      labels:
-        app: apparmor-loader
-    spec:
-      hostPID: true
-      containers:
-        - name: loader
-          image: alpine
-          securityContext:
-            privileged: true
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              apk add --no-cache apparmor
-              cat > /etc/apparmor.d/sandbox-nsjail << 'PROFILE'
-              # Copy contents of sandbox-nsjail file here
-              PROFILE
-              apparmor_parser -r /etc/apparmor.d/sandbox-nsjail
-              echo "Profile loaded"
-              sleep infinity
-          volumeMounts:
-            - name: sys
-              mountPath: /sys
-            - name: apparmor
-              mountPath: /etc/apparmor.d
-      volumes:
-        - name: sys
-          hostPath:
-            path: /sys
-        - name: apparmor
-          hostPath:
-            path: /etc/apparmor.d
+    selector:
+        matchLabels:
+            app: apparmor-loader
+    template:
+        metadata:
+            labels:
+                app: apparmor-loader
+        spec:
+            hostPID: true
+            containers:
+                - name: loader
+                  image: alpine
+                  securityContext:
+                      privileged: true
+                  command: ['/bin/sh', '-c']
+                  args:
+                      - |
+                          apk add --no-cache apparmor
+                          cat > /etc/apparmor.d/sandbox-nsjail << 'PROFILE'
+                          # Copy contents of sandbox-nsjail file here
+                          PROFILE
+                          apparmor_parser -r /etc/apparmor.d/sandbox-nsjail
+                          echo "Profile loaded"
+                          sleep infinity
+                  volumeMounts:
+                      - name: sys
+                        mountPath: /sys
+                      - name: apparmor
+                        mountPath: /etc/apparmor.d
+            volumes:
+                - name: sys
+                  hostPath:
+                      path: /sys
+                - name: apparmor
+                  hostPath:
+                      path: /etc/apparmor.d
 ```
 
 ### 2. Enable in Helm Values
 
 ```yaml
 workerSandbox:
-  securityHardening:
-    enabled: true
-    appArmorProfile: "sandbox-nsjail"
+    securityHardening:
+        enabled: true
+        appArmorProfile: 'sandbox-nsjail'
 ```
 
 ### 3. Verify
@@ -129,7 +129,7 @@ kubectl get pod -l app.kubernetes.io/component=worker-sandbox -o jsonpath='{.ite
 Required for NsJail to function:
 
 - `capability sys_admin` - Create namespaces, mount filesystems
-- `capability sys_chroot` - Change root filesystem  
+- `capability sys_chroot` - Change root filesystem
 - `mount`, `pivot_root` - Set up isolated filesystem
 - `/pkgs/**`, `/tmp/**` - Sandbox working directories
 - `/sys/fs/cgroup/**` - Resource limits via cgroups

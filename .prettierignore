@@ -1,2 +1,8 @@
 node_modules
 data/
+helm/codeapi/templates/
+.build/
+.build-service/
+launcher/target/
+api/.build/
+service/.build-service/

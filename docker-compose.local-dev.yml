@@ -7,149 +7,149 @@
 # The sandbox runs inside a libkrun microVM with its own guest kernel.
 # Requires /dev/kvm (WSL2 with nested virt, or bare metal Linux).
 services:
-  # MicroVM Sandbox API (libkrun + NsJail code execution)
-  sandbox:
-    build:
-      context: .
-      dockerfile: api/Dockerfile
-      target: sandbox-runner-${KVM_ENABLED:-true}
-    container_name: sandbox
-    privileged: false
-    devices:
-      - ${KVM_DEVICE_PATH:-/dev/kvm}:/dev/kvm
-    ports:
-      - 2000:2000
-    volumes:
-      - ${SANDBOX_PACKAGES_PATH:-./data/pkgs}:/host-packages:ro
-    environment:
-      - KVM_ENABLED=${KVM_ENABLED:-true}
-      - LAUNCHER_PACKAGES_HOST=/disabled-host-packages
-      - LAUNCHER_VCPUS=2
-      - LAUNCHER_RAM_MIB=2048
-      - LAUNCHER_LOG_LEVEL=3
-      - SANDBOX_LOG_LEVEL=DEBUG
-      - SANDBOX_PACKAGES_DIRECTORY=/pkgs
-      - SANDBOX_MAX_PROCESS_COUNT=100
-      - SANDBOX_PER_JOB_UIDS=true
-      - SANDBOX_JOB_UID_BASE=200000
-      - SANDBOX_JOB_GID_BASE=200000
-      - SANDBOX_WORKSPACE_REAPER_MAX_AGE_SECONDS=3600
-      - SANDBOX_RUN_CPU_TIME=60000
-      - SANDBOX_RUN_TIMEOUT=300000
-      - SANDBOX_OUTPUT_MAX_SIZE=65536
-      - SANDBOX_DISABLE_NETWORKING=true
-      - FILE_SERVER_URL=http://file_server:3000
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
-      - SANDBOX_ALLOWED_LOCAL_NETWORK_PORT=3033
-      - SANDBOX_FORWARD_TARGET=tool_call_server:3033
-    healthcheck:
-      test: ["CMD", "/usr/local/bin/sandbox-runner-healthcheck.sh"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-    depends_on:
-      - tool_call_server
+    # MicroVM Sandbox API (libkrun + NsJail code execution)
+    sandbox:
+        build:
+            context: .
+            dockerfile: api/Dockerfile
+            target: sandbox-runner-${KVM_ENABLED:-true}
+        container_name: sandbox
+        privileged: false
+        devices:
+            - ${KVM_DEVICE_PATH:-/dev/kvm}:/dev/kvm
+        ports:
+            - 2000:2000
+        volumes:
+            - ${SANDBOX_PACKAGES_PATH:-./data/pkgs}:/host-packages:ro
+        environment:
+            - KVM_ENABLED=${KVM_ENABLED:-true}
+            - LAUNCHER_PACKAGES_HOST=/disabled-host-packages
+            - LAUNCHER_VCPUS=2
+            - LAUNCHER_RAM_MIB=2048
+            - LAUNCHER_LOG_LEVEL=3
+            - SANDBOX_LOG_LEVEL=DEBUG
+            - SANDBOX_PACKAGES_DIRECTORY=/pkgs
+            - SANDBOX_MAX_PROCESS_COUNT=100
+            - SANDBOX_PER_JOB_UIDS=true
+            - SANDBOX_JOB_UID_BASE=200000
+            - SANDBOX_JOB_GID_BASE=200000
+            - SANDBOX_WORKSPACE_REAPER_MAX_AGE_SECONDS=3600
+            - SANDBOX_RUN_CPU_TIME=60000
+            - SANDBOX_RUN_TIMEOUT=300000
+            - SANDBOX_OUTPUT_MAX_SIZE=65536
+            - SANDBOX_DISABLE_NETWORKING=true
+            - FILE_SERVER_URL=http://file_server:3000
+            - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+            - SANDBOX_ALLOWED_LOCAL_NETWORK_PORT=3033
+            - SANDBOX_FORWARD_TARGET=tool_call_server:3033
+        healthcheck:
+            test: ['CMD', '/usr/local/bin/sandbox-runner-healthcheck.sh']
+            interval: 10s
+            timeout: 5s
+            retries: 6
+        depends_on:
+            - tool_call_server
 
-  # File Server (MinIO integration) - Stateless, scales independently
-  file_server:
-    build:
-      context: .
-      dockerfile: service/Dockerfile
-      target: production
-    container_name: file_server
-    ports:
-      - 3000:3000
-    environment:
-      - MINIO_BUCKET=test-bucket
-      - MINIO_ENDPOINT=minio
-      - MINIO_PORT=9000
-      - MINIO_USE_SSL=false
-      - MINIO_ACCESS_KEY=minioadmin
-      - MINIO_SECRET_KEY=minioadmin
-      - FILE_SERVER_PORT=3000
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=localdev
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
-    depends_on:
-      - minio
-      - redis
+    # File Server (MinIO integration) - Stateless, scales independently
+    file_server:
+        build:
+            context: .
+            dockerfile: service/Dockerfile
+            target: production
+        container_name: file_server
+        ports:
+            - 3000:3000
+        environment:
+            - MINIO_BUCKET=test-bucket
+            - MINIO_ENDPOINT=minio
+            - MINIO_PORT=9000
+            - MINIO_USE_SSL=false
+            - MINIO_ACCESS_KEY=minioadmin
+            - MINIO_SECRET_KEY=minioadmin
+            - FILE_SERVER_PORT=3000
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            - REDIS_PASSWORD=localdev
+            - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+        depends_on:
+            - minio
+            - redis
 
-  # Tool Call Server (programmatic tool calling) - Stateless, scales independently
-  tool_call_server:
-    build:
-      context: .
-      dockerfile: service/Dockerfile.tool-call-server
-      target: production
-    container_name: tool_call_server
-    ports:
-      - 3033:3033
-    environment:
-      - TOOL_CALL_SERVER_PORT=3033
-      - TOOL_CALL_REQUEST_TIMEOUT=300000
-      - TOOL_CALL_SESSION_EXPIRY=600
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=localdev
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
-    depends_on:
-      - redis
+    # Tool Call Server (programmatic tool calling) - Stateless, scales independently
+    tool_call_server:
+        build:
+            context: .
+            dockerfile: service/Dockerfile.tool-call-server
+            target: production
+        container_name: tool_call_server
+        ports:
+            - 3033:3033
+        environment:
+            - TOOL_CALL_SERVER_PORT=3033
+            - TOOL_CALL_REQUEST_TIMEOUT=300000
+            - TOOL_CALL_SESSION_EXPIRY=600
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            - REDIS_PASSWORD=localdev
+            - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+        depends_on:
+            - redis
 
-  # Local Service API (combined API + Workers, no auth required)
-  # For production, split into api + worker-sandbox pods
-  service:
-    build:
-      context: .
-      dockerfile: service/Dockerfile.local
-      target: production
-    container_name: service
-    ports:
-      - 3112:3112
-    environment:
-      - LOCAL_MODE=${LOCAL_MODE:-true}
-      - SANDBOX_ENDPOINT=http://sandbox:2000/api/v2
-      - FILE_SERVER_URL=http://file_server:3000
-      - TOOL_CALL_SERVER_URL=http://tool_call_server:3033
-      - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=localdev
-      - PYTHON_CONCURRENCY=1
-      - OTHER_CONCURRENCY=8
-      - JOB_WINDOW=1000
-      # Must match or exceed programmatic request timeout for tool calls to work
-      - JOB_TIMEOUT=300000
-      - PORT=3112
-      # Programmatic Tool Calling mode: `blocking` (legacy) or `replay` (Temporal-style).
-      - PTC_MODE=${PTC_MODE:-replay}
-      - PTC_DEBUG=${PTC_DEBUG:-false}
-    depends_on:
-      - redis
-      - sandbox
-      - file_server
-      - tool_call_server
+    # Local Service API (combined API + Workers, no auth required)
+    # For production, split into api + worker-sandbox pods
+    service:
+        build:
+            context: .
+            dockerfile: service/Dockerfile.local
+            target: production
+        container_name: service
+        ports:
+            - 3112:3112
+        environment:
+            - LOCAL_MODE=${LOCAL_MODE:-true}
+            - SANDBOX_ENDPOINT=http://sandbox:2000/api/v2
+            - FILE_SERVER_URL=http://file_server:3000
+            - TOOL_CALL_SERVER_URL=http://tool_call_server:3033
+            - CODEAPI_INTERNAL_SERVICE_TOKEN=${CODEAPI_INTERNAL_SERVICE_TOKEN:-localdev-internal-service-token}
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            - REDIS_PASSWORD=localdev
+            - PYTHON_CONCURRENCY=1
+            - OTHER_CONCURRENCY=8
+            - JOB_WINDOW=1000
+            # Must match or exceed programmatic request timeout for tool calls to work
+            - JOB_TIMEOUT=300000
+            - PORT=3112
+            # Programmatic Tool Calling mode: `blocking` (legacy) or `replay` (Temporal-style).
+            - PTC_MODE=${PTC_MODE:-replay}
+            - PTC_DEBUG=${PTC_DEBUG:-false}
+        depends_on:
+            - redis
+            - sandbox
+            - file_server
+            - tool_call_server
 
-  # Redis - Shared job queue and state store
-  redis:
-    image: redis:7-alpine
-    container_name: redis
-    command: redis-server --requirepass localdev
-    ports:
-      - 6379:6379
+    # Redis - Shared job queue and state store
+    redis:
+        image: redis:7-alpine
+        container_name: redis
+        command: redis-server --requirepass localdev
+        ports:
+            - 6379:6379
 
-  # MinIO (S3-compatible storage) - Shared file storage
-  minio:
-    image: quay.io/minio/minio
-    container_name: minio
-    ports:
-      - 9000:9000
-      - 9001:9001
-    volumes:
-      - minio_data:/data
-    environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
-    command: server /data --console-address ":9001"
+    # MinIO (S3-compatible storage) - Shared file storage
+    minio:
+        image: quay.io/minio/minio
+        container_name: minio
+        ports:
+            - 9000:9000
+            - 9001:9001
+        volumes:
+            - minio_data:/data
+        environment:
+            - MINIO_ROOT_USER=minioadmin
+            - MINIO_ROOT_PASSWORD=minioadmin
+        command: server /data --console-address ":9001"
 
 volumes:
-  minio_data:
+    minio_data:

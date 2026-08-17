@@ -5,6 +5,9 @@ import { openEgressHandle, type EgressHandleClaims } from './egress-grant';
  * decodeURIComponent again can throw on valid decoded bytes like `%` and turn
  * malformed handles into 500s instead of scoped egress-token rejections.
  */
-export function openEgressRouteHandle(raw: string, secret: string): EgressHandleClaims {
-  return openEgressHandle(raw, secret);
+export function openEgressRouteHandle(
+    raw: string,
+    secret: string,
+): EgressHandleClaims {
+    return openEgressHandle(raw, secret);
 }

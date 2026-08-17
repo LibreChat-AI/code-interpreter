@@ -122,9 +122,9 @@ services:
 
     sandbox-runner:
         build:
-          context: .
-          dockerfile: api/Dockerfile
-          target: sandbox-runner-${KVM_ENABLED:-true}
+            context: .
+            dockerfile: api/Dockerfile
+            target: sandbox-runner-${KVM_ENABLED:-true}
         container_name: sandbox-runner
         restart: always
         privileged: false
@@ -165,7 +165,7 @@ services:
             egress_gateway:
                 condition: service_healthy
         healthcheck:
-            test: ["CMD", "/usr/local/bin/sandbox-runner-healthcheck.sh"]
+            test: ['CMD', '/usr/local/bin/sandbox-runner-healthcheck.sh']
             interval: 5s
             timeout: 3s
             retries: 60

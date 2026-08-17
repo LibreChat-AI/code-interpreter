@@ -31,24 +31,24 @@
  *   --update        MICROVM_UPDATE=true    update an existing image (new version) instead of create
  */
 import {
-  LambdaMicrovmsClient,
-  CreateMicrovmImageCommand,
-  UpdateMicrovmImageCommand,
-  GetMicrovmImageCommand,
-  ListMicrovmImagesCommand,
+    LambdaMicrovmsClient,
+    CreateMicrovmImageCommand,
+    UpdateMicrovmImageCommand,
+    GetMicrovmImageCommand,
+    ListMicrovmImagesCommand,
 } from '@aws-sdk/client-lambda-microvms';
 import {
-  positiveFiniteNumber,
-  positiveInteger,
-  parseStringMapJson,
-  resolveMicrovmImageArn,
-  waitForMicrovmImage,
+    positiveFiniteNumber,
+    positiveInteger,
+    parseStringMapJson,
+    resolveMicrovmImageArn,
+    waitForMicrovmImage,
 } from './create-microvm-image-lib';
 
 function arg(flag: string, env: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(flag);
-  if (i >= 0 && process.argv[i + 1]) return process.argv[i + 1];
-  return process.env[env] ?? fallback;
+    const i = process.argv.indexOf(flag);
+    if (i >= 0 && process.argv[i + 1]) return process.argv[i + 1];
+    return process.env[env] ?? fallback;
 }
 
 const region = arg('--region', 'MICROVM_REGION', 'us-east-1') as string;
@@ -56,24 +56,28 @@ const name = arg('--name', 'MICROVM_IMAGE_NAME', 'codeapi-session') as string;
 const artifactUri = arg('--artifact', 'MICROVM_ARTIFACT_URI');
 const buildRoleArn = arg('--build-role', 'MICROVM_BUILD_ROLE_ARN');
 const baseImageArn = arg(
-  '--base-image',
-  'MICROVM_BASE_IMAGE_ARN',
-  `arn:aws:lambda:${region}:aws:microvm-image:al2023-1`,
+    '--base-image',
+    'MICROVM_BASE_IMAGE_ARN',
+    `arn:aws:lambda:${region}:aws:microvm-image:al2023-1`,
 ) as string;
 const baseImageVersion = arg('--base-version', 'MICROVM_BASE_IMAGE_VERSION');
 const memory = positiveInteger(
-  arg('--memory', 'MICROVM_MEMORY_MIB', '4096') as string,
-  'MICROVM_MEMORY_MIB',
+    arg('--memory', 'MICROVM_MEMORY_MIB', '4096') as string,
+    'MICROVM_MEMORY_MIB',
 );
 const buildDeadlineMinutes = positiveFiniteNumber(
-  process.env.MICROVM_BUILD_DEADLINE_MINUTES ?? '30',
-  'MICROVM_BUILD_DEADLINE_MINUTES',
+    process.env.MICROVM_BUILD_DEADLINE_MINUTES ?? '30',
+    'MICROVM_BUILD_DEADLINE_MINUTES',
 );
-const isUpdate = (arg('--update', 'MICROVM_UPDATE') ?? 'false') === 'true' || process.argv.includes('--update');
+const isUpdate =
+    (arg('--update', 'MICROVM_UPDATE') ?? 'false') === 'true' ||
+    process.argv.includes('--update');
 
 if (!artifactUri || !buildRoleArn) {
-  console.error('Missing required --artifact <s3://...> and/or --build-role <arn>.');
-  process.exit(2);
+    console.error(
+        'Missing required --artifact <s3://...> and/or --build-role <arn>.',
+    );
+    process.exit(2);
 }
 
 /* Runner env is baked at image-build time (RunMicrovm does not inject it later),
@@ -91,9 +95,9 @@ if (!artifactUri || !buildRoleArn) {
  * computations) and SANDBOX_OUTPUT_MAX_SIZE (1024 bytes default truncates
  * output after a single verbose stack trace). */
 function parseEnvJson(): Record<string, string> {
-  const raw = arg('--env-json', 'MICROVM_IMAGE_ENV_JSON');
-  if (!raw) return {};
-  return parseStringMapJson(raw, 'MICROVM_IMAGE_ENV_JSON');
+    const raw = arg('--env-json', 'MICROVM_IMAGE_ENV_JSON');
+    if (!raw) return {};
+    return parseStringMapJson(raw, 'MICROVM_IMAGE_ENV_JSON');
 }
 
 /* Hard-won working image config (see docs/lambda-microvm/README.md):
@@ -103,92 +107,118 @@ function parseEnvJson(): Record<string, string> {
  *    subtree_control, so fall back to rlimit-based caps.
  *  - NO hooks: hookless is the reliable build path (see header). */
 const shared = {
-  baseImageArn,
-  baseImageVersion,
-  buildRoleArn,
-  codeArtifact: { uri: artifactUri },
-  cpuConfigurations: [{ architecture: 'ARM_64' as const }],
-  resources: [{ minimumMemoryInMiB: memory }],
-  additionalOsCapabilities: ['ALL' as const],
-  environmentVariables: { SANDBOX_USE_CGROUPV2: 'false', ...parseEnvJson() },
+    baseImageArn,
+    baseImageVersion,
+    buildRoleArn,
+    codeArtifact: { uri: artifactUri },
+    cpuConfigurations: [{ architecture: 'ARM_64' as const }],
+    resources: [{ minimumMemoryInMiB: memory }],
+    additionalOsCapabilities: ['ALL' as const],
+    environmentVariables: { SANDBOX_USE_CGROUPV2: 'false', ...parseEnvJson() },
 };
 
-const client = new LambdaMicrovmsClient({ region, retryMode: 'adaptive', maxAttempts: 3 });
+const client = new LambdaMicrovmsClient({
+    region,
+    retryMode: 'adaptive',
+    maxAttempts: 3,
+});
 
 async function main(): Promise<void> {
-  console.log(`${isUpdate ? 'Updating' : 'Creating'} hookless MicroVM image "${name}" in ${region}...`);
-  console.log(`  managed base: ${baseImageArn}${baseImageVersion ? ` @ ${baseImageVersion}` : ' (latest version)'}`);
-  const startedAtMs = Date.now();
-  const deadlineAtMs = startedAtMs + buildDeadlineMinutes * 60_000;
-  const controller = new AbortController();
-  const deadline = setTimeout(() => {
-    controller.abort(new Error(
-      `MicroVM image provisioning exceeded ${buildDeadlineMinutes} minute(s)`,
-    ));
-  }, Math.max(1, deadlineAtMs - Date.now()));
-  deadline.unref?.();
-  let createdArn: string | undefined;
-  try {
-    if (isUpdate) {
-      const imageIdentifier = await resolveMicrovmImageArn(
-        name,
-        async (nameFilter, nextToken, signal) => client.send(
-          new ListMicrovmImagesCommand({ nameFilter, nextToken, maxResults: 50 }),
-          { abortSignal: signal },
-        ),
-        controller.signal,
-      );
-      const res = await client.send(
-        new UpdateMicrovmImageCommand({ imageIdentifier, ...shared }),
-        { abortSignal: controller.signal },
-      );
-      createdArn = res.imageArn ?? imageIdentifier;
-    } else {
-      const res = await client.send(
-        new CreateMicrovmImageCommand({ name, description: 'CodeAPI hookless session runner', ...shared }),
-        { abortSignal: controller.signal },
-      );
-      createdArn = res.imageArn;
-    }
+    console.log(
+        `${isUpdate ? 'Updating' : 'Creating'} hookless MicroVM image "${name}" in ${region}...`,
+    );
+    console.log(
+        `  managed base: ${baseImageArn}${baseImageVersion ? ` @ ${baseImageVersion}` : ' (latest version)'}`,
+    );
+    const startedAtMs = Date.now();
+    const deadlineAtMs = startedAtMs + buildDeadlineMinutes * 60_000;
+    const controller = new AbortController();
+    const deadline = setTimeout(
+        () => {
+            controller.abort(
+                new Error(
+                    `MicroVM image provisioning exceeded ${buildDeadlineMinutes} minute(s)`,
+                ),
+            );
+        },
+        Math.max(1, deadlineAtMs - Date.now()),
+    );
+    deadline.unref?.();
+    let createdArn: string | undefined;
+    try {
+        if (isUpdate) {
+            const imageIdentifier = await resolveMicrovmImageArn(
+                name,
+                async (nameFilter, nextToken, signal) =>
+                    client.send(
+                        new ListMicrovmImagesCommand({
+                            nameFilter,
+                            nextToken,
+                            maxResults: 50,
+                        }),
+                        { abortSignal: signal },
+                    ),
+                controller.signal,
+            );
+            const res = await client.send(
+                new UpdateMicrovmImageCommand({ imageIdentifier, ...shared }),
+                { abortSignal: controller.signal },
+            );
+            createdArn = res.imageArn ?? imageIdentifier;
+        } else {
+            const res = await client.send(
+                new CreateMicrovmImageCommand({
+                    name,
+                    description: 'CodeAPI hookless session runner',
+                    ...shared,
+                }),
+                { abortSignal: controller.signal },
+            );
+            createdArn = res.imageArn;
+        }
 
-    /* GetMicrovmImage and UpdateMicrovmImage require the full ARN. Create
-     * accepts a name; update resolves that name above. Create/Update, every
-     * lookup/poll, and every sleep share one hard deadline. */
-    const completed = await waitForMicrovmImage({
-      imageIdentifier: createdArn ?? '',
-      deadlineMinutes: buildDeadlineMinutes,
-      startedAtMs,
-      deadlineAtMs,
-      signal: controller.signal,
-      getImage: (imageIdentifier, signal) => client.send(
-        new GetMicrovmImageCommand({ imageIdentifier }),
-        { abortSignal: signal },
-      ),
-      onPending: (state, elapsedSeconds) => {
-        if (elapsedSeconds % 60 < 20) console.log(`  [${elapsedSeconds}s] ${state}`);
-      },
-    });
+        /* GetMicrovmImage and UpdateMicrovmImage require the full ARN. Create
+         * accepts a name; update resolves that name above. Create/Update, every
+         * lookup/poll, and every sleep share one hard deadline. */
+        const completed = await waitForMicrovmImage({
+            imageIdentifier: createdArn ?? '',
+            deadlineMinutes: buildDeadlineMinutes,
+            startedAtMs,
+            deadlineAtMs,
+            signal: controller.signal,
+            getImage: (imageIdentifier, signal) =>
+                client.send(new GetMicrovmImageCommand({ imageIdentifier }), {
+                    abortSignal: signal,
+                }),
+            onPending: (state, elapsedSeconds) => {
+                if (elapsedSeconds % 60 < 20)
+                    console.log(`  [${elapsedSeconds}s] ${state}`);
+            },
+        });
 
-    console.log(`\n${completed.state} in ${completed.elapsedSeconds}s`);
-    console.log(`  imageArn: ${completed.imageArn}`);
-    console.log(`  version:  ${completed.imageVersion}`);
-    console.log('\nSet on the CodeAPI service:');
-    console.log(`  LAMBDA_MICROVM_IMAGE_ARN=${completed.imageArn}`);
-    console.log(`  LAMBDA_MICROVM_IMAGE_VERSION=${completed.imageVersion}`);
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new Error(
-        `MicroVM image provisioning timed out after ${buildDeadlineMinutes} minute(s)`,
-        { cause: error },
-      );
+        console.log(`\n${completed.state} in ${completed.elapsedSeconds}s`);
+        console.log(`  imageArn: ${completed.imageArn}`);
+        console.log(`  version:  ${completed.imageVersion}`);
+        console.log('\nSet on the CodeAPI service:');
+        console.log(`  LAMBDA_MICROVM_IMAGE_ARN=${completed.imageArn}`);
+        console.log(`  LAMBDA_MICROVM_IMAGE_VERSION=${completed.imageVersion}`);
+    } catch (error) {
+        if (controller.signal.aborted) {
+            throw new Error(
+                `MicroVM image provisioning timed out after ${buildDeadlineMinutes} minute(s)`,
+                { cause: error },
+            );
+        }
+        throw error;
+    } finally {
+        clearTimeout(deadline);
     }
-    throw error;
-  } finally {
-    clearTimeout(deadline);
-  }
 }
 
-main().catch((error) => {
-  console.error('create-microvm-image failed:', error instanceof Error ? error.message : error);
-  process.exit(1);
+main().catch(error => {
+    console.error(
+        'create-microvm-image failed:',
+        error instanceof Error ? error.message : error,
+    );
+    process.exit(1);
 });

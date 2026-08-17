@@ -1,94 +1,94 @@
 openapi: 3.0.0
 info:
-  title: Code Execution API
-  version: 1.0.0
+    title: Code Execution API
+    version: 1.0.0
 
 paths:
-  /execute:
-    post:
-      summary: Execute code
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ExecuteRequest'
-      responses:
-        '200':
-          description: Successful execution
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExecuteResponse'
-        '400':
-          description: Bad request
-        '500':
-          description: Internal server error
+    /execute:
+        post:
+            summary: Execute code
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/ExecuteRequest'
+            responses:
+                '200':
+                    description: Successful execution
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ExecuteResponse'
+                '400':
+                    description: Bad request
+                '500':
+                    description: Internal server error
 
 components:
-  schemas:
-    ExecuteRequest:
-      type: object
-      required:
-        - language
-        - version
-        - files
-      properties:
-        session_id:
-          type: string
-        language:
-          type: string
-        version:
-          type: string
-        files:
-          type: array
-          items:
-            $ref: '#/components/schemas/File'
-        stdin:
-          type: string
-        args:
-          type: array
-          items:
-            type: string
-        compileTimeout:
-          type: integer
-        runTimeout:
-          type: integer
-        compileMemoryLimit:
-          type: integer
-        runMemoryLimit:
-          type: integer
-    
-    File:
-      type: object
-      required:
-        - name
-        - content
-      properties:
-        name:
-          type: string
-        id:
-          type: string
-        content:
-          type: string
-        encoding:
-          type: string
-          enum: [base64, hex, utf8]
-    
-    ExecuteResponse:
-      type: object
-      properties:
-        compile:
-          $ref: '#/components/schemas/ExecutionStage'
-        run:
-          $ref: '#/components/schemas/ExecutionStage'
-    
-    ExecutionStage:
-      type: object
-      properties:
-        stdout:
-          type: string
-        stderr:
-          type: string
-        exitCode:
-          type: integer
+    schemas:
+        ExecuteRequest:
+            type: object
+            required:
+                - language
+                - version
+                - files
+            properties:
+                session_id:
+                    type: string
+                language:
+                    type: string
+                version:
+                    type: string
+                files:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/File'
+                stdin:
+                    type: string
+                args:
+                    type: array
+                    items:
+                        type: string
+                compileTimeout:
+                    type: integer
+                runTimeout:
+                    type: integer
+                compileMemoryLimit:
+                    type: integer
+                runMemoryLimit:
+                    type: integer
+
+        File:
+            type: object
+            required:
+                - name
+                - content
+            properties:
+                name:
+                    type: string
+                id:
+                    type: string
+                content:
+                    type: string
+                encoding:
+                    type: string
+                    enum: [base64, hex, utf8]
+
+        ExecuteResponse:
+            type: object
+            properties:
+                compile:
+                    $ref: '#/components/schemas/ExecutionStage'
+                run:
+                    $ref: '#/components/schemas/ExecutionStage'
+
+        ExecutionStage:
+            type: object
+            properties:
+                stdout:
+                    type: string
+                stderr:
+                    type: string
+                exitCode:
+                    type: integer

@@ -1,6 +1,6 @@
 {
     "devDependencies": {
-        "prettier": "2.4.1"
+        "prettier": "^3.9.6"
     },
     "license": "Apache-2.0",
     "name": "code-interpreter"

@@ -20,11 +20,11 @@ lifetime, without changing the default HTTP behavior.
 Stateful sessions span three repos. Each owns one layer, and they degrade
 gracefully out of order (the wire fields are additive and ignored when absent).
 
-| Repo | Provides | Key artifact |
-|---|---|---|
-| **code-interpreter** (this repo) | The Code API service + the Lambda MicroVM backend, the runner's persistent workspace, checkpoint/restore, and the session registry. Owns **all** AWS config. | `CODEAPI_SANDBOX_BACKEND=lambda-microvm` |
-| **@librechat/agents** | The SDK surface: `toolExecution.sandbox.statefulSessions` and the `statefulSessions` tool-factory param. Stamps a per-conversation session hint on `/exec`. | `runtime_session_hint` on the wire |
-| **LibreChat** | The `stateful_code_sessions` app capability + a per-agent Agent Builder toggle, wired into `createRun`. | endpoints.agents capability + agent toggle |
+| Repo                             | Provides                                                                                                                                                     | Key artifact                               |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------ |
+| **code-interpreter** (this repo) | The Code API service + the Lambda MicroVM backend, the runner's persistent workspace, checkpoint/restore, and the session registry. Owns **all** AWS config. | `CODEAPI_SANDBOX_BACKEND=lambda-microvm`   |
+| **@librechat/agents**            | The SDK surface: `toolExecution.sandbox.statefulSessions` and the `statefulSessions` tool-factory param. Stamps a per-conversation session hint on `/exec`.  | `runtime_session_hint` on the wire         |
+| **LibreChat**                    | The `stateful_code_sessions` app capability + a per-agent Agent Builder toggle, wired into `createRun`.                                                      | endpoints.agents capability + agent toggle |
 
 **Trust boundary:** LibreChat and the agents SDK never learn any AWS
 configuration. They speak the same `/exec` HTTP protocol as always, plus one
@@ -307,48 +307,48 @@ appear in `api/src/config.ts`.
 
 ### Backend selection
 
-| Env | Default | Meaning |
-|---|---|---|
-| `CODEAPI_SANDBOX_BACKEND` | `http` | `http` (byte-identical to today) or `lambda-microvm`. |
-| `CODEAPI_RUNTIME_SESSION_MODE` | `stateless` | `stateless` \| `affinity` \| `strict`. `affinity` and `strict` require the `lambda-microvm` backend. See [Operating modes](#operating-modes). |
-| `CODEAPI_RUNTIME_SESSION_LOCK_WAIT_MS` | `15000` | How long a stateful execution waits for the session lock before returning `RUNTIME_SESSION_BUSY` (HTTP 409). |
+| Env                                    | Default     | Meaning                                                                                                                                       |
+| -------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CODEAPI_SANDBOX_BACKEND`              | `http`      | `http` (byte-identical to today) or `lambda-microvm`.                                                                                         |
+| `CODEAPI_RUNTIME_SESSION_MODE`         | `stateless` | `stateless` \| `affinity` \| `strict`. `affinity` and `strict` require the `lambda-microvm` backend. See [Operating modes](#operating-modes). |
+| `CODEAPI_RUNTIME_SESSION_LOCK_WAIT_MS` | `15000`     | How long a stateful execution waits for the session lock before returning `RUNTIME_SESSION_BUSY` (HTTP 409).                                  |
 
 ### MicroVM launch
 
-| Env | Default | Meaning |
-|---|---|---|
-| `LAMBDA_MICROVM_IMAGE_ARN` | — (required) | The image created in step 4. |
-| `LAMBDA_MICROVM_IMAGE_VERSION` | latest in stateless mode; required in affinity/strict | Exact image version. Stateful startup rejects an unpinned version so a rolling image update cannot silently mix workspace sessions across revisions. |
-| `LAMBDA_MICROVM_EXECUTION_ROLE_ARN` | — | Logging-only role. Required (with the log group below) for runtime VM stdout to reach CloudWatch. |
-| `LAMBDA_MICROVM_LOG_GROUP` | — | CloudWatch log group sent on `RunMicrovm`. Needed alongside the execution role or stdout goes nowhere. |
-| `LAMBDA_MICROVM_REGION` | SDK default | Region for the lambda-microvms client. |
-| `LAMBDA_MICROVM_INGRESS_CONNECTOR_ARNS` | — | Comma-separated. Inbound HTTPS to the VM. |
-| `LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS` | — | Comma-separated. Outbound from the VM. Required in hardened mode. |
-| `LAMBDA_MICROVM_PORT` | `8080` | Runner port. |
-| `LAMBDA_MICROVM_MAX_DURATION_SECONDS` | `28800` | Hard lifetime ceiling (≤ 8h). |
-| `LAMBDA_MICROVM_IDLE_SECONDS` | `1800` | idlePolicy: auto-suspend after this idle. |
-| `LAMBDA_MICROVM_SUSPEND_SECONDS` | `1800` | idlePolicy: auto-terminate after this suspended. |
-| `LAMBDA_MICROVM_AUTH_TOKEN_TTL_SECONDS` | `300` | Requested AWS proxy-token lifetime. Tokens are minted afresh for each probe, push, checkpoint, restore, or execute request; the multi-probe launch-readiness loop refreshes its token near expiry. |
-| `LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS` | `60000` | Budget for RunMicrovm → RUNNING. |
-| `LAMBDA_MICROVM_HEALTH_TIMEOUT_MS` | `5000` | Health check budget. |
-| `LAMBDA_MICROVM_LAUNCH_TPS` | `4` | Client-side launch throttle (headroom under AWS's 5 TPS cap). Suspend/resume are driven by the configured AWS idle policy, not worker control-plane calls. |
-| `LAMBDA_MICROVM_TOKEN_TPS` | `8` | Shared worker throttle for fresh `CreateMicrovmAuthToken` calls. |
-| `LAMBDA_MICROVM_ALLOW_SHELL` | `false` | Must stay false in prod (shell auth token → IAM-deny). |
+| Env                                     | Default                                               | Meaning                                                                                                                                                                                            |
+| --------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LAMBDA_MICROVM_IMAGE_ARN`              | — (required)                                          | The image created in step 4.                                                                                                                                                                       |
+| `LAMBDA_MICROVM_IMAGE_VERSION`          | latest in stateless mode; required in affinity/strict | Exact image version. Stateful startup rejects an unpinned version so a rolling image update cannot silently mix workspace sessions across revisions.                                               |
+| `LAMBDA_MICROVM_EXECUTION_ROLE_ARN`     | —                                                     | Logging-only role. Required (with the log group below) for runtime VM stdout to reach CloudWatch.                                                                                                  |
+| `LAMBDA_MICROVM_LOG_GROUP`              | —                                                     | CloudWatch log group sent on `RunMicrovm`. Needed alongside the execution role or stdout goes nowhere.                                                                                             |
+| `LAMBDA_MICROVM_REGION`                 | SDK default                                           | Region for the lambda-microvms client.                                                                                                                                                             |
+| `LAMBDA_MICROVM_INGRESS_CONNECTOR_ARNS` | —                                                     | Comma-separated. Inbound HTTPS to the VM.                                                                                                                                                          |
+| `LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS`  | —                                                     | Comma-separated. Outbound from the VM. Required in hardened mode.                                                                                                                                  |
+| `LAMBDA_MICROVM_PORT`                   | `8080`                                                | Runner port.                                                                                                                                                                                       |
+| `LAMBDA_MICROVM_MAX_DURATION_SECONDS`   | `28800`                                               | Hard lifetime ceiling (≤ 8h).                                                                                                                                                                      |
+| `LAMBDA_MICROVM_IDLE_SECONDS`           | `1800`                                                | idlePolicy: auto-suspend after this idle.                                                                                                                                                          |
+| `LAMBDA_MICROVM_SUSPEND_SECONDS`        | `1800`                                                | idlePolicy: auto-terminate after this suspended.                                                                                                                                                   |
+| `LAMBDA_MICROVM_AUTH_TOKEN_TTL_SECONDS` | `300`                                                 | Requested AWS proxy-token lifetime. Tokens are minted afresh for each probe, push, checkpoint, restore, or execute request; the multi-probe launch-readiness loop refreshes its token near expiry. |
+| `LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS`      | `60000`                                               | Budget for RunMicrovm → RUNNING.                                                                                                                                                                   |
+| `LAMBDA_MICROVM_HEALTH_TIMEOUT_MS`      | `5000`                                                | Health check budget.                                                                                                                                                                               |
+| `LAMBDA_MICROVM_LAUNCH_TPS`             | `4`                                                   | Client-side launch throttle (headroom under AWS's 5 TPS cap). Suspend/resume are driven by the configured AWS idle policy, not worker control-plane calls.                                         |
+| `LAMBDA_MICROVM_TOKEN_TPS`              | `8`                                                   | Shared worker throttle for fresh `CreateMicrovmAuthToken` calls.                                                                                                                                   |
+| `LAMBDA_MICROVM_ALLOW_SHELL`            | `false`                                               | Must stay false in prod (shell auth token → IAM-deny).                                                                                                                                             |
 
 ### Hardened egress split
 
-| Env | Placement | Meaning |
-|---|---|---|
-| `CODEAPI_HARDENED_SANDBOX_MODE=true` | API, worker, gateway, runner image | Enables each process's fail-closed startup checks. Because runner env is immutable, it must be present during image creation. |
-| `EGRESS_GATEWAY_URL` | API, worker, runner image | Bare gateway origin (no path/query). Worker creates and restores grants; runner routes file/tool egress through it. |
-| `CODEAPI_INTERNAL_SERVICE_TOKEN` | API, worker, gateway, file server, tool-call server; **never runner** | Authenticates internal control/upstream calls. Use one strong secret value across these workloads. |
-| `CODEAPI_EGRESS_GRANT_SECRET` | Gateway only | Seals per-execution grants. Hardened API/worker startup rejects this secret. |
-| `EGRESS_GATEWAY_FILE_SERVER_URL` / `_TOOL_CALL_SERVER_URL` | Gateway only | Private upstream origins. Do not expose them to the runner. |
-| `FILE_SERVER_URL` | Worker only | Direct source used to fetch authorized by-reference inputs before pushing them into the runner cache. Do not bake it into the runner. |
-| `CODEAPI_EGRESS_LEDGER_REQUIRED=true` / `REDIS_*` | Gateway | Makes grant replay/revocation state fail closed in Redis. |
-| `SANDBOX_ALLOWED_LOCAL_NETWORK_PORT` / `SANDBOX_FORWARD_TARGET` | Runner image | Configures the narrow tool-call socket proxy; it does not start or expose the socket by itself. The target host/port must match `EGRESS_GATEWAY_URL`. |
-| `CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY` | Worker only | Signs the manifest after the gateway returns the scoped grant. |
-| `SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY` / `SANDBOX_REQUIRE_EGRESS_MANIFEST=true` | Runner image | Verifies and requires the signed per-execution manifest. |
+| Env                                                                              | Placement                                                             | Meaning                                                                                                                                               |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CODEAPI_HARDENED_SANDBOX_MODE=true`                                             | API, worker, gateway, runner image                                    | Enables each process's fail-closed startup checks. Because runner env is immutable, it must be present during image creation.                         |
+| `EGRESS_GATEWAY_URL`                                                             | API, worker, runner image                                             | Bare gateway origin (no path/query). Worker creates and restores grants; runner routes file/tool egress through it.                                   |
+| `CODEAPI_INTERNAL_SERVICE_TOKEN`                                                 | API, worker, gateway, file server, tool-call server; **never runner** | Authenticates internal control/upstream calls. Use one strong secret value across these workloads.                                                    |
+| `CODEAPI_EGRESS_GRANT_SECRET`                                                    | Gateway only                                                          | Seals per-execution grants. Hardened API/worker startup rejects this secret.                                                                          |
+| `EGRESS_GATEWAY_FILE_SERVER_URL` / `_TOOL_CALL_SERVER_URL`                       | Gateway only                                                          | Private upstream origins. Do not expose them to the runner.                                                                                           |
+| `FILE_SERVER_URL`                                                                | Worker only                                                           | Direct source used to fetch authorized by-reference inputs before pushing them into the runner cache. Do not bake it into the runner.                 |
+| `CODEAPI_EGRESS_LEDGER_REQUIRED=true` / `REDIS_*`                                | Gateway                                                               | Makes grant replay/revocation state fail closed in Redis.                                                                                             |
+| `SANDBOX_ALLOWED_LOCAL_NETWORK_PORT` / `SANDBOX_FORWARD_TARGET`                  | Runner image                                                          | Configures the narrow tool-call socket proxy; it does not start or expose the socket by itself. The target host/port must match `EGRESS_GATEWAY_URL`. |
+| `CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY`                                         | Worker only                                                           | Signs the manifest after the gateway returns the scoped grant.                                                                                        |
+| `SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY` / `SANDBOX_REQUIRE_EGRESS_MANIFEST=true` | Runner image                                                          | Verifies and requires the signed per-execution manifest.                                                                                              |
 
 The Unix socket is mounted only for an execution whose body-bound, signed
 manifest carries `tool_call_socket=true`; the service's matching request flag is
@@ -358,16 +358,16 @@ operator environment switch.
 
 ### Checkpoints (affinity/strict only)
 
-| Env | Default | Meaning |
-|---|---|---|
-| `CODEAPI_SESSION_CHECKPOINTS` | `true` | `false` disables checkpoint/restore. Warm reuse still works, but a VM replacement starts clean and only receives the inputs declared by that request. |
-| `CODEAPI_CHECKPOINT_BUCKET` | `MINIO_BUCKET` | Checkpoint bucket. |
-| `CODEAPI_CHECKPOINT_PREFIX` | `rtsx-checkpoints/` | Key prefix. Immutable objects are `<prefix><runtime_session_id>/<20-digit-sequence>.tar.gz`; a sibling `.committed` marker makes a fenced upload eligible for Redis-loss recovery. |
-| `CODEAPI_CHECKPOINT_MAX_BYTES` | `536870912` | Max checkpoint size (512 MiB). |
-| `SANDBOX_CHECKPOINT_MAX_BYTES` | `536870912` | Runner-side ceiling for streamed checkpoint restores. Bake it into the MicroVM image and keep it equal to worker `CODEAPI_CHECKPOINT_MAX_BYTES`. |
-| `CODEAPI_CHECKPOINT_TIMEOUT_MS` | `60000` | Checkpoint transfer budget. |
-| `MINIO_ENDPOINT` / `_PORT` / `_USE_SSL` / `_REGION` | — | S3-compatible endpoint configuration. Absolute URLs use their scheme-default port; `MINIO_PORT` explicitly overrides it. Bare MinIO-style endpoints default to port 9000 and use `_USE_SSL` to select the scheme. Point at real S3 in prod. |
-| `MINIO_ACCESS_KEY` / `_SECRET_KEY` / `_SESSION_TOKEN` | workload IAM provider | Optional complete static credential set for local/non-role deployments. ECS, EC2, and web-identity/IRSA credentials are loaded automatically when the pair is absent. |
+| Env                                                   | Default               | Meaning                                                                                                                                                                                                                                     |
+| ----------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CODEAPI_SESSION_CHECKPOINTS`                         | `true`                | `false` disables checkpoint/restore. Warm reuse still works, but a VM replacement starts clean and only receives the inputs declared by that request.                                                                                       |
+| `CODEAPI_CHECKPOINT_BUCKET`                           | `MINIO_BUCKET`        | Checkpoint bucket.                                                                                                                                                                                                                          |
+| `CODEAPI_CHECKPOINT_PREFIX`                           | `rtsx-checkpoints/`   | Key prefix. Immutable objects are `<prefix><runtime_session_id>/<20-digit-sequence>.tar.gz`; a sibling `.committed` marker makes a fenced upload eligible for Redis-loss recovery.                                                          |
+| `CODEAPI_CHECKPOINT_MAX_BYTES`                        | `536870912`           | Max checkpoint size (512 MiB).                                                                                                                                                                                                              |
+| `SANDBOX_CHECKPOINT_MAX_BYTES`                        | `536870912`           | Runner-side ceiling for streamed checkpoint restores. Bake it into the MicroVM image and keep it equal to worker `CODEAPI_CHECKPOINT_MAX_BYTES`.                                                                                            |
+| `CODEAPI_CHECKPOINT_TIMEOUT_MS`                       | `60000`               | Checkpoint transfer budget.                                                                                                                                                                                                                 |
+| `MINIO_ENDPOINT` / `_PORT` / `_USE_SSL` / `_REGION`   | —                     | S3-compatible endpoint configuration. Absolute URLs use their scheme-default port; `MINIO_PORT` explicitly overrides it. Bare MinIO-style endpoints default to port 9000 and use `_USE_SSL` to select the scheme. Point at real S3 in prod. |
+| `MINIO_ACCESS_KEY` / `_SECRET_KEY` / `_SESSION_TOKEN` | workload IAM provider | Optional complete static credential set for local/non-role deployments. ECS, EC2, and web-identity/IRSA credentials are loaded automatically when the pair is absent.                                                                       |
 
 The worker rejects oversized checkpoint objects before transfer and the runner
 independently bounds the streamed restore body. Keep

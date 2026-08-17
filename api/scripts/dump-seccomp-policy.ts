@@ -5,17 +5,17 @@
 import { buildArgs } from '../src/nsjail';
 
 const args = buildArgs({
-  logPath: '/tmp/nsjail-test.log',
-  pkgdir: '/pkgs/python/3.14.4',
-  timeout: 1000,
-  memoryLimit: -1,
-  envVars: {},
-  command: ['/bin/true'],
-  identity: { slot: 0, uid: 65534, gid: 65534, perJobUid: false },
+    logPath: '/tmp/nsjail-test.log',
+    pkgdir: '/pkgs/python/3.14.4',
+    timeout: 1000,
+    memoryLimit: -1,
+    envVars: {},
+    command: ['/bin/true'],
+    identity: { slot: 0, uid: 65534, gid: 65534, perJobUid: false },
 });
 const idx = args.indexOf('--seccomp_string');
 if (idx < 0) {
-  console.error('seccomp_string flag not found');
-  process.exit(2);
+    console.error('seccomp_string flag not found');
+    process.exit(2);
 }
 process.stdout.write(args[idx + 1]);

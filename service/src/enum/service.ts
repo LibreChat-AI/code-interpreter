@@ -1,16 +1,16 @@
 export enum Jobs {
-  execute = 'execute',
+    execute = 'execute',
 }
 
 export enum Queues {
-  python = 'python-queue',
-  other = 'other-queue',
+    python = 'python-queue',
+    other = 'other-queue',
 }
 
 export enum Languages {
-  bash = 'bash',
-  js = 'js',
-  node = 'node',
-  py = 'py',
-  ts = 'ts',
+    bash = 'bash',
+    js = 'js',
+    node = 'node',
+    py = 'py',
+    ts = 'ts',
 }

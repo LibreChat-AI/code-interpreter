@@ -3,7 +3,10 @@ import { loadPackages } from './runtime';
 import { logger } from './logger';
 import { config } from './config';
 import { validateHardenedSandboxStartup } from './secure-startup';
-import { initializeSandboxWorkspaceIsolation, startWorkspaceReaper } from './workspace-isolation';
+import {
+    initializeSandboxWorkspaceIsolation,
+    startWorkspaceReaper,
+} from './workspace-isolation';
 import { httpMetricsMiddleware, metricsHandler } from './metrics';
 import { positiveInt, shutdownTelemetry, traceHttpRequest } from './telemetry';
 import { startWarmupCommand } from './warmup';
@@ -36,11 +39,11 @@ app.use(LIFECYCLE_HOOK_BASE_PATH, lifecycleRouter);
 app.use('/api/v2', v2Router);
 
 app.get('/', (_req, res) => {
-  return res.status(200).json({ message: 'Sandbox v2.0.0 (nsjail)' });
+    return res.status(200).json({ message: 'Sandbox v2.0.0 (nsjail)' });
 });
 
 app.use((_req, res) => {
-  return res.status(404).json({ message: 'Not Found' });
+    return res.status(404).json({ message: 'Not Found' });
 });
 
 /** Express resolves error handlers strictly *forward* from the position
@@ -56,77 +59,93 @@ app.use((_req, res) => {
  * JSON) and we forward it verbatim so callers can distinguish; legacy
  * `err.statusCode` is also honored for forward compatibility. */
 interface HttpError extends Error {
-  status?: number;
-  statusCode?: number;
+    status?: number;
+    statusCode?: number;
 }
-app.use((err: HttpError, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  logger.error({ err }, 'Unhandled error');
-  const status = err.status ?? err.statusCode ?? 400;
-  return res.status(status).json({ message: err.message || 'Bad request' });
-});
+app.use(
+    (
+        err: HttpError,
+        _req: express.Request,
+        res: express.Response,
+        _next: express.NextFunction,
+    ) => {
+        logger.error({ err }, 'Unhandled error');
+        const status = err.status ?? err.statusCode ?? 400;
+        return res
+            .status(status)
+            .json({ message: err.message || 'Bad request' });
+    },
+);
 
 async function main(): Promise<void> {
-  validateHardenedSandboxStartup();
-  await initializeSandboxWorkspaceIsolation();
-  await startWarmupCommand();
+    validateHardenedSandboxStartup();
+    await initializeSandboxWorkspaceIsolation();
+    await startWarmupCommand();
 
-  const [address, port] = config.bind_address.split(':');
-  const stopWorkspaceReaper = startWorkspaceReaper();
-  const server = app.listen(Number(port), address, () => {
-    logger.info({ address: config.bind_address }, 'Sandbox API started');
-  });
-  let shuttingDown = false;
-  const closeHttpServer = (): Promise<void> => new Promise((resolve, reject) => {
-    server.close((error) => {
-      if (error) reject(error);
-      else resolve();
+    const [address, port] = config.bind_address.split(':');
+    const stopWorkspaceReaper = startWorkspaceReaper();
+    const server = app.listen(Number(port), address, () => {
+        logger.info({ address: config.bind_address }, 'Sandbox API started');
     });
-    server.closeIdleConnections?.();
-  });
+    let shuttingDown = false;
+    const closeHttpServer = (): Promise<void> =>
+        new Promise((resolve, reject) => {
+            server.close(error => {
+                if (error) reject(error);
+                else resolve();
+            });
+            server.closeIdleConnections?.();
+        });
 
-  const closeHttpServerWithTimeout = async (
-    timeoutMillis = positiveInt(process.env.CODEAPI_SHUTDOWN_HTTP_TIMEOUT_MS, 3000),
-  ): Promise<void> => {
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const closePromise = closeHttpServer().catch((err) => {
-      logger.warn({ err }, 'Sandbox HTTP server close failed');
-    });
-    const timeoutPromise = new Promise<void>((resolve) => {
-      timeout = setTimeout(() => {
-        logger.warn({ timeoutMillis }, 'Timed out waiting for sandbox HTTP server to close');
-        resolve();
-      }, timeoutMillis);
-      (timeout as { unref?: () => void }).unref?.();
-    });
+    const closeHttpServerWithTimeout = async (
+        timeoutMillis = positiveInt(
+            process.env.CODEAPI_SHUTDOWN_HTTP_TIMEOUT_MS,
+            3000,
+        ),
+    ): Promise<void> => {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const closePromise = closeHttpServer().catch(err => {
+            logger.warn({ err }, 'Sandbox HTTP server close failed');
+        });
+        const timeoutPromise = new Promise<void>(resolve => {
+            timeout = setTimeout(() => {
+                logger.warn(
+                    { timeoutMillis },
+                    'Timed out waiting for sandbox HTTP server to close',
+                );
+                resolve();
+            }, timeoutMillis);
+            (timeout as { unref?: () => void }).unref?.();
+        });
 
-    try {
-      await Promise.race([closePromise, timeoutPromise]);
-    } finally {
-      if (timeout) clearTimeout(timeout);
-    }
-  };
+        try {
+            await Promise.race([closePromise, timeoutPromise]);
+        } finally {
+            if (timeout) clearTimeout(timeout);
+        }
+    };
 
-  const shutdown = async (): Promise<void> => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    stopWorkspaceReaper();
-    await closeHttpServerWithTimeout();
-    await stopToolCallSocketProxy().catch((err) => {
-      logger.warn({ err }, 'Tool-call socket proxy shutdown failed');
-    });
-    try {
-      await shutdownTelemetry();
-    } catch (err) {
-      logger.warn({ err }, 'OpenTelemetry shutdown failed');
-    }
-    process.exit(0);
-  };
+    const shutdown = async (): Promise<void> => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        stopWorkspaceReaper();
+        await closeHttpServerWithTimeout();
+        await stopToolCallSocketProxy().catch(err => {
+            logger.warn({ err }, 'Tool-call socket proxy shutdown failed');
+        });
+        try {
+            await shutdownTelemetry();
+        } catch (err) {
+            logger.warn({ err }, 'OpenTelemetry shutdown failed');
+        }
+        process.exit(0);
+    };
 
-  process.on('SIGTERM', () => void shutdown());
-  process.on('SIGINT', () => void shutdown());
+    process.on('SIGTERM', () => void shutdown());
+    process.on('SIGINT', () => void shutdown());
 }
 
-main().catch((err) => {
-  logger.error({ err }, 'Sandbox API startup failed');
-  process.exit(1);
+main().catch(err => {
+    logger.error({ err }, 'Sandbox API startup failed');
+    process.exit(1);
 });

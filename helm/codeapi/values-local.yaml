@@ -12,115 +12,115 @@
 # own keypair — see README.md "Execution manifest signing keys".
 # =============================================================================
 executionManifest:
-  privateKey: "MC4CAQAwBQYDK2VwBCIEIBoxzSJjQ5jTVyuohHtlD+uDGqv/tZ6hQS2CmxuOg2Wn"
-  publicKey: "MCowBQYDK2VwAyEAeY3PRoTS3adfU6E3gQUB5hSZdrdMSw6OrKkH4UhYh0U="
+    privateKey: 'MC4CAQAwBQYDK2VwBCIEIBoxzSJjQ5jTVyuohHtlD+uDGqv/tZ6hQS2CmxuOg2Wn'
+    publicKey: 'MCowBQYDK2VwAyEAeY3PRoTS3adfU6E3gQUB5hSZdrdMSw6OrKkH4UhYh0U='
 
 # Use local images (already loaded into cluster)
 api:
-  replicaCount: 1  # Single API pod for local dev
-  image:
-    repository: codeapi-api
-    tag: latest
-    pullPolicy: Never  # Use local image, don't try to pull
-  # Enable local mode (bypasses authentication)
-  extraEnv:
-    - name: LOCAL_MODE
-      value: "true"
+    replicaCount: 1 # Single API pod for local dev
+    image:
+        repository: codeapi-api
+        tag: latest
+        pullPolicy: Never # Use local image, don't try to pull
+    # Enable local mode (bypasses authentication)
+    extraEnv:
+        - name: LOCAL_MODE
+          value: 'true'
 
 workerSandbox:
-  replicaCount: 3
-  workerImage:
-    repository: codeapi-worker
-    tag: latest
-    pullPolicy: Never
-  sandboxImage:
-    repository: codeapi-sandbox-runner
-    tag: latest
-    pullPolicy: Never
-  extraEnv:
-    - name: LOCAL_MODE
-      value: "true"
-  
-  # MicroVM launcher config (only used when kvmEnabled: true)
-  launcher:
-    vcpus: 2
-    ramMib: 2048
-    logLevel: 3
+    replicaCount: 3
+    workerImage:
+        repository: codeapi-worker
+        tag: latest
+        pullPolicy: Never
+    sandboxImage:
+        repository: codeapi-sandbox-runner
+        tag: latest
+        pullPolicy: Never
+    extraEnv:
+        - name: LOCAL_MODE
+          value: 'true'
 
-  # Set to true only when the node has /dev/kvm available.
-  # false: sandbox runs via chroot + NsJail directly (no microVM).
-  # Minikube Docker driver cannot pass through KVM (nested virt not supported).
-  kvmEnabled: false
+    # MicroVM launcher config (only used when kvmEnabled: true)
+    launcher:
+        vcpus: 2
+        ramMib: 2048
+        logLevel: 3
 
-  # KVM device group ID (only relevant when kvmEnabled: true)
-  # 103 on minikube Docker driver host, 108 on Ubuntu, 36 on some distros
-  kvmGid: 103
+    # Set to true only when the node has /dev/kvm available.
+    # false: sandbox runs via chroot + NsJail directly (no microVM).
+    # Minikube Docker driver cannot pass through KVM (nested virt not supported).
+    kvmEnabled: false
 
-  # No privileged mode — direct mode uses SYS_ADMIN/SYS_CHROOT capabilities instead.
-  # KVM mode needs no special capabilities beyond device access via supplementalGroups.
+    # KVM device group ID (only relevant when kvmEnabled: true)
+    # 103 on minikube Docker driver host, 108 on Ubuntu, 36 on some distros
+    kvmGid: 103
 
-  # Resources: requests only, NO limits (let workers use all available resources)
-  resources:
-    requests:
-      cpu: 500m
-      memory: 1Gi
-  
-  # Worker container (BullMQ job processor)  
-  workerResources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-  
-  # Use PVC for packages (fast local storage, no 9p overhead)
-  # Populate manually: see cheat sheet pvc-populator section
-  packages:
-    # The baked block-root image requires KVM; local direct NsJail mode keeps
-    # the legacy PVC package path.
-    source: pvc
-    hostPath: ""  # Don't use hostPath (9p is slow)
-    persistence:
-      enabled: true
-      size: 10Gi
-      storageClass: "standard"  # minikube's default fast storage
-    initJob:
-      enabled: true
-      image:
-        repository: codeapi-package-init
+    # No privileged mode — direct mode uses SYS_ADMIN/SYS_CHROOT capabilities instead.
+    # KVM mode needs no special capabilities beyond device access via supplementalGroups.
+
+    # Resources: requests only, NO limits (let workers use all available resources)
+    resources:
+        requests:
+            cpu: 500m
+            memory: 1Gi
+
+    # Worker container (BullMQ job processor)
+    workerResources:
+        requests:
+            cpu: 100m
+            memory: 256Mi
+
+    # Use PVC for packages (fast local storage, no 9p overhead)
+    # Populate manually: see cheat sheet pvc-populator section
+    packages:
+        # The baked block-root image requires KVM; local direct NsJail mode keeps
+        # the legacy PVC package path.
+        source: pvc
+        hostPath: '' # Don't use hostPath (9p is slow)
+        persistence:
+            enabled: true
+            size: 10Gi
+            storageClass: 'standard' # minikube's default fast storage
+        initJob:
+            enabled: true
+            image:
+                repository: codeapi-package-init
+                tag: latest
+                pullPolicy: Never
+
+fileServer:
+    image:
+        repository: codeapi-file-server
         tag: latest
         pullPolicy: Never
 
-fileServer:
-  image:
-    repository: codeapi-file-server
-    tag: latest
-    pullPolicy: Never
-
 toolCallServer:
-  image:
-    repository: codeapi-tool-call-server
-    tag: latest
-    pullPolicy: Never
+    image:
+        repository: codeapi-tool-call-server
+        tag: latest
+        pullPolicy: Never
 
 egressGateway:
-  image:
-    repository: codeapi-egress-gateway
-    tag: latest
-    pullPolicy: Never
+    image:
+        repository: codeapi-egress-gateway
+        tag: latest
+        pullPolicy: Never
 
 # Simplified Redis for local dev
 redis:
-  enabled: true
-  architecture: standalone
-  auth:
-    password: "localdev"
-  master:
-    persistence:
-      enabled: false  # No persistence for local dev
+    enabled: true
+    architecture: standalone
+    auth:
+        password: 'localdev'
+    master:
+        persistence:
+            enabled: false # No persistence for local dev
 
 # Simple MinIO for local dev (bypasses Bitnami chart image issues)
 minio:
-  enabled: false  # Disable Bitnami subchart
-  useSimple: true  # Use our simple minio-simple.yaml instead
-  auth:
-    rootUser: minioadmin
-    rootPassword: "localdev"
+    enabled: false # Disable Bitnami subchart
+    useSimple: true # Use our simple minio-simple.yaml instead
+    auth:
+        rootUser: minioadmin
+        rootPassword: 'localdev'

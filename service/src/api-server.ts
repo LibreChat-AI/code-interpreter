@@ -14,7 +14,10 @@
 import express, { json, Router } from 'express';
 import { startApiServer, gracefulShutdown } from './lifecycle';
 import { apiKeyAuth } from './middleware/auth';
-import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-error-logger';
+import {
+    requestErrorLogger,
+    requestNotFoundLogger,
+} from './middleware/request-error-logger';
 import { localAuth } from './auth/local';
 import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
@@ -40,13 +43,13 @@ app.use(json({ limit: env.HTTP_JSON_LIMIT }));
 app.get('/metrics', metricsHandler);
 
 app.get('/v1/health', async (_, res) => {
-  try {
-    await connection.ping();
-    res.sendStatus(200);
-  } catch (error) {
-    logger.error('Health check failed:', error);
-    res.sendStatus(503);
-  }
+    try {
+        await connection.ping();
+        res.sendStatus(200);
+    } catch (error) {
+        logger.error('Health check failed:', error);
+        res.sendStatus(503);
+    }
 });
 
 v1.use(isLocalMode ? localAuth : apiKeyAuth);
@@ -66,11 +69,11 @@ process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGUSR2', gracefulShutdown);
 
-process.on('uncaughtException', async (error) => {
-  logger.error('Uncaught Exception', error);
-  await gracefulShutdown();
+process.on('uncaughtException', async error => {
+    logger.error('Uncaught Exception', error);
+    await gracefulShutdown();
 });
 
-process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled Rejection', reason);
+process.on('unhandledRejection', reason => {
+    logger.error('Unhandled Rejection', reason);
 });

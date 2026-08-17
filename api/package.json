@@ -1,34 +1,31 @@
 {
-  "name": "sandbox-api",
-  "version": "2.0.0",
-  "description": "NsJail-based sandbox API for code execution",
-  "main": "src/index.ts",
-  "scripts": {
-    "dev": "bun run --watch src/index.ts",
-    "build": "bun build ./src/index.ts --minify --outdir .build --target bun --external '@opentelemetry/*' && bun build ./src/tool-call-socket-proxy.ts --target=node --format=cjs --outfile=.build/tool-call-socket-proxy.cjs",
-    "start": "bun run .build/index.js",
-    "test": "bun test"
-  },
-  "dependencies": {
-    "@opentelemetry/api": "1.9.1",
-    "@opentelemetry/core": "2.8.0",
-    "@opentelemetry/exporter-trace-otlp-proto": "0.219.0",
-    "@opentelemetry/resources": "2.8.0",
-    "@opentelemetry/sdk-trace-base": "2.8.0",
-    "express": "^4.22.2",
-    "nanoid": "^3.3.7",
-    "pino": "^10.3.0",
-    "prom-client": "^15.1.3",
-    "semver": "^7.8.0"
-  },
-  "devDependencies": {
-    "@types/bun": "^1.3.14",
-    "@types/express": "^5.0.0",
-    "@types/semver": "^7.5.8",
-    "typescript": "^5.7.3"
-  },
-  "overrides": {
-    "path-to-regexp": "0.1.13"
-  },
-  "license": "Apache-2.0"
+    "name": "sandbox-api",
+    "version": "2.0.0",
+    "description": "NsJail-based sandbox API for code execution",
+    "main": "src/index.ts",
+    "scripts": {
+        "dev": "bun run --watch src/index.ts",
+        "build": "bun build ./src/index.ts --minify --outdir .build --target bun --external '@opentelemetry/*' && bun build ./src/tool-call-socket-proxy.ts --target=node --format=cjs --outfile=.build/tool-call-socket-proxy.cjs",
+        "start": "bun run .build/index.js",
+        "test": "bun test"
+    },
+    "dependencies": {
+        "@opentelemetry/api": "1.9.1",
+        "@opentelemetry/core": "2.10.0",
+        "@opentelemetry/exporter-trace-otlp-proto": "0.221.0",
+        "@opentelemetry/resources": "2.10.0",
+        "@opentelemetry/sdk-trace-base": "2.10.0",
+        "express": "^5.2.1",
+        "nanoid": "^6.0.1",
+        "pino": "^10.3.0",
+        "prom-client": "^15.1.3",
+        "semver": "^7.8.0"
+    },
+    "devDependencies": {
+        "@types/bun": "^1.3.14",
+        "@types/express": "^5.0.6",
+        "@types/semver": "^7.8.0",
+        "typescript": "^5.9.3"
+    },
+    "license": "Apache-2.0"
 }

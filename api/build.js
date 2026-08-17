@@ -20,25 +20,25 @@ function obfuscateFile(filePath) {
         simplify: true,
         stringArrayShuffle: true,
         splitStrings: true,
-        stringArrayThreshold: 0.75
+        stringArrayThreshold: 0.75,
     });
 
     const relativePath = path.relative(sourceDir, filePath);
     const outputPath = path.join(outputDir, relativePath);
-    
+
     // Create directory structure if needed
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    
+
     fs.writeFileSync(outputPath, obfuscatedCode.getObfuscatedCode());
 }
 
 function processDirectory(directory) {
     const files = fs.readdirSync(directory);
-    
+
     files.forEach(file => {
         const filePath = path.join(directory, file);
         const stat = fs.statSync(filePath);
-        
+
         if (stat.isDirectory()) {
             processDirectory(filePath);
         } else if (file.endsWith('.js')) {

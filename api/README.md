@@ -14,15 +14,15 @@ NsJail-based sandbox for secure code execution. Runs untrusted user code inside 
 
 Each code execution runs in a fresh NsJail sandbox with the following isolation:
 
-| Layer | Mechanism | Effect |
-|-------|-----------|--------|
-| **Namespaces** | PID, mount, network, user, IPC, UTS, cgroup | Complete process and filesystem isolation |
-| **Seccomp-bpf** | Kafel policy in `nsjail.ts` | Blocks dangerous syscalls (`ptrace`, `mount`, `bpf`, etc.), kernel-control socket families (`AF_KEY`, `AF_NETLINK`, `AF_RXRPC`), nested namespace creation, and returns `EPERM`/`ENOSYS` for runtime probes like `io_uring` and `clone3` |
-| **cgroups v2** | Memory, swap, PID limits | Prevents resource exhaustion |
-| **rlimits** | AS, fsize, nofile, nproc, cpu | Per-process resource caps |
-| **User mapping** | UID/GID 65534 (`nobody`) | No privilege escalation |
-| **Filesystem** | Read-only `/usr`, tmpfs `/tmp`, writable `/mnt/data` only | Minimal writable surface |
-| **Network** | `clone_newnet` (empty network namespace) | No outbound connectivity by default |
+| Layer            | Mechanism                                                 | Effect                                                                                                                                                                                                                                   |
+| ---------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Namespaces**   | PID, mount, network, user, IPC, UTS, cgroup               | Complete process and filesystem isolation                                                                                                                                                                                                |
+| **Seccomp-bpf**  | Kafel policy in `nsjail.ts`                               | Blocks dangerous syscalls (`ptrace`, `mount`, `bpf`, etc.), kernel-control socket families (`AF_KEY`, `AF_NETLINK`, `AF_RXRPC`), nested namespace creation, and returns `EPERM`/`ENOSYS` for runtime probes like `io_uring` and `clone3` |
+| **cgroups v2**   | Memory, swap, PID limits                                  | Prevents resource exhaustion                                                                                                                                                                                                             |
+| **rlimits**      | AS, fsize, nofile, nproc, cpu                             | Per-process resource caps                                                                                                                                                                                                                |
+| **User mapping** | UID/GID 65534 (`nobody`)                                  | No privilege escalation                                                                                                                                                                                                                  |
+| **Filesystem**   | Read-only `/usr`, tmpfs `/tmp`, writable `/mnt/data` only | Minimal writable surface                                                                                                                                                                                                                 |
+| **Network**      | `clone_newnet` (empty network namespace)                  | No outbound connectivity by default                                                                                                                                                                                                      |
 
 ## Configuration
 
@@ -34,30 +34,30 @@ The protobuf config at `config/sandbox.cfg` defines the static sandbox policy: n
 
 All prefixed with `SANDBOX_` unless noted:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SANDBOX_LOG_LEVEL` | `INFO` | Log verbosity |
-| `SANDBOX_PACKAGES_DIRECTORY` | `/pkgs` | Directory containing language packages |
-| `SANDBOX_DISABLE_NETWORKING` | `true` | Isolate sandbox from the network |
-| `SANDBOX_ALLOWED_LOCAL_NETWORK_PORT` | `0` | Allow sandbox to reach this host port (for tool calling) |
-| `SANDBOX_OUTPUT_MAX_SIZE` | `1024` | Per-stream output cap. stderr truncates at this size (the job keeps running); stdout overflow kills the job (`status: OL`), since stdout is the result. Every shipped compose/helm config sets `65536` — the `1024` fallback only applies when running the runner bare. |
-| `SANDBOX_MAX_PROCESS_COUNT` | `64` | Max PIDs inside the sandbox |
-| `SANDBOX_MAX_OPEN_FILES` | `2048` | rlimit nofile |
-| `SANDBOX_MAX_FILE_SIZE` | `10000000` | rlimit fsize (bytes) |
-| `SANDBOX_COMPILE_TIMEOUT` | `10000` | Compile phase timeout (ms) |
-| `SANDBOX_RUN_TIMEOUT` | `30000` | Run phase timeout (ms) |
-| `SANDBOX_COMPILE_CPU_TIME` | `10000` | Compile CPU time limit (ms) |
-| `SANDBOX_RUN_CPU_TIME` | `30000` | Run CPU time limit (ms) |
-| `SANDBOX_COMPILE_MEMORY_LIMIT` | `-1` | Compile memory cgroup limit (bytes, -1 = no limit) |
-| `SANDBOX_RUN_MEMORY_LIMIT` | `-1` | Run memory cgroup limit (bytes, -1 = no limit) |
-| `SANDBOX_MAX_CONCURRENT_JOBS` | `8` | Max parallel executions per sandbox runner |
-| `SANDBOX_RLIMIT_AS` | `4096` | Address space rlimit (MB) |
-| `SANDBOX_RLIMIT_FSIZE` | `100` | File size rlimit (MB) |
-| `SANDBOX_LIMIT_OVERRIDES` | `{}` | JSON object for per-runtime limit overrides |
-| `NSJAIL_PATH` | `/usr/sbin/nsjail` | Path to the NsJail binary |
-| `NSJAIL_CONFIG` | `/sandbox_api/config/sandbox.cfg` | Path to the NsJail protobuf config |
-| `FILE_SERVER_URL` | _(empty)_ | File server base URL for downloading/uploading files |
-| `PORT` | `2000` | HTTP listen port |
+| Variable                             | Default                           | Description                                                                                                                                                                                                                                                             |
+| ------------------------------------ | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SANDBOX_LOG_LEVEL`                  | `INFO`                            | Log verbosity                                                                                                                                                                                                                                                           |
+| `SANDBOX_PACKAGES_DIRECTORY`         | `/pkgs`                           | Directory containing language packages                                                                                                                                                                                                                                  |
+| `SANDBOX_DISABLE_NETWORKING`         | `true`                            | Isolate sandbox from the network                                                                                                                                                                                                                                        |
+| `SANDBOX_ALLOWED_LOCAL_NETWORK_PORT` | `0`                               | Allow sandbox to reach this host port (for tool calling)                                                                                                                                                                                                                |
+| `SANDBOX_OUTPUT_MAX_SIZE`            | `1024`                            | Per-stream output cap. stderr truncates at this size (the job keeps running); stdout overflow kills the job (`status: OL`), since stdout is the result. Every shipped compose/helm config sets `65536` — the `1024` fallback only applies when running the runner bare. |
+| `SANDBOX_MAX_PROCESS_COUNT`          | `64`                              | Max PIDs inside the sandbox                                                                                                                                                                                                                                             |
+| `SANDBOX_MAX_OPEN_FILES`             | `2048`                            | rlimit nofile                                                                                                                                                                                                                                                           |
+| `SANDBOX_MAX_FILE_SIZE`              | `10000000`                        | rlimit fsize (bytes)                                                                                                                                                                                                                                                    |
+| `SANDBOX_COMPILE_TIMEOUT`            | `10000`                           | Compile phase timeout (ms)                                                                                                                                                                                                                                              |
+| `SANDBOX_RUN_TIMEOUT`                | `30000`                           | Run phase timeout (ms)                                                                                                                                                                                                                                                  |
+| `SANDBOX_COMPILE_CPU_TIME`           | `10000`                           | Compile CPU time limit (ms)                                                                                                                                                                                                                                             |
+| `SANDBOX_RUN_CPU_TIME`               | `30000`                           | Run CPU time limit (ms)                                                                                                                                                                                                                                                 |
+| `SANDBOX_COMPILE_MEMORY_LIMIT`       | `-1`                              | Compile memory cgroup limit (bytes, -1 = no limit)                                                                                                                                                                                                                      |
+| `SANDBOX_RUN_MEMORY_LIMIT`           | `-1`                              | Run memory cgroup limit (bytes, -1 = no limit)                                                                                                                                                                                                                          |
+| `SANDBOX_MAX_CONCURRENT_JOBS`        | `8`                               | Max parallel executions per sandbox runner                                                                                                                                                                                                                              |
+| `SANDBOX_RLIMIT_AS`                  | `4096`                            | Address space rlimit (MB)                                                                                                                                                                                                                                               |
+| `SANDBOX_RLIMIT_FSIZE`               | `100`                             | File size rlimit (MB)                                                                                                                                                                                                                                                   |
+| `SANDBOX_LIMIT_OVERRIDES`            | `{}`                              | JSON object for per-runtime limit overrides                                                                                                                                                                                                                             |
+| `NSJAIL_PATH`                        | `/usr/sbin/nsjail`                | Path to the NsJail binary                                                                                                                                                                                                                                               |
+| `NSJAIL_CONFIG`                      | `/sandbox_api/config/sandbox.cfg` | Path to the NsJail protobuf config                                                                                                                                                                                                                                      |
+| `FILE_SERVER_URL`                    | _(empty)_                         | File server base URL for downloading/uploading files                                                                                                                                                                                                                    |
+| `PORT`                               | `2000`                            | HTTP listen port                                                                                                                                                                                                                                                        |
 
 ## Supported Runtimes
 

@@ -1,12 +1,9 @@
 import type { LCTool } from './preamble';
-import {
-  buildScopedSentinel,
-  PTC_HISTORY_SANDBOX_PATH,
-} from './ptc-constants';
+import { buildScopedSentinel, PTC_HISTORY_SANDBOX_PATH } from './ptc-constants';
 
 export interface BashReplayPreambleConfig {
-  executionId: string;
-  tools: LCTool[];
+    executionId: string;
+    tools: LCTool[];
 }
 
 /** Detect tools whose names normalize to the same bash function
@@ -14,74 +11,114 @@ export interface BashReplayPreambleConfig {
  * Used by the router to surface a 400 before the job is enqueued
  * rather than letting the preamble generator throw mid-run. */
 export function findBashToolNameCollision(
-  tools: readonly LCTool[],
+    tools: readonly LCTool[],
 ): { firstName: string; secondName: string; normalized: string } | null {
-  const seen = new Map<string, string>();
-  for (const tool of tools) {
-    const normalized = normalizeBashFunctionName(tool.name);
-    const prior = seen.get(normalized);
-    if (prior !== undefined && prior !== tool.name) {
-      return { firstName: prior, secondName: tool.name, normalized };
+    const seen = new Map<string, string>();
+    for (const tool of tools) {
+        const normalized = normalizeBashFunctionName(tool.name);
+        const prior = seen.get(normalized);
+        if (prior !== undefined && prior !== tool.name) {
+            return { firstName: prior, secondName: tool.name, normalized };
+        }
+        seen.set(normalized, tool.name);
     }
-    seen.set(normalized, tool.name);
-  }
-  return null;
+    return null;
 }
 
 export class BashToolNameCollisionError extends Error {
-  constructor(
-    public readonly firstName: string,
-    public readonly secondName: string,
-    public readonly normalized: string,
-  ) {
-    super(
-      `Bash tool names "${firstName}" and "${secondName}" both normalize to the same function identifier "${normalized}"; rename one to avoid collision`,
-    );
-    this.name = 'BashToolNameCollisionError';
-  }
+    constructor(
+        public readonly firstName: string,
+        public readonly secondName: string,
+        public readonly normalized: string,
+    ) {
+        super(
+            `Bash tool names "${firstName}" and "${secondName}" both normalize to the same function identifier "${normalized}"; rename one to avoid collision`,
+        );
+        this.name = 'BashToolNameCollisionError';
+    }
 }
 
 const BASH_RESERVED = new Set([
-  'if', 'then', 'else', 'elif', 'fi', 'case', 'esac', 'for', 'select',
-  'while', 'until', 'do', 'done', 'in', 'function', 'time', 'coproc',
-  'return', 'exit', 'break', 'continue', 'shift', 'export', 'readonly',
-  'local', 'declare', 'typeset', 'unset', 'alias', 'unalias', 'source',
-  'echo', 'printf', 'read', 'cd', 'pwd', 'kill', 'trap', 'wait', 'eval',
-  'exec', 'jobs', 'bg', 'fg', 'set', 'let', 'test', 'true', 'false',
+    'if',
+    'then',
+    'else',
+    'elif',
+    'fi',
+    'case',
+    'esac',
+    'for',
+    'select',
+    'while',
+    'until',
+    'do',
+    'done',
+    'in',
+    'function',
+    'time',
+    'coproc',
+    'return',
+    'exit',
+    'break',
+    'continue',
+    'shift',
+    'export',
+    'readonly',
+    'local',
+    'declare',
+    'typeset',
+    'unset',
+    'alias',
+    'unalias',
+    'source',
+    'echo',
+    'printf',
+    'read',
+    'cd',
+    'pwd',
+    'kill',
+    'trap',
+    'wait',
+    'eval',
+    'exec',
+    'jobs',
+    'bg',
+    'fg',
+    'set',
+    'let',
+    'test',
+    'true',
+    'false',
 ]);
 
 function normalizeBashFunctionName(name: string): string {
-  let normalized = name.replace(/[-\s.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
-  if (/^[0-9]/.test(normalized)) normalized = '_' + normalized;
-  /** Reserve the entire `_ptc_` / `_PTC_` helper namespace so user-supplied
-   * tool names can never normalize onto an internal function or variable
-   * identifier (e.g. `_ptc_maybe_emit_pending`, `_PTC_HISTORY_PATH`). A
-   * colliding stub would otherwise overwrite the internal helper before
-   * the end-of-preamble `readonly -f` lockdown runs. Compared case-
-   * insensitively because the `_PTC_` prefix is used for variables and
-   * `_ptc_` for functions, and both live in the same identifier space. */
-  if (
-    BASH_RESERVED.has(normalized) ||
-    /^_ptc_/i.test(normalized)
-  ) {
-    normalized = normalized + '_tool';
-  }
-  if (normalized === '') normalized = 'tool';
-  return normalized;
+    let normalized = name.replace(/[-\s.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
+    if (/^[0-9]/.test(normalized)) normalized = '_' + normalized;
+    /** Reserve the entire `_ptc_` / `_PTC_` helper namespace so user-supplied
+     * tool names can never normalize onto an internal function or variable
+     * identifier (e.g. `_ptc_maybe_emit_pending`, `_PTC_HISTORY_PATH`). A
+     * colliding stub would otherwise overwrite the internal helper before
+     * the end-of-preamble `readonly -f` lockdown runs. Compared case-
+     * insensitively because the `_PTC_` prefix is used for variables and
+     * `_ptc_` for functions, and both live in the same identifier space. */
+    if (BASH_RESERVED.has(normalized) || /^_ptc_/i.test(normalized)) {
+        normalized = normalized + '_tool';
+    }
+    if (normalized === '') normalized = 'tool';
+    return normalized;
 }
 
 /** Escape a string so it is safe to embed inside a bash double-quoted literal. */
 function escapeForBashDoubleQuote(s: string): string {
-  return s
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\$/g, '\\$')
-    .replace(/`/g, '\\`');
+    return s
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\$/g, '\\$')
+        .replace(/`/g, '\\`');
 }
 
 /** Escape a string so it is safe inside a bash extended regular expression. */
 function escapeForBashEre(s: string): string {
-  return s.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+    return s.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
 }
 
 /**
@@ -95,11 +132,14 @@ function escapeForBashEre(s: string): string {
  * Users capture results via command substitution; input is passed as a single
  * JSON object string argument (validated by jq).
  */
-export function generateBashReplayPreamble(config: BashReplayPreambleConfig): string {
-  const { executionId, tools } = config;
-  const { start: scopedStart, end: scopedEnd } = buildScopedSentinel(executionId);
+export function generateBashReplayPreamble(
+    config: BashReplayPreambleConfig,
+): string {
+    const { executionId, tools } = config;
+    const { start: scopedStart, end: scopedEnd } =
+        buildScopedSentinel(executionId);
 
-  let preamble = `#!/bin/bash
+    let preamble = `#!/bin/bash
 # ============================================================================
 # PROGRAMMATIC TOOL CALLING INFRASTRUCTURE (bash, replay mode)
 # Auto-generated - do not modify
@@ -567,26 +607,26 @@ _ptc_call_tool() {
 
 `;
 
-  /** Defense-in-depth: the router rejects tool-name collisions up front
-   * via `findBashToolNameCollision`, but throw here too so any future
-   * caller that bypasses the router still fails loudly rather than
-   * silently emitting stubs where one tool's function overwrites
-   * another's. */
-  const collision = findBashToolNameCollision(tools);
-  if (collision) {
-    throw new BashToolNameCollisionError(
-      collision.firstName,
-      collision.secondName,
-      collision.normalized,
-    );
-  }
-  for (const tool of tools) {
-    preamble += generateBashToolStub(tool) + '\n';
-  }
+    /** Defense-in-depth: the router rejects tool-name collisions up front
+     * via `findBashToolNameCollision`, but throw here too so any future
+     * caller that bypasses the router still fails loudly rather than
+     * silently emitting stubs where one tool's function overwrites
+     * another's. */
+    const collision = findBashToolNameCollision(tools);
+    if (collision) {
+        throw new BashToolNameCollisionError(
+            collision.firstName,
+            collision.secondName,
+            collision.normalized,
+        );
+    }
+    for (const tool of tools) {
+        preamble += generateBashToolStub(tool) + '\n';
+    }
 
-  preamble += generateBashPendingDeferHelper(tools);
+    preamble += generateBashPendingDeferHelper(tools);
 
-  preamble += `# ============================================================================
+    preamble += `# ============================================================================
 # LOCK INTERNAL FUNCTIONS
 # ============================================================================
 # Prevent user code from redefining or unsetting the PTC infrastructure.
@@ -617,7 +657,7 @@ readonly -f trap _ptc_maybe_emit_pending _ptc_exit_handler _ptc_cleanup_tempfile
 
 `;
 
-  return preamble;
+    return preamble;
 }
 
 /** Emitted after user code to close the subshell opened by
@@ -626,7 +666,7 @@ readonly -f trap _ptc_maybe_emit_pending _ptc_exit_handler _ptc_cleanup_tempfile
  * in so the per-tool stubs never run in the parent but still inherit
  * into the subshell via function inheritance. */
 export function generateBashReplayPostamble(): string {
-  return `
+    return `
 # ============================================================================
 # USER CODE ENDS
 # ============================================================================
@@ -654,11 +694,15 @@ exit $_ptc_user_exit_code
 }
 
 function generateBashToolStub(tool: LCTool): string {
-  const fnName = normalizeBashFunctionName(tool.name);
-  const desc = (tool.description ?? '').split('\n').map(l => `# ${l}`).join('\n');
-  const nameComment = fnName !== tool.name ? `# Original tool name: ${tool.name}\n` : '';
-  const escapedToolName = escapeForBashDoubleQuote(tool.name);
-  return `${nameComment}${desc ? desc + '\n' : ''}${fnName}() {
+    const fnName = normalizeBashFunctionName(tool.name);
+    const desc = (tool.description ?? '')
+        .split('\n')
+        .map(l => `# ${l}`)
+        .join('\n');
+    const nameComment =
+        fnName !== tool.name ? `# Original tool name: ${tool.name}\n` : '';
+    const escapedToolName = escapeForBashDoubleQuote(tool.name);
+    return `${nameComment}${desc ? desc + '\n' : ''}${fnName}() {
     local _default_input='{}'
     local _input="\${1:-\$_default_input}"
     if [ "\${BASH_SUBSHELL:-0}" -gt 1 ]; then
@@ -670,17 +714,18 @@ function generateBashToolStub(tool: LCTool): string {
 }
 
 function generateBashPendingDeferHelper(tools: readonly LCTool[]): string {
-  const toolNamesPattern = tools
-    .map(tool => normalizeBashFunctionName(tool.name))
-    .map(escapeForBashEre)
-    .join('|') || 'a^';
-  const assignmentValuePattern = `([^[:space:]'"]*|'[^']*'|"([^"\\\\]|\\\\.)*")`;
-  const assignmentPrefixPattern = `([[:space:]]*[A-Za-z_][A-Za-z0-9_]*=${assignmentValuePattern}[[:space:]]+)*`;
-  const commandPrefixPattern = `[[:space:]]*${assignmentPrefixPattern}(time[[:space:]]+${assignmentPrefixPattern})?`;
-  const commandPattern = `^${commandPrefixPattern}(${toolNamesPattern})([[:space:]]|$)`;
-  const compoundCommandPattern = `(^|[;|&(){}][[:space:]]*)((then|do|else|elif)[[:space:]]+)?${commandPrefixPattern}(${toolNamesPattern})([[:space:];|&(){}]|$)`;
+    const toolNamesPattern =
+        tools
+            .map(tool => normalizeBashFunctionName(tool.name))
+            .map(escapeForBashEre)
+            .join('|') || 'a^';
+    const assignmentValuePattern = `([^[:space:]'"]*|'[^']*'|"([^"\\\\]|\\\\.)*")`;
+    const assignmentPrefixPattern = `([[:space:]]*[A-Za-z_][A-Za-z0-9_]*=${assignmentValuePattern}[[:space:]]+)*`;
+    const commandPrefixPattern = `[[:space:]]*${assignmentPrefixPattern}(time[[:space:]]+${assignmentPrefixPattern})?`;
+    const commandPattern = `^${commandPrefixPattern}(${toolNamesPattern})([[:space:]]|$)`;
+    const compoundCommandPattern = `(^|[;|&(){}][[:space:]]*)((then|do|else|elif)[[:space:]]+)?${commandPrefixPattern}(${toolNamesPattern})([[:space:];|&(){}]|$)`;
 
-  return `
+    return `
 _PTC_TOOL_COMMAND_RE="${escapeForBashDoubleQuote(commandPattern)}"
 _PTC_COMPOUND_TOOL_COMMAND_RE="${escapeForBashDoubleQuote(compoundCommandPattern)}"
 

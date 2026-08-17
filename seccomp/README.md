@@ -41,9 +41,9 @@ The following dangerous syscalls are NOT in the whitelist and will return EPERM:
 
 ```yaml
 services:
-  sandbox:
-    security_opt:
-      - seccomp=./seccomp/nsjail.json
+    sandbox:
+        security_opt:
+            - seccomp=./seccomp/nsjail.json
 ```
 
 ### Kubernetes
@@ -77,54 +77,55 @@ Create a privileged DaemonSet that copies the profile to each node:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: seccomp-profile-installer
+    name: seccomp-profile-installer
 spec:
-  selector:
-    matchLabels:
-      app: seccomp-installer
-  template:
-    metadata:
-      labels:
-        app: seccomp-installer
-    spec:
-      initContainers:
-        - name: install-profile
-          image: busybox:1.36.1
-          command:
-            - sh
-            - -c
-            - |
-              mkdir -p /host/var/lib/kubelet/seccomp/profiles
-              cp /profiles/nsjail.json /host/var/lib/kubelet/seccomp/profiles/
-          volumeMounts:
-            - name: host-seccomp
-              mountPath: /host/var/lib/kubelet/seccomp
-            - name: profiles
-              mountPath: /profiles
-          securityContext:
-            privileged: true
-      containers:
-        - name: pause
-          image: gcr.io/google_containers/pause:3.2
-          resources:
-            requests:
-              cpu: 1m
-              memory: 1Mi
-      volumes:
-        - name: host-seccomp
-          hostPath:
-            path: /var/lib/kubelet/seccomp
-            type: DirectoryOrCreate
-        - name: profiles
-          configMap:
-            name: codeapi-seccomp-profile
-      tolerations:
-        - operator: Exists
+    selector:
+        matchLabels:
+            app: seccomp-installer
+    template:
+        metadata:
+            labels:
+                app: seccomp-installer
+        spec:
+            initContainers:
+                - name: install-profile
+                  image: busybox:1.36.1
+                  command:
+                      - sh
+                      - -c
+                      - |
+                          mkdir -p /host/var/lib/kubelet/seccomp/profiles
+                          cp /profiles/nsjail.json /host/var/lib/kubelet/seccomp/profiles/
+                  volumeMounts:
+                      - name: host-seccomp
+                        mountPath: /host/var/lib/kubelet/seccomp
+                      - name: profiles
+                        mountPath: /profiles
+                  securityContext:
+                      privileged: true
+            containers:
+                - name: pause
+                  image: gcr.io/google_containers/pause:3.2
+                  resources:
+                      requests:
+                          cpu: 1m
+                          memory: 1Mi
+            volumes:
+                - name: host-seccomp
+                  hostPath:
+                      path: /var/lib/kubelet/seccomp
+                      type: DirectoryOrCreate
+                - name: profiles
+                  configMap:
+                      name: codeapi-seccomp-profile
+            tolerations:
+                - operator: Exists
 ```
 
 #### Helm Configuration
 
 When `workerSandbox.seccomp.enabled=true`, the Helm chart:
+
 1. Creates a ConfigMap with the seccomp profile
 2. Configures sandbox pods to use `Localhost` seccomp with `profiles/nsjail.json`
 
@@ -142,10 +143,10 @@ All tests should pass. If NsJail fails with "Operation not permitted", check the
 
 ## Security Impact
 
-| Metric | Without Seccomp | With Seccomp |
-|--------|-----------------|--------------|
-| Allowed syscalls | ~450 | ~300 |
-| Kernel attack surface | High | Reduced |
-| Module loading | Possible | Blocked |
-| Time manipulation | Possible | Blocked |
-| BPF loading | Possible | Blocked |
+| Metric                | Without Seccomp | With Seccomp |
+| --------------------- | --------------- | ------------ |
+| Allowed syscalls      | ~450            | ~300         |
+| Kernel attack surface | High            | Reduced      |
+| Module loading        | Possible        | Blocked      |
+| Time manipulation     | Possible        | Blocked      |
+| BPF loading           | Possible        | Blocked      |

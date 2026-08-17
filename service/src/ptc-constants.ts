@@ -43,25 +43,25 @@ export const PTC_HISTORY_SANDBOX_PATH = `/mnt/data/${PTC_HISTORY_FILENAME}`;
  *   `_ptc_data.csv`, `_ptc_counter.XXXXXX`, `notes_ptc_history.json`.
  */
 export function isReservedPtcFilename(name: string): boolean {
-  if (typeof name !== 'string' || name.length === 0) return false;
-  const unified = name.replace(/\\/g, '/');
-  const segments: string[] = [];
-  let escapes = false;
-  for (const seg of unified.split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') {
-      if (segments.length === 0) {
-        escapes = true;
-      } else {
-        segments.pop();
-      }
-      continue;
+    if (typeof name !== 'string' || name.length === 0) return false;
+    const unified = name.replace(/\\/g, '/');
+    const segments: string[] = [];
+    let escapes = false;
+    for (const seg of unified.split('/')) {
+        if (seg === '' || seg === '.') continue;
+        if (seg === '..') {
+            if (segments.length === 0) {
+                escapes = true;
+            } else {
+                segments.pop();
+            }
+            continue;
+        }
+        segments.push(seg);
     }
-    segments.push(seg);
-  }
-  if (escapes) return true;
-  const basename = segments.length > 0 ? segments[segments.length - 1] : '';
-  return basename === PTC_HISTORY_FILENAME;
+    if (escapes) return true;
+    const basename = segments.length > 0 ? segments[segments.length - 1] : '';
+    return basename === PTC_HISTORY_FILENAME;
 }
 
 /**
@@ -77,12 +77,17 @@ export const PTC_SENTINEL_END_PREFIX = '__PTC_PENDING_V1_END__';
 const EXECUTION_ID_CHARSET = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** Returns execution-scoped sentinel markers. Rejects invalid execution ids. */
-export function buildScopedSentinel(executionId: string): { start: string; end: string } {
-  if (!EXECUTION_ID_CHARSET.test(executionId)) {
-    throw new Error(`executionId "${executionId}" contains invalid characters`);
-  }
-  return {
-    start: `${PTC_SENTINEL_START_PREFIX}__${executionId}`,
-    end: `${PTC_SENTINEL_END_PREFIX}__${executionId}`,
-  };
+export function buildScopedSentinel(executionId: string): {
+    start: string;
+    end: string;
+} {
+    if (!EXECUTION_ID_CHARSET.test(executionId)) {
+        throw new Error(
+            `executionId "${executionId}" contains invalid characters`,
+        );
+    }
+    return {
+        start: `${PTC_SENTINEL_START_PREFIX}__${executionId}`,
+        end: `${PTC_SENTINEL_END_PREFIX}__${executionId}`,
+    };
 }

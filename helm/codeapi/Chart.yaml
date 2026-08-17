@@ -3,27 +3,27 @@ apiVersion: v2
 name: codeapi
 description: A Helm chart for Code Interpreter API - scalable code execution service
 type: application
-version: 0.3.0       # Chart version (bump this when you change the chart)
-appVersion: "2.0.0"  # App version (bump this when you change the app)
+version: 0.3.0 # Chart version (bump this when you change the chart)
+appVersion: '2.0.0' # App version (bump this when you change the app)
 
 # Keywords for searching
 keywords:
-  - code-execution
-  - sandbox
-  - api
+    - code-execution
+    - sandbox
+    - api
 
 # Maintainers
 maintainers:
-  - name: danny-avila
-    url: https://github.com/danny-avila
+    - name: danny-avila
+      url: https://github.com/danny-avila
 
 # Dependencies (we'll use these for Redis and MinIO)
 dependencies:
-  - name: redis
-    version: "24.1.0"
-    repository: "https://charts.bitnami.com/bitnami"
-    condition: redis.enabled
-  - name: minio
-    version: "17.0.21"
-    repository: "https://charts.bitnami.com/bitnami"
-    condition: minio.enabled
+    - name: redis
+      version: '24.1.0'
+      repository: 'https://charts.bitnami.com/bitnami'
+      condition: redis.enabled
+    - name: minio
+      version: '17.0.21'
+      repository: 'https://charts.bitnami.com/bitnami'
+      condition: minio.enabled

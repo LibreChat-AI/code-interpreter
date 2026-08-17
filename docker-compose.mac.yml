@@ -1,35 +1,35 @@
 services:
-  sandbox-runner:
-    build:
-      target: sandbox-build
-    entrypoint: ["/sandbox_api/entrypoint.sh"]
-    devices:
-      - /dev/null:/dev/kvm
-    volumes:
-      - ${SANDBOX_PACKAGES_PATH:-./data/pkgs}:/pkgs:ro
-    environment:
-      - KVM_ENABLED=false
-      - SANDBOX_USE_CGROUPV2=false
-      - SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP=false
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          bun -e "fetch('http://localhost:2000/api/v2/runtimes').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
-    security_opt:
-      - seccomp=./seccomp/nsjail.json
-    cap_add:
-      - SYS_ADMIN
-      - SYS_CHROOT
-      - SYS_PTRACE
-      - SETUID
-      - SETGID
-      - NET_ADMIN
-      - DAC_OVERRIDE
-      - DAC_READ_SEARCH
-      - CHOWN
-      - FOWNER
-      - FSETID
-      - KILL
-      - SETFCAP
-      - MKNOD
+    sandbox-runner:
+        build:
+            target: sandbox-build
+        entrypoint: ['/sandbox_api/entrypoint.sh']
+        devices:
+            - /dev/null:/dev/kvm
+        volumes:
+            - ${SANDBOX_PACKAGES_PATH:-./data/pkgs}:/pkgs:ro
+        environment:
+            - KVM_ENABLED=false
+            - SANDBOX_USE_CGROUPV2=false
+            - SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP=false
+        healthcheck:
+            test:
+                - CMD-SHELL
+                - >-
+                    bun -e "fetch('http://localhost:2000/api/v2/runtimes').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+        security_opt:
+            - seccomp=./seccomp/nsjail.json
+        cap_add:
+            - SYS_ADMIN
+            - SYS_CHROOT
+            - SYS_PTRACE
+            - SETUID
+            - SETGID
+            - NET_ADMIN
+            - DAC_OVERRIDE
+            - DAC_READ_SEARCH
+            - CHOWN
+            - FOWNER
+            - FSETID
+            - KILL
+            - SETFCAP
+            - MKNOD

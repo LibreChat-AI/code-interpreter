@@ -4,9 +4,9 @@ import { randomString } from 'https://jslib.k6.io/k6-utils/1.2.0/index.js';
 import { Rate } from 'k6/metrics';
 
 export const options = {
-  vus: 50,  // Increased number of VUs
-  duration: '1m',
-  rps: 17,  // Target 17 requests per second (1020 per minute)
+    vus: 50, // Increased number of VUs
+    duration: '1m',
+    rps: 17, // Target 17 requests per second (1020 per minute)
 };
 
 const url = 'https://api.librechat.ai/v1/exec';
@@ -14,8 +14,8 @@ const url = 'https://api.librechat.ai/v1/exec';
 const rate = new Rate('requests_per_second');
 
 const basePayload = {
-  language: 'py',
-  code: `import matplotlib.pyplot as plt
+    language: 'py',
+    code: `import matplotlib.pyplot as plt
 import numpy as np
 
 # Original signal generation
@@ -51,26 +51,28 @@ plt.savefig("./tinted_sine_wave.png")
 plt.close()
 print("Tinted original plot saved as tinted_sine_wave.png")
 
-print("\\nScript completed successfully")`
+print("\\nScript completed successfully")`,
 };
 
 export default function () {
-  const session_id = `session_${randomString(8)}`;
-  const user_id = `user_${randomString(8)}`;
+    const session_id = `session_${randomString(8)}`;
+    const user_id = `user_${randomString(8)}`;
 
-  const randomizedPayload = JSON.parse(JSON.stringify(basePayload));
-  randomizedPayload.session_id = session_id;
-  randomizedPayload.user_id = user_id;
+    const randomizedPayload = JSON.parse(JSON.stringify(basePayload));
+    randomizedPayload.session_id = session_id;
+    randomizedPayload.user_id = user_id;
 
-  const headers = {
-    'Content-Type': 'application/json',
-  };
+    const headers = {
+        'Content-Type': 'application/json',
+    };
 
-  const response = http.post(url, JSON.stringify(randomizedPayload), { headers: headers });
+    const response = http.post(url, JSON.stringify(randomizedPayload), {
+        headers: headers,
+    });
 
-  check(response, {
-    'status is 200': (r) => r.status === 200,
-  });
+    check(response, {
+        'status is 200': r => r.status === 200,
+    });
 
-  rate.add(1);
+    rate.add(1);
 }

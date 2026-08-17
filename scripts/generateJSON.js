@@ -2,18 +2,18 @@ const fs = require('fs');
 const path = require('path');
 
 function parseArgs(args) {
-  const result = { files: [], code: 'initial' };
-  for (let i = 2; i < args.length; i++) {
-    if (args[i] === '--session' || args[i] === '-s') {
-      result.session = args[++i];
-    } else if (args[i] === '--files' || args[i] === '-f') {
-      while (args[i + 1] && !args[i + 1].startsWith('-')) {
-        result.files.push(args[++i]);
-      }
-    } else if (args[i] === '--code' || args[i] === '-c') {
-      result.code = args[++i];
-    } else if (args[i] === '--help' || args[i] === '-h') {
-      console.log(`
+    const result = { files: [], code: 'initial' };
+    for (let i = 2; i < args.length; i++) {
+        if (args[i] === '--session' || args[i] === '-s') {
+            result.session = args[++i];
+        } else if (args[i] === '--files' || args[i] === '-f') {
+            while (args[i + 1] && !args[i + 1].startsWith('-')) {
+                result.files.push(args[++i]);
+            }
+        } else if (args[i] === '--code' || args[i] === '-c') {
+            result.code = args[++i];
+        } else if (args[i] === '--help' || args[i] === '-h') {
+            console.log(`
 Usage: node script.js [options]
 
 Options:
@@ -22,57 +22,64 @@ Options:
   --code, -c       Code selection (initial or followup)
   --help, -h       Show this help message
       `);
-      process.exit(0);
+            process.exit(0);
+        }
     }
-  }
-  return result;
+    return result;
 }
 
 const argv = parseArgs(process.argv);
 
 /**
- * @param {string} userCode 
- * @returns 
+ * @param {string} userCode
+ * @returns
  */
 function createRequestBody(userCode) {
-  let templateCode;
-  try {
-    templateCode = fs.readFileSync(path.join(__dirname, 'template.py'), 'utf8');
-  } catch (error) {
-    console.error('Error reading template.py:', error);
-    return;
-  }
+    let templateCode;
+    try {
+        templateCode = fs.readFileSync(
+            path.join(__dirname, 'template.py'),
+            'utf8',
+        );
+    } catch (error) {
+        console.error('Error reading template.py:', error);
+        return;
+    }
 
-  const indentedUserCode = userCode.trim().split('\n').map(line => `    ${line}`).join('\n');
+    const indentedUserCode = userCode
+        .trim()
+        .split('\n')
+        .map(line => `    ${line}`)
+        .join('\n');
 
-  const finalCode = templateCode.replace(
-    /# BEGIN USER CODE\n[\s\S]*?# END USER CODE/,
-    `# BEGIN USER CODE\n${indentedUserCode}\n    # END USER CODE`
-  );
+    const finalCode = templateCode.replace(
+        /# BEGIN USER CODE\n[\s\S]*?# END USER CODE/,
+        `# BEGIN USER CODE\n${indentedUserCode}\n    # END USER CODE`,
+    );
 
-  const requestBody = {
-    language: "python",
-    version: "3.14.4",
-    files: [
-      {
-        name: "main.py",
-        content: finalCode
-      }
-    ]
-  };
+    const requestBody = {
+        language: 'python',
+        version: '3.14.4',
+        files: [
+            {
+                name: 'main.py',
+                content: finalCode,
+            },
+        ],
+    };
 
-  if (argv.session) {
-    requestBody.session_id = argv.session;
-  }
+    if (argv.session) {
+        requestBody.session_id = argv.session;
+    }
 
-  if (argv.files.length > 0) {
-    argv.files.forEach(file => {
-      const [name, id] = file.split(':');
-      requestBody.files.push({ name, id });
-    });
-  }
+    if (argv.files.length > 0) {
+        argv.files.forEach(file => {
+            const [name, id] = file.split(':');
+            requestBody.files.push({ name, id });
+        });
+    }
 
-  return JSON.stringify(requestBody, null, 2);
+    return JSON.stringify(requestBody, null, 2);
 }
 
 const initialCode = `

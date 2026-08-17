@@ -1,13 +1,16 @@
 import { CODE_ENV_KINDS } from './types';
 import type { AuthenticatedRequest, CodeEnvKind } from './types';
-import { getExecutionIdentity, resolveStorageNamespace } from './execution-identity';
+import {
+    getExecutionIdentity,
+    resolveStorageNamespace,
+} from './execution-identity';
 
 /* Read directly from `process.env` (not the snapshotted `env` object)
  * so test suites can flip the flag between cases without module-cache
  * surgery. The cost of one env access per sessionKey resolution is
  * trivial relative to the request lifecycle. */
 function strictTenantIsolation(): boolean {
-  return process.env.CODEAPI_TENANT_ISOLATION_STRICT === 'true';
+    return process.env.CODEAPI_TENANT_ISOLATION_STRICT === 'true';
 }
 
 const KNOWN_KINDS_RUNTIME = new Set<string>(CODE_ENV_KINDS);
@@ -20,23 +23,23 @@ const KNOWN_KINDS_RUNTIME = new Set<string>(CODE_ENV_KINDS);
  * same kind switch.
  */
 export interface SessionKeyInput {
-  kind: CodeEnvKind;
-  /** Resource identity. Sessionkey-meaningful for `'skill'` / `'agent'`;
-   *  ignored for `'user'` (auth context provides the userId). Carried on
-   *  the input for shape uniformity across kinds. */
-  id: string;
-  /** Required when `kind === 'skill'`; rejected by the validator
-   *  otherwise. */
-  version?: number;
+    kind: CodeEnvKind;
+    /** Resource identity. Sessionkey-meaningful for `'skill'` / `'agent'`;
+     *  ignored for `'user'` (auth context provides the userId). Carried on
+     *  the input for shape uniformity across kinds. */
+    id: string;
+    /** Required when `kind === 'skill'`; rejected by the validator
+     *  otherwise. */
+    version?: number;
 }
 
 export class SessionKeyResolutionError extends Error {
-  readonly status: 400 | 500;
-  constructor(status: 400 | 500, message: string) {
-    super(message);
-    this.name = 'SessionKeyResolutionError';
-    this.status = status;
-  }
+    readonly status: 400 | 500;
+    constructor(status: 400 | 500, message: string) {
+        super(message);
+        this.name = 'SessionKeyResolutionError';
+        this.status = status;
+    }
 }
 
 /**
@@ -64,43 +67,46 @@ export class SessionKeyResolutionError extends Error {
  * deploys without an auth tenancy concept keep working.
  */
 export function resolveSessionKey(
-  req: AuthenticatedRequest,
-  input: SessionKeyInput,
+    req: AuthenticatedRequest,
+    input: SessionKeyInput,
 ): string {
-  const storageNamespace = resolveSessionStorageNamespace(req);
+    const storageNamespace = resolveSessionStorageNamespace(req);
 
-  switch (input.kind) {
-    case 'skill': {
-      if (input.version == null) {
-        throw new SessionKeyResolutionError(
-          400,
-          `resolveSessionKey: kind 'skill' requires version (got id=${input.id})`,
-        );
-      }
-      return `${storageNamespace}:skill:${input.id}:v:${input.version}`;
+    switch (input.kind) {
+        case 'skill': {
+            if (input.version == null) {
+                throw new SessionKeyResolutionError(
+                    400,
+                    `resolveSessionKey: kind 'skill' requires version (got id=${input.id})`,
+                );
+            }
+            return `${storageNamespace}:skill:${input.id}:v:${input.version}`;
+        }
+        case 'agent':
+            return `${storageNamespace}:agent:${input.id}`;
+        case 'user': {
+            /* `input.id` is informational only for `kind: 'user'` — the
+             * sessionKey derives from auth context. Kept on the input for
+             * shape uniformity. */
+            const userId = getExecutionIdentity(req).canonicalUserId;
+            if (!userId) {
+                throw new SessionKeyResolutionError(
+                    400,
+                    "resolveSessionKey: kind 'user' requires authContext.userId",
+                );
+            }
+            return `${storageNamespace}:user:${userId}`;
+        }
+        default: {
+            /* Exhaustive check: TypeScript catches missing switch arms when a
+             * new kind is added to `CODE_ENV_KINDS`. */
+            const _exhaustive: never = input.kind;
+            throw new SessionKeyResolutionError(
+                400,
+                `unknown kind: ${_exhaustive as string}`,
+            );
+        }
     }
-    case 'agent':
-      return `${storageNamespace}:agent:${input.id}`;
-    case 'user': {
-      /* `input.id` is informational only for `kind: 'user'` — the
-       * sessionKey derives from auth context. Kept on the input for
-       * shape uniformity. */
-      const userId = getExecutionIdentity(req).canonicalUserId;
-      if (!userId) {
-        throw new SessionKeyResolutionError(
-          400,
-          'resolveSessionKey: kind \'user\' requires authContext.userId',
-        );
-      }
-      return `${storageNamespace}:user:${userId}`;
-    }
-    default: {
-      /* Exhaustive check: TypeScript catches missing switch arms when a
-       * new kind is added to `CODE_ENV_KINDS`. */
-      const _exhaustive: never = input.kind;
-      throw new SessionKeyResolutionError(400, `unknown kind: ${_exhaustive as string}`);
-    }
-  }
 }
 
 /**
@@ -111,16 +117,18 @@ export function resolveSessionKey(
  * output bucket; that's a deliberate behavioral change from the legacy
  * entity_id-driven derivation. See codeapi #1455 / Phase C design.
  */
-export function resolveOutputBucketSessionKey(req: AuthenticatedRequest): string {
-  const storageNamespace = resolveSessionStorageNamespace(req);
-  const userId = getExecutionIdentity(req).canonicalUserId;
-  if (!userId) {
-    throw new SessionKeyResolutionError(
-      500,
-      'resolveOutputBucketSessionKey: authContext.userId is missing',
-    );
-  }
-  return `${storageNamespace}:user:${userId}`;
+export function resolveOutputBucketSessionKey(
+    req: AuthenticatedRequest,
+): string {
+    const storageNamespace = resolveSessionStorageNamespace(req);
+    const userId = getExecutionIdentity(req).canonicalUserId;
+    if (!userId) {
+        throw new SessionKeyResolutionError(
+            500,
+            'resolveOutputBucketSessionKey: authContext.userId is missing',
+        );
+    }
+    return `${storageNamespace}:user:${userId}`;
 }
 
 /**
@@ -137,49 +145,67 @@ export function resolveOutputBucketSessionKey(req: AuthenticatedRequest): string
  * for shape uniformity.
  */
 export function parseUploadSessionKeyInput(args: {
-  kind: string | undefined;
-  id: string | undefined;
-  version: string | undefined;
-  authContextUserId: string;
+    kind: string | undefined;
+    id: string | undefined;
+    version: string | undefined;
+    authContextUserId: string;
 }): SessionKeyInput {
-  const { kind, id, version, authContextUserId } = args;
-  if (typeof kind !== 'string' || !KNOWN_KINDS_RUNTIME.has(kind)) {
-    throw new SessionKeyResolutionError(
-      400,
-      `kind must be one of: ${[...KNOWN_KINDS_RUNTIME].join(', ')}`,
-    );
-  }
-  const resolvedId = (typeof id === 'string' && id) ? id : (kind === 'user' ? authContextUserId : '');
-  if (!resolvedId) {
-    throw new SessionKeyResolutionError(400, `id is required for kind: '${kind}'`);
-  }
-  if (kind === 'skill') {
-    if (version === undefined || version === '') {
-      throw new SessionKeyResolutionError(400, "version is required for kind: 'skill'");
+    const { kind, id, version, authContextUserId } = args;
+    if (typeof kind !== 'string' || !KNOWN_KINDS_RUNTIME.has(kind)) {
+        throw new SessionKeyResolutionError(
+            400,
+            `kind must be one of: ${[...KNOWN_KINDS_RUNTIME].join(', ')}`,
+        );
     }
-    const versionNum = Number(version);
-    if (!Number.isFinite(versionNum)) {
-      throw new SessionKeyResolutionError(400, "version must be a number for kind: 'skill'");
+    const resolvedId =
+        typeof id === 'string' && id
+            ? id
+            : kind === 'user'
+              ? authContextUserId
+              : '';
+    if (!resolvedId) {
+        throw new SessionKeyResolutionError(
+            400,
+            `id is required for kind: '${kind}'`,
+        );
     }
-    return { kind: 'skill', id: resolvedId, version: versionNum };
-  }
-  if (version !== undefined && version !== '') {
-    throw new SessionKeyResolutionError(400, `version is only valid for kind: 'skill'`);
-  }
-  return { kind: kind as CodeEnvKind, id: resolvedId };
+    if (kind === 'skill') {
+        if (version === undefined || version === '') {
+            throw new SessionKeyResolutionError(
+                400,
+                "version is required for kind: 'skill'",
+            );
+        }
+        const versionNum = Number(version);
+        if (!Number.isFinite(versionNum)) {
+            throw new SessionKeyResolutionError(
+                400,
+                "version must be a number for kind: 'skill'",
+            );
+        }
+        return { kind: 'skill', id: resolvedId, version: versionNum };
+    }
+    if (version !== undefined && version !== '') {
+        throw new SessionKeyResolutionError(
+            400,
+            `version is only valid for kind: 'skill'`,
+        );
+    }
+    return { kind: kind as CodeEnvKind, id: resolvedId };
 }
 
 function resolveSessionStorageNamespace(req: AuthenticatedRequest): string {
-  const identity = getExecutionIdentity(req);
-  if (!strictTenantIsolation() || req.codeApiAuthContext?.tenantId) {
-    return identity.storageNamespace;
-  }
+    const identity = getExecutionIdentity(req);
+    if (!strictTenantIsolation() || req.codeApiAuthContext?.tenantId) {
+        return identity.storageNamespace;
+    }
 
-  return resolveStorageNamespace(req.codeApiAuthContext, {
-    requireTenant: true,
-    onMissingTenant: () => new SessionKeyResolutionError(
-      500,
-      'tenantId missing from auth context (CODEAPI_TENANT_ISOLATION_STRICT=true)',
-    ),
-  });
+    return resolveStorageNamespace(req.codeApiAuthContext, {
+        requireTenant: true,
+        onMissingTenant: () =>
+            new SessionKeyResolutionError(
+                500,
+                'tenantId missing from auth context (CODEAPI_TENANT_ISOLATION_STRICT=true)',
+            ),
+    });
 }

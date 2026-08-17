@@ -1,7 +1,10 @@
 import express, { json, Router } from 'express';
 import { startServer, gracefulShutdown } from './lifecycle';
 import { apiKeyAuth } from './middleware/auth';
-import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-error-logger';
+import {
+    requestErrorLogger,
+    requestNotFoundLogger,
+} from './middleware/request-error-logger';
 import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
 import { connection } from './queue';
@@ -17,13 +20,13 @@ const v1 = Router();
 app.use(json({ limit: env.HTTP_JSON_LIMIT })); // Large scripts/tool definitions are configurable.
 
 app.get('/v1/health', async (_, res) => {
-  try {
-    await connection.ping();
-    res.sendStatus(200);
-  } catch (error) {
-    logger.error('Health check failed:', error);
-    res.sendStatus(503);
-  }
+    try {
+        await connection.ping();
+        res.sendStatus(200);
+    } catch (error) {
+        logger.error('Health check failed:', error);
+        res.sendStatus(503);
+    }
 });
 
 v1.use(apiKeyAuth);
@@ -43,11 +46,11 @@ process.on('SIGINT', gracefulShutdown);
 process.on('SIGUSR2', gracefulShutdown); // For nodemon restarts
 
 // Improve your existing handlers
-process.on('uncaughtException', async (error) => {
-  logger.error('Uncaught Exception', error);
-  await gracefulShutdown();
+process.on('uncaughtException', async error => {
+    logger.error('Uncaught Exception', error);
+    await gracefulShutdown();
 });
 
-process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled Rejection', reason);
+process.on('unhandledRejection', reason => {
+    logger.error('Unhandled Rejection', reason);
 });
