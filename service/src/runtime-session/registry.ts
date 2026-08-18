@@ -155,7 +155,11 @@ async function runRegistryCommand<T>(
             value => {
                 if (settled) {
                     runBestEffort(
-                        onLateValue ? (): void => onLateValue(value) : undefined,
+                        onLateValue
+                            ? (): void => {
+                                  void onLateValue(value);
+                              }
+                            : undefined,
                     );
                     return;
                 }

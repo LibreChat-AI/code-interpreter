@@ -113,7 +113,7 @@ export const keyGenerator = (req: Request): string => {
     if (identity.canonicalUserId) {
         return `${keySegment(identity.storageNamespace, 'legacy')}:user:${keySegment(identity.canonicalUserId)}`;
     }
-    return `ip:${keySegment(ipKeyGenerator(req))}`;
+    return `ip:${keySegment(ipKeyGenerator(req.ip ?? ''))}`;
 };
 
 const buildRateLimiter = (

@@ -8,10 +8,73 @@ type RawJsonValue =
     | { type: 'array'; items: RawJsonValue[] }
     | { type: 'object'; entries: Map<string, RawJsonValue> };
 
+/* Format a finite JS number exactly as jq 1.6 prints it (jvp_dtoa_fmt in
+ * src/jv_dtoa.c). jq parses JSON numbers to doubles and prints the shortest
+ * round-trip decimal representation, choosing fixed vs scientific notation by
+ * the dtoa `decpt` (value = 0.digits * 10^decpt): scientific when
+ * decpt <= -4 or decpt > ndigits + 15, otherwise fixed. */
+function jqNumberFormat(num: number): string {
+    if (Object.is(num, -0)) return '-0';
+    if (num === 0) return '0';
+    if (!Number.isFinite(num)) return String(num);
+    const negative = num < 0;
+    const { digits, sciExp } = shortestDigits(Math.abs(num));
+    const sign = negative ? '-' : '';
+    const ndigits = digits.length;
+    const decpt = sciExp + 1;
+
+    if (decpt <= -4 || decpt > ndigits + 15) {
+        // Scientific notation: coefficient + 'e' + signed, zero-padded exponent.
+        const coefficient =
+            ndigits > 1 ? `${digits[0]}.${digits.slice(1)}` : digits;
+        const expSign = sciExp < 0 ? '-' : '+';
+        const expStr = expSign + String(Math.abs(sciExp)).padStart(2, '0');
+        return `${sign}${coefficient}e${expStr}`;
+    }
+    if (decpt <= 0) {
+        // Fixed: 0.000...digits
+        return `${sign}0.${'0'.repeat(-decpt)}${digits}`;
+    }
+    // Fixed: decimal point after `decpt` digits, padding with zeros.
+    if (decpt >= ndigits) {
+        return `${sign}${digits}${'0'.repeat(decpt - ndigits)}`;
+    }
+    return `${sign}${digits.slice(0, decpt)}.${digits.slice(decpt)}`;
+}
+
+/* Extract the shortest significant digits and the scientific exponent
+ * (value = digits[0].digits[1..] * 10^sciExp) from a JS number's shortest
+ * string form. */
+function shortestDigits(absNum: number): { digits: string; sciExp: number } {
+    const s = absNum.toString();
+    const eIdx = s.search(/[eE]/);
+    if (eIdx !== -1) {
+        // Scientific form: "M e E" — mantissa is already in [1, 10).
+        const mant = s.slice(0, eIdx);
+        const expPart = parseInt(s.slice(eIdx + 1), 10);
+        const dotIdx = mant.indexOf('.');
+        const intPart = dotIdx === -1 ? mant : mant.slice(0, dotIdx);
+        const fracPart = dotIdx === -1 ? '' : mant.slice(dotIdx + 1);
+        return { digits: intPart + fracPart, sciExp: expPart };
+    }
+    const dotIdx = s.indexOf('.');
+    if (dotIdx === -1) {
+        // Integer form: strip trailing zeros, exponent = len - 1.
+        return { digits: s.replace(/0+$/, ''), sciExp: s.length - 1 };
+    }
+    const intPart = s.slice(0, dotIdx);
+    const fracPart = s.slice(dotIdx + 1);
+    if (intPart === '0') {
+        // 0.xxx — first nonzero digit at index p gives sciExp = -(p + 1).
+        const p = fracPart.search(/[1-9]/);
+        return { digits: fracPart.slice(p), sciExp: -(p + 1) };
+    }
+    return { digits: intPart + fracPart, sciExp: intPart.length - 1 };
+}
+
 function canonicalJson(value: unknown): string {
     if (typeof value === 'number') {
-        if (Object.is(value, -0)) return '-0';
-        return JSON.stringify(value).replace('e', 'E');
+        return jqNumberFormat(value);
     }
     if (value === null || typeof value !== 'object')
         return JSON.stringify(value);
@@ -31,48 +94,9 @@ export function hashToolInput(input: Record<string, unknown>): string {
 }
 
 function normalizeRawJsonNumber(raw: string): string {
-    const match = raw.match(/^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/);
-    if (match == null) return raw;
-    const [, sign, intPart, fracPart = '', exponentPart] = match;
-
-    const exponent =
-        exponentPart == null ? 0 : Number.parseInt(exponentPart, 10);
-    if (!Number.isSafeInteger(exponent)) return raw.replace(/[eE]/, 'E');
-
-    const digits = intPart + fracPart;
-    const point = intPart.length + exponent;
-    const firstNonZero = digits.search(/[1-9]/);
-    if (firstNonZero === -1) {
-        const zeroExponent = exponent - fracPart.length;
-        if (zeroExponent === 0) return `${sign}0`;
-        if (zeroExponent >= -6 && zeroExponent < 0) {
-            return `${sign}0.${'0'.repeat(-zeroExponent - 1)}0`;
-        }
-        const exponentSign = zeroExponent >= 0 ? '+' : '';
-        return `${sign}0E${exponentSign}${zeroExponent}`;
-    }
-
-    const scientificExponent = point - firstNonZero - 1;
-
-    if (scientificExponent >= -6 && point <= digits.length) {
-        if (point <= 0) {
-            return `${sign}0.${'0'.repeat(-point)}${digits}`;
-        }
-        if (point < digits.length) {
-            const integer =
-                digits.slice(0, point).replace(/^0+(?=\d)/, '') || '0';
-            return `${sign}${integer}.${digits.slice(point)}`;
-        }
-        const expanded = digits.slice(0, point).replace(/^0+(?=\d)/, '');
-        return `${sign}${expanded || '0'}`;
-    }
-
-    const significantDigits = digits.slice(firstNonZero);
-    const coefficient = `${significantDigits[0]}${
-        significantDigits.length > 1 ? `.${significantDigits.slice(1)}` : ''
-    }`;
-    const exponentSign = scientificExponent >= 0 ? '+' : '';
-    return `${sign}${coefficient}E${exponentSign}${scientificExponent}`;
+    const num = Number(raw);
+    if (!Number.isFinite(num)) return raw;
+    return jqNumberFormat(num);
 }
 
 function parseRawJson(text: string): RawJsonValue {
