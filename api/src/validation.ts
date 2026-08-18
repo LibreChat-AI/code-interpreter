@@ -32,12 +32,15 @@ export function isDirkeep(name: string): boolean {
  * execute — leaving the rejected request's writes behind.
  */
 export function hasRunnableSource(
-  files: Array<{ name: string; encoding?: string }>,
+  files: Array<{ name?: string; encoding?: string }>,
   language: string,
 ): boolean {
   if (language === 'file') return true;
   return files.some(
-    (file) => !isDirkeep(file.name) && (!file.encoding || file.encoding === 'utf8'),
+    /* Request files may omit `name`; Job normalizes those to `file${i}.code`,
+     * which is runnable and cannot be the .dirkeep sentinel. */
+    (file) => (file.name === undefined || !isDirkeep(file.name))
+      && (!file.encoding || file.encoding === 'utf8'),
   );
 }
 

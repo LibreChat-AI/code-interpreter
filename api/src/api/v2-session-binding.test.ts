@@ -184,6 +184,43 @@ describe('per-request session binding', () => {
     }
   });
 
+  test('a nameless utf8 inline source uses the default filename and remains runnable', async () => {
+    config.session_workspace_enabled = false;
+    config.require_execution_manifest = false;
+
+    const originalPrime = Job.prototype.prime;
+    const originalExecute = Job.prototype.execute;
+    const originalCleanup = Job.prototype.cleanup;
+
+    let primedName: string | undefined;
+    Job.prototype.prime = async function trackDefaultName(): Promise<void> {
+      primedName = this.files[0]?.name;
+    };
+    Job.prototype.execute = async function executeWithoutSandbox() {
+      return {} as Awaited<ReturnType<Job['execute']>>;
+    };
+    Job.prototype.cleanup = async function cleanupWithoutFilesystem(): Promise<void> {};
+
+    try {
+      const response = await fetch(`${baseUrl}/api/v2/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          language: testLanguage,
+          version: testVersion,
+          files: [{ content: 'test' }],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(primedName).toBe('file0.code');
+    } finally {
+      Job.prototype.prime = originalPrime;
+      Job.prototype.execute = originalExecute;
+      Job.prototype.cleanup = originalCleanup;
+    }
+  });
+
   test('a post-prime failure still reports the workspace as dirty', async () => {
     config.session_workspace_enabled = true;
     config.require_execution_manifest = false;
