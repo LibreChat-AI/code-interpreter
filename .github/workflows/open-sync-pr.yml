@@ -26,8 +26,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          OPEN=$(gh api -X GET repos/ClickHouse/code-interpreter/pulls \
-            -f state=open -f base=main -f head=ClickHouse:sync/main \
+          OPEN=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f state=open -f base=main -f head="${GITHUB_REPOSITORY_OWNER}:sync/main" \
             -f per_page=1 --jq length)
           if [ "$OPEN" -gt 0 ]; then
             echo "Sync PR already open."

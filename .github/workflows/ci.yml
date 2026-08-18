@@ -1,4 +1,4 @@
-# Standalone CI for the public ClickHouse/code-interpreter repo, which is
+# Standalone CI for the public LibreChat-AI/code-interpreter repo, which is
 # published from services/codeapi as snapshot commits (see
 # .github/workflows/publish-codeapi.yml in the monorepo). This file is
 # inert inside the monorepo — GitHub only runs workflows from the repo
