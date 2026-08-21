@@ -327,6 +327,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          description: Hosted app start rate limit exceeded
         '503':
           description: Lifecycle or provider operation unavailable
           content:

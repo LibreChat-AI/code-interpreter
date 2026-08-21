@@ -207,6 +207,10 @@ source runtime session under its existing lock, records an exact checkpoint and
 AWS idempotency intent in the fenced Redis registry, then launches/restores the
 dedicated app-host VM on an isolated BullMQ queue. API pods enqueue lifecycle
 work and proxy preview bytes; only worker pods need Lambda MicroVM IAM.
+Start requests share the authenticated execution rate limiter. Before enabling
+this feature broadly for untrusted multi-tenant traffic, add a plan-aware cap on
+active hosted-app leases per owner; the initial feature-flagged slice relies on
+the deployment's Lambda MicroVM quota as its hard fleet ceiling.
 
 Authenticated API contract:
 

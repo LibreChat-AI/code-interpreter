@@ -10,6 +10,7 @@ import {
   RuntimeSessionHintError,
 } from '../runtime-session/id';
 import { captureTraceCarrier } from '../telemetry';
+import { executionLimiter } from '../middleware/limits';
 import {
   assertHostedAppOwned,
   HostedAppControlPlaneError,
@@ -141,7 +142,7 @@ function sendFailure(error: unknown, res: Response): Response {
   });
 }
 
-router.post('/', async (req: AuthenticatedRequest, res) => {
+router.post('/', executionLimiter, async (req: AuthenticatedRequest, res) => {
   if (unavailable(res)) return;
   try {
     const parsed = parseHostedAppStartRequest(req.body);
