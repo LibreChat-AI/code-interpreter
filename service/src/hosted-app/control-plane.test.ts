@@ -343,6 +343,33 @@ describe('HostedAppControlPlane', () => {
     expect(f.restores).toEqual(['rtsx-checkpoints/rt_source/exact.tar.gz']);
   });
 
+  test('records replacement cleanup before terminating the prior revision', async () => {
+    const registry = new MemoryRegistry();
+    registry.record = {
+      ...pendingRecord(),
+      state: 'RUNNING',
+      microvm_id: 'vm-old-revision',
+      endpoint: 'https://vm-old-revision.test',
+    };
+    registry.allocateGeneration = async () => {
+      throw new Error('generation store unavailable');
+    };
+    const runtime = new FakeRuntime();
+    const f = fixture({ registry, runtime });
+
+    await f.control.start({
+      ...input,
+      spec: { ...appSpec, revision: 'rev-2' },
+    }).catch(() => undefined);
+
+    expect(runtime.terminations).toEqual(['vm-old-revision']);
+    expect(registry.record).toMatchObject({
+      state: 'TERMINATING',
+      microvm_id: 'vm-old-revision',
+      endpoint: 'https://vm-old-revision.test',
+    });
+  });
+
   test('terminates and retires a VM whose exact checkpoint cannot be restored', async () => {
     const f = fixture({ restore: 'fetch_failed' });
 

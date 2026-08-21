@@ -13,6 +13,10 @@ export function applyHostedAppPreviewSecurityHeaders(
   response.setHeader('X-Content-Type-Options', 'nosniff');
   response.setHeader('X-DNS-Prefetch-Control', 'off');
   response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  /* The app origin and browser cache outlive an individual capability and app
+   * revision. User-controlled caching could otherwise replay old HTML/JS after
+   * the revision-bound cookie has expired or a replacement has landed. */
+  response.setHeader('Cache-Control', 'private, no-store');
   /* User code has no server-side egress and should not regain it through the
    * owner's browser. Disabling workers also prevents a service worker from one
    * revision persisting on this stable app origin into a later revision. */
@@ -54,13 +58,11 @@ const SAFE_REQUEST_HEADERS = new Set([
 
 const SAFE_RESPONSE_HEADERS = new Set([
   'accept-ranges',
-  'cache-control',
   'content-disposition',
   'content-language',
   'content-range',
   'content-type',
   'etag',
-  'expires',
   'last-modified',
   'vary',
 ]);

@@ -20,6 +20,7 @@ describe('hosted app preview proxy policy', () => {
     expect(headers.get('permissions-policy')).toContain('camera=()');
     expect(headers.get('x-dns-prefetch-control')).toBe('off');
     expect(headers.get('cross-origin-opener-policy')).toBe('same-origin');
+    expect(headers.get('cache-control')).toBe('private, no-store');
   });
 
   test('keeps CodeAPI identity and caller-supplied AWS headers out of the app', () => {
@@ -50,19 +51,17 @@ describe('hosted app preview proxy policy', () => {
     });
   });
 
-  test('does not let a hosted app set origin cookies, redirects, or security policy', () => {
+  test('does not let a hosted app set cookies, caching, redirects, or security policy', () => {
     const headers = hostedAppProxyResponseHeaders(new Headers({
       'content-type': 'text/html',
-      'cache-control': 'no-cache',
+      'cache-control': 'public, max-age=31536000',
+      expires: 'Wed, 21 Oct 2037 07:28:00 GMT',
       'set-cookie': 'session=owned',
       location: 'https://internal-microvm.example/secret',
       'content-security-policy': "default-src *",
       'access-control-allow-origin': '*',
     }));
 
-    expect(Object.fromEntries(headers)).toEqual({
-      'cache-control': 'no-cache',
-      'content-type': 'text/html',
-    });
+    expect(Object.fromEntries(headers)).toEqual({ 'content-type': 'text/html' });
   });
 });

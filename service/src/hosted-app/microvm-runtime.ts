@@ -270,7 +270,8 @@ export class HostedAppMicrovmRuntime {
     }
 
     let current = vm;
-    while (current.state === 'PENDING' || current.state === 'SUSPENDING') {
+    let resumeRequested = false;
+    for (;;) {
       if (Date.now() >= deadlineAtMs) {
         throw new HostedAppMicrovmError(
           'hosted_app_launch_timeout',
@@ -278,17 +279,44 @@ export class HostedAppMicrovmRuntime {
           true,
         );
       }
+      if (current.state === 'RUNNING' && current.endpoint) return current;
+      if (current.state === 'TERMINATING' || current.state === 'TERMINATED') {
+        throw new HostedAppMicrovmError(
+          'hosted_app_boot_failed',
+          `Hosted app MicroVM entered ${current.state} before becoming ready`,
+          true,
+        );
+      }
+      /* Same-token recovery can find an older accepted launch after its idle
+       * policy suspended it. That is the resource we must recover, not evidence
+       * of a failed boot: rotating the token here would provision a second VM
+       * and abandon the first one until its hard deadline. Resume it once, then
+       * keep polling the same id while AWS completes the transition. */
+      if (current.state === 'SUSPENDED' && !resumeRequested) {
+        resumeRequested = true;
+        try {
+          current = await this.client.resumeMicrovm(current.microvmId, signal);
+          continue;
+        } catch (error) {
+          if (error instanceof LambdaMicrovmApiError && error.kind === 'not_found') {
+            throw new HostedAppMicrovmError(
+              'hosted_app_boot_failed',
+              'Recovered hosted app MicroVM no longer exists',
+              true,
+              error,
+            );
+          }
+          /* A conflicting resume commonly means auto-resume or another request
+           * won the state transition. Poll the known id instead of discarding
+           * it or rotating the launch token. */
+          if (!(error instanceof LambdaMicrovmApiError) || error.kind !== 'conflict') {
+            throw error;
+          }
+        }
+      }
       await this.deps.sleep(Math.min(250, Math.max(1, deadlineAtMs - Date.now())), signal);
       current = await this.client.getMicrovm(current.microvmId, signal);
     }
-    if (current.state !== 'RUNNING' || !current.endpoint) {
-      throw new HostedAppMicrovmError(
-        'hosted_app_boot_failed',
-        `Hosted app MicroVM entered ${current.state} before becoming ready`,
-        true,
-      );
-    }
-    return current;
   }
 
   async mintToken(

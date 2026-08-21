@@ -212,10 +212,20 @@ export class HostedAppControlPlane {
           );
         } catch (error) {
           if (!(error instanceof HostedAppMicrovmError) || !error.transient) throw error;
+          const terminating: RuntimeSessionRecord = {
+            ...prior,
+            state: 'TERMINATING',
+            last_seen_at: this.now(),
+          };
+          /* Record the destructive transition before acting on AWS. If the
+           * subsequent generation allocation or Redis write fails, callers see
+           * a recoverable cleanup state rather than a stale RUNNING endpoint
+           * for a VM we already terminated. */
+          await this.writeOrFence(terminating, lockToken, signal);
           const terminated = await this.deps.runtime.terminate(vm.microvmId);
           if (!terminated) throw error;
           prior = {
-            ...prior,
+            ...terminating,
             microvm_id: undefined,
             endpoint: undefined,
             state: 'TERMINATED',
@@ -269,6 +279,12 @@ export class HostedAppControlPlane {
         : await this.deps.captureCheckpoint(input.sourceRuntimeSessionId, input, signal);
 
       if (prior?.microvm_id) {
+        const terminating: RuntimeSessionRecord = {
+          ...prior,
+          state: 'TERMINATING',
+          last_seen_at: this.now(),
+        };
+        await this.writeOrFence(terminating, lockToken, signal);
         const terminated = await this.deps.runtime.terminate(prior.microvm_id);
         if (!terminated) {
           throw new HostedAppControlPlaneError(
@@ -278,6 +294,7 @@ export class HostedAppControlPlane {
             true,
           );
         }
+        prior = terminating;
       }
 
       const generation = replayPending && prior

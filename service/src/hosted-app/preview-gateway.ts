@@ -63,6 +63,9 @@ export async function hostedAppPreviewGateway(
 
   /* A wildcard app host is a separate, unprivileged origin. Never fall through
    * from it into CodeAPI routes, even when authentication fails. */
+  /* App routes are arbitrary user data. Collapse them before the outer metrics
+   * middleware records its completion event so Prometheus labels stay bounded. */
+  res.locals.codeapiMetricPath = '/hosted-app-preview/*';
   applyHostedAppPreviewSecurityHeaders(res);
   try {
     if (req.path === '/__codeapi/authorize') {

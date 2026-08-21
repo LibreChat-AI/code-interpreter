@@ -3,6 +3,7 @@ import { setMaxListeners } from 'node:events';
 import { nanoid } from 'nanoid';
 import { connection } from '../queue';
 import { env } from '../config';
+import logger from '../logger';
 import type { HostedAppJobData, HostedAppJobName, HostedAppJobResult } from './jobs';
 
 /** Hosted apps are stateful-only. A fixed isolated queue prevents an ordinary
@@ -26,6 +27,16 @@ function resources(): { queue: HostedAppQueue; events: QueueEvents } {
     );
     hostedAppQueueEvents = new QueueEvents(HOSTED_APP_QUEUE_NAME, { connection });
     setMaxListeners(0, hostedAppQueue, hostedAppQueueEvents);
+    /* These resources are created after lifecycle startup, on first use, so the
+     * ordinary queue listener registration never sees them. An unhandled
+     * EventEmitter `error` would otherwise crash an API process during a Redis
+     * failover. */
+    hostedAppQueue.on('error', error => {
+      logger.error('Hosted app queue error', { error });
+    });
+    hostedAppQueueEvents.on('error', error => {
+      logger.error('Hosted app queue events error', { error });
+    });
   }
   return { queue: hostedAppQueue, events: hostedAppQueueEvents };
 }

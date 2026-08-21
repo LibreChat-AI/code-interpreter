@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import type { RuntimeSessionRecord } from '../runtime-session/registry';
 import {
   hostedAppPreviewCredentialUsable,
+  hostedAppForwardedQuery,
   hostedAppUpstreamUrl,
+  rewriteHostedAppLocation,
 } from './preview-proxy';
 
 function previewRecord(): RuntimeSessionRecord {
@@ -58,6 +60,21 @@ describe('hosted app preview upstream URL', () => {
     expect(() => hostedAppUpstreamUrl('https://user@vm.aws.example', '/')).toThrow(
       'Hosted app endpoint is invalid',
     );
+  });
+
+  test('resolves relative redirects against the current app route', () => {
+    const current = 'https://vm.aws.example/projects/demo/start?from=preview';
+    expect(rewriteHostedAppLocation('../login?next=demo', current))
+      .toBe('/projects/login?next=demo');
+    expect(rewriteHostedAppLocation('?ready=true', current))
+      .toBe('/projects/demo/start?ready=true');
+    expect(rewriteHostedAppLocation('https://attacker.example/steal', current)).toBeUndefined();
+  });
+
+  test('preserves signed and repeated query bytes without Express re-encoding', () => {
+    expect(hostedAppForwardedQuery('/download?sig=a%2Fb+c&tag=one&tag=two'))
+      .toBe('?sig=a%2Fb+c&tag=one&tag=two');
+    expect(hostedAppForwardedQuery('/download')).toBe('');
   });
 
   test('rejects stale revisions, expired leases, and expired preview credentials', () => {

@@ -108,6 +108,26 @@ describe('HostedAppMicrovmRuntime', () => {
     ).clientToken)).toEqual(['sess-happ-2', 'sess-happ-2-r1']);
   });
 
+  test('resumes a suspended same-token launch instead of provisioning a second VM', async () => {
+    const fake = new FakeLambdaMicrovmClient();
+    const fixture = runtime(fake);
+    const first = await fixture.runtime.launch('sess-happ-recovered', new AbortController().signal);
+    await fake.suspendMicrovm(first.vm.microvmId);
+
+    const recovered = await fixture.runtime.launch(
+      'sess-happ-recovered',
+      new AbortController().signal,
+    );
+
+    expect(recovered.vm.microvmId).toBe(first.vm.microvmId);
+    expect(recovered.clientToken).toBe('sess-happ-recovered');
+    expect(fake.vms.size).toBe(1);
+    expect(fake.callsFor('resumeMicrovm')).toHaveLength(1);
+    expect(fake.callsFor('runMicrovm').map(call => (
+      call.args as { clientToken?: string }
+    ).clientToken)).toEqual(['sess-happ-recovered', 'sess-happ-recovered']);
+  });
+
   test('does not rotate the idempotency token after an ambiguous provider failure', async () => {
     const fake = new FakeLambdaMicrovmClient();
     fake.failNext('runMicrovm', new LambdaMicrovmApiError(

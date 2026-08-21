@@ -79,18 +79,7 @@ async function previewRecord(
       true,
     );
   }
-  if (resolved.identity) {
-    assertHostedAppOwned(record, resolved.identity, resolved.sourceRuntimeSessionId);
-  } else {
-    const key = Buffer.from(env.HOSTED_APP_PREVIEW_SIGNING_KEY, 'base64');
-    const expected = hostedAppPreviewOwnerBinding({
-      tenantId: record.tenant_id,
-      canonicalUserId: record.canonical_user_id,
-    }, key);
-    if (!resolved.ownerBinding || resolved.ownerBinding !== expected) {
-      throw new HostedAppControlPlaneError('hosted_app_not_found', 'Hosted app not found', 404);
-    }
-  }
+  assertPreviewRecordAuthorized(record, resolved);
   if (!hostedAppPreviewCredentialUsable(record, resolved, Date.now(), PREVIEW_REFRESH_SKEW_MS)) {
     await submitHostedAppJob('hosted-app:refresh-preview', {
       operation: 'refresh-preview',
@@ -109,7 +98,29 @@ async function previewRecord(
       true,
     );
   }
+  /* Refresh waits on another worker and then rereads durable state. Recheck
+   * ownership on that second snapshot instead of relying on the pre-await
+   * authorization decision. */
+  assertPreviewRecordAuthorized(record, resolved);
   return record;
+}
+
+function assertPreviewRecordAuthorized(
+  record: RuntimeSessionRecord,
+  resolved: HostedAppPreviewTarget,
+): void {
+  if (resolved.identity) {
+    assertHostedAppOwned(record, resolved.identity, resolved.sourceRuntimeSessionId);
+  } else {
+    const key = Buffer.from(env.HOSTED_APP_PREVIEW_SIGNING_KEY, 'base64');
+    const expected = hostedAppPreviewOwnerBinding({
+      tenantId: record.tenant_id,
+      canonicalUserId: record.canonical_user_id,
+    }, key);
+    if (!resolved.ownerBinding || resolved.ownerBinding !== expected) {
+      throw new HostedAppControlPlaneError('hosted_app_not_found', 'Hosted app not found', 404);
+    }
+  }
 }
 
 function requestBody(req: AuthenticatedRequest): BodyInit | undefined {
@@ -154,9 +165,12 @@ function requestBody(req: AuthenticatedRequest): BodyInit | undefined {
   return req.pipe(limiter) as unknown as BodyInit;
 }
 
-function rewriteLocation(location: string, endpoint: string): string | undefined {
+export function rewriteHostedAppLocation(
+  location: string,
+  currentUpstreamUrl: string,
+): string | undefined {
   try {
-    const upstreamOrigin = new URL(endpoint);
+    const upstreamOrigin = new URL(currentUpstreamUrl);
     const destination = new URL(location, upstreamOrigin);
     if (destination.origin !== upstreamOrigin.origin) return undefined;
     return `${destination.pathname}${destination.search}${destination.hash}`;
@@ -198,6 +212,11 @@ export function hostedAppUpstreamUrl(endpoint: string, upstreamPath: string): UR
   return upstream;
 }
 
+export function hostedAppForwardedQuery(originalUrl: string): string {
+  const queryStart = originalUrl.indexOf('?');
+  return queryStart < 0 ? '' : originalUrl.slice(queryStart);
+}
+
 export async function proxyHostedAppPreview(
   req: AuthenticatedRequest,
   res: Response,
@@ -226,13 +245,11 @@ export async function proxyHostedAppPreview(
     }
     const endpoint = `${record.endpoint?.replace(/\/+$/, '')}/`;
     const upstream = hostedAppUpstreamUrl(endpoint, upstreamPath);
-    for (const [name, value] of Object.entries(req.query)) {
-      if (Array.isArray(value)) {
-        for (const item of value) upstream.searchParams.append(name, String(item));
-      } else if (value != null && typeof value !== 'object') {
-        upstream.searchParams.set(name, String(value));
-      }
-    }
+    /* A reverse proxy must not parse and rebuild signed/repeated query strings:
+     * decoding and re-encoding changes their byte representation, while nested
+     * values can disappear entirely through Express's query parser. Preserve
+     * the original query bytes and constrain only the upstream origin/path. */
+    upstream.search = hostedAppForwardedQuery(req.originalUrl);
     const init: RequestInit & { duplex?: 'half' } = {
       method: req.method,
       headers: hostedAppProxyRequestHeaders(
@@ -257,7 +274,12 @@ export async function proxyHostedAppPreview(
       res.setHeader(name, value);
     });
     const location = response.headers.get('location');
-    const safeLocation = location ? rewriteLocation(location, endpoint) : undefined;
+    /* Resolve relative redirects against the request URL, not the AWS endpoint
+     * root. Framework redirects such as `Location: ../login` depend on the
+     * current route while the same-origin check still strips the AWS origin. */
+    const safeLocation = location
+      ? rewriteHostedAppLocation(location, upstream.toString())
+      : undefined;
     if (location && !safeLocation) {
       await response.body?.cancel().catch(() => {});
       return res.status(502).type('text/plain').send('Hosted app returned an unsafe redirect');
