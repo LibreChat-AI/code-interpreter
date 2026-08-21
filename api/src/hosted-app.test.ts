@@ -96,6 +96,7 @@ function dependencies(
   options: {
     probe?: boolean;
     guardError?: Error;
+    killCgroup?: () => Promise<void>;
   } = {},
 ): {
   deps: HostedAppDependencies;
@@ -123,7 +124,10 @@ function dependencies(
       return child as unknown as ReturnType<HostedAppDependencies['spawnApp']>;
     }) as HostedAppDependencies['spawnApp'],
     prepareCgroup: async () => {},
-    killCgroup: async () => { cgroupKills.push('kill'); },
+    killCgroup: async () => {
+      cgroupKills.push('kill');
+      await options.killCgroup?.();
+    },
     installNetworkGuard: async uid => {
       guards.push(uid);
       if (options.guardError) throw options.guardError;
@@ -289,6 +293,32 @@ describe('HostedAppSupervisor', () => {
 
     expect(supervisor.status()?.state).toBe('failed');
     expect(fixture.cgroupKills.length).toBeGreaterThan(0);
+    await supervisor.shutdown();
+  });
+
+  test('waits for unexpected-exit cleanup before launching a replacement revision', async () => {
+    const root = await workspace();
+    let releaseCleanup!: () => void;
+    const cleanupBlocked = new Promise<void>(resolve => { releaseCleanup = resolve; });
+    let cleanupCalls = 0;
+    const fixture = dependencies(root, {
+      killCgroup: async () => {
+        cleanupCalls += 1;
+        if (cleanupCalls === 1) await cleanupBlocked;
+      },
+    });
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    await supervisor.start(request());
+
+    fixture.children[0].emit('exit', 1, null);
+    await Promise.resolve();
+    const replacement = supervisor.start(request({ revision: 'rev-2' }));
+    await Promise.resolve();
+    expect(fixture.spawns).toHaveLength(1);
+
+    releaseCleanup();
+    expect((await replacement).revision).toBe('rev-2');
+    expect(fixture.spawns).toHaveLength(2);
     await supervisor.shutdown();
   });
 });

@@ -556,12 +556,18 @@ export class HostedAppSupervisor {
         active.status.message ??= 'hosted app exited';
       }
       /* A daemonized descendant can outlive the tracked launcher process and
-       * process group. An explicit stop owns and awaits its cgroup sweep; an
-       * unexpected exit must initiate one here. Keeping those paths exclusive
-       * prevents a late old-app cleanup racing a newly launched revision. */
+       * process group. Queue unexpected cleanup in the same transition chain
+       * as start/stop: a detached sweep must never land after a new revision
+       * has entered this shared cgroup. */
       if (active.status.state !== 'stopped') {
-        void this.deps.killCgroup().catch(error => {
-          logger.error({ err: error, appId: active.request.app_id }, 'Hosted-app cgroup cleanup failed');
+        void this.serialize(async () => {
+          if (active.status.state === 'stopped') return;
+          await this.deps.killCgroup();
+        }).catch(error => {
+          logger.error(
+            { err: error, appId: active.request.app_id },
+            'Hosted-app cgroup cleanup failed',
+          );
         });
       }
     });

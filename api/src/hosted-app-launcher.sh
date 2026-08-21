@@ -16,6 +16,7 @@ shift 3
 # inherit the cgroup even if they daemonize or create a new process group.
 printf '%s' "$$" > "${CGROUP_PATH}/cgroup.procs"
 exec /usr/bin/setpriv \
+  --no-new-privs \
   --reuid "$APP_UID" \
   --regid "$APP_GID" \
   --clear-groups \
