@@ -20,6 +20,7 @@ export interface HostedAppPreviewTarget {
   sourceRuntimeSessionId?: string;
   identity?: { tenantId: string; canonicalUserId: string };
   ownerBinding?: string;
+  publicHost?: string;
 }
 
 async function previewRecord(
@@ -196,7 +197,15 @@ export async function proxyHostedAppPreview(
     }
     const init: RequestInit & { duplex?: 'half' } = {
       method: req.method,
-      headers: hostedAppProxyRequestHeaders(req.headers, token, env.HOSTED_APP_PREVIEW_PORT),
+      headers: hostedAppProxyRequestHeaders(
+        req.headers,
+        token,
+        env.HOSTED_APP_PREVIEW_PORT,
+        resolved.publicHost ? {
+          host: resolved.publicHost,
+          protocol: new URL(env.HOSTED_APP_PREVIEW_ORIGIN).protocol === 'http:' ? 'http' : 'https',
+        } : undefined,
+      ),
       body: requestBody(req),
       redirect: 'manual',
       signal: controller.signal,

@@ -124,12 +124,15 @@ export async function hostedAppPreviewGateway(
       reject(res, 403, 'Preview authorization does not match this app');
       return;
     }
+    const publicOrigin = new URL(env.HOSTED_APP_PREVIEW_ORIGIN);
+    publicOrigin.hostname = hostname as string;
     await proxyHostedAppPreview(
       req as AuthenticatedRequest,
       res,
       {
         hostedAppRuntimeId: runtimeId,
         ownerBinding: claims.ownerBinding,
+        publicHost: publicOrigin.host,
       },
       req.path,
     );

@@ -18,13 +18,18 @@ describe('hosted app preview proxy policy', () => {
       headerName: 'X-aws-proxy-auth',
       token: 'worker-minted-token',
       expiresAtMs: Date.now() + 60_000,
-    }, 3000);
+    }, 3000, {
+      host: 'happ-safe.apps.example.test',
+      protocol: 'https',
+    });
 
     expect(Object.fromEntries(headers)).toEqual({
       accept: 'text/event-stream',
       'x-app-action': 'move',
       'x-aws-proxy-auth': 'worker-minted-token',
       'x-aws-proxy-port': '3000',
+      'x-forwarded-host': 'happ-safe.apps.example.test',
+      'x-forwarded-proto': 'https',
     });
   });
 

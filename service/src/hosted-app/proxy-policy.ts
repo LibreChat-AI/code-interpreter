@@ -35,6 +35,7 @@ export function hostedAppProxyRequestHeaders(
   source: IncomingHttpHeaders,
   token: MicrovmAuthToken,
   previewPort: number,
+  publicOrigin?: { host: string; protocol: 'https' | 'http' },
 ): Headers {
   const headers = new Headers({
     [token.headerName]: token.token,
@@ -47,6 +48,10 @@ export function hostedAppProxyRequestHeaders(
     headers.set(name, Array.isArray(value) ? value.join(', ') : value);
   }
   headers.delete('content-length');
+  if (publicOrigin) {
+    headers.set('X-Forwarded-Host', publicOrigin.host);
+    headers.set('X-Forwarded-Proto', publicOrigin.protocol);
+  }
   return headers;
 }
 /** Cookies, redirects, CORS, and security-policy headers from user code must
