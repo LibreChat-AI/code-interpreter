@@ -103,6 +103,7 @@ export class HostedAppMicrovmError extends Error {
     message: string,
     readonly transient: boolean,
     readonly cause?: unknown,
+    readonly httpStatus = 503,
   ) {
     super(message);
     this.name = 'HostedAppMicrovmError';
@@ -390,6 +391,8 @@ export class HostedAppMicrovmRuntime {
         'hosted_app_start_failed',
         `Hosted app runner rejected start (${response.status}): ${body.slice(0, 1_024)}`,
         response.status >= 500,
+        undefined,
+        response.status,
       );
     }
   }

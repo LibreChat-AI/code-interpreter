@@ -5,6 +5,7 @@ import {
   hostedAppLaunchFingerprint,
   hostedAppLaunchGenerationSeed,
   hostedAppLaunchRequestFingerprint,
+  HostedAppMicrovmError,
   HostedAppMicrovmRuntime,
   type HostedAppMicrovmConfig,
 } from './microvm-runtime';
@@ -164,5 +165,25 @@ describe('HostedAppMicrovmRuntime', () => {
       'Content-Type': 'application/json',
     });
     expect(JSON.parse(String(captured?.init?.body))).toEqual(spec);
+  });
+
+  test('preserves a runner validation status as a non-retryable typed failure', async () => {
+    const fake = new FakeLambdaMicrovmClient({ endpointProvider: () => 'http://app-host.test' });
+    const fixture = runtime(fake, async () => new Response(JSON.stringify({
+      error: 'hosted_app_runtime_not_found',
+      message: 'runtime node@99 is not installed',
+    }), { status: 400 }));
+    const { vm } = await fixture.runtime.launch('sess-happ-6', new AbortController().signal);
+
+    const error = await fixture.runtime.startResidentApp(
+      vm,
+      'rt_source_session',
+      spec,
+      new AbortController().signal,
+    ).catch(value => value);
+
+    expect(error).toBeInstanceOf(HostedAppMicrovmError);
+    expect(error.httpStatus).toBe(400);
+    expect(error.transient).toBe(false);
   });
 });

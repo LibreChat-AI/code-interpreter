@@ -3,17 +3,35 @@ import { env } from '../config';
 import { connection } from '../queue';
 import { withSpan, withTraceContext } from '../telemetry';
 import { HostedAppControlPlaneError } from './control-plane';
+import { HostedAppMicrovmError } from './microvm-runtime';
 import type { HostedAppJob, HostedAppJobData, HostedAppJobName, HostedAppJobResult } from './jobs';
 import { HOSTED_APP_QUEUE_NAME } from './queue';
 import logger from '../logger';
 import { workerRunning } from '../metrics';
 
-function serializedFailure(error: unknown): Error {
+export function serializedHostedAppFailure(error: unknown): Error {
   if (error instanceof HostedAppControlPlaneError) {
     return new Error(JSON.stringify({
       code: error.code,
       status: error.status,
       message: error.message,
+      transient: error.transient,
+    }));
+  }
+  if (error instanceof HostedAppMicrovmError) {
+    const status = error.httpStatus >= 400 && error.httpStatus < 500
+      ? error.httpStatus
+      : error.code === 'hosted_app_start_failed' && error.httpStatus === 504
+        ? 504
+        : 503;
+    return new Error(JSON.stringify({
+      code: error.code,
+      status,
+      message: status < 500
+        ? error.message
+        : status === 504
+          ? 'Hosted app did not become ready before the startup deadline'
+          : 'Hosted app infrastructure operation failed',
       transient: error.transient,
     }));
   }
@@ -70,7 +88,7 @@ export async function processHostedAppJob(job: HostedAppJob): Promise<HostedAppJ
         400,
       );
     } catch (error) {
-      throw serializedFailure(error);
+      throw serializedHostedAppFailure(error);
     } finally {
       clearTimeout(timer);
     }
