@@ -142,6 +142,64 @@ IMAGE_DIGEST=sha256:<64-hex-digest> \
   scripts/build-lambda-microvm-artifact.sh zip upload
 ```
 
+### Dedicated hosted-app image (experimental)
+
+Resident web servers use a separate `lambda-microvm-app-host` image. They do
+not run as background children of `/execute`: an execution's PID/network
+namespaces end with that execution, while the app host intentionally keeps one
+supervised foreground process alive for the MicroVM lease. Build its immutable
+artifact through the same provenance-checked pipeline:
+
+```bash
+MICROVM_IMAGE_TARGET=lambda-microvm-app-host \
+  ECR_URI="$ECR_URI" S3_URI="$S3_URI" IMAGE_TAG="$IMAGE_TAG" \
+  scripts/build-lambda-microvm-artifact.sh build push zip upload
+# → app-host tags/artifacts are distinct from the normal runner
+```
+
+The app-host contract is deliberately narrow:
+
+1. Launch a MicroVM from the dedicated app-host image and wait for port 8080.
+2. Mint a control token restricted to port 8080.
+3. Restore an immutable stateful-session checkpoint with
+   `X-Runtime-Session-Id`, exactly as for a replacement session runner.
+4. `POST /api/v2/hosted-app/start` on port 8080 with the same session header:
+
+   ```json
+   {
+     "app_id": "my-app",
+     "revision": "rev-1",
+     "language": "node",
+     "version": ">=22",
+     "entrypoint": "server.js",
+     "cwd": ".",
+     "args": [],
+     "env": {}
+   }
+   ```
+
+   The process must listen on `HOST=0.0.0.0` and the injected `PORT` (3000 by
+   default). Start is idempotent for an identical revision; changed launch
+   settings require a new revision.
+5. Mint a separate preview token restricted to port 3000. Keep the endpoint and
+   both AWS credentials behind a CodeAPI preview gateway; never put a raw AWS
+   proxy token in browser-visible HTML or JavaScript.
+
+Hosted mode disables ordinary `/api/v2/execute`. The app runs as the
+session-workspace UID with a curated environment, and the runner installs
+fail-closed IPv4 and IPv6 OUTPUT rules before spawn: responses to inbound
+preview traffic are allowed, but new outbound connections (including calls to
+the root-owned control listener on localhost) are rejected. One app runs per
+MicroVM. A restored checkpoint is a revision copy, not a live shared filesystem
+with the coding VM.
+
+Lambda suspend/resume preserves the resident process, but the eight-hour hard
+lifetime does not. The higher-level hosted-app control plane must therefore
+retain the immutable revision/checkpoint identity, relaunch, restore, and start
+again after expiry. Static assets and request-shaped handlers should remain on
+cheaper stateless delivery paths; this target is only the resident-server
+adapter.
+
 ### 3. Generate the split execution-manifest keys
 
 The worker signs each execution manifest; the runner only receives the public
