@@ -227,7 +227,153 @@ components:
           type: string
           enum: [default, stateful]
 
+    HostedAppStartRequest:
+      type: object
+      required:
+        - runtime_session_hint
+        - app_id
+        - revision
+        - language
+        - version
+        - entrypoint
+      properties:
+        runtime_session_hint:
+          type: string
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._:-]+$'
+        adapter:
+          type: string
+          enum: [resident]
+          default: resident
+        app_id:
+          type: string
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+        revision:
+          type: string
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        language:
+          type: string
+        version:
+          type: string
+        entrypoint:
+          type: string
+          description: Canonical path relative to the restored stateful workspace.
+        cwd:
+          type: string
+          default: .
+        args:
+          type: array
+          maxItems: 64
+          items:
+            type: string
+        env:
+          type: object
+          additionalProperties:
+            type: string
+
+    HostedAppStatus:
+      type: object
+      required: [app_id, revision, state, preview_id, updated_at]
+      properties:
+        app_id:
+          type: string
+        revision:
+          type: string
+        state:
+          type: string
+          enum: [starting, running, stopping, stopped, failed]
+        preview_id:
+          type: string
+          description: Opaque hosted-app lease identity.
+        preview_url:
+          type: string
+          format: uri
+          description: Five-minute owner capability exchange URL on the isolated app origin.
+        hard_deadline_at:
+          type: integer
+          format: int64
+        updated_at:
+          type: integer
+          format: int64
+        error:
+          type: string
+
 paths:
+  /hosted-apps:
+    post:
+      summary: Start or reassert a resident hosted app
+      description: >-
+        Stateful-profile only. Captures an exact workspace checkpoint and runs
+        the immutable revision in a dedicated Lambda MicroVM app-host image.
+      operationId: startHostedApp
+      parameters:
+        - $ref: '#/components/parameters/ExpectedExecutionProfile'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HostedAppStartRequest'
+      responses:
+        '200':
+          description: Hosted app is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostedAppStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          description: Lifecycle or provider operation unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /hosted-apps/{app_id}:
+    parameters:
+      - $ref: '#/components/parameters/ExpectedExecutionProfile'
+      - name: app_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: runtime_session_hint
+        in: query
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._:-]+$'
+    get:
+      summary: Get hosted app status and a fresh preview URL
+      operationId: getHostedApp
+      responses:
+        '200':
+          description: Hosted app status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostedAppStatus'
+        '404':
+          description: Hosted app not found
+    delete:
+      summary: Terminate a hosted app lease
+      operationId: stopHostedApp
+      responses:
+        '200':
+          description: Hosted app stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostedAppStatus'
+        '404':
+          description: Hosted app not found
+
   /exec:
     post:
       summary: Execute code

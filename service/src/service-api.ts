@@ -10,11 +10,14 @@ import workspaceToolsRouter from './workspace-tools';
 import { connection } from './queue';
 import { env } from './config';
 import logger from './logger';
+import hostedAppRouter from './hosted-app/router';
+import { hostedAppPreviewGateway } from './hosted-app/preview-gateway';
 
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(executionProfileMiddleware);
+app.use(hostedAppPreviewGateway);
 
 const v1 = Router();
 
@@ -34,6 +37,7 @@ v1.use('/bridge', bridgeRouter);
 v1.use(apiKeyAuth);
 
 v1.use(workspaceToolsRouter);
+v1.use('/hosted-apps', hostedAppRouter);
 v1.use(serviceRouter);
 v1.use(programmaticRouter);
 

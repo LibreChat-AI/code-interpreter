@@ -118,6 +118,15 @@ hardening variables documented in `docs/lambda-microvm/README.md`. This chart
 still renders its bundled sandbox-runner, though a Lambda worker does not call
 it; a platform-specific stateful deployment may omit that component.
 
+Resident hosted apps are an opt-in capability of that stateful deployment.
+Configure `CODEAPI_HOSTED_APPS_ENABLED`, the preview origin, and both hosted-app
+keys through `api.extraEnv`; configure only the feature flag and credential key
+on `workerSandbox.extraEnv`, along with the dedicated app image settings.
+Wildcard DNS and TLS for the preview origin must route to the API service
+separately from the normal CodeAPI host. See “Hosted-app control plane and preview gateway” in
+`docs/lambda-microvm/README.md`; do not serve previews beneath the privileged
+LibreChat/CodeAPI origin.
+
 For an existing affinity/strict deployment from before execution profiles,
 first roll the new binary to API and worker pods with
 `CODEAPI_EXECUTION_PROFILE` still unset. The inferred stateful compatibility
