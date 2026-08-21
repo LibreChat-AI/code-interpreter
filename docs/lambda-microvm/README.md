@@ -287,7 +287,10 @@ openssl rand -base64 32 # CODEAPI_HOSTED_APP_PREVIEW_SIGNING_KEY
 The preview proxy strips CodeAPI authorization, cookies, forwarded identity,
 caller-provided AWS headers, app `Set-Cookie`, cross-origin policy, and external
 redirects. It supports streamed HTTP/SSE and same-origin redirects. WebSockets
-are not part of this first resident adapter. The request `env` map is persisted
+are not part of this first resident adapter. A gateway-owned CSP keeps browser
+network access same-origin and disables workers/service workers, so one app
+revision cannot leave a persistent worker controlling a later revision. The
+request `env` map is persisted
 with the immutable launch spec in the registry; it is configuration, not a
 secret store. Add a dedicated secret-reference flow before passing application
 secrets to hosted code.

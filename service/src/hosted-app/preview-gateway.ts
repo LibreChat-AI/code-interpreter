@@ -11,6 +11,7 @@ import {
   verifyHostedAppPreviewAccess,
 } from './preview-access';
 import { proxyHostedAppPreview } from './preview-proxy';
+import { applyHostedAppPreviewSecurityHeaders } from './proxy-policy';
 
 const COOKIE_NAME = '__Host-codeapi-app';
 const PREVIEW_COOKIE_TTL_MS = 60 * 60_000;
@@ -62,9 +63,7 @@ export async function hostedAppPreviewGateway(
 
   /* A wildcard app host is a separate, unprivileged origin. Never fall through
    * from it into CodeAPI routes, even when authentication fails. */
-  res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  applyHostedAppPreviewSecurityHeaders(res);
   try {
     if (req.path === '/__codeapi/authorize') {
       if (req.method !== 'GET' || typeof req.query.token !== 'string') {

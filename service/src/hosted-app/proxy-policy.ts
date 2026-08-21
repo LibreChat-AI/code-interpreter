@@ -1,6 +1,42 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import { microvmPortHeaders, type MicrovmAuthToken } from '../runtime-session/lambda-client';
 
+export interface HostedAppPreviewHeaderWriter {
+  setHeader(name: string, value: string): unknown;
+}
+
+/** Browser-enforced guardrails owned by the trusted gateway, not user code. */
+export function applyHostedAppPreviewSecurityHeaders(
+  response: HostedAppPreviewHeaderWriter,
+): void {
+  response.setHeader('Referrer-Policy', 'no-referrer');
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  /* User code has no server-side egress and should not regain it through the
+   * owner's browser. Disabling workers also prevents a service worker from one
+   * revision persisting on this stable app origin into a later revision. */
+  response.setHeader('Content-Security-Policy', [
+    "default-src 'self' data: blob:",
+    "connect-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "media-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "worker-src 'none'",
+    "child-src 'none'",
+    "frame-src 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'self'",
+  ].join('; '));
+  response.setHeader(
+    'Permissions-Policy',
+    'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+  );
+}
+
 const SAFE_REQUEST_HEADERS = new Set([
   'accept',
   'accept-language',

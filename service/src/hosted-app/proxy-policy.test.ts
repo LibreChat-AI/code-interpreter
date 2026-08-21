@@ -1,10 +1,26 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  applyHostedAppPreviewSecurityHeaders,
   hostedAppProxyRequestHeaders,
   hostedAppProxyResponseHeaders,
 } from './proxy-policy';
 
 describe('hosted app preview proxy policy', () => {
+  test('keeps browser egress same-origin and disables persistent workers', () => {
+    const headers = new Map<string, string>();
+    applyHostedAppPreviewSecurityHeaders({
+      setHeader(name, value) {
+        headers.set(name.toLowerCase(), value);
+      },
+    });
+
+    expect(headers.get('content-security-policy')).toContain("connect-src 'self'");
+    expect(headers.get('content-security-policy')).toContain("worker-src 'none'");
+    expect(headers.get('content-security-policy')).toContain("form-action 'self'");
+    expect(headers.get('permissions-policy')).toContain('camera=()');
+    expect(headers.get('cross-origin-opener-policy')).toBe('same-origin');
+  });
+
   test('keeps CodeAPI identity and caller-supplied AWS headers out of the app', () => {
     const headers = hostedAppProxyRequestHeaders({
       authorization: 'Bearer codeapi-secret',
