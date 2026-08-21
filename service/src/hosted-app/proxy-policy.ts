@@ -11,6 +11,7 @@ export function applyHostedAppPreviewSecurityHeaders(
 ): void {
   response.setHeader('Referrer-Policy', 'no-referrer');
   response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('X-DNS-Prefetch-Control', 'off');
   response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   /* User code has no server-side egress and should not regain it through the
    * owner's browser. Disabling workers also prevents a service worker from one

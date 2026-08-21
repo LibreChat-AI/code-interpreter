@@ -18,6 +18,7 @@ describe('hosted app preview proxy policy', () => {
     expect(headers.get('content-security-policy')).toContain("worker-src 'none'");
     expect(headers.get('content-security-policy')).toContain("form-action 'self'");
     expect(headers.get('permissions-policy')).toContain('camera=()');
+    expect(headers.get('x-dns-prefetch-control')).toBe('off');
     expect(headers.get('cross-origin-opener-policy')).toBe('same-origin');
   });
 
