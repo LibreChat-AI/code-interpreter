@@ -331,8 +331,25 @@ export function validateSandboxBackendPolicy(): void {
     }
     requireValue('LAMBDA_MICROVM_APP_IMAGE_ARN', env.HOSTED_APP_IMAGE_ARN);
     requireValue('LAMBDA_MICROVM_APP_IMAGE_VERSION', env.HOSTED_APP_IMAGE_VERSION);
+    for (const [name, expected] of [
+      ['LAMBDA_MICROVM_APP_CONTROL_PORT', '8080'],
+      ['LAMBDA_MICROVM_APP_PREVIEW_PORT', '3000'],
+      ['LAMBDA_MICROVM_APP_START_TIMEOUT_MS', '30000'],
+    ] as const) {
+      const configured = process.env[name]?.trim();
+      if (configured && configured !== expected) {
+        throw new SecureStartupConfigError(
+          `${name} cannot override the pinned app-host image contract (${expected})`,
+        );
+      }
+    }
     requireSafeWholeNumber('LAMBDA_MICROVM_APP_CONTROL_PORT', env.HOSTED_APP_CONTROL_PORT, 1_024);
     requireSafeWholeNumber('LAMBDA_MICROVM_APP_PREVIEW_PORT', env.HOSTED_APP_PREVIEW_PORT, 1_024);
+    if (env.HOSTED_APP_CONTROL_PORT !== 8080 || env.HOSTED_APP_PREVIEW_PORT !== 3000) {
+      throw new SecureStartupConfigError(
+        'Hosted app image contract requires control port 8080 and preview port 3000',
+      );
+    }
     requireSafeWholeNumber(
       'LAMBDA_MICROVM_APP_MAX_DURATION_SECONDS',
       env.HOSTED_APP_MAX_DURATION_SECONDS,
@@ -341,8 +358,10 @@ export function validateSandboxBackendPolicy(): void {
     requireSafeWholeNumber('LAMBDA_MICROVM_APP_IDLE_SECONDS', env.HOSTED_APP_IDLE_SECONDS, 60);
     requireSafeWholeNumber('LAMBDA_MICROVM_APP_SUSPEND_SECONDS', env.HOSTED_APP_SUSPEND_SECONDS, 0);
     requireSafeWholeNumber('LAMBDA_MICROVM_APP_START_TIMEOUT_MS', env.HOSTED_APP_START_TIMEOUT_MS, 1);
-    if (env.HOSTED_APP_CONTROL_PORT > 65_535 || env.HOSTED_APP_PREVIEW_PORT > 65_535) {
-      throw new SecureStartupConfigError('Hosted app ports must be at most 65535');
+    if (env.HOSTED_APP_START_TIMEOUT_MS !== 30_000) {
+      throw new SecureStartupConfigError(
+        'Hosted app image contract requires a 30000ms resident startup timeout',
+      );
     }
     if (
       env.HOSTED_APP_MAX_DURATION_SECONDS > 28_800
@@ -350,9 +369,6 @@ export function validateSandboxBackendPolicy(): void {
       || env.HOSTED_APP_SUSPEND_SECONDS > 28_800
     ) {
       throw new SecureStartupConfigError('Hosted app lifetime controls must be at most 28800 seconds');
-    }
-    if (env.HOSTED_APP_CONTROL_PORT === env.HOSTED_APP_PREVIEW_PORT) {
-      throw new SecureStartupConfigError('Hosted app control and preview ports must differ');
     }
   }
 }

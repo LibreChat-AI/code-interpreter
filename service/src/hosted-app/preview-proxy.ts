@@ -2,6 +2,7 @@ import type { Response } from 'express';
 import { Readable, Transform } from 'node:stream';
 import { env } from '../config';
 import { readRuntimeSessionRecord } from '../runtime-session/registry';
+import type { RuntimeSessionRecord } from '../runtime-session/registry';
 import { captureTraceCarrier } from '../telemetry';
 import type { AuthenticatedRequest } from '../types';
 import { assertHostedAppOwned, HostedAppControlPlaneError } from './control-plane';
@@ -17,10 +18,52 @@ const PREVIEW_REFRESH_SKEW_MS = 60_000;
 
 export interface HostedAppPreviewTarget {
   hostedAppRuntimeId: string;
+  revision?: string;
   sourceRuntimeSessionId?: string;
   identity?: { tenantId: string; canonicalUserId: string };
   ownerBinding?: string;
   publicHost?: string;
+}
+
+export function hostedAppPreviewRecordUsable(
+  record: RuntimeSessionRecord | null | undefined,
+  resolved: HostedAppPreviewTarget,
+  now = Date.now(),
+): record is RuntimeSessionRecord & {
+  hosted_app: NonNullable<RuntimeSessionRecord['hosted_app']>;
+  microvm_id: string;
+  endpoint: string;
+} {
+  return Boolean(
+    record?.hosted_app
+    && record.state === 'RUNNING'
+    && record.microvm_id
+    && record.endpoint
+    && record.hard_deadline_at != null
+    && record.hard_deadline_at > now
+    && (resolved.revision == null || record.hosted_app.revision === resolved.revision)
+  );
+}
+
+export function hostedAppPreviewCredentialUsable(
+  record: RuntimeSessionRecord | null | undefined,
+  resolved: HostedAppPreviewTarget,
+  now = Date.now(),
+  minimumTtlMs = 0,
+): record is RuntimeSessionRecord & {
+  hosted_app: NonNullable<RuntimeSessionRecord['hosted_app']> & {
+    preview_credential: string;
+    preview_credential_expires_at: number;
+  };
+  microvm_id: string;
+  endpoint: string;
+} {
+  return hostedAppPreviewRecordUsable(record, resolved, now)
+    && Boolean(
+      record.hosted_app.preview_credential
+      && record.hosted_app.preview_credential_expires_at != null
+      && record.hosted_app.preview_credential_expires_at > now + minimumTtlMs
+    );
 }
 
 async function previewRecord(
@@ -28,12 +71,7 @@ async function previewRecord(
   signal: AbortSignal,
 ) {
   let record = await readRuntimeSessionRecord(resolved.hostedAppRuntimeId, { signal });
-  if (
-    !record?.hosted_app
-    || record.state !== 'RUNNING'
-    || !record.microvm_id
-    || !record.endpoint
-  ) {
+  if (!hostedAppPreviewRecordUsable(record, resolved)) {
     throw new HostedAppControlPlaneError(
       'hosted_app_not_running',
       'Hosted app is not running',
@@ -53,11 +91,7 @@ async function previewRecord(
       throw new HostedAppControlPlaneError('hosted_app_not_found', 'Hosted app not found', 404);
     }
   }
-  if (
-    !record.hosted_app.preview_credential
-    || !record.hosted_app.preview_credential_expires_at
-    || record.hosted_app.preview_credential_expires_at <= Date.now() + PREVIEW_REFRESH_SKEW_MS
-  ) {
+  if (!hostedAppPreviewCredentialUsable(record, resolved, Date.now(), PREVIEW_REFRESH_SKEW_MS)) {
     await submitHostedAppJob('hosted-app:refresh-preview', {
       operation: 'refresh-preview',
       hostedAppRuntimeId: resolved.hostedAppRuntimeId,
@@ -67,11 +101,7 @@ async function previewRecord(
     }, `happ-refresh-${resolved.hostedAppRuntimeId}-${Math.floor(Date.now() / 30_000)}`);
     record = await readRuntimeSessionRecord(resolved.hostedAppRuntimeId, { signal });
   }
-  if (
-    !record?.hosted_app?.preview_credential
-    || record.state !== 'RUNNING'
-    || !record.endpoint
-  ) {
+  if (!hostedAppPreviewCredentialUsable(record, resolved)) {
     throw new HostedAppControlPlaneError(
       'hosted_app_preview_unavailable',
       'Hosted app preview credential is unavailable',
@@ -186,6 +216,14 @@ export async function proxyHostedAppPreview(
       record.hosted_app?.preview_credential as string,
       key,
     );
+    if (token.expiresAtMs <= Date.now()) {
+      throw new HostedAppControlPlaneError(
+        'hosted_app_preview_unavailable',
+        'Hosted app preview credential is unavailable',
+        503,
+        true,
+      );
+    }
     const endpoint = `${record.endpoint?.replace(/\/+$/, '')}/`;
     const upstream = hostedAppUpstreamUrl(endpoint, upstreamPath);
     for (const [name, value] of Object.entries(req.query)) {

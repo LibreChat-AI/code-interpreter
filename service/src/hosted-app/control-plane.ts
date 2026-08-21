@@ -18,6 +18,8 @@ import {
   type ResidentHostedAppSpec,
 } from './spec';
 
+const HOSTED_APP_DEADLINE_HEADROOM_MS = 60_000;
+
 export class HostedAppControlPlaneError extends Error {
   constructor(
     readonly code: string,
@@ -130,7 +132,15 @@ export function hostedAppPublicStatus(
     preview_id: record.runtime_session_id,
     hard_deadline_at: record.hard_deadline_at,
     updated_at: record.last_seen_at,
-    ...(record.last_error ? { error: record.last_error } : {}),
+    ...(record.last_error ? {
+      /* Provider, endpoint, and checkpoint errors stay in the internal record
+       * and worker logs. Status is a public API and must not replay them. */
+      error: record.state === 'TERMINATING'
+        ? 'Hosted app cleanup is pending'
+        : record.state === 'RUNNING'
+          ? 'Hosted app could not be stopped'
+          : 'Hosted app operation failed',
+    } : {}),
   };
 }
 
@@ -182,7 +192,8 @@ export class HostedAppControlPlane {
         && prior?.state === 'RUNNING'
         && prior.microvm_id
         && prior.endpoint
-        && (prior.hard_deadline_at == null || prior.hard_deadline_at > this.now() + 60_000)
+        && (prior.hard_deadline_at == null
+          || prior.hard_deadline_at > this.now() + HOSTED_APP_DEADLINE_HEADROOM_MS)
       ) {
         /* Reassert both the runner and credential. This resumes a suspended VM,
          * heals a dead resident process, and never trusts an expired token. */
@@ -224,13 +235,20 @@ export class HostedAppControlPlane {
         && prior.launch_request_fingerprint
           === hostedAppLaunchRequestFingerprint(this.deps.runtime.config)
         && prior.hard_deadline_at != null
-        && prior.hard_deadline_at > this.now() + 60_000
+        && prior.hard_deadline_at > this.now() + HOSTED_APP_DEADLINE_HEADROOM_MS
       );
-      if (
+      const pendingProviderCouldStillBeLive = Boolean(
         prior?.state === 'PENDING'
         && !prior.microvm_id
-        && prior.hard_deadline_at != null
-        && prior.hard_deadline_at > this.now() + 60_000
+        && (
+          prior.hard_deadline_at == null
+          || prior.hard_deadline_at
+            + HOSTED_APP_DEADLINE_HEADROOM_MS
+            + this.deps.runtime.config.launchTimeoutMs > this.now()
+        )
+      );
+      if (
+        pendingProviderCouldStillBeLive
         && !replayPending
       ) {
         /* A provider call may have succeeded before its response was lost. We
@@ -277,7 +295,9 @@ export class HostedAppControlPlane {
         : this.now();
       const hardDeadlineAt = replayPending && prior?.hard_deadline_at
         ? prior.hard_deadline_at
-        : launchedAt + this.deps.runtime.config.maximumDurationSeconds * 1_000 - 60_000;
+        : launchedAt
+          + this.deps.runtime.config.maximumDurationSeconds * 1_000
+          - HOSTED_APP_DEADLINE_HEADROOM_MS;
       let launchIntent: RuntimeSessionRecord = {
         runtime_session_id: input.hostedAppRuntimeId,
         tenant_id: input.tenantId,
@@ -308,6 +328,9 @@ export class HostedAppControlPlane {
       try {
         const launched = await this.deps.runtime.launch(clientToken, signal);
         vm = launched.vm;
+        const providerStartedAt = Number.isFinite(vm.startedAtMs)
+          ? vm.startedAtMs
+          : undefined;
         launchIntent = {
           ...launchIntent,
           launch_client_token: launched.clientToken,
@@ -315,6 +338,12 @@ export class HostedAppControlPlane {
           endpoint: vm.endpoint,
           image_arn: vm.imageArn ?? launchIntent.image_arn,
           image_version: vm.imageVersion ?? launchIntent.image_version,
+          launched_at: providerStartedAt ?? launchIntent.launched_at,
+          hard_deadline_at: providerStartedAt == null
+            ? launchIntent.hard_deadline_at
+            : providerStartedAt
+              + this.deps.runtime.config.maximumDurationSeconds * 1_000
+              - HOSTED_APP_DEADLINE_HEADROOM_MS,
           last_seen_at: this.now(),
         };
         await this.writeOrFence(launchIntent, lockToken, signal);
@@ -407,11 +436,69 @@ export class HostedAppControlPlane {
     signal: AbortSignal,
   ): Promise<HostedAppPublicStatus> {
     return this.withLease(hostedAppRuntimeId, signal, async (leaseSignal, lockToken) => {
-      const record = await this.deps.registry.read(hostedAppRuntimeId, { signal: leaseSignal });
+      let record = await this.deps.registry.read(hostedAppRuntimeId, { signal: leaseSignal });
       if (!record?.hosted_app) {
         throw new HostedAppControlPlaneError('hosted_app_not_found', 'Hosted app not found', 404);
       }
       assertHostedAppOwned(record, owner);
+      if (
+        record.state === 'PENDING'
+        && !record.microvm_id
+        && (
+          record.hard_deadline_at == null
+          || record.hard_deadline_at
+            + HOSTED_APP_DEADLINE_HEADROOM_MS
+            + this.deps.runtime.config.launchTimeoutMs > this.now()
+        )
+      ) {
+        const replayable = Boolean(
+          record.launch_client_token
+          && record.launch_fingerprint === hostedAppLaunchFingerprint(this.deps.runtime.config)
+          && record.launch_request_fingerprint
+            === hostedAppLaunchRequestFingerprint(this.deps.runtime.config)
+        );
+        if (!replayable) {
+          /* The provider may still have accepted this request. Retain the
+           * intent until its maximum provider lifetime passes rather than
+           * claiming it was stopped and losing the only safe recovery key. */
+          throw new HostedAppControlPlaneError(
+            'hosted_app_stop_pending',
+            'The pending hosted app launch must be recovered before it can be stopped',
+            409,
+            true,
+          );
+        }
+        const launched = await this.deps.runtime.launch(
+          record.launch_client_token as string,
+          leaseSignal,
+        );
+        const recovered: RuntimeSessionRecord = {
+          ...record,
+          launch_client_token: launched.clientToken,
+          microvm_id: launched.vm.microvmId,
+          endpoint: launched.vm.endpoint,
+          image_arn: launched.vm.imageArn ?? record.image_arn,
+          image_version: launched.vm.imageVersion ?? record.image_version,
+          launched_at: Number.isFinite(launched.vm.startedAtMs)
+            ? launched.vm.startedAtMs
+            : record.launched_at,
+          hard_deadline_at: Number.isFinite(launched.vm.startedAtMs)
+            ? (launched.vm.startedAtMs as number)
+              + this.deps.runtime.config.maximumDurationSeconds * 1_000
+              - HOSTED_APP_DEADLINE_HEADROOM_MS
+            : record.hard_deadline_at,
+          last_seen_at: this.now(),
+        };
+        try {
+          await this.writeOrFence(recovered, lockToken, leaseSignal);
+        } catch (error) {
+          /* A recovered VM must never escape merely because we lost the Redis
+           * fence while recording its id. */
+          await this.deps.runtime.terminate(launched.vm.microvmId).catch(() => false);
+          throw error;
+        }
+        record = recovered;
+      }
       if (record.microvm_id) {
         const terminating: RuntimeSessionRecord = {
           ...record,
@@ -442,7 +529,7 @@ export class HostedAppControlPlane {
         last_seen_at: this.now(),
         last_error: undefined,
         hosted_app: {
-          ...record.hosted_app,
+          ...(record.hosted_app as NonNullable<RuntimeSessionRecord['hosted_app']>),
           preview_credential: undefined,
           preview_credential_expires_at: undefined,
         },
@@ -472,6 +559,8 @@ export class HostedAppControlPlane {
         record.state !== 'RUNNING'
         || !record.microvm_id
         || !record.endpoint
+        || record.hard_deadline_at == null
+        || record.hard_deadline_at <= this.now()
       ) {
         throw new HostedAppControlPlaneError(
           'hosted_app_not_running',
@@ -509,6 +598,14 @@ export class HostedAppControlPlane {
     signal: AbortSignal,
   ): Promise<RuntimeSessionRecord> {
     const credential = await this.deps.runtime.previewToken(vm.microvmId, signal);
+    if (credential.expiresAtMs <= this.now()) {
+      throw new HostedAppControlPlaneError(
+        'hosted_app_preview_unavailable',
+        'Hosted app preview credential is unavailable',
+        503,
+        true,
+      );
+    }
     const running: RuntimeSessionRecord = {
       ...record,
       state: 'RUNNING',

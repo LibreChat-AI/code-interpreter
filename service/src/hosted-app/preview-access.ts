@@ -1,11 +1,13 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { HostedAppOwner } from './control-plane';
+import { HOSTED_APP_REVISION_PATTERN } from './spec';
 
 const PREVIEW_TOKEN_VERSION = 'v1';
 const RUNTIME_ID_PATTERN = /^happ_[0-9a-f]{40}$/;
 
 export interface HostedAppPreviewClaims {
   hostedAppRuntimeId: string;
+  revision: string;
   ownerBinding: string;
   expiresAt: number;
 }
@@ -50,12 +52,14 @@ export function signHostedAppPreviewAccess(
   if (
     !Number.isSafeInteger(claims.expiresAt)
     || claims.expiresAt <= 0
+    || !HOSTED_APP_REVISION_PATTERN.test(claims.revision)
     || !/^[A-Za-z0-9_-]{43}$/.test(claims.ownerBinding)
   ) {
     throw new HostedAppPreviewAccessError('preview claims are invalid');
   }
   const payload = Buffer.from(JSON.stringify({
     r: claims.hostedAppRuntimeId,
+    v: claims.revision,
     o: claims.ownerBinding,
     e: claims.expiresAt,
   }), 'utf8').toString('base64url');
@@ -81,11 +85,13 @@ export function verifyHostedAppPreviewAccess(
   }
   try {
     const parsed = JSON.parse(decodeBase64url(payload, 512).toString('utf8')) as {
-      r?: unknown; o?: unknown; e?: unknown;
+      r?: unknown; v?: unknown; o?: unknown; e?: unknown;
     };
     if (
       typeof parsed.r !== 'string'
       || !RUNTIME_ID_PATTERN.test(parsed.r)
+      || typeof parsed.v !== 'string'
+      || !HOSTED_APP_REVISION_PATTERN.test(parsed.v)
       || typeof parsed.o !== 'string'
       || !/^[A-Za-z0-9_-]{43}$/.test(parsed.o)
       || !Number.isSafeInteger(parsed.e)
@@ -95,6 +101,7 @@ export function verifyHostedAppPreviewAccess(
     }
     return {
       hostedAppRuntimeId: parsed.r,
+      revision: parsed.v,
       ownerBinding: parsed.o,
       expiresAt: parsed.e as number,
     };

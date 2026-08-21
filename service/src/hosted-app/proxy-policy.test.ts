@@ -6,7 +6,7 @@ import {
 } from './proxy-policy';
 
 describe('hosted app preview proxy policy', () => {
-  test('keeps browser egress same-origin and disables persistent workers', () => {
+  test('constrains browser fetches and disables persistent workers', () => {
     const headers = new Map<string, string>();
     applyHostedAppPreviewSecurityHeaders({
       setHeader(name, value) {

@@ -46,8 +46,8 @@ export async function processHostedAppJob(job: HostedAppJob): Promise<HostedAppJ
     'codeapi.hosted_app.id': job.data.hostedAppRuntimeId,
   }, async () => {
     const controller = new AbortController();
-    const timeoutMs = env.CHECKPOINT_TIMEOUT_MS * 2
-      + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 3
+    const timeoutMs = env.CHECKPOINT_TIMEOUT_MS * 5
+      + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 7
       + env.HOSTED_APP_START_TIMEOUT_MS
       + 30_000;
     const timer = setTimeout(

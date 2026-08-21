@@ -30,8 +30,11 @@ function resources(): { queue: HostedAppQueue; events: QueueEvents } {
   return { queue: hostedAppQueue, events: hostedAppQueueEvents };
 }
 
-const HOSTED_APP_OPERATION_WAIT_MS = env.CHECKPOINT_TIMEOUT_MS * 2
-  + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 3
+/* A cold start can capture (pull + store), restore (load + push), launch, wait
+ * for control, start the process, and mint preview credentials. Budget every
+ * independently bounded leg so the queue waiter cannot abandon valid work. */
+const HOSTED_APP_OPERATION_WAIT_MS = env.CHECKPOINT_TIMEOUT_MS * 5
+  + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 7
   + env.HOSTED_APP_START_TIMEOUT_MS
   + 45_000;
 

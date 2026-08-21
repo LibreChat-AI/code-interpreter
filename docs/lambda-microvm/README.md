@@ -270,12 +270,14 @@ configuration:
 |---|---|---|
 | `LAMBDA_MICROVM_APP_IMAGE_ARN` | — | Dedicated `lambda-microvm-app-host` image ARN. |
 | `LAMBDA_MICROVM_APP_IMAGE_VERSION` | — | Required pinned image version. |
-| `LAMBDA_MICROVM_APP_CONTROL_PORT` | `8080` | Root-owned runner control/checkpoint port. |
-| `LAMBDA_MICROVM_APP_PREVIEW_PORT` | `3000` | Untrusted resident app port; must differ from the control port. |
 | `LAMBDA_MICROVM_APP_MAX_DURATION_SECONDS` | `28800` | App-VM hard lifetime. The control plane relaunches an immutable revision after expiry. |
 | `LAMBDA_MICROVM_APP_IDLE_SECONDS` | `300` | Seconds idle before AWS suspends the VM. |
 | `LAMBDA_MICROVM_APP_SUSPEND_SECONDS` | `900` | Seconds suspended before AWS terminates the VM. Suspended VMs still consume quota. |
-| `LAMBDA_MICROVM_APP_START_TIMEOUT_MS` | `30000` | Resident process readiness budget after restore. |
+
+The pinned app-host image contract fixes the root-owned control/checkpoint
+listener at port 8080, the resident app at port 3000, and resident readiness at
+30 seconds. `RunMicrovm` cannot override the image environment; changing this
+contract requires publishing a matching image and control-plane revision.
 
 Generate the two keys independently:
 
@@ -287,10 +289,13 @@ openssl rand -base64 32 # CODEAPI_HOSTED_APP_PREVIEW_SIGNING_KEY
 The preview proxy strips CodeAPI authorization, cookies, forwarded identity,
 caller-provided AWS headers, app `Set-Cookie`, cross-origin policy, and external
 redirects. It supports streamed HTTP/SSE and same-origin redirects. WebSockets
-are not part of this first resident adapter. A gateway-owned CSP keeps browser
-network access same-origin and disables workers/service workers, so one app
-revision cannot leave a persistent worker controlling a later revision. The
-request `env` map is persisted
+are not part of this first resident adapter. A gateway-owned CSP constrains
+fetches and subresources to the app origin and disables workers/service workers,
+so one app revision cannot leave a persistent worker controlling a later
+revision. Top-level app JavaScript can still navigate the owner's browser to an
+external origin; treat this experimental viewer as owner-trusted. Before broad
+untrusted enablement, serve app content from a separate origin inside a sandboxed
+gateway wrapper. The request `env` map is persisted
 with the immutable launch spec in the registry; it is configuration, not a
 secret store. Add a dedicated secret-reference flow before passing application
 secrets to hosted code.

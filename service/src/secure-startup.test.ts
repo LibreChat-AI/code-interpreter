@@ -670,7 +670,7 @@ describe('hosted app startup policy', () => {
     expect(() => validateHostedAppsApiConfig()).toThrow('bare HTTPS origin');
   });
 
-  test('worker policy requires a pinned dedicated image and distinct valid ports', () => {
+  test('worker policy requires a pinned dedicated image and its fixed listener contract', () => {
     configureHostedApps();
     /* Reuse the suite's valid Lambda/checkpoint baseline. */
     env.PTC_MODE = 'replay';
@@ -706,7 +706,13 @@ describe('hosted app startup policy', () => {
     env.HOSTED_APP_IMAGE_VERSION = undefined;
     expect(() => validateSandboxBackendPolicy()).toThrow('LAMBDA_MICROVM_APP_IMAGE_VERSION');
     env.HOSTED_APP_IMAGE_VERSION = '4';
-    env.HOSTED_APP_PREVIEW_PORT = env.HOSTED_APP_CONTROL_PORT;
-    expect(() => validateSandboxBackendPolicy()).toThrow('ports must differ');
+    env.HOSTED_APP_PREVIEW_PORT = 3001;
+    expect(() => validateSandboxBackendPolicy()).toThrow('preview port 3000');
+    env.HOSTED_APP_PREVIEW_PORT = 3000;
+    env.HOSTED_APP_START_TIMEOUT_MS = 30_001;
+    expect(() => validateSandboxBackendPolicy()).toThrow('30000ms');
+    env.HOSTED_APP_START_TIMEOUT_MS = 30_000;
+    process.env.LAMBDA_MICROVM_APP_PREVIEW_PORT = '4000';
+    expect(() => validateSandboxBackendPolicy()).toThrow('cannot override');
   });
 });

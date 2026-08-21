@@ -42,6 +42,7 @@ function presentStatus(
   const key = Buffer.from(env.HOSTED_APP_PREVIEW_SIGNING_KEY, 'base64');
   const token = signHostedAppPreviewAccess({
     hostedAppRuntimeId: status.preview_id,
+    revision: status.revision,
     ownerBinding: hostedAppPreviewOwnerBinding(owner, key),
     expiresAt: Date.now() + PREVIEW_LINK_TTL_MS,
   }, key);

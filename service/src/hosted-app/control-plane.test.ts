@@ -82,6 +82,8 @@ class FakeRuntime {
   healthChecks: string[] = [];
   terminations: string[] = [];
   previewMints = 0;
+  previewExpiresAt = 1_900_000_000_000;
+  startedAtMs?: number;
   terminateSucceeds = true;
   launchError?: Error;
   healthError?: Error;
@@ -94,6 +96,7 @@ class FakeRuntime {
         microvmId: 'vm-app-1',
         endpoint: 'https://vm-app-1.test',
         state: 'RUNNING',
+        startedAtMs: this.startedAtMs,
         imageArn: runtimeConfig.imageArn,
         imageVersion: runtimeConfig.imageVersion,
       },
@@ -120,7 +123,7 @@ class FakeRuntime {
     return {
       headerName: 'X-aws-proxy-auth',
       token: `secret-token-${this.previewMints}`,
-      expiresAtMs: 1_900_000_000_000,
+      expiresAtMs: this.previewExpiresAt,
     };
   }
   async terminate(microvmId: string): Promise<boolean> {
@@ -215,6 +218,18 @@ describe('HostedAppControlPlane', () => {
     expect(hostedAppPublicStatus(expired, 100).state).toBe('stopped');
   });
 
+  test('does not expose provider details persisted in an internal failure record', () => {
+    const failed = {
+      ...pendingRecord(),
+      state: 'TERMINATED' as const,
+      last_error: 'AccessDenied for arn:aws:iam::123456789012:role/private',
+    };
+    const status = hostedAppPublicStatus(failed);
+    expect(status.state).toBe('failed');
+    expect(status.error).toBe('Hosted app operation failed');
+    expect(JSON.stringify(status)).not.toContain('123456789012');
+  });
+
   test('checkpoints, launches, restores, starts, and persists only a sealed preview credential', async () => {
     const f = fixture();
 
@@ -228,6 +243,19 @@ describe('HostedAppControlPlane', () => {
     expect(JSON.stringify(f.registry.record)).not.toContain('secret-token-1');
     const sealed = f.registry.record?.hosted_app?.preview_credential as string;
     expect(openHostedAppCredential('happ_123', sealed, f.credentialKey).token).toBe('secret-token-1');
+  });
+
+  test('derives the advertised lease deadline from the provider start time', async () => {
+    const runtime = new FakeRuntime();
+    runtime.startedAtMs = 1_800_000_000_500;
+    const f = fixture({ runtime });
+
+    await f.control.start(input);
+
+    expect(f.registry.record?.launched_at).toBe(runtime.startedAtMs);
+    expect(f.registry.record?.hard_deadline_at).toBe(
+      runtime.startedAtMs + runtimeConfig.maximumDurationSeconds * 1_000 - 60_000,
+    );
   });
 
   test('replays an exact pending launch intent without taking a different checkpoint', async () => {
@@ -365,6 +393,61 @@ describe('HostedAppControlPlane', () => {
     });
   });
 
+  test('stop replays an ambiguous pending launch before terminating it', async () => {
+    const registry = new MemoryRegistry();
+    registry.record = pendingRecord();
+    const f = fixture({ registry });
+
+    const status = await f.control.stop(input.hostedAppRuntimeId, input, input.signal);
+
+    expect(status.state).toBe('stopped');
+    expect(f.runtime.launches).toEqual([pendingRecord().launch_client_token as string]);
+    expect(f.runtime.terminations).toEqual(['vm-app-1']);
+    expect(registry.writes.map(record => record.state)).toEqual([
+      'PENDING',
+      'TERMINATING',
+      'TERMINATED',
+    ]);
+    expect(registry.record).toMatchObject({
+      state: 'TERMINATED',
+      microvm_id: undefined,
+      endpoint: undefined,
+    });
+  });
+
+  test('stop preserves an ambiguous pending intent when recovery fails', async () => {
+    const registry = new MemoryRegistry();
+    registry.record = pendingRecord();
+    const runtime = new FakeRuntime();
+    runtime.launchError = new HostedAppMicrovmError(
+      'hosted_app_launch_failed',
+      'connection reset after provider accepted the request',
+      true,
+    );
+    const f = fixture({ registry, runtime });
+
+    const error = await f.control.stop(input.hostedAppRuntimeId, input, input.signal)
+      .catch(value => value);
+
+    expect(error.code).toBe('hosted_app_launch_failed');
+    expect(registry.writes).toEqual([]);
+    expect(registry.record).toEqual(pendingRecord());
+  });
+
+  test('stop does not overwrite a pending intent that current config cannot replay', async () => {
+    const registry = new MemoryRegistry();
+    registry.record = { ...pendingRecord(), launch_fingerprint: 'different-image' };
+    const f = fixture({ registry });
+
+    const error = await f.control.stop(input.hostedAppRuntimeId, input, input.signal)
+      .catch(value => value);
+
+    expect(error.code).toBe('hosted_app_stop_pending');
+    expect(error.transient).toBe(true);
+    expect(f.runtime.launches).toEqual([]);
+    expect(registry.writes).toEqual([]);
+  });
+
   test('a failed cleanup never promotes a partial launch to running', async () => {
     const registry = new MemoryRegistry();
     registry.record = {
@@ -407,5 +490,35 @@ describe('HostedAppControlPlane', () => {
     await ambiguous.control.start(input).catch(() => undefined);
     expect(ambiguous.registry.record?.state).toBe('PENDING');
     expect(ambiguous.registry.record?.microvm_id).toBeUndefined();
+  });
+
+  test('does not refresh a preview after its advertised hard deadline', async () => {
+    const registry = new MemoryRegistry();
+    registry.record = {
+      ...pendingRecord(),
+      state: 'RUNNING',
+      microvm_id: 'vm-existing',
+      endpoint: 'https://vm-existing.test',
+      hard_deadline_at: 1_800_000_000_000,
+    };
+    const f = fixture({ registry });
+
+    const error = await f.control.refreshPreview(input.hostedAppRuntimeId, input, input.signal)
+      .catch(value => value);
+
+    expect(error.code).toBe('hosted_app_not_running');
+    expect(f.runtime.previewMints).toBe(0);
+  });
+
+  test('rejects an already-expired credential instead of publishing it', async () => {
+    const runtime = new FakeRuntime();
+    runtime.previewExpiresAt = 1_800_000_000_000;
+    const f = fixture({ runtime });
+
+    const error = await f.control.start(input).catch(value => value);
+
+    expect(error.code).toBe('hosted_app_preview_unavailable');
+    expect(runtime.terminations).toEqual(['vm-app-1']);
+    expect(f.registry.record).toMatchObject({ state: 'TERMINATED' });
   });
 });

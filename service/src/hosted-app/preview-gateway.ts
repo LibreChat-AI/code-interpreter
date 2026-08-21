@@ -76,7 +76,15 @@ export async function hostedAppPreviewGateway(
         return;
       }
       const record = await readRuntimeSessionRecord(runtimeId);
-      if (!record?.hosted_app || record.state !== 'RUNNING') {
+      if (
+        !record?.hosted_app
+        || record.state !== 'RUNNING'
+        || record.hosted_app.revision !== linkClaims.revision
+        || !record.microvm_id
+        || !record.endpoint
+        || record.hard_deadline_at == null
+        || record.hard_deadline_at <= Date.now()
+      ) {
         reject(res, 409, 'Hosted app is not running');
         return;
       }
@@ -130,6 +138,7 @@ export async function hostedAppPreviewGateway(
       res,
       {
         hostedAppRuntimeId: runtimeId,
+        revision: claims.revision,
         ownerBinding: claims.ownerBinding,
         publicHost: publicOrigin.host,
       },

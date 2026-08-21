@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { validateRuntimeSessionHint } from '../runtime-session/id';
 
 const APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+export const HOSTED_APP_REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_ARGS = 64;
 const MAX_ARG_BYTES = 4_096;
@@ -135,7 +135,9 @@ export function parseHostedAppStartRequest(raw: unknown): {
   const appId = boundedString(raw, 'app_id', 64);
   validateHostedAppId(appId);
   const revision = boundedString(raw, 'revision', 128);
-  if (!REVISION_PATTERN.test(revision)) throw new HostedAppSpecError('revision is malformed');
+  if (!HOSTED_APP_REVISION_PATTERN.test(revision)) {
+    throw new HostedAppSpecError('revision is malformed');
+  }
   const language = boundedString(raw, 'language', 64);
   const version = boundedString(raw, 'version', 128);
   const entrypoint = canonicalRelativePath(

@@ -11,6 +11,7 @@ import {
 const key = Buffer.alloc(32, 9);
 const claims = {
   hostedAppRuntimeId: `happ_${'a'.repeat(40)}`,
+  revision: 'rev-1',
   ownerBinding: hostedAppPreviewOwnerBinding({
     tenantId: 'tenant-1',
     canonicalUserId: 'user-1',
@@ -29,6 +30,15 @@ describe('hosted app preview access', () => {
     expect(() => verifyHostedAppPreviewAccess(parts.join('.'), key, 1_000_000)).toThrow('invalid');
     expect(() => verifyHostedAppPreviewAccess(`${token}=`, key, 1_000_000)).toThrow('malformed');
     expect(() => verifyHostedAppPreviewAccess(token, key, claims.expiresAt)).toThrow('expired');
+  });
+
+  test('binds the capability to one immutable app revision', () => {
+    const token = signHostedAppPreviewAccess(claims, key);
+    expect(verifyHostedAppPreviewAccess(token, key, 1_000_000).revision).toBe('rev-1');
+    expect(() => signHostedAppPreviewAccess({
+      ...claims,
+      revision: '../rev-2',
+    }, key)).toThrow('claims are invalid');
   });
 
   test('blinds tenant and user identities into a stable keyed owner binding', () => {
