@@ -269,8 +269,9 @@ function isRecoveryRecord(value: unknown): value is RecoveryRecord {
   return typeof record.session_id === 'string'
     && isValidId(record.session_id)
     && typeof record.expected_session_key === 'string'
+    && record.expected_session_key.length > 0
     && record.expected_session_key.length <= MAX_RECOVERY_SESSION_KEY_LENGTH
-    && /^[A-Za-z0-9_.:-]+$/.test(record.expected_session_key);
+    && !/\p{Cc}/u.test(record.expected_session_key);
 }
 
 export function parseRecoveryManifest(

@@ -102,6 +102,31 @@ describe('rehydrate-session-cache', () => {
     ]);
   });
 
+  it('accepts session keys containing identity punctuation and Unicode', () => {
+    const emittedSessionKey = 'tenant+東京@example.com/user:user+東京@example.com';
+    const input = [
+      JSON.stringify(SOURCE),
+      JSON.stringify({ session_id: SESSION_ID, expected_session_key: emittedSessionKey }),
+    ].join('\n');
+
+    expect(parseRecoveryManifest(input, SCOPE).records).toEqual([
+      { session_id: SESSION_ID, expected_session_key: emittedSessionKey },
+    ]);
+  });
+
+  it('rejects empty session keys and control characters', () => {
+    for (const expectedSessionKey of ['', 'tenant:user:user\nid']) {
+      const input = [
+        JSON.stringify(SOURCE),
+        JSON.stringify({ session_id: SESSION_ID, expected_session_key: expectedSessionKey }),
+      ].join('\n');
+
+      expect(() => parseRecoveryManifest(input, SCOPE)).toThrow(
+        'must contain a valid session_id and expected_session_key',
+      );
+    }
+  });
+
   it('accepts recovery scope from arguments or configuration', () => {
     expect(parseOptions([
       '--environment', 'argument-env',
