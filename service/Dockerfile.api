@@ -18,9 +18,11 @@ RUN cd /temp/prod && bun install --frozen-lockfile --production
 FROM base AS builder
 COPY --from=install /temp/dev/node_modules node_modules
 COPY service/src ./src
+COPY service/scripts ./scripts
 COPY shared /shared
 COPY service/tsconfig.json ./
 RUN bun build ./src/api-server.ts --minify --outdir .build --target bun --external '@opentelemetry/*'
+RUN bun build ./scripts/rehydrate-session-cache.ts --minify --outdir .build-migrations --target bun --external '@opentelemetry/*'
 
 # Production stage
 FROM oven/bun:1.3.14 AS production
@@ -30,6 +32,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 COPY --from=install /temp/prod/node_modules ./node_modules
 COPY --from=builder /app/.build ./.build
+COPY --from=builder /app/.build-migrations ./.build-migrations
 COPY --from=builder /app/src ./src
 # Copy matplotlib templates to /app where __dirname points at runtime
 COPY --from=builder /app/src/matplotlib.py /app/src/matplotlib-async.py ./
