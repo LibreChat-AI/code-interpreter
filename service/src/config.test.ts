@@ -54,6 +54,11 @@ describe('resolvePositiveIntEnv', () => {
     expect(resolvePositiveIntEnv('NaN', 42)).toBe(42);
     expect(resolvePositiveIntEnv('not-a-number', 42)).toBe(42);
   });
+
+  test('falls back to the default when flooring would collapse a fraction to zero', () => {
+    expect(resolvePositiveIntEnv('0.5', 42)).toBe(42);
+    expect(resolvePositiveIntEnv('0.9', 42)).toBe(42);
+  });
 });
 
 describe('parsePlanLimits', () => {
