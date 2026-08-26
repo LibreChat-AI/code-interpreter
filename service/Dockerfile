@@ -16,10 +16,12 @@ RUN cd /temp/prod && bun install --frozen-lockfile --production
 FROM base AS builder
 COPY --from=install /temp/dev/node_modules node_modules
 COPY service/src ./src
+COPY service/scripts ./scripts
 COPY shared /shared
 COPY service/tsconfig.json ./
 RUN bun build ./src/file-server.ts --minify --outdir .build --target bun --external '@opentelemetry/*'
 RUN bun build ./src/api-server.ts --minify --outdir .build-api --target bun --external '@opentelemetry/*'
+RUN bun build ./scripts/rehydrate-session-cache.ts --minify --outdir .build-migrations --target bun --external '@opentelemetry/*'
 RUN bun build ./src/worker-server.ts --minify --outdir .build-worker --target bun --external '@opentelemetry/*'
 RUN bun build ./src/egress-gateway.ts --minify --outdir .build-egress-gateway --target bun --external '@opentelemetry/*'
 
@@ -37,6 +39,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
 COPY --from=builder /app/.build-api ./.build-api
+COPY --from=builder /app/.build-migrations ./.build-migrations
 COPY --from=builder /app/src/*.py ./src/
 CMD ["bun", "run", ".build-api/api-server.js"]
 
