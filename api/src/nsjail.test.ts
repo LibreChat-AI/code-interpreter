@@ -91,6 +91,29 @@ describe('NsJail args', () => {
     expect(valueAfter(args, '--config')).toBe('/tmp/nsjail-job-xyz.cfg');
   });
 
+  test('exposes only the package bundle checksum alongside the selected runtime', async () => {
+    const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'nsjail-bundle-checksum-'));
+    const originalPackagesDirectory = config.packages_directory;
+    config.packages_directory = tmp;
+    try {
+      const checksum = path.join(tmp, '.bundle.sha256');
+      await fsp.writeFile(checksum, '0'.repeat(64));
+      const args = buildArgs({
+        logPath: '/tmp/nsjail-test.log',
+        pkgdir: path.join(tmp, 'python/3.14.4'),
+        timeout: 1000,
+        memoryLimit: -1,
+        envVars: {},
+        command: ['/bin/bash', path.join(tmp, 'python/3.14.4/run'), 'main.py'],
+        identity: { slot: 0, uid: 65534, gid: 65534, perJobUid: false },
+      });
+      expect(hasArgPair(args, '-R', `${checksum}:${checksum}`)).toBe(true);
+    } finally {
+      config.packages_directory = originalPackagesDirectory;
+      await fsp.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   test('does not export TOOL_CALL_SOCKET into the jail (preamble references the literal path)', () => {
     const args = buildArgs({
       logPath: '/tmp/nsjail-test.log',

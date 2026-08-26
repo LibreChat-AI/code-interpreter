@@ -668,6 +668,11 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
     '-R', `${pkgdir}:${pkgdir}`,
   ];
 
+  const bundleChecksum = path.join(config.packages_directory, '.bundle.sha256');
+  if (fs.existsSync(bundleChecksum)) {
+    args.push('-R', `${bundleChecksum}:${bundleChecksum}`);
+  }
+
   if (config.use_cgroupv2) {
     args.push('--use_cgroupv2');
   }

@@ -45,8 +45,20 @@ profile sandbox-nsjail flags=(attach_disconnected,mediate_deleted) {
   
   # Full access to sandbox working directories
   /pkgs/** rwlk,
+  /host-packages/ r,
+  /host-packages/** r,
   /tmp/** rwlk,
   /mnt/** rwlk,
+
+  # Read-only registries required by native document and media tools
+  /etc/alternatives/ r,
+  /etc/alternatives/** r,
+  /etc/fonts/ r,
+  /etc/fonts/** r,
+  /etc/libreoffice/ r,
+  /etc/libreoffice/** r,
+  /var/cache/fontconfig/ r,
+  /var/cache/fontconfig/** r,
   
   # NsJail binary and config
   /usr/sbin/nsjail rix,

@@ -82,6 +82,11 @@ RUN apt-get update && \
     file \
     jq \
     poppler-utils \
+    libreoffice \
+    ffmpeg \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    shared-mime-info \
     fonts-dejavu \
     fonts-liberation \
     libnl-route-3-200 \
