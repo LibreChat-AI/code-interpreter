@@ -214,11 +214,11 @@ export function resolvePositiveIntEnv(raw: string | undefined, defaultValue: num
   if (raw == null || raw.trim() === '') {
     return defaultValue;
   }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  const parsed = Math.floor(Number(raw));
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     return defaultValue;
   }
-  return Math.floor(parsed);
+  return parsed;
 }
 
 export function resolveEgressGrantTtlSeconds(rawTtlSeconds: string | undefined, jobTimeoutMs: number): number {
