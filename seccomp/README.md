@@ -12,7 +12,7 @@ The `nsjail.json` profile uses a whitelist approach - only explicitly allowed sy
 
 2. **NsJail namespace operations** - `clone`, `clone3`, `setns`, `unshare`, `sethostname`, `setdomainname`
 
-3. **NsJail mount operations** - `mount`, `umount`, `umount2`, `pivot_root`
+3. **NsJail mount operations** - legacy mount syscalls plus the modern bind-mount flow used by util-linux (`open_tree`, `mount_setattr`, `move_mount`)
 
 4. **NsJail chroot** - `chroot`
 

@@ -46,6 +46,7 @@ const sharedSyscallDefines = [
   '#define fsopen 430',
   '#define fsmount 432',
   '#define fspick 433',
+  '#define mount_setattr 442',
   /* pidfd_* are Linux 5.1+/5.3+ — newer than Kafel's bundled symbol
    * table on the pinned NsJail snapshot, so define numerically. Same
    * number on x86_64 and arm64. */
@@ -111,9 +112,10 @@ const SECCOMP_POLICY = [
   '    add_key, request_key, keyctl,',
   '    mount, umount2, pivot_root,',
   /* New mount API (Linux 5.2+) — orthogonal to mount(2) and not covered by
-   * the line above. open_tree+move_mount can replicate a bind-mount; fsopen/
-   * fsmount/fspick form the new filesystem-context flow. Block all five. */
-  '    move_mount, open_tree, fsopen, fsmount, fspick,',
+   * the line above. open_tree+mount_setattr+move_mount can replicate a
+   * read-only bind-mount; fsopen/fsmount/fspick form the filesystem-context
+   * flow. The runner needs these before NsJail starts, but sandboxed code does not. */
+  '    move_mount, open_tree, mount_setattr, fsopen, fsmount, fspick,',
   '    swapon, swapoff, reboot,',
   '    init_module, finit_module, delete_module,',
   /* setns joins an existing namespace via fd. Unshare is already blocked

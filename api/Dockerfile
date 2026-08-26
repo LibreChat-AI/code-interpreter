@@ -216,6 +216,8 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     ca-certificates \
     && dnf clean all
 
+RUN mkdir -p /etc/alternatives /etc/fonts /etc/libreoffice /var/cache/fontconfig
+
 COPY --from=launcher-builder /launcher/target/release/sandbox-launcher /usr/local/bin/launcher
 
 COPY launcher/entrypoint.sh /usr/local/bin/launcher-entrypoint.sh

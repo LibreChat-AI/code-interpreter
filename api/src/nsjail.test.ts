@@ -368,7 +368,7 @@ describe('NsJail seccomp policy', () => {
 
   test('KILLs the new mount API family (Linux 5.2+)', () => {
     const policy = seccompPolicy();
-    for (const name of ['move_mount', 'open_tree', 'fsopen', 'fsmount', 'fspick']) {
+    for (const name of ['move_mount', 'open_tree', 'mount_setattr', 'fsopen', 'fsmount', 'fspick']) {
       expect(policy).toMatch(new RegExp(`\\b${name}\\b[,\\s]`));
     }
   });
@@ -380,6 +380,7 @@ describe('NsJail seccomp policy', () => {
     expect(policy).toContain('#define fsopen 430');
     expect(policy).toContain('#define fsmount 432');
     expect(policy).toContain('#define fspick 433');
+    expect(policy).toContain('#define mount_setattr 442');
   });
 
   test('KILLs AF_VSOCK in the socket(domain) filter', () => {
