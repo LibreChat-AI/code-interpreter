@@ -47,8 +47,11 @@ if grep -q virtiofs /proc/filesystems 2>/dev/null; then
     fi
 fi
 
-# Restrict dmesg access (requires CAP_SYSLOG to read kernel ring buffer)
-echo 1 > /proc/sys/kernel/dmesg_restrict 2>/dev/null || true
+# Only change dmesg policy inside the dedicated guest kernel. Direct mode must
+# not attempt to mutate the host kernel's sysctl namespace.
+if [ "${KVM_ENABLED:-true}" = "true" ]; then
+    echo 1 > /proc/sys/kernel/dmesg_restrict 2>/dev/null || true
+fi
 
 # Remove Kubernetes/containerd proc masks so NsJail can mount fresh procfs.
 # Container runtimes add submounts to /proc (kcore, keys, timer_list, etc.)

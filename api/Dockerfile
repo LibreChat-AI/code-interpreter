@@ -82,6 +82,11 @@ RUN apt-get update && \
     file \
     jq \
     poppler-utils \
+    libreoffice \
+    ffmpeg \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    shared-mime-info \
     fonts-dejavu \
     fonts-liberation \
     libnl-route-3-200 \
@@ -210,6 +215,8 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     findutils \
     ca-certificates \
     && dnf clean all
+
+RUN mkdir -p /etc/alternatives /etc/fonts /etc/libreoffice /var/cache/fontconfig
 
 COPY --from=launcher-builder /launcher/target/release/sandbox-launcher /usr/local/bin/launcher
 

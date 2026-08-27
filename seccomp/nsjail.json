@@ -358,6 +358,9 @@
 			"comment": "NsJail mount operations - requires CAP_SYS_ADMIN",
 			"names": [
 				"mount",
+				"open_tree",
+				"mount_setattr",
+				"move_mount",
 				"umount",
 				"umount2",
 				"pivot_root"

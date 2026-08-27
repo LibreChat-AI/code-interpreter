@@ -42,15 +42,51 @@ profile sandbox-nsjail flags=(attach_disconnected,mediate_deleted) {
   # ==========================================================================
   # File access rules
   # ==========================================================================
-  
+
+  / r,
+
   # Full access to sandbox working directories
-  /pkgs/** rwlk,
+  /pkgs/ rw,
+  /pkgs/** rwmlkix,
+  /host-packages/ r,
+  /host-packages/** r,
+  /sandbox_api/ rw,
+  /sandbox_api/** rix,
+  /sandbox-rootfs/ r,
+  /sandbox-rootfs/** r,
+  /tmp/ rw,
   /tmp/** rwlk,
+  /mnt/ rw,
   /mnt/** rwlk,
+  /run/mount/ rw,
+  /run/mount/** rwk,
+  /run/user/ rw,
+  /run/user/** rwk,
+
+  # util-linux mount and libc identity lookups used during direct startup
+  /etc/fstab r,
+  /etc/passwd r,
+  /etc/group r,
+  /etc/nsswitch.conf r,
+  /etc/authselect/nsswitch.conf r,
+  /etc/host.conf r,
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/gai.conf r,
+  /etc/services r,
+
+  # Read-only registries required by native document and media tools
+  /etc/alternatives/ r,
+  /etc/alternatives/** r,
+  /etc/fonts/ r,
+  /etc/fonts/** r,
+  /etc/libreoffice/ r,
+  /etc/libreoffice/** r,
+  /var/cache/fontconfig/ r,
+  /var/cache/fontconfig/** r,
   
   # NsJail binary and config
   /usr/sbin/nsjail rix,
-  /sandbox_api/** r,
   /sandbox_api/config/** r,
   
   # Runtime executables (Python, Node, Bun, etc.)
@@ -69,6 +105,9 @@ profile sandbox-nsjail flags=(attach_disconnected,mediate_deleted) {
   
   # Proc filesystem (read-only for most, some writes for cgroups)
   /proc/** r,
+  /proc/[0-9]*/uid_map rw,
+  /proc/[0-9]*/gid_map rw,
+  /proc/[0-9]*/setgroups rw,
   /proc/sys/kernel/random/uuid r,
   
   # Cgroups v2 (NsJail uses these for resource limits)

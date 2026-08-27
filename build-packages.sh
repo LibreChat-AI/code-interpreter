@@ -10,8 +10,14 @@
 # Environment Variables:
 #   PYTHON_VERSION=3.14.4    # Python version to install
 #   NODE_VERSION=24.15.0     # Node.js version to install
+#   NPM_VERSION=12.0.2       # npm version bundled into the Node runtime
+#   NPM_TAR_VERSION=7.5.21   # Patched tar package embedded in npm
+#   NPM_BRACE_EXPANSION_VERSION=5.0.9 # Patched brace-expansion embedded in npm
+#   NPM_IP_ADDRESS_VERSION=10.3.1 # Patched ip-address embedded in npm
+#   NPM_INSTALL_ATTEMPTS=3   # Retry the patched npm install
 #   BUN_VERSION=1.3.14       # Bun version to install
 #   BASH_PACKAGE_VERSION=5.2.0 # Bash package registration version (semver-like x.y.z)
+#   PYTHON_PACKAGE_INSTALL_ATTEMPTS=3 # Retry the complete Python dependency install
 #   SKIP_PYTHON_PACKAGES=1   # Skip Python pip packages
 #   SKIP_JS_PACKAGES=1       # Skip JavaScript npm packages for Node/Bun
 #   SKIP_NODE=1              # Skip Node.js installation
@@ -28,6 +34,11 @@ cd "$SCRIPT_DIR"
 
 PYTHON_VERSION="${PYTHON_VERSION:-3.14.4}"
 NODE_VERSION="${NODE_VERSION:-24.15.0}"
+NPM_VERSION="${NPM_VERSION:-12.0.2}"
+NPM_TAR_VERSION="${NPM_TAR_VERSION:-7.5.21}"
+NPM_BRACE_EXPANSION_VERSION="${NPM_BRACE_EXPANSION_VERSION:-5.0.9}"
+NPM_IP_ADDRESS_VERSION="${NPM_IP_ADDRESS_VERSION:-10.3.1}"
+NPM_INSTALL_ATTEMPTS="${NPM_INSTALL_ATTEMPTS:-3}"
 BUN_VERSION="${BUN_VERSION:-1.3.14}"
 PACKAGES_DIR="./data/pkgs"
 JS_PACKAGE_MANIFEST="${JS_PACKAGE_MANIFEST:-${SCRIPT_DIR}/javascript-packages.txt}"
@@ -109,7 +120,8 @@ install_python() {
         mkdir -p ${pkg_dest}
         rm -f ${pkg_dest}/.package-installed
         cd /tmp
-        wget -q https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz
+        wget -q --tries=5 --timeout=30 --retry-connrefused \
+            https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz
         tar xf Python-${PYTHON_VERSION}.tar.xz
         cd Python-${PYTHON_VERSION}
         ./configure --prefix=${pkg_dest} --enable-optimizations 2>/dev/null
@@ -163,7 +175,14 @@ install_python_packages() {
     # onnxruntime wheel segfaults under NsJail. 0.0.2 still supports PPTX via
     # python-pptx without that native dependency.
     local python_packages_installed=false
-    if docker exec "$CONTAINER_NAME" "$pip_path" install \
+    local install_attempts="${PYTHON_PACKAGE_INSTALL_ATTEMPTS:-3}"
+    if [[ ! "$install_attempts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: PYTHON_PACKAGE_INSTALL_ATTEMPTS must be a positive integer" >&2
+        return 1
+    fi
+
+    for ((attempt = 1; attempt <= install_attempts; attempt++)); do
+        if docker exec "$CONTAINER_NAME" "$pip_path" install --retries 10 --timeout 60 \
         openpyxl \
         matplotlib \
         numpy \
@@ -177,7 +196,12 @@ install_python_packages() {
         networkx \
         sympy \
         wordcloud \
+        pypdf \
         pypdf2 \
+        pdfplumber \
+        "weasyprint>=68" \
+        "msgpack>=1.2.1" \
+        "setuptools>=78.1.1" \
         python-docx \
         imageio \
         seaborn \
@@ -218,14 +242,25 @@ install_python_packages() {
         osmnx \
         folium \
         gpxpy; then
-        python_packages_installed=true
-    else
+            python_packages_installed=true
+            break
+        fi
+
+        if [ "$attempt" -lt "$install_attempts" ]; then
+            echo "Python package installation attempt ${attempt} failed; retrying..."
+            sleep $((attempt * 5))
+        fi
+    done
+
+    if [ "$python_packages_installed" != true ]; then
         echo "ERROR: Python package installation failed"
         return 1
     fi
 
     docker exec "$CONTAINER_NAME" "$pip_path" install --upgrade six 2>/dev/null || true
     if [ "$python_packages_installed" = true ]; then
+        docker exec "$CONTAINER_NAME" "/pkgs/python/${PYTHON_VERSION}/bin/python3" -c \
+            'from pathlib import Path; import pip; (Path(pip.__file__).resolve().parent / "_vendor" / "bom.cdx.json").unlink(missing_ok=True)'
         docker exec "$CONTAINER_NAME" bash -c "echo \$(date +%s)000 > /pkgs/python/${PYTHON_VERSION}/.package-installed"
     fi
 
@@ -250,7 +285,8 @@ install_node() {
         mkdir -p ${pkg_dest}
         rm -f ${pkg_dest}/.package-installed
         cd /tmp
-        curl -fsSL -o node.tar.xz https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz
+        curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 \
+            -o node.tar.xz https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz
         tar -xJf node.tar.xz --strip-components=1 -C ${pkg_dest}
         rm -f node.tar.xz
     "
@@ -280,11 +316,72 @@ chmod +x ${pkg_dest}/run"
         echo 'NODE_PATH=${pkg_dest}/node_modules' >> ${pkg_dest}/.env
     "
 
+    if [[ ! "$NPM_INSTALL_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: NPM_INSTALL_ATTEMPTS must be a positive integer" >&2
+        return 1
+    fi
+
+    local npm_installed=false
+    for ((attempt = 1; attempt <= NPM_INSTALL_ATTEMPTS; attempt++)); do
+        if docker exec "$CONTAINER_NAME" bash -c "
+            set -e
+            export PATH=${pkg_dest}/bin:\$PATH
+            export npm_config_fetch_retries=5
+            export npm_config_fetch_retry_maxtimeout=60000
+            export npm_config_fetch_timeout=60000
+            ${pkg_dest}/bin/npm install --global \
+                --prefix ${pkg_dest} \
+                --no-audit \
+                --no-fund \
+                npm@${NPM_VERSION}
+            patch_npm_dependency() {
+                package_name=\"\$1\"
+                package_version=\"\$2\"
+                package_root=${pkg_dest}/lib/node_modules/npm/node_modules/\"\$package_name\"
+                patch_dir=\$(mktemp -d)
+                ${pkg_dest}/bin/npm pack --silent \
+                    --pack-destination \"\$patch_dir\" \
+                    \"\$package_name@\$package_version\" >/dev/null
+                package_archive=\$(find \"\$patch_dir\" -maxdepth 1 -type f -name '*.tgz' -print -quit)
+                test -f \"\$package_archive\"
+                rm -rf \"\$package_root\"
+                mkdir -p \"\$package_root\"
+                tar -xzf \"\$package_archive\" --strip-components=1 -C \"\$package_root\"
+                rm -rf \"\$patch_dir\"
+            }
+            patch_npm_dependency tar ${NPM_TAR_VERSION}
+            patch_npm_dependency brace-expansion ${NPM_BRACE_EXPANSION_VERSION}
+            patch_npm_dependency ip-address ${NPM_IP_ADDRESS_VERSION}
+            test \"\$(${pkg_dest}/bin/npm --version)\" = ${NPM_VERSION}
+            test \"\$(${pkg_dest}/bin/node -p \\
+                \"require('${pkg_dest}/lib/node_modules/npm/node_modules/tar/package.json').version\")\" \
+                = ${NPM_TAR_VERSION}
+            test \"\$(${pkg_dest}/bin/node -p \\
+                \"require('${pkg_dest}/lib/node_modules/npm/node_modules/brace-expansion/package.json').version\")\" \
+                = ${NPM_BRACE_EXPANSION_VERSION}
+            test \"\$(${pkg_dest}/bin/node -p \\
+                \"require('${pkg_dest}/lib/node_modules/npm/node_modules/ip-address/package.json').version\")\" \
+                = ${NPM_IP_ADDRESS_VERSION}
+        "; then
+            npm_installed=true
+            break
+        fi
+        if [ "$attempt" -lt "$NPM_INSTALL_ATTEMPTS" ]; then
+            echo "Patched npm installation attempt ${attempt} failed; retrying..."
+            sleep $((attempt * 5))
+        fi
+    done
+    if [ "$npm_installed" != true ]; then
+        echo "ERROR: Failed to install the patched npm runtime" >&2
+        return 1
+    fi
+
     if [ "${SKIP_JS_PACKAGES:-}" = "1" ]; then
         docker exec "$CONTAINER_NAME" bash -c "echo \$(date +%s)000 > ${pkg_dest}/.package-installed"
     fi
 
     echo "Node.js ${NODE_VERSION} installed: $(docker exec "$CONTAINER_NAME" "${pkg_dest}/bin/node" --version)"
+    echo "npm ${NPM_VERSION} installed with tar ${NPM_TAR_VERSION}, brace-expansion ${NPM_BRACE_EXPANSION_VERSION}, and ip-address ${NPM_IP_ADDRESS_VERSION}"
 }
 
 install_node_packages() {
@@ -347,7 +444,8 @@ install_bun() {
         mkdir -p ${pkg_dest}
         rm -f ${pkg_dest}/.package-installed
         cd /tmp
-        curl -fsSL -o bun.zip https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-${BUN_ARCH}.zip
+        curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 \
+            -o bun.zip https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-${BUN_ARCH}.zip
         unzip -o bun.zip
         mv bun-linux-${BUN_ARCH}/bun ${pkg_dest}/bun
         chmod +x ${pkg_dest}/bun
@@ -494,6 +592,18 @@ EOF
     echo "Bash ${bash_package_version} registered (using system binary ${system_bash_version})"
 }
 
+write_bundle_checksum() {
+    docker exec "$CONTAINER_NAME" bash -c '
+        set -euo pipefail
+        checksum="$(find /pkgs -type f ! -name .bundle.sha256 -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sha256sum \
+            | cut -d " " -f 1)"
+        printf "%s\n" "$checksum" > /pkgs/.bundle.sha256
+    '
+}
+
 main() {
     echo "=============================================="
     echo "  Code Interpreter API - Package Builder"
@@ -528,6 +638,7 @@ main() {
     install_bun
     install_bun_packages
     install_bash
+    write_bundle_checksum
 
     echo "Setting permissions..."
     chmod -R a+rX "$PACKAGES_DIR" 2>/dev/null || true

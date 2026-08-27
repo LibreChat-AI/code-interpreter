@@ -135,7 +135,7 @@ data:
         },
         {
           "comment": "NsJail mount operations - requires CAP_SYS_ADMIN",
-          "names": ["mount", "umount", "umount2", "pivot_root"],
+          "names": ["mount", "open_tree", "mount_setattr", "move_mount", "umount", "umount2", "pivot_root"],
           "action": "SCMP_ACT_ALLOW"
         },
         {
