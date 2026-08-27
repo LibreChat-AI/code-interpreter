@@ -80,6 +80,8 @@ for rule in \
     '/run/user/** rwk,' \
     '/etc/fstab r,' \
     '/etc/passwd r,' \
+    '/etc/hosts r,' \
+    '/etc/resolv.conf r,' \
     '/proc/[0-9]*/uid_map rw,' \
     '/proc/[0-9]*/gid_map rw,' \
     '/proc/[0-9]*/setgroups rw,'; do
