@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import type { CodeApiAuthContext, RequestFile } from '../types';
 import type { LCTool } from '../preamble';
-import { buildReplayExecutionState } from './programmatic-state';
+import {
+  buildReplayExecutionState,
+  resolveReplayStateSandboxBackend,
+} from './programmatic-state';
 
 const TOOLS = [
   {
@@ -43,6 +46,27 @@ function build(
 }
 
 describe('buildReplayExecutionState', () => {
+  test('persists the resolved queue consumer backend for split stateful deployments', () => {
+    expect(
+      resolveReplayStateSandboxBackend({
+        executionProfile: 'stateful',
+        executionProfileSource: 'explicit',
+        apiSandboxBackend: 'http',
+      }),
+    ).toBe('lambda-microvm');
+  });
+
+  test('pins bridge replay state to the remote bridge backend', () => {
+    expect(
+      resolveReplayStateSandboxBackend({
+        executionProfile: 'stateful',
+        executionProfileSource: 'explicit',
+        apiSandboxBackend: 'http',
+        bridgeWorkerId: 'worker-1',
+      }),
+    ).toBe('remote-bridge');
+  });
+
   test('persists canonical LibreChat auth context for replay continuations', () => {
     const authContext: CodeApiAuthContext = {
       userId: 'user_canonical',

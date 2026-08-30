@@ -36,7 +36,10 @@ import {
 import { findUnregisteredToolCall } from '../tool-scope';
 import { summarizeRequestedFiles } from '../execution-log';
 import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-authorization';
-import { buildReplayExecutionState } from './programmatic-state';
+import {
+  buildReplayExecutionState,
+  resolveReplayStateSandboxBackend,
+} from './programmatic-state';
 import {
   BridgeWorkerSelectionError,
   CODEAPI_BRIDGE_WORKER_HEADER,
@@ -578,7 +581,12 @@ async function handleReplayInitial(
     timeout,
     language,
     bridgeWorkerId,
-    sandboxBackend: env.SANDBOX_BACKEND,
+    sandboxBackend: resolveReplayStateSandboxBackend({
+      executionProfile: env.EXECUTION_PROFILE,
+      executionProfileSource: env.EXECUTION_PROFILE_SOURCE,
+      apiSandboxBackend: env.SANDBOX_BACKEND,
+      bridgeWorkerId,
+    }),
   });
   /** Replay mode persists the full request (`userCode` + `tools` + `files`)
    * inside `ExecutionState` so continuations can re-enqueue without the
