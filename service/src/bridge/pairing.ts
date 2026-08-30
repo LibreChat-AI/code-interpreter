@@ -154,6 +154,10 @@ function legacyPairingScanDeadlineKey(): string {
   return `${PREFIX}:migration:legacy-pairing-scan-until`;
 }
 
+function legacyPairingWorkerScanKey(workerId: string): string {
+  return `${PREFIX}:migration:legacy-pairing-scanned:${workerId}`;
+}
+
 function proofNonceKey(credential: string, nonce: string): string {
   return `${PREFIX}:proof:${digest(credential)}:${digest(nonce)}`;
 }
@@ -362,30 +366,47 @@ export class RedisBridgePairingStore {
     const now = Date.now();
     const migrationWindowMs = this.pairingTtlSeconds * 1000;
     const proposedDeadline = now + migrationWindowMs;
-    const initialized = await this.redis.set(
-      deadlineKey,
-      String(proposedDeadline),
-      'PX',
-      migrationWindowMs,
-      'NX',
-    );
-    let deadline = proposedDeadline;
-    if (initialized !== 'OK') {
-      deadline = Number(await this.redis.get(deadlineKey));
-      if (!Number.isFinite(deadline) || deadline <= now) {
-        deadline = proposedDeadline;
-        await this.redis.set(
-          deadlineKey,
-          String(deadline),
-          'PX',
-          migrationWindowMs,
-        );
-      } else {
-        // Retrofit an expiry onto markers written by the preceding release.
-        await this.redis.pexpire(deadlineKey, Math.max(1, deadline - now));
+    let rawDeadline = await this.redis.get(deadlineKey);
+    if (rawDeadline == null) {
+      const initialized = await this.redis.set(
+        deadlineKey,
+        String(proposedDeadline),
+        'NX',
+      );
+      rawDeadline = initialized === 'OK'
+        ? String(proposedDeadline)
+        : await this.redis.get(deadlineKey);
+    } else if ((await this.redis.pttl(deadlineKey)) > 0) {
+      // Markers from the preceding build expired and reopened forever. Keep
+      // their original deadline, but make it durable so normal idle periods
+      // cannot start another migration window.
+      await this.redis.persist(deadlineKey);
+    }
+
+    const indexedKey = await this.redis.get(workerPairingIndexKey(workerId));
+    const indexedRaw = indexedKey == null ? null : await this.redis.get(indexedKey);
+    let rollbackDetected = false;
+    if (indexedRaw != null) {
+      try {
+        rollbackDetected = (JSON.parse(indexedRaw) as StoredPairing).generation == null;
+      } catch {
+        rollbackDetected = false;
       }
     }
-    if (!Number.isFinite(deadline) || Date.now() > deadline) return;
+
+    const deadline = Number(rawDeadline);
+    if (!rollbackDetected) {
+      if (!Number.isFinite(deadline) || now > deadline) return;
+      const claimed = await this.redis.set(
+        legacyPairingWorkerScanKey(workerId),
+        '1',
+        'PX',
+        Math.max(1, deadline - now),
+        'NX',
+      );
+      if (claimed !== 'OK') return;
+    }
+
     let cursor = '0';
     do {
       const [nextCursor, keys] = await this.redis.scan(

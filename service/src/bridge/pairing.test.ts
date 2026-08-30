@@ -382,11 +382,40 @@ describe('RedisBridgePairingStore', () => {
       'EX',
       60,
     );
+    await redis.set(
+      'codeapi:bridge:v1:pairing-index:vm-later-rollback',
+      legacyKey,
+      'EX',
+      60,
+    );
 
     await pairings.revoke('vm-later-rollback');
 
     await expect(redis.get(legacyKey)).resolves.toBeNull();
-    expect(await redis.pttl(deadlineKey)).toBeGreaterThan(0);
+    await expect(redis.get(deadlineKey)).resolves.toBe('0');
+  });
+
+  test('does not restart an expired migration window without rollback evidence', async () => {
+    const legacyCode = 'unindexed-post-migration-code';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    const deadlineKey = 'codeapi:bridge:v1:migration:legacy-pairing-scan-until';
+    await redis.set(deadlineKey, '0');
+    await redis.set(
+      legacyKey,
+      JSON.stringify({
+        workerId: 'vm-no-rollback-signal',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      'EX',
+      60,
+    );
+
+    await pairings.revoke('vm-no-rollback-signal');
+
+    await expect(redis.get(legacyKey)).resolves.not.toBeNull();
+    await expect(redis.get(deadlineKey)).resolves.toBe('0');
   });
 
   test('redeems an unrevoked pairing code issued by a pre-fence replica', async () => {
