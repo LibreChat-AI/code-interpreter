@@ -22,7 +22,9 @@ const FILES = [
   },
 ] as RequestFile[];
 
-function build(overrides: Partial<Parameters<typeof buildReplayExecutionState>[0]> = {}) {
+function build(
+  overrides: Partial<Parameters<typeof buildReplayExecutionState>[0]> = {},
+): ReturnType<typeof buildReplayExecutionState> {
   return buildReplayExecutionState({
     executionId: 'exec_123',
     sessionId: 'session_123',
@@ -52,7 +54,7 @@ describe('buildReplayExecutionState', () => {
       authContextHash: 'hash_123',
     };
 
-    const state = build({ authContext });
+    const state = build({ authContext, bridgeWorkerId: 'code-user_123' });
 
     expect(state).toMatchObject({
       execution_id: 'exec_123',
@@ -67,6 +69,7 @@ describe('buildReplayExecutionState', () => {
       principalSource: 'openid_reuse',
       authContextHash: 'hash_123',
       apiKeyId: 'key_legacy',
+      bridgeWorkerId: 'code-user_123',
       mode: 'replay',
       userCode: 'print("hello")',
       tools: TOOLS,

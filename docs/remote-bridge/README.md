@@ -41,11 +41,13 @@ CODEAPI_BRIDGE_AUTH_MODE=paired
 # CODEAPI_BRIDGE_WORKER_ID=my-default-vm
 ```
 
-Dynamic routing is accepted only with paired authentication. The trusted
-LibreChat-to-Code-API request selects a worker with
-`X-LibreChat-Code-Worker-ID`; Code API validates the identifier before it
-crosses the queue boundary and requires that worker's stored tenant binding
-before creating a lease.
+Dynamic routing is accepted only with paired authentication. LibreChat signs
+the selected worker into the short-lived Code API JWT as `code_worker_id`.
+`X-LibreChat-Code-Worker-ID` remains the transport header, but Code API accepts
+it only when it exactly matches that authenticated claim. The resolved worker
+is persisted across the queue and programmatic replay boundaries, and Code API
+requires both its stored tenant binding and registered worker credential before
+creating a lease.
 
 Create a single-use pairing code with the administrator secret:
 

@@ -17,6 +17,7 @@ export interface BuildReplayExecutionStateParams {
   isPyPlot: boolean;
   timeout: number;
   language: 'python' | 'bash';
+  bridgeWorkerId?: string;
   now?: number;
 }
 
@@ -41,6 +42,7 @@ export function buildReplayExecutionState(
     principalSource: identity.principalSource,
     authContextHash: identity.authContextHash,
     apiKeyId: params.apiKeyId,
+    bridgeWorkerId: params.bridgeWorkerId,
     startTime: now,
     lastActivity: now,
     mode: 'replay',

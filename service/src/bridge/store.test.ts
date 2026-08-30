@@ -42,6 +42,39 @@ describe('RedisBridgeStore', () => {
     ).rejects.toMatchObject({ code: 'WORKER_UNAUTHORIZED' });
   });
 
+  test('does not lease an assignment to a newly rebound worker credential', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'rebound-worker',
+      credentialId: 'tenant-a-credential',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      binding: {
+        tenantId: 'tenant-a',
+        principal: { type: 'user', id: 'user-a' },
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'rebound-worker',
+      tenantId: 'tenant-a',
+      requireTenantBinding: true,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+
+    await expect(
+      store.lease('rebound-worker', 1_000, undefined, 'tenant-b-credential'),
+    ).resolves.toBeUndefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
   test('delivers and settles one fenced stateful assignment', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,

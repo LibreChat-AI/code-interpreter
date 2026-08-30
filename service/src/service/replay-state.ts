@@ -109,6 +109,8 @@ export interface ExecutionState {
    *  after one `EXECUTION_STATE_TTL` window post a trusted-source
    *  apiKeyId invariant. */
   apiKeyId?: string;
+  /** Authenticated worker selection retained across every replay iteration. */
+  bridgeWorkerId?: string;
   startTime: number;
   /**
    * Wall-clock ms of the last interaction that advanced this execution (initial

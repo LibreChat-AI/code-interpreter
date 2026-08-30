@@ -36,6 +36,11 @@ import { findUnregisteredToolCall } from '../tool-scope';
 import { summarizeRequestedFiles } from '../execution-log';
 import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-authorization';
 import { buildReplayExecutionState } from './programmatic-state';
+import {
+  BridgeWorkerSelectionError,
+  CODEAPI_BRIDGE_WORKER_HEADER,
+  resolveBridgeWorkerSelection,
+} from '../bridge/selection';
 import logger from '../logger';
 import {
   type ExecutionState,
@@ -408,6 +413,7 @@ async function runReplayIteration(
     tenantId: state.tenantId,
     canonicalUserId: state.canonicalUserId,
     executionProfile: env.EXECUTION_PROFILE,
+    ...(state.bridgeWorkerId != null ? { bridgeWorkerId: state.bridgeWorkerId } : {}),
     runtimeSessionMode: 'stateless',
     runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,
     executionManifestClaims: sandboxSecurity.executionManifestClaims,
@@ -439,9 +445,10 @@ async function handleReplayInitial(
   params: {
     apiKeyId: string;
     userId: string;
+    bridgeWorkerId?: string;
   },
 ): Promise<void> {
-  const { apiKeyId, userId } = params;
+  const { apiKeyId, userId, bridgeWorkerId } = params;
   const {
     code,
     tools,
@@ -560,6 +567,7 @@ async function handleReplayInitial(
     isPyPlot,
     timeout,
     language,
+    bridgeWorkerId,
   });
   /** Replay mode persists the full request (`userCode` + `tools` + `files`)
    * inside `ExecutionState` so continuations can re-enqueue without the
@@ -1023,6 +1031,26 @@ router.post('/exec/programmatic', executionLimiter, async (req: t.AuthenticatedR
   } = req.body as t.ProgrammaticRequestBody;
   const rawBody = req.body as Record<string, unknown>;
   const requestedLanguage: unknown = rawBody.language ?? rawBody.lang;
+  let bridgeWorkerId: string | undefined;
+  if (continuation_token == null || continuation_token === '') {
+    try {
+      const bridgeSelection = resolveBridgeWorkerSelection({
+        backend: env.SANDBOX_BACKEND,
+        configuredWorkerId: env.BRIDGE_WORKER_ID,
+        dynamicWorkers: env.BRIDGE_DYNAMIC_WORKERS,
+        requestedWorkerId: req.header(CODEAPI_BRIDGE_WORKER_HEADER),
+        trustedWorkerId: principal.codeWorkerId,
+      });
+      bridgeWorkerId = bridgeSelection?.explicit === true
+        ? bridgeSelection.workerId
+        : undefined;
+    } catch (error) {
+      if (error instanceof BridgeWorkerSelectionError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      throw error;
+    }
+  }
 
   if (
     requestedLanguage !== undefined &&
@@ -1079,9 +1107,9 @@ router.post('/exec/programmatic', executionLimiter, async (req: t.AuthenticatedR
       });
     }
     if (env.PTC_MODE === 'replay') {
-      return await handleReplayInitial(req, res, { apiKeyId, userId });
+      return await handleReplayInitial(req, res, { apiKeyId, userId, bridgeWorkerId });
     }
-    return await handleBlocking(req, res, { apiKeyId, userId });
+    return await handleBlocking(req, res, { apiKeyId, userId, bridgeWorkerId });
   } catch (err) {
     logger.error(`[${INSTANCE_ID}] Programmatic routing error:`, err);
     if (!res.headersSent) {
@@ -1099,9 +1127,9 @@ router.post('/exec/programmatic', executionLimiter, async (req: t.AuthenticatedR
 async function handleBlocking(
   req: t.AuthenticatedRequest,
   res: Response,
-  params: { apiKeyId: string; userId: string },
+  params: { apiKeyId: string; userId: string; bridgeWorkerId?: string },
 ): Promise<void | ReturnType<typeof res.status>> {
-  const { apiKeyId, userId } = params;
+  const { apiKeyId, userId, bridgeWorkerId } = params;
   const {
     code,
     tools,
@@ -1282,6 +1310,7 @@ async function handleBlocking(
     principalSource: identity.principalSource,
     authContextHash: identity.authContextHash,
     apiKeyId,
+    bridgeWorkerId,
     startTime: Date.now(),
     lastActivity: Date.now(),
     mode: 'blocking',
@@ -1378,6 +1407,7 @@ async function handleBlocking(
       tenantId: identity.storageNamespace,
       canonicalUserId: identity.canonicalUserId,
       executionProfile: env.EXECUTION_PROFILE,
+      ...(bridgeWorkerId != null ? { bridgeWorkerId } : {}),
       runtimeSessionMode: 'stateless',
       runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,
       executionManifestClaims: sandboxSecurity.executionManifestClaims,

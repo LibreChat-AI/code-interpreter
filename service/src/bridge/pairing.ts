@@ -27,6 +27,27 @@ redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])
 redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
 return 1
 `;
+const ISSUE_PAIRING_SCRIPT = `
+local previous = redis.call('GET', KEYS[1])
+if previous then
+  redis.call('DEL', previous)
+end
+redis.call('SET', KEYS[1], KEYS[2], 'EX', ARGV[2])
+redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+return 1
+`;
+const REDEEM_PAIRING_SCRIPT = `
+local pairing = redis.call('GET', KEYS[1])
+if not pairing then
+  return nil
+end
+if redis.call('GET', KEYS[2]) ~= KEYS[1] then
+  redis.call('DEL', KEYS[1])
+  return nil
+end
+redis.call('DEL', KEYS[1], KEYS[2])
+return pairing
+`;
 
 export type BridgePrincipalType = 'deployment' | 'tenant' | 'user' | 'role' | 'group';
 
@@ -99,6 +120,10 @@ function workerStableIdentityKey(workerId: string): string {
   return `${PREFIX}:stable-identity:${workerId}`;
 }
 
+function workerPairingIndexKey(workerId: string): string {
+  return `${PREFIX}:pairing-index:${workerId}`;
+}
+
 function proofNonceKey(credential: string, nonce: string): string {
   return `${PREFIX}:proof:${digest(credential)}:${digest(nonce)}`;
 }
@@ -127,11 +152,14 @@ export class RedisBridgePairingStore {
       Date.now() + this.pairingTtlSeconds * 1000,
     ).toISOString();
     const pairing: StoredPairing = { workerId, expiresAt, binding };
-    await this.redis.set(
-      pairingKey(code),
+    const codeKey = pairingKey(code);
+    await this.redis.eval(
+      ISSUE_PAIRING_SCRIPT,
+      2,
+      workerPairingIndexKey(workerId),
+      codeKey,
       JSON.stringify(pairing),
-      'EX',
-      this.pairingTtlSeconds,
+      String(this.pairingTtlSeconds),
     );
     return { workerId, code, expiresAt };
   }
@@ -141,8 +169,14 @@ export class RedisBridgePairingStore {
     code: string;
     publicKey: string;
   }): Promise<BridgeWorkerCredential> {
-    const raw = await this.redis.getdel(pairingKey(args.code));
-    if (raw == null) {
+    const codeKey = pairingKey(args.code);
+    const raw = await this.redis.eval(
+      REDEEM_PAIRING_SCRIPT,
+      2,
+      codeKey,
+      workerPairingIndexKey(args.workerId),
+    );
+    if (typeof raw !== 'string') {
       throw new BridgePairingError(
         'PAIRING_INVALID',
         'Pairing code is invalid or expired',

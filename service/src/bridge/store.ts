@@ -47,10 +47,12 @@ export class BridgeStoreError extends Error {
 
 interface StoredAssignment extends CodeBridgeAssignment {
   leaseTokenHash: string;
+  workerCredentialId?: string;
 }
 
 export interface RegisteredBridgeWorker extends BridgeWorkerRegistration {
   binding?: BridgeWorkerBinding;
+  credentialId?: string;
 }
 
 function workerKey(workerId: string): string {
@@ -261,6 +263,9 @@ export class RedisBridgeStore {
         generation,
         leaseToken,
         leaseTokenHash: tokenHash(leaseToken),
+        ...(registration.credentialId != null
+          ? { workerCredentialId: registration.credentialId }
+          : {}),
         expiresAt: new Date(args.deadlineAtMs).toISOString(),
         runtimeSessionId: args.runtimeSessionId,
         request: {
@@ -311,6 +316,7 @@ export class RedisBridgeStore {
     incarnationId: string,
     waitMs: number,
     signal?: AbortSignal,
+    credentialId?: string,
   ): Promise<CodeBridgeAssignment | undefined> {
     const deadline = Date.now() + waitMs;
     while (signal?.aborted !== true && Date.now() < deadline) {
@@ -332,8 +338,13 @@ export class RedisBridgeStore {
           'Bridge worker incarnation was replaced',
         );
       }
+      if (assignment.workerCredentialId !== credentialId) continue;
       if (Date.parse(assignment.expiresAt) <= Date.now()) continue;
-      const { leaseTokenHash: _leaseTokenHash, ...wireAssignment } = assignment;
+      const {
+        leaseTokenHash: _leaseTokenHash,
+        workerCredentialId: _workerCredentialId,
+        ...wireAssignment
+      } = assignment;
       return wireAssignment;
     }
     return undefined;

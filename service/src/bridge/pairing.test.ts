@@ -51,7 +51,7 @@ describe('RedisBridgePairingStore', () => {
 
     await expect(
       pairings.authorize(requestFor(rotated.credential, 'bound-worker-proof')),
-    ).resolves.toEqual({ workerId: 'vm-bound', binding });
+    ).resolves.toMatchObject({ workerId: 'vm-bound', binding });
     await expect(
       pairings.authorize(requestFor(issued.credential, 'superseded-bound-proof')),
     ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
@@ -76,6 +76,33 @@ describe('RedisBridgePairingStore', () => {
         publicKey: identity.publicKey,
       }),
     ).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
+  });
+
+  test('only the newest pairing code can rebind a worker identity', async () => {
+    const identity = createBridgeIdentity();
+    const older = await pairings.issue('vm-1', {
+      tenantId: 'tenant-a',
+      principal: { type: 'user', id: 'user-a' },
+    });
+    const newer = await pairings.issue('vm-1', {
+      tenantId: 'tenant-b',
+      principal: { type: 'user', id: 'user-b' },
+    });
+
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-1',
+        code: older.code,
+        publicKey: identity.publicKey,
+      }),
+    ).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-1',
+        code: newer.code,
+        publicKey: identity.publicKey,
+      }),
+    ).resolves.toMatchObject({ workerId: 'vm-1' });
   });
 
   test('authorizes a credential only with proof from its worker key', async () => {

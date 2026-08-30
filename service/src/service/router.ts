@@ -152,8 +152,9 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
       configuredWorkerId: env.BRIDGE_WORKER_ID,
       dynamicWorkers: env.BRIDGE_DYNAMIC_WORKERS,
       requestedWorkerId: req.header(CODEAPI_BRIDGE_WORKER_HEADER),
+      trustedWorkerId: principal.codeWorkerId,
     });
-    bridgeWorkerId = bridgeSelection?.dynamic === true
+    bridgeWorkerId = bridgeSelection?.explicit === true
       ? bridgeSelection.workerId
       : undefined;
   } catch (error) {

@@ -14,6 +14,7 @@ import { BridgeStoreError, RedisBridgeStore } from './store';
 
 const INCARNATION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const MAX_LEASE_WAIT_MS = 30_000;
+const BRIDGE_BINDING_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PRINCIPAL_TYPES = new Set<BridgePrincipalType>([
   'deployment',
   'tenant',
@@ -59,11 +60,11 @@ function parseBinding(value: unknown): BridgeWorkerBinding | undefined {
   const { tenantId, principal } = value;
   if (
     typeof tenantId !== 'string' ||
-    !BRIDGE_WORKER_ID_PATTERN.test(tenantId) ||
+    !BRIDGE_BINDING_ID_PATTERN.test(tenantId) ||
     typeof principal.type !== 'string' ||
     !PRINCIPAL_TYPES.has(principal.type as BridgePrincipalType) ||
     typeof principal.id !== 'string' ||
-    !BRIDGE_WORKER_ID_PATTERN.test(principal.id)
+    !BRIDGE_BINDING_ID_PATTERN.test(principal.id)
   ) {
     return undefined;
   }
@@ -342,6 +343,7 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
       const authorization = res.locals.bridgeWorkerAuthorization as
         | {
             workerId: string;
+            credentialId: string;
             binding?: BridgeWorkerBinding;
           }
         | undefined;
@@ -362,6 +364,9 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
       try {
         await options.store.register({
           ...trustedRegistration,
+          ...(authorization?.credentialId != null
+            ? { credentialId: authorization.credentialId }
+            : {}),
           ...(authorization?.binding != null
             ? { binding: authorization.binding }
             : {}),
@@ -411,6 +416,12 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
           workerId,
           body.incarnationId,
           Math.min(requestedWait, MAX_LEASE_WAIT_MS),
+          undefined,
+          (
+            res.locals.bridgeWorkerAuthorization as
+              | { credentialId: string }
+              | undefined
+          )?.credentialId,
         );
         res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
       } catch (error) {

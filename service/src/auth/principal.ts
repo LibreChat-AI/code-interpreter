@@ -13,6 +13,7 @@ export type CodeApiPrincipal = {
   authContextHash?: string;
   credentialId?: string;
   planId?: string;
+  codeWorkerId?: string;
 };
 
 export function applyPrincipal(req: t.AuthenticatedRequest, principal: CodeApiPrincipal): void {
