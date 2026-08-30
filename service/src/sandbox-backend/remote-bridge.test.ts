@@ -71,4 +71,38 @@ describe('RemoteBridgeSandboxBackend', () => {
       code: 'BRIDGE_WORKER_UNAUTHORIZED',
     });
   });
+
+  test('keeps an explicitly selected singleton on its unbound compatibility route', async () => {
+    let dispatched: Parameters<RedisBridgeStore['dispatch']>[0] | undefined;
+    const store = {
+      dispatch: async (
+        args: Parameters<RedisBridgeStore['dispatch']>[0],
+      ): ReturnType<RedisBridgeStore['dispatch']> => {
+        dispatched = args;
+        return {
+          protocolVersion: 1 as const,
+          generation: 1,
+          leaseToken: 'a'.repeat(32),
+          status: 'fulfilled' as const,
+          result: {
+            session_id: 'session-1',
+            language: 'bash',
+            version: '5.2.0',
+            files: [],
+          },
+        };
+      },
+    } satisfies Pick<RedisBridgeStore, 'dispatch'>;
+    const backend = new RemoteBridgeSandboxBackend(store, 'deployment-worker');
+
+    await backend.execute(request(), {
+      ...context(),
+      bridgeWorkerId: 'deployment-worker',
+    });
+
+    expect(dispatched).toMatchObject({
+      workerId: 'deployment-worker',
+      requireTenantBinding: false,
+    });
+  });
 });

@@ -151,6 +151,81 @@ describe('RedisBridgePairingStore', () => {
     ).resolves.toMatchObject({ workerId: 'vm-1' });
   });
 
+  test('does not let a paused redemption overwrite a newer pairing identity', async () => {
+    const firstIdentity = createBridgeIdentity();
+    const secondIdentity = createBridgeIdentity();
+    const firstPairing = await pairings.issue('vm-race', {
+      tenantId: 'tenant-a',
+      principal: { type: 'user', id: 'user-a' },
+    });
+    const originalEval = redis.eval.bind(redis);
+    let releaseFirst!: () => void;
+    let firstRedeemed!: () => void;
+    const firstRedeemedPromise = new Promise<void>((resolve) => {
+      firstRedeemed = resolve;
+    });
+    const releaseFirstPromise = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let paused = false;
+    redis.eval = (async (script: string, ...args: unknown[]) => {
+      const result = await (originalEval as (...evalArgs: unknown[]) => Promise<unknown>)(
+        script,
+        ...args,
+      );
+      if (!paused && script.includes('return pairing')) {
+        paused = true;
+        firstRedeemed();
+        await releaseFirstPromise;
+      }
+      return result;
+    }) as typeof redis.eval;
+
+    try {
+      const staleRedemption = pairings.redeem({
+        workerId: 'vm-race',
+        code: firstPairing.code,
+        publicKey: firstIdentity.publicKey,
+      });
+      await firstRedeemedPromise;
+      const secondPairing = await pairings.issue('vm-race', {
+        tenantId: 'tenant-b',
+        principal: { type: 'user', id: 'user-b' },
+      });
+      const current = await pairings.redeem({
+        workerId: 'vm-race',
+        code: secondPairing.code,
+        publicKey: secondIdentity.publicKey,
+      });
+      releaseFirst();
+
+      await expect(staleRedemption).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
+      const proof = {
+        credential: current.credential,
+        method: 'POST',
+        path: '/v1/bridge/workers/vm-race/lease',
+        timestamp: new Date().toISOString(),
+        nonce: 'current-race-proof',
+        body: JSON.stringify({ protocolVersion: 1, waitMs: 25_000 }),
+      };
+      await expect(
+        pairings.authorize({
+          ...proof,
+          workerId: 'vm-race',
+          signature: signBridgeRequest(secondIdentity.privateKey, proof),
+        }),
+      ).resolves.toMatchObject({
+        binding: {
+          tenantId: 'tenant-b',
+          principal: { type: 'user', id: 'user-b' },
+        },
+      });
+    } finally {
+      redis.eval = originalEval as typeof redis.eval;
+      releaseFirst();
+    }
+  });
+
   test('authorizes a credential only with proof from its worker key', async () => {
     const identity = createBridgeIdentity();
     const pairing = await pairings.issue('vm-1');

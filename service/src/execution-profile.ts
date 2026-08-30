@@ -18,6 +18,18 @@ export interface ExecutionProfileQueueNames {
 
 export type SandboxBackendName = typeof SANDBOX_BACKENDS[number];
 
+/** Resolve the backend owned by the queue consumer rather than the API pod.
+ * Stateful API-only pods intentionally retain the HTTP local default while
+ * dispatching to Lambda workers. */
+export function resolveQueuedSandboxBackend(
+  profile: ExecutionProfile,
+  apiBackend: SandboxBackendName,
+): SandboxBackendName {
+  return profile === 'stateful' && apiBackend === 'http'
+    ? 'lambda-microvm'
+    : apiBackend;
+}
+
 export function resolveExecutionProfile(
   raw: string | undefined,
   runtimeSessionMode: 'stateless' | 'affinity' | 'strict',
@@ -153,8 +165,16 @@ export function validateQueuedExecutionProfile(
 export function validateQueuedSandboxBackend(
   jobBackend: unknown,
   workerBackend: SandboxBackendName,
+  bridgeWorkerId?: string,
 ): void {
-  if (jobBackend == null) return;
+  if (jobBackend == null) {
+    if (bridgeWorkerId != null && workerBackend !== 'remote-bridge') {
+      throw new Error(
+        `Legacy queued bridge job cannot run on the ${workerBackend} sandbox backend`,
+      );
+    }
+    return;
+  }
   if (!SANDBOX_BACKENDS.includes(jobBackend as SandboxBackendName)) {
     throw new Error(`Queued job has invalid sandbox backend: ${String(jobBackend)}`);
   }

@@ -35,7 +35,8 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
       const settlement = await this.store.dispatch({
         workerId,
         tenantId: ctx.tenantId,
-        requireTenantBinding: ctx.bridgeWorkerId != null,
+        requireTenantBinding:
+          ctx.bridgeWorkerId != null && ctx.bridgeWorkerId !== this.workerId,
         body: req.body,
         headers: req.headers,
         runtimeSessionId: ctx.runtimeSessionId,

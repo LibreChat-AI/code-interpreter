@@ -25,6 +25,7 @@ import {
 } from '../metrics';
 import { Jobs } from '../enum';
 import { env, jobCompletionWaitTimeoutMs } from '../config';
+import { resolveQueuedSandboxBackend } from '../execution-profile';
 import {
   normalizeEgressGatewayUrl,
   normalizeProgrammaticTimeoutMs,
@@ -413,7 +414,10 @@ async function runReplayIteration(
     tenantId: state.tenantId,
     canonicalUserId: state.canonicalUserId,
     executionProfile: env.EXECUTION_PROFILE,
-    sandboxBackend: env.SANDBOX_BACKEND,
+    sandboxBackend: resolveQueuedSandboxBackend(
+      env.EXECUTION_PROFILE,
+      env.SANDBOX_BACKEND,
+    ),
     ...(state.bridgeWorkerId != null ? { bridgeWorkerId: state.bridgeWorkerId } : {}),
     runtimeSessionMode: 'stateless',
     runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,
@@ -1408,7 +1412,10 @@ async function handleBlocking(
       tenantId: identity.storageNamespace,
       canonicalUserId: identity.canonicalUserId,
       executionProfile: env.EXECUTION_PROFILE,
-      sandboxBackend: env.SANDBOX_BACKEND,
+      sandboxBackend: resolveQueuedSandboxBackend(
+        env.EXECUTION_PROFILE,
+        env.SANDBOX_BACKEND,
+      ),
       ...(bridgeWorkerId != null ? { bridgeWorkerId } : {}),
       runtimeSessionMode: 'stateless',
       runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,

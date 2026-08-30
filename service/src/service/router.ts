@@ -31,6 +31,7 @@ import {
   resolveBridgeWorkerSelection,
 } from '../bridge/selection';
 import logger from '../logger';
+import { resolveQueuedSandboxBackend } from '../execution-profile';
 
 const { INSTANCE_ID } = env;
 const JOB_COMPLETION_WAIT_TIMEOUT_MS = jobCompletionWaitTimeoutMs(
@@ -271,7 +272,10 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
         tenantId: identity.storageNamespace,
         canonicalUserId: identity.canonicalUserId,
         executionProfile: env.EXECUTION_PROFILE,
-        sandboxBackend: env.SANDBOX_BACKEND,
+        sandboxBackend: resolveQueuedSandboxBackend(
+          env.EXECUTION_PROFILE,
+          env.SANDBOX_BACKEND,
+        ),
         ...(bridgeWorkerId != null ? { bridgeWorkerId } : {}),
         ...(runtimeSessionId != null ? { runtimeSessionId } : {}),
         runtimeSessionMode,
