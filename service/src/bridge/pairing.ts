@@ -395,41 +395,64 @@ export class RedisBridgePairingStore {
     }
 
     const deadline = Number(rawDeadline);
+    let scanClaim:
+      | { key: string; token: string }
+      | undefined;
     if (!rollbackDetected) {
       if (!Number.isFinite(deadline) || now > deadline) return;
+      const key = legacyPairingWorkerScanKey(workerId);
+      const token = randomBytes(24).toString('base64url');
       const claimed = await this.redis.set(
-        legacyPairingWorkerScanKey(workerId),
-        '1',
+        key,
+        token,
         'PX',
         Math.max(1, deadline - now),
         'NX',
       );
       if (claimed !== 'OK') return;
+      scanClaim = { key, token };
     }
 
-    let cursor = '0';
-    do {
-      const [nextCursor, keys] = await this.redis.scan(
-        cursor,
-        'MATCH',
-        `${PREFIX}:pairing:*`,
-        'COUNT',
-        100,
-      );
-      cursor = nextCursor;
-      if (keys.length === 0) continue;
-      const values = await this.redis.mget(...keys);
-      const matching = keys.filter((_key, index) => {
-        const raw = values[index];
-        if (raw == null) return false;
-        try {
-          return (JSON.parse(raw) as Partial<StoredPairing>).workerId === workerId;
-        } catch {
-          return false;
-        }
-      });
-      if (matching.length > 0) await this.redis.del(...matching);
-    } while (cursor !== '0');
+    try {
+      let cursor = '0';
+      do {
+        const [nextCursor, keys] = await this.redis.scan(
+          cursor,
+          'MATCH',
+          `${PREFIX}:pairing:*`,
+          'COUNT',
+          100,
+        );
+        cursor = nextCursor;
+        if (keys.length === 0) continue;
+        const values = await this.redis.mget(...keys);
+        const matching = keys.filter((_key, index) => {
+          const raw = values[index];
+          if (raw == null) return false;
+          try {
+            return (JSON.parse(raw) as Partial<StoredPairing>).workerId === workerId;
+          } catch {
+            return false;
+          }
+        });
+        if (matching.length > 0) await this.redis.del(...matching);
+      } while (cursor !== '0');
+    } catch (error) {
+      if (scanClaim != null) {
+        await this.redis.eval(
+          [
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then",
+            "  return redis.call('DEL', KEYS[1])",
+            'end',
+            'return 0',
+          ].join('\n'),
+          1,
+          scanClaim.key,
+          scanClaim.token,
+        );
+      }
+      throw error;
+    }
   }
 
   async rotate(

@@ -366,6 +366,39 @@ describe('RedisBridgePairingStore', () => {
     await expect(redis.get(legacyKey)).resolves.toBeNull();
   });
 
+  test('retries legacy cleanup after a transient scan failure', async () => {
+    const legacyCode = 'retryable-legacy-pairing-code';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    await redis.set(
+      legacyKey,
+      JSON.stringify({
+        workerId: 'vm-scan-retry',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      'EX',
+      60,
+    );
+    const scan = redis.scan.bind(redis);
+    let failScan = true;
+    redis.scan = (async (...args: Parameters<Redis['scan']>) => {
+      if (failScan) {
+        failScan = false;
+        throw new Error('transient scan failure');
+      }
+      return scan(...args);
+    }) as Redis['scan'];
+
+    await expect(pairings.revoke('vm-scan-retry')).rejects.toThrow(
+      'transient scan failure',
+    );
+    redis.scan = scan;
+    await pairings.revoke('vm-scan-retry');
+
+    await expect(redis.get(legacyKey)).resolves.toBeNull();
+  });
+
   test('reopens legacy cleanup after a rollback outlives the prior scan window', async () => {
     const legacyCode = 'later-rollback-pairing-code';
     const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
