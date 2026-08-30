@@ -24,6 +24,8 @@ spec:
       {{- include "codeapi.api.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        codeapi.librechat.ai/pairing-fence-version: "1"
       labels:
         {{- include "codeapi.api.selectorLabels" . | nindent 8 }}
     spec:

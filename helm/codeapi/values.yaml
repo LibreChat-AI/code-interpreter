@@ -73,6 +73,7 @@ api:
   # already-revoked code during the first rollout of paired bridge workers.
   strategy:
     type: Recreate
+    rollingUpdate: null
 
   image:
     repository: codeapi-api

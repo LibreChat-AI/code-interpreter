@@ -136,6 +136,10 @@ function workerPairingGenerationKey(workerId: string): string {
   return `${PREFIX}:pairing-generation:${workerId}`;
 }
 
+function legacyPairingScanDeadlineKey(): string {
+  return `${PREFIX}:migration:legacy-pairing-scan-until`;
+}
+
 function proofNonceKey(credential: string, nonce: string): string {
   return `${PREFIX}:proof:${digest(credential)}:${digest(nonce)}`;
 }
@@ -170,6 +174,10 @@ export class RedisBridgePairingStore {
       generation,
       binding,
     };
+    // Pre-index binaries cannot remove a superseded code themselves. During
+    // the one pairing-TTL migration window, find and delete those records so
+    // rolling back cannot make a replaced code valid again.
+    await this.removeLegacyPairings(workerId);
     const codeKey = pairingKey(code);
     await this.redis.eval(
       ISSUE_PAIRING_SCRIPT,
@@ -327,6 +335,10 @@ export class RedisBridgePairingStore {
       this.pairingTtlSeconds,
     );
     await this.removeLegacyPairings(workerId);
+    const indexedPairing = await this.redis.get(workerPairingIndexKey(workerId));
+    if (indexedPairing != null) {
+      await this.redis.del(indexedPairing, workerPairingIndexKey(workerId));
+    }
     const identityKey = workerIdentityKey(workerId);
     const credentialDigest = await this.redis.get(identityKey);
     if (credentialDigest == null) return;
@@ -334,6 +346,18 @@ export class RedisBridgePairingStore {
   }
 
   private async removeLegacyPairings(workerId: string): Promise<void> {
+    const deadlineKey = legacyPairingScanDeadlineKey();
+    const proposedDeadline = Date.now() + this.pairingTtlSeconds * 1000;
+    const initialized = await this.redis.set(
+      deadlineKey,
+      String(proposedDeadline),
+      'NX',
+    );
+    const deadline =
+      initialized === 'OK'
+        ? proposedDeadline
+        : Number(await this.redis.get(deadlineKey));
+    if (!Number.isFinite(deadline) || Date.now() > deadline) return;
     let cursor = '0';
     do {
       const [nextCursor, keys] = await this.redis.scan(
