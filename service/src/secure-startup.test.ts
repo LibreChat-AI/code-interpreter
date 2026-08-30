@@ -14,6 +14,8 @@ const saved = {
   executionProfile: env.EXECUTION_PROFILE,
   executionProfileSource: env.EXECUTION_PROFILE_SOURCE,
   sandboxBackend: env.SANDBOX_BACKEND,
+  bridgeWorkerId: env.BRIDGE_WORKER_ID,
+  bridgeToken: env.BRIDGE_TOKEN,
   ptcMode: env.PTC_MODE,
   runtimeSessionMode: env.RUNTIME_SESSION_MODE,
   lambdaImageArn: env.LAMBDA_MICROVM_IMAGE_ARN,
@@ -52,6 +54,8 @@ function restore(): void {
   env.EXECUTION_PROFILE = saved.executionProfile;
   env.EXECUTION_PROFILE_SOURCE = saved.executionProfileSource;
   env.SANDBOX_BACKEND = saved.sandboxBackend;
+  env.BRIDGE_WORKER_ID = saved.bridgeWorkerId;
+  env.BRIDGE_TOKEN = saved.bridgeToken;
   env.PTC_MODE = saved.ptcMode;
   env.RUNTIME_SESSION_MODE = saved.runtimeSessionMode;
   env.LAMBDA_MICROVM_IMAGE_ARN = saved.lambdaImageArn;
@@ -279,12 +283,49 @@ describe('sandbox backend policy', () => {
     expect(() => validateSandboxBackendPolicy()).not.toThrow();
   });
 
-  test('stateful runtime session modes require the lambda backend', () => {
+  test('stateful runtime session modes require a stateful backend', () => {
     env.SANDBOX_BACKEND = 'http';
     env.RUNTIME_SESSION_MODE = 'affinity';
-    expect(() => validateSandboxBackendPolicy()).toThrow('requires the lambda-microvm backend');
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'requires the lambda-microvm or remote-bridge backend',
+    );
     env.RUNTIME_SESSION_MODE = 'strict';
-    expect(() => validateSandboxBackendPolicy()).toThrow('requires the lambda-microvm backend');
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'requires the lambda-microvm or remote-bridge backend',
+    );
+  });
+
+  test('accepts a configured remote bridge and fails closed on missing enrollment', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.RUNTIME_SESSION_MODE = 'strict';
+    env.PTC_MODE = 'replay';
+    env.BRIDGE_WORKER_ID = '';
+    env.BRIDGE_TOKEN = '';
+    expect(() => validateSandboxBackendPolicy()).toThrow('CODEAPI_BRIDGE_WORKER_ID');
+
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    expect(() => validateSandboxBackendPolicy()).toThrow('CODEAPI_BRIDGE_TOKEN');
+
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    expect(() => validateSandboxBackendPolicy()).not.toThrow();
+  });
+
+  test('remote bridge requires replay PTC and a strong token in hardened mode', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.RUNTIME_SESSION_MODE = 'affinity';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.PTC_MODE = 'blocking';
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'PTC replay is the only supported PTC mode',
+    );
+
+    env.PTC_MODE = 'replay';
+    env.HARDENED_SANDBOX_MODE = true;
+    expect(() => validateSandboxBackendPolicy()).toThrow('at least 32 bytes');
+
+    env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
+    expect(() => validateSandboxBackendPolicy()).not.toThrow();
   });
 
   test('rejects blocking PTC on the lambda backend', () => {
