@@ -24,3 +24,7 @@ if ! grep -q 'codeapi.librechat.ai/pairing-fence-version: "1"' "$deployment"; th
   echo 'the first pairing-fence chart upgrade must revise the API pod template' >&2
   exit 1
 fi
+if ! grep -A 8 '^  image:$' "$values" | grep -q '^    pullPolicy: Always$'; then
+  echo 'the fenced API rollout must pull the current image even when the default tag is mutable' >&2
+  exit 1
+fi

@@ -78,7 +78,9 @@ api:
   image:
     repository: codeapi-api
     tag: latest
-    pullPolicy: IfNotPresent  # Use Always in production
+    # Recreate is a security fence only if replacement pods cannot reuse a
+    # cached pre-fence image behind the mutable default tag.
+    pullPolicy: Always
 
   # Resource limits
   resources:

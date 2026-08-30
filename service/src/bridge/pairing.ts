@@ -15,6 +15,7 @@ const PROOF_NONCE_TTL_SECONDS = 2 * 60;
 const PROOF_CLOCK_SKEW_MS = 60_000;
 const LEGACY_SCAN_CLAIM_TTL_MS = 5_000;
 const LEGACY_SCAN_POLL_INTERVAL_MS = 25;
+const LEGACY_SCAN_PENDING = 'pending';
 const LEGACY_SCAN_COMPLETE = 'done';
 const ISSUE_PAIRING_SCRIPT = `
 local previous = redis.call('GET', KEYS[1])
@@ -81,9 +82,28 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
 end
 return 0
 `;
-const COMPLETE_LEGACY_SCAN_CLAIM_SCRIPT = `
+const NORMALIZE_LEGACY_SCAN_STATE_SCRIPT = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
-  redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+  redis.call('SET', KEYS[1], ARGV[2])
+  return 1
+end
+return 0
+`;
+const RENEW_LEGACY_SCAN_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+`;
+const COMPLETE_LEGACY_SCAN_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[2]) == ARGV[1] then
+  local remaining = tonumber(ARGV[3])
+  if remaining > 0 then
+    redis.call('SET', KEYS[1], ARGV[2], 'PX', remaining)
+  else
+    redis.call('DEL', KEYS[1])
+  end
+  redis.call('DEL', KEYS[2])
   return 1
 end
 return 0
@@ -191,12 +211,17 @@ export class RedisBridgePairingStore {
     private readonly redis: Redis,
     private readonly pairingTtlSeconds = DEFAULT_PAIRING_TTL_SECONDS,
     private readonly credentialTtlSeconds = DEFAULT_CREDENTIAL_TTL_SECONDS,
+    private readonly legacyScanClaimTtlMs = LEGACY_SCAN_CLAIM_TTL_MS,
   ) {}
 
   async issue(
     workerId: string,
     binding?: BridgeWorkerBinding,
   ): Promise<BridgePairing> {
+    // Pre-index binaries cannot remove a superseded code themselves. During
+    // the one pairing-TTL migration window, find and delete those records so
+    // rolling back cannot make a replaced code valid again.
+    await this.removeLegacyPairings(workerId);
     const code = randomBytes(24).toString('base64url');
     const generation = randomBytes(24).toString('base64url');
     const expiresAt = new Date(
@@ -208,10 +233,6 @@ export class RedisBridgePairingStore {
       generation,
       binding,
     };
-    // Pre-index binaries cannot remove a superseded code themselves. During
-    // the one pairing-TTL migration window, find and delete those records so
-    // rolling back cannot make a replaced code valid again.
-    await this.removeLegacyPairings(workerId);
     const codeKey = pairingKey(code);
     await this.redis.eval(
       ISSUE_PAIRING_SCRIPT,
@@ -410,42 +431,88 @@ export class RedisBridgePairingStore {
     }
 
     const deadline = Number(rawDeadline);
-    let scanClaim:
-      | { key: string; token: string }
-      | undefined;
-    if (!rollbackDetected) {
-      if (!Number.isFinite(deadline) || now > deadline) return;
-      const key = legacyPairingWorkerScanKey(workerId);
-      while (scanClaim == null) {
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) return;
-        const existing = await this.redis.get(key);
+    const stateKey = legacyPairingWorkerScanKey(workerId);
+    while (true) {
+      const state = await this.redis.get(stateKey);
+      if (state === LEGACY_SCAN_COMPLETE && !rollbackDetected) return;
+      if (state === LEGACY_SCAN_PENDING) break;
+      if (state == null) {
         if (
-          existing === LEGACY_SCAN_COMPLETE ||
-          (existing != null && !existing.startsWith('claim:'))
+          !rollbackDetected &&
+          (!Number.isFinite(deadline) || Date.now() > deadline)
         ) {
           return;
         }
-        const token = `claim:${randomBytes(24).toString('base64url')}`;
-        const claimed = await this.redis.set(
-          key,
-          token,
-          'PX',
-          Math.max(1, Math.min(LEGACY_SCAN_CLAIM_TTL_MS, remainingMs)),
+        const initialized = await this.redis.set(
+          stateKey,
+          LEGACY_SCAN_PENDING,
           'NX',
         );
-        if (claimed === 'OK') {
-          scanClaim = { key, token };
-          break;
-        }
-        await new Promise((resolve) =>
-          setTimeout(
-            resolve,
-            Math.max(1, Math.min(LEGACY_SCAN_POLL_INTERVAL_MS, remainingMs)),
-          ),
-        );
+        if (initialized === 'OK') break;
+        continue;
       }
+      // Predecessor builds stored an unqualified random token before scanning.
+      // It cannot prove whether that scan completed, so normalize it to a
+      // durable retry requirement instead of treating it as success.
+      const normalized = await this.redis.eval(
+        NORMALIZE_LEGACY_SCAN_STATE_SCRIPT,
+        1,
+        stateKey,
+        state,
+        LEGACY_SCAN_PENDING,
+      );
+      if (normalized === 1) break;
     }
+
+    const claimKey = `${stateKey}:claim`;
+    let scanClaim: { key: string; token: string } | undefined;
+    while (scanClaim == null) {
+      const state = await this.redis.get(stateKey);
+      if (state === LEGACY_SCAN_COMPLETE || state == null) return;
+      const token = `claim:${randomBytes(24).toString('base64url')}`;
+      const claimed = await this.redis.set(
+        claimKey,
+        token,
+        'PX',
+        Math.max(1, this.legacyScanClaimTtlMs),
+        'NX',
+      );
+      if (claimed === 'OK') {
+        scanClaim = { key: claimKey, token };
+        break;
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, LEGACY_SCAN_POLL_INTERVAL_MS),
+      );
+    }
+
+    let renewalError: unknown;
+    let renewal = Promise.resolve();
+    let renewalInFlight = false;
+    const renewClaim = async (): Promise<void> => {
+      const renewed = await this.redis.eval(
+        RENEW_LEGACY_SCAN_CLAIM_SCRIPT,
+        1,
+        scanClaim.key,
+        scanClaim.token,
+        String(Math.max(1, this.legacyScanClaimTtlMs)),
+      );
+      if (renewed !== 1) {
+        throw new Error('Legacy pairing cleanup claim was lost');
+      }
+    };
+    const renewalTimer = setInterval(() => {
+      if (renewalInFlight || renewalError != null) return;
+      renewalInFlight = true;
+      renewal = renewClaim()
+        .catch((error: unknown) => {
+          renewalError = error;
+        })
+        .finally(() => {
+          renewalInFlight = false;
+        });
+    }, Math.max(1, Math.floor(this.legacyScanClaimTtlMs / 3)));
+    renewalTimer.unref?.();
 
     try {
       let cursor = '0';
@@ -457,6 +524,7 @@ export class RedisBridgePairingStore {
           'COUNT',
           100,
         );
+        if (renewalError != null) throw renewalError;
         cursor = nextCursor;
         if (keys.length === 0) continue;
         const values = await this.redis.mget(...keys);
@@ -472,28 +540,31 @@ export class RedisBridgePairingStore {
         });
         if (matching.length > 0) await this.redis.del(...matching);
       } while (cursor !== '0');
-      if (scanClaim != null) {
-        const completed = await this.redis.eval(
-          COMPLETE_LEGACY_SCAN_CLAIM_SCRIPT,
-          1,
-          scanClaim.key,
-          scanClaim.token,
-          LEGACY_SCAN_COMPLETE,
-          String(Math.max(1, deadline - Date.now())),
-        );
-        if (completed !== 1) {
-          await this.removeLegacyPairings(workerId);
-        }
+      clearInterval(renewalTimer);
+      await renewal;
+      if (renewalError != null) throw renewalError;
+      await renewClaim();
+      const completed = await this.redis.eval(
+        COMPLETE_LEGACY_SCAN_CLAIM_SCRIPT,
+        2,
+        stateKey,
+        scanClaim.key,
+        scanClaim.token,
+        LEGACY_SCAN_COMPLETE,
+        String(deadline - Date.now()),
+      );
+      if (completed !== 1) {
+        await this.removeLegacyPairings(workerId);
       }
     } catch (error) {
-      if (scanClaim != null) {
-        await this.redis.eval(
-          RELEASE_LEGACY_SCAN_CLAIM_SCRIPT,
-          1,
-          scanClaim.key,
-          scanClaim.token,
-        );
-      }
+      clearInterval(renewalTimer);
+      await renewal;
+      await this.redis.eval(
+        RELEASE_LEGACY_SCAN_CLAIM_SCRIPT,
+        1,
+        scanClaim.key,
+        scanClaim.token,
+      );
       throw error;
     }
   }

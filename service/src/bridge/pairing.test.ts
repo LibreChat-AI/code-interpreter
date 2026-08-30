@@ -420,6 +420,146 @@ describe('RedisBridgePairingStore', () => {
     await expect(redis.get(legacyKey)).resolves.toBeNull();
   });
 
+  test('retries a claimed cleanup after the migration deadline', async () => {
+    const legacyCode = 'post-deadline-retry-pairing-code';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    await redis.set(
+      legacyKey,
+      JSON.stringify({
+        workerId: 'vm-post-deadline-retry',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      'EX',
+      60,
+    );
+    await redis.set(
+      'codeapi:bridge:v1:migration:legacy-pairing-scan-until',
+      String(Date.now() + 15),
+    );
+    const scan = redis.scan.bind(redis);
+    let failScan = true;
+    redis.scan = (async (...args: Parameters<Redis['scan']>) => {
+      if (failScan) {
+        failScan = false;
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        throw new Error('scan failed after deadline');
+      }
+      return scan(...args);
+    }) as Redis['scan'];
+
+    await expect(pairings.revoke('vm-post-deadline-retry')).rejects.toThrow(
+      'scan failed after deadline',
+    );
+    await pairings.revoke('vm-post-deadline-retry');
+
+    redis.scan = scan;
+    await expect(redis.get(legacyKey)).resolves.toBeNull();
+  });
+
+  test('renews the cleanup claim while a shared-keyspace scan is in flight', async () => {
+    const store = new RedisBridgePairingStore(redis, 600, 300, 30);
+    const legacyCode = 'renewed-claim-pairing-code';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    await redis.set(
+      legacyKey,
+      JSON.stringify({
+        workerId: 'vm-renewed-claim',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      'EX',
+      60,
+    );
+    const scan = redis.scan.bind(redis);
+    let scanCalls = 0;
+    let renewCalls = 0;
+    let markScanStarted = () => {};
+    const scanStarted = new Promise<void>((resolve) => {
+      markScanStarted = resolve;
+    });
+    redis.scan = (async (...args: Parameters<Redis['scan']>) => {
+      scanCalls += 1;
+      if (scanCalls === 1) {
+        markScanStarted();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      return scan(...args);
+    }) as Redis['scan'];
+    const originalEval = redis.eval.bind(redis);
+    redis.eval = (async (script: string, ...args: unknown[]) => {
+      if (script.includes("redis.call('PEXPIRE'")) renewCalls += 1;
+      return await (originalEval as (...evalArgs: unknown[]) => Promise<unknown>)(
+        script,
+        ...args,
+      );
+    }) as typeof redis.eval;
+
+    try {
+      const first = store.revoke('vm-renewed-claim');
+      await scanStarted;
+      await new Promise((resolve) => setTimeout(resolve, 45));
+      expect(renewCalls).toBeGreaterThan(0);
+      await first;
+
+      expect(scanCalls).toBe(1);
+      await expect(redis.get(legacyKey)).resolves.toBeNull();
+    } finally {
+      redis.scan = scan;
+      redis.eval = originalEval as typeof redis.eval;
+    }
+  });
+
+  test('rescans an ambiguous marker written by the preceding build', async () => {
+    const legacyCode = 'ambiguous-predecessor-marker-code';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    const workerId = 'vm-ambiguous-predecessor-marker';
+    await redis.set(
+      legacyKey,
+      JSON.stringify({
+        workerId,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      'EX',
+      60,
+    );
+    await redis.set(
+      `codeapi:bridge:v1:migration:legacy-pairing-scanned:${workerId}`,
+      'predecessor-random-token',
+      'PX',
+      60_000,
+    );
+
+    await pairings.revoke(workerId);
+
+    await expect(redis.get(legacyKey)).resolves.toBeNull();
+  });
+
+  test('starts the advertised pairing lifetime after legacy cleanup', async () => {
+    const store = new RedisBridgePairingStore(redis, 60);
+    const scan = redis.scan.bind(redis);
+    const originalNow = Date.now;
+    let now = originalNow();
+    Date.now = () => now;
+    redis.scan = (async (...args: Parameters<Redis['scan']>) => {
+      const result = await scan(...args);
+      now += 10;
+      return result;
+    }) as Redis['scan'];
+
+    try {
+      const pairing = await store.issue('vm-post-cleanup-expiry');
+      expect(Date.parse(pairing.expiresAt) - Date.now()).toBe(60_000);
+    } finally {
+      Date.now = originalNow;
+      redis.scan = scan;
+    }
+  });
+
   test('waits for a failed in-progress cleanup and confirms legacy removal itself', async () => {
     const legacyCode = 'overlapping-legacy-pairing-code';
     const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
@@ -518,6 +658,10 @@ describe('RedisBridgePairingStore', () => {
       legacyKey,
       'EX',
       60,
+    );
+    await redis.set(
+      'codeapi:bridge:v1:migration:legacy-pairing-scanned:vm-later-rollback',
+      'done',
     );
 
     await pairings.revoke('vm-later-rollback');
