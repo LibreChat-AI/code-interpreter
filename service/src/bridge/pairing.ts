@@ -30,7 +30,7 @@ if pairing ~= ARGV[1] then
 end
 local generation = redis.call('GET', KEYS[2])
 if ARGV[2] == '' then
-  if generation then
+  if generation and redis.call('GET', KEYS[5]) ~= KEYS[1] then
     redis.call('DEL', KEYS[1])
     return 0
   end
@@ -60,11 +60,16 @@ return 1
 `;
 const REVOKE_PAIRING_SCRIPT = `
 local indexed = redis.call('GET', KEYS[1])
+local credential = redis.call('GET', KEYS[3])
 redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
 if indexed then
   redis.call('DEL', indexed)
 end
 redis.call('DEL', KEYS[1])
+if credential then
+  redis.call('DEL', KEYS[3])
+  redis.call('DEL', ARGV[3] .. credential)
+end
 return 1
 `;
 
@@ -237,6 +242,7 @@ export class RedisBridgePairingStore {
     ).toISOString();
     const stored: StoredCredential = {
       workerId: args.workerId,
+      identityId: randomBytes(18).toString('base64url'),
       publicKey: args.publicKey,
       expiresAt,
       binding: pairing.binding,
@@ -341,16 +347,14 @@ export class RedisBridgePairingStore {
     // that linearizes afterward installs a distinct generation and code.
     await this.redis.eval(
       REVOKE_PAIRING_SCRIPT,
-      2,
+      3,
       workerPairingIndexKey(workerId),
       workerPairingGenerationKey(workerId),
+      workerIdentityKey(workerId),
       randomBytes(24).toString('base64url'),
       String(this.pairingTtlSeconds),
+      `${PREFIX}:credential:`,
     );
-    const identityKey = workerIdentityKey(workerId);
-    const credentialDigest = await this.redis.get(identityKey);
-    if (credentialDigest == null) return;
-    await this.redis.del(identityKey, credentialDigestKey(credentialDigest));
   }
 
   private async removeLegacyPairings(workerId: string): Promise<void> {

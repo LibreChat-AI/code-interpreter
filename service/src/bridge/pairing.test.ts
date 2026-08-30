@@ -389,6 +389,38 @@ describe('RedisBridgePairingStore', () => {
     ).resolves.toMatchObject({ workerId: 'vm-1' });
   });
 
+  test('redeems an indexed legacy code issued after rollback', async () => {
+    const identity = createBridgeIdentity();
+    await pairings.issue('vm-rollback');
+    const legacyCode = 'rollback-issued-legacy-pairing';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    await redis.set(
+      legacyKey,
+      JSON.stringify({
+        workerId: 'vm-rollback',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      'EX',
+      60,
+    );
+    await redis.set(
+      'codeapi:bridge:v1:pairing-index:vm-rollback',
+      legacyKey,
+      'EX',
+      60,
+    );
+
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-rollback',
+        code: legacyCode,
+        publicKey: identity.publicKey,
+      }),
+    ).resolves.toMatchObject({ workerId: 'vm-rollback' });
+  });
+
   test('replacement invalidates a pairing code issued by a pre-fence replica', async () => {
     const identity = createBridgeIdentity();
     const legacyCode = 'replaced-legacy-pairing';
