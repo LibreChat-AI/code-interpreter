@@ -54,7 +54,11 @@ describe('buildReplayExecutionState', () => {
       authContextHash: 'hash_123',
     };
 
-    const state = build({ authContext, bridgeWorkerId: 'code-user_123' });
+    const state = build({
+      authContext,
+      bridgeWorkerId: 'code-user_123',
+      sandboxBackend: 'remote-bridge',
+    });
 
     expect(state).toMatchObject({
       execution_id: 'exec_123',
@@ -70,6 +74,7 @@ describe('buildReplayExecutionState', () => {
       authContextHash: 'hash_123',
       apiKeyId: 'key_legacy',
       bridgeWorkerId: 'code-user_123',
+      sandboxBackend: 'remote-bridge',
       mode: 'replay',
       userCode: 'print("hello")',
       tools: TOOLS,

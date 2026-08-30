@@ -2,6 +2,7 @@ import type * as t from '../types';
 import type { LCTool } from '../preamble';
 import type { ExecutionState } from './replay-state';
 import { buildExecutionIdentity, type ExecutionIdentity } from '../execution-identity';
+import type { SandboxBackendName } from '../execution-profile';
 
 export interface BuildReplayExecutionStateParams {
   executionId: string;
@@ -18,6 +19,7 @@ export interface BuildReplayExecutionStateParams {
   timeout: number;
   language: 'python' | 'bash';
   bridgeWorkerId?: string;
+  sandboxBackend?: SandboxBackendName;
   now?: number;
 }
 
@@ -43,6 +45,7 @@ export function buildReplayExecutionState(
     authContextHash: identity.authContextHash,
     apiKeyId: params.apiKeyId,
     bridgeWorkerId: params.bridgeWorkerId,
+    sandboxBackend: params.sandboxBackend,
     startTime: now,
     lastActivity: now,
     mode: 'replay',

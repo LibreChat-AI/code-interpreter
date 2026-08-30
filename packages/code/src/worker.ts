@@ -32,6 +32,7 @@ export interface BridgeWorkerOptions {
   onError?: (error: unknown) => void;
   onIdentityChange?: (identity: BridgeWorkerIdentity) => void | Promise<void>;
   incarnationId?: string;
+  credentialRefreshWindowMs?: number;
 }
 
 export interface BridgeWorkerIdentity {
@@ -181,7 +182,10 @@ export class BridgeWorker {
 
   async refreshCredential(
     signal?: AbortSignal,
-    validThroughMs = Date.now() + CREDENTIAL_REFRESH_WINDOW_MS,
+    validThroughMs =
+      Date.now() +
+      (this.options.credentialRefreshWindowMs ??
+        CREDENTIAL_REFRESH_WINDOW_MS),
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
@@ -216,6 +220,40 @@ export class BridgeWorker {
     identity.expiresAt = rotatedIdentity.expiresAt;
   }
 
+  private async maintainCredential(
+    assignment: BridgeAssignment,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const identity = this.options.identity;
+    if (identity == null) return;
+    const refreshWindowMs =
+      this.options.credentialRefreshWindowMs ??
+      CREDENTIAL_REFRESH_WINDOW_MS;
+    const assignmentDeadlineMs = Date.parse(assignment.expiresAt);
+    while (!signal.aborted && Date.now() < assignmentDeadlineMs) {
+      const refreshAtMs = Date.parse(identity.expiresAt) - refreshWindowMs;
+      const waitMs = Math.max(
+        0,
+        Math.min(refreshAtMs - Date.now(), assignmentDeadlineMs - Date.now()),
+      );
+      if (waitMs > 0) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, waitMs);
+          signal.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true },
+          );
+        });
+      }
+      if (signal.aborted || Date.now() >= assignmentDeadlineMs) return;
+      await this.refreshCredential(signal);
+    }
+  }
+
   async executeAndSettle(
     assignment: BridgeAssignment,
     signal?: AbortSignal,
@@ -225,7 +263,11 @@ export class BridgeWorker {
       Date.parse(assignment.expiresAt) + CREDENTIAL_REFRESH_WINDOW_MS,
     );
     const executionController = new AbortController();
-    const abortExecution = (): void => executionController.abort();
+    const credentialController = new AbortController();
+    const abortExecution = (): void => {
+      executionController.abort();
+      credentialController.abort();
+    };
     signal?.addEventListener('abort', abortExecution, { once: true });
     const deadlineDelay = Math.max(
       0,
@@ -250,12 +292,18 @@ export class BridgeWorker {
       executionController,
       cancellationController.signal,
     );
+    let credentialMaintenanceError: unknown;
+    let credentialMaintenance: Promise<void> | undefined;
     let settlement: BridgeSettlement;
     try {
-      await this.refreshCredential(
-        signal,
-        Date.parse(assignment.expiresAt),
-      );
+      await this.refreshCredential(signal);
+      credentialMaintenance = this.maintainCredential(
+        assignment,
+        credentialController.signal,
+      ).catch((error) => {
+        credentialMaintenanceError = error;
+        executionController.abort();
+      });
       const headers = {
         ...assignment.request.headers,
         ...(assignment.runtimeSessionId
@@ -276,6 +324,9 @@ export class BridgeWorker {
       );
       const payload = (await response.json()) as object;
       if (heartbeatError != null) throw heartbeatError;
+      if (credentialMaintenanceError != null) {
+        throw credentialMaintenanceError;
+      }
       if (!response.ok) {
         throw new BridgeProtocolError(
           errorMessage(payload) ??
@@ -306,9 +357,12 @@ export class BridgeWorker {
     clearTimeout(deadlineTimer);
     heartbeatController.abort();
     await heartbeat;
+    credentialController.abort();
+    await credentialMaintenance;
     cancellationController.abort();
     await cancellationWatcher;
     signal?.removeEventListener('abort', abortExecution);
+    await this.refreshCredential(signal);
     await this.request<BridgeSettlementResponse>(
       this.assignmentUrl(assignment, 'settle'),
       settlement,

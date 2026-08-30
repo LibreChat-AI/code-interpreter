@@ -71,6 +71,45 @@ describe('RedisBridgeStore', () => {
     await expect(
       store.lease('rebound-worker', 1_000, undefined, 'tenant-b-identity'),
     ).resolves.toBeUndefined();
+    await expect(
+      store.lease('rebound-worker', 1_000, undefined, 'tenant-a-identity'),
+    ).resolves.toBeDefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
+  test('a stale identity poll cannot consume work queued for the replacement identity', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'replacement-worker',
+      identityId: 'replacement-identity',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      binding: {
+        tenantId: 'tenant-a',
+        principal: { type: 'user', id: 'user-a' },
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'replacement-worker',
+      tenantId: 'tenant-a',
+      requireTenantBinding: true,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+
+    await expect(
+      store.lease('replacement-worker', 100, undefined, 'stale-identity'),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.lease('replacement-worker', 1_000, undefined, 'replacement-identity'),
+    ).resolves.toBeDefined();
     controller.abort();
     await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
   });

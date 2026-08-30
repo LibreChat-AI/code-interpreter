@@ -98,6 +98,14 @@ function assignmentKey(assignmentId: string): string {
   return `${PREFIX}:assignment:${assignmentId}`;
 }
 
+function queuedAssignment(
+  assignmentId: string,
+  workerIdentityId?: string,
+): string {
+  const identity = workerIdentityId ?? '';
+  return `${identity.length}:${identity}${assignmentId}`;
+}
+
 function settlementKey(assignmentId: string): string {
   return `${PREFIX}:assignment:${assignmentId}:settlement`;
 }
@@ -281,7 +289,10 @@ export class RedisBridgeStore {
         'EX',
         ttlSeconds,
       );
-      transaction.rpush(queueKey(args.workerId), assignmentId);
+      transaction.rpush(
+        queueKey(args.workerId),
+        queuedAssignment(assignmentId, assignment.workerIdentityId),
+      );
       transaction.expire(queueKey(args.workerId), ttlSeconds);
       await transaction.exec();
       const settlement = await this.waitForSettlement(
@@ -321,16 +332,48 @@ export class RedisBridgeStore {
   ): Promise<CodeBridgeAssignment | undefined> {
     const deadline = Date.now() + waitMs;
     while (signal?.aborted !== true && Date.now() < deadline) {
-      const assignmentId = await this.redis.lpop(queueKey(workerId));
-      if (assignmentId == null) {
+      const raw = await this.redis.eval(
+        [
+          "local entries = redis.call('LRANGE', KEYS[1], 0, -1)",
+          'for _, entry in ipairs(entries) do',
+          "  local separator = string.find(entry, ':', 1, true)",
+          '  local id = nil',
+          "  local identity = ''",
+          '  if separator then',
+          '    local identityLength = tonumber(string.sub(entry, 1, separator - 1))',
+          '    if identityLength then',
+          '      identity = string.sub(entry, separator + 1, separator + identityLength)',
+          '      id = string.sub(entry, separator + identityLength + 1)',
+          '    end',
+          "  elseif ARGV[3] == '' then",
+          '    id = entry',
+          '  end',
+          '  if id and identity == ARGV[3] then',
+          "  local raw = redis.call('GET', ARGV[1] .. id)",
+          '  if not raw then',
+          "    redis.call('LREM', KEYS[1], 1, entry)",
+          '  else',
+          "      redis.call('LREM', KEYS[1], 1, entry)",
+          '      return raw',
+          '  end',
+          '  end',
+          'end',
+          'return nil',
+        ].join('\n'),
+        1,
+        queueKey(workerId),
+        `${PREFIX}:assignment:`,
+        workerId,
+        identityId ?? '',
+      );
+      if (raw == null) {
         await delay(
           Math.min(POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())),
           signal,
         );
         continue;
       }
-      const assignment = await this.readAssignment(assignmentId);
-      if (assignment == null || assignment.workerId !== workerId) continue;
+      const assignment = JSON.parse(String(raw)) as StoredAssignment;
       if (assignment.incarnationId !== incarnationId) continue;
       const registration = await this.registration(workerId);
       if (registration?.incarnationId !== incarnationId) {
@@ -339,7 +382,12 @@ export class RedisBridgeStore {
           'Bridge worker incarnation was replaced',
         );
       }
-      if (assignment.workerIdentityId !== identityId) continue;
+      if (
+        assignment.workerId !== workerId ||
+        assignment.workerIdentityId !== identityId
+      ) {
+        continue;
+      }
       if (Date.parse(assignment.expiresAt) <= Date.now()) continue;
       const {
         leaseTokenHash: _leaseTokenHash,

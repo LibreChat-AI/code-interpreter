@@ -414,11 +414,15 @@ async function runReplayIteration(
     tenantId: state.tenantId,
     canonicalUserId: state.canonicalUserId,
     executionProfile: env.EXECUTION_PROFILE,
-    sandboxBackend: resolveQueuedSandboxBackend(
-      env.EXECUTION_PROFILE,
-      env.SANDBOX_BACKEND,
-      env.EXECUTION_PROFILE_SOURCE,
-    ),
+    sandboxBackend:
+      state.sandboxBackend ??
+      (state.bridgeWorkerId != null
+        ? 'remote-bridge'
+        : resolveQueuedSandboxBackend(
+            env.EXECUTION_PROFILE,
+            env.SANDBOX_BACKEND,
+            env.EXECUTION_PROFILE_SOURCE,
+          )),
     ...(state.bridgeWorkerId != null ? { bridgeWorkerId: state.bridgeWorkerId } : {}),
     runtimeSessionMode: 'stateless',
     runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,
@@ -574,6 +578,7 @@ async function handleReplayInitial(
     timeout,
     language,
     bridgeWorkerId,
+    sandboxBackend: env.SANDBOX_BACKEND,
   });
   /** Replay mode persists the full request (`userCode` + `tools` + `files`)
    * inside `ExecutionState` so continuations can re-enqueue without the

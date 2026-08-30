@@ -24,6 +24,7 @@ import { nanoid } from 'nanoid';
 import type { Redis } from 'ioredis';
 import type * as t from '../types';
 import type { LCTool } from '../preamble';
+import type { SandboxBackendName } from '../execution-profile';
 import { connection } from '../queue';
 import { env } from '../config';
 import { internalServiceHeaders } from '../internal-service-auth';
@@ -111,6 +112,8 @@ export interface ExecutionState {
   apiKeyId?: string;
   /** Authenticated worker selection retained across every replay iteration. */
   bridgeWorkerId?: string;
+  /** Original queue/backend target retained across replay continuations. */
+  sandboxBackend?: SandboxBackendName;
   startTime: number;
   /**
    * Wall-clock ms of the last interaction that advanced this execution (initial
