@@ -222,7 +222,8 @@ export class BridgeWorker {
 
   private async maintainCredential(
     assignment: BridgeAssignment,
-    signal: AbortSignal,
+    stopSignal: AbortSignal,
+    requestSignal?: AbortSignal,
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
@@ -230,7 +231,7 @@ export class BridgeWorker {
       this.options.credentialRefreshWindowMs ??
       CREDENTIAL_REFRESH_WINDOW_MS;
     const assignmentDeadlineMs = Date.parse(assignment.expiresAt);
-    while (!signal.aborted && Date.now() < assignmentDeadlineMs) {
+    while (!stopSignal.aborted && Date.now() < assignmentDeadlineMs) {
       const refreshAtMs = Date.parse(identity.expiresAt) - refreshWindowMs;
       const waitMs = Math.max(
         0,
@@ -239,7 +240,7 @@ export class BridgeWorker {
       if (waitMs > 0) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, waitMs);
-          signal.addEventListener(
+          stopSignal.addEventListener(
             'abort',
             () => {
               clearTimeout(timer);
@@ -249,8 +250,11 @@ export class BridgeWorker {
           );
         });
       }
-      if (signal.aborted || Date.now() >= assignmentDeadlineMs) return;
-      await this.refreshCredential(signal);
+      if (stopSignal.aborted || Date.now() >= assignmentDeadlineMs) return;
+      /* Sandbox completion stops the maintenance loop, but it must not abort a
+       * refresh already accepted by the server. Only cancellation of the
+       * whole worker operation may cancel that request. */
+      await this.refreshCredential(requestSignal);
     }
   }
 
@@ -300,6 +304,7 @@ export class BridgeWorker {
       credentialMaintenance = this.maintainCredential(
         assignment,
         credentialController.signal,
+        signal,
       ).catch((error) => {
         credentialMaintenanceError = error;
         executionController.abort();

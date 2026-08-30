@@ -469,6 +469,86 @@ test('worker shutdown interrupts reconnect backoff', async () => {
   await run;
 });
 
+test('sandbox completion does not cancel an in-flight credential rotation', async () => {
+  const key = createBridgeIdentity();
+  const identity = {
+    privateKey: key.privateKey,
+    credential: 'credential-before-in-flight-rotation',
+    expiresAt: new Date(Date.now() + 40).toISOString(),
+  };
+  let refreshStarted!: () => void;
+  const refreshStartedPromise = new Promise<void>((resolve) => {
+    refreshStarted = resolve;
+  });
+  let refreshCount = 0;
+  let settleAuthorization = '';
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/credentials/refresh')) {
+      refreshCount += 1;
+      if (refreshCount > 1) {
+        return Response.json({ error: 'stale credential' }, { status: 401 });
+      }
+      refreshStarted();
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 30);
+        init?.signal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            reject(new DOMException('Aborted', 'AbortError'));
+          },
+          { once: true },
+        );
+      });
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: 'credential-after-in-flight-rotation',
+        expiresAt: new Date(Date.now() + 300_000).toISOString(),
+      });
+    }
+    if (url.endsWith('/execute')) {
+      await refreshStartedPromise;
+      return Response.json({ session_id: 'run-rotation-race', files: [] });
+    }
+    settleAuthorization = (
+      init?.headers as Record<string, string>
+    ).Authorization;
+    return Response.json({ protocolVersion: 1, accepted: true });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+    credentialRefreshWindowMs: 30,
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-rotation-race',
+    workerId: 'vm-1',
+    generation: 5,
+    leaseToken: 'assignment-rotation-race-lease-token',
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(refreshCount, 1);
+  assert.equal(identity.credential, 'credential-after-in-flight-rotation');
+  assert.equal(
+    settleAuthorization,
+    'Bridge credential-after-in-flight-rotation',
+  );
+});
+
 test('reconnect delay uses bounded exponential jitter', () => {
   assert.equal(reconnectDelayMs(0, 1_000, 30_000, () => 0), 500);
   assert.equal(reconnectDelayMs(0, 1_000, 30_000, () => 1), 1_000);

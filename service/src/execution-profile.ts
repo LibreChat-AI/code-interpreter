@@ -105,6 +105,16 @@ export function queueNamesForExecutionProfile(
     : LEGACY_QUEUE_NAMES;
 }
 
+export function queueNameForExecution(
+  language: 'python' | 'bash',
+  profile: ExecutionProfile,
+  source: ExecutionProfileSource,
+  backend?: SandboxBackendName,
+): string {
+  const names = queueNamesForExecutionProfile(profile, source, backend);
+  return language === 'bash' ? names.other : names.python;
+}
+
 export type ExecutionProfileExpectation =
   | { ok: true }
   | {

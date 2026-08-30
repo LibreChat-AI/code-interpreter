@@ -2,11 +2,15 @@ import axios from 'axios';
 import { nanoid } from 'nanoid';
 import { Router } from 'express';
 import type { Response } from 'express';
-import type { Queue, QueueEvents } from 'bullmq';
 import type * as t from '../types';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
 import { executionLimiter } from '../middleware/limits';
-import { pyQueue, pyQueueEvents, otherQueue, otherQueueEvents, connection } from '../queue';
+import {
+  pyQueue,
+  pyQueueEvents,
+  connection,
+  getExecutionQueueBinding,
+} from '../queue';
 import { createProgrammaticPayload, extractPendingFromStdout } from '../preamble';
 import { findBashToolNameCollision } from '../preamble-bash';
 import type { LCTool } from '../preamble';
@@ -337,19 +341,6 @@ async function waitForExecutionState(
 // Replay mode helpers
 // ---------------------------------------------------------------------------
 
-interface QueueBinding {
-  queue: Queue<t.JobData, t.JobResult, Jobs.execute>;
-  events: QueueEvents;
-  language: 'python' | 'bash';
-}
-
-function pickQueue(language: 'python' | 'bash'): QueueBinding {
-  if (language === 'bash') {
-    return { queue: otherQueue, events: otherQueueEvents, language: 'bash' };
-  }
-  return { queue: pyQueue, events: pyQueueEvents, language: 'python' };
-}
-
 function buildReplayPayload(
   req: t.AuthenticatedRequest,
   state: ExecutionState,
@@ -405,7 +396,19 @@ async function runReplayIteration(
     });
   }
 
-  const { queue, events, language } = pickQueue(state.language ?? 'python');
+  const replayBackend =
+    state.sandboxBackend ??
+    (state.bridgeWorkerId != null
+      ? 'remote-bridge'
+      : resolveQueuedSandboxBackend(
+          env.EXECUTION_PROFILE,
+          env.SANDBOX_BACKEND,
+          env.EXECUTION_PROFILE_SOURCE,
+        ));
+  const { queue, events, language } = getExecutionQueueBinding(
+    state.language ?? 'python',
+    replayBackend,
+  );
   const job = await queue.add(Jobs.execute, {
     code: state.userCode ?? '',
     userId,
@@ -417,15 +420,7 @@ async function runReplayIteration(
     tenantId: state.tenantId,
     canonicalUserId: state.canonicalUserId,
     executionProfile: env.EXECUTION_PROFILE,
-    sandboxBackend:
-      state.sandboxBackend ??
-      (state.bridgeWorkerId != null
-        ? 'remote-bridge'
-        : resolveQueuedSandboxBackend(
-            env.EXECUTION_PROFILE,
-            env.SANDBOX_BACKEND,
-            env.EXECUTION_PROFILE_SOURCE,
-          )),
+    sandboxBackend: replayBackend,
     ...(state.bridgeWorkerId != null ? { bridgeWorkerId: state.bridgeWorkerId } : {}),
     runtimeSessionMode: 'stateless',
     runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,

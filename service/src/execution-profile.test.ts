@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   checkExecutionProfileExpectation,
   queueNamesForExecutionProfile,
+  queueNameForExecution,
   resolveExecutionProfile,
   resolveExecutionProfileSource,
   resolveQueuedSandboxBackend,
@@ -56,6 +57,17 @@ describe('execution profile queue isolation', () => {
       python: 'stateful-python-queue',
       other: 'stateful-other-queue',
     });
+  });
+
+  test('routes a persisted remote bridge replay to the bridge queue on a lambda API', () => {
+    expect(
+      queueNameForExecution(
+        'python',
+        'stateful',
+        'explicit',
+        'remote-bridge',
+      ),
+    ).toBe('remote-bridge-python-queue');
   });
 
   test('isolates outbound bridge jobs from Lambda consumers', () => {

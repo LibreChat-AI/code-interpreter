@@ -1,10 +1,16 @@
 import type { Queue } from 'bullmq';
 import type { Express } from 'express';
-import { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, connection } from './queue';
+import {
+  pyQueue,
+  otherQueue,
+  connection,
+  closeQueueConnections,
+} from './queue';
 import { validateStartupAuthConfig } from './auth/startup';
 import { env } from './config';
 import {
   validateApiHardenedConfig,
+  validateApiSandboxBackendPolicy,
   validateExecutionProfilePolicy,
   validateSandboxBackendPolicy,
   validateApiBridgePolicy,
@@ -91,8 +97,9 @@ export async function startupApiOnly(): Promise<void> {
   logger.info('Starting API service (no workers)...');
   validateApiHardenedConfig();
   validateExecutionProfilePolicy({ requireBackendMatch: false });
+  validateApiSandboxBackendPolicy();
   validateApiBridgePolicy();
-  /* No validateSandboxBackendPolicy() here: an API-only pod authenticates and
+  /* No full validateSandboxBackendPolicy() here: an API-only pod authenticates and
    * enqueues jobs, it never constructs the Lambda backend or checkpoint store.
    * Validating that policy would force worker-only config (LAMBDA_MICROVM_* and
    * the MINIO_* checkpoint creds) into API pods just to boot. The worker and
@@ -252,12 +259,7 @@ export async function gracefulShutdown(): Promise<void> {
     }
 
     // Close queue connections (both API and Worker need this)
-    await Promise.all([
-      pyQueue.close(),
-      otherQueue.close(),
-      pyQueueEvents.close(),
-      otherQueueEvents.close()
-    ]);
+    await closeQueueConnections();
     logger.info('Queue connections closed');
 
     // Only disconnect Redis if explicitly requested

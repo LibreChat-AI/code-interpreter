@@ -3,6 +3,7 @@ import { env } from './config';
 import {
   validateApiHardenedConfig,
   validateApiBridgePolicy,
+  validateApiSandboxBackendPolicy,
   validateEgressGatewayHardenedConfig,
   validateExecutionProfilePolicy,
   validateSandboxBackendPolicy,
@@ -330,6 +331,19 @@ describe('sandbox backend policy', () => {
 
     env.BRIDGE_AUTH_MODE = 'paired';
     expect(() => validateSandboxBackendPolicy()).not.toThrow();
+  });
+
+  test('requires paired dynamic worker auth in an API-only process', () => {
+    env.SANDBOX_BACKEND = 'http';
+    env.BRIDGE_DYNAMIC_WORKERS = true;
+    env.BRIDGE_AUTH_MODE = 'static';
+
+    expect(() => validateApiSandboxBackendPolicy()).toThrow(
+      'CODEAPI_BRIDGE_AUTH_MODE=paired',
+    );
+
+    env.BRIDGE_AUTH_MODE = 'paired';
+    expect(() => validateApiSandboxBackendPolicy()).not.toThrow();
   });
 
   test('hardened remote bridge requires replay PTC, paired auth, and a strong administrator token', () => {
