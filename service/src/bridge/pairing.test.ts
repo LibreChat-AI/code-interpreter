@@ -367,6 +367,52 @@ describe('RedisBridgePairingStore', () => {
     await expect(redis.get(legacyKey)).resolves.toBeNull();
   });
 
+  test('redeems an unrevoked pairing code issued by a pre-fence replica', async () => {
+    const identity = createBridgeIdentity();
+    const legacyCode = 'unrevoked-legacy-pairing';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    await redis.set(
+      legacyKey,
+      JSON.stringify({ workerId: 'vm-1', expiresAt: new Date(Date.now() + 60_000).toISOString() }),
+      'EX',
+      60,
+    );
+
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-1',
+        code: legacyCode,
+        publicKey: identity.publicKey,
+      }),
+    ).resolves.toMatchObject({ workerId: 'vm-1' });
+  });
+
+  test('replacement invalidates a pairing code issued by a pre-fence replica', async () => {
+    const identity = createBridgeIdentity();
+    const legacyCode = 'replaced-legacy-pairing';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    await redis.set(
+      legacyKey,
+      JSON.stringify({ workerId: 'vm-1', expiresAt: new Date(Date.now() + 60_000).toISOString() }),
+      'EX',
+      60,
+    );
+
+    await pairings.issue('vm-1');
+
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-1',
+        code: legacyCode,
+        publicKey: identity.publicKey,
+      }),
+    ).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
+  });
+
   test('issuing a replacement invalidates the prior unredeemed pairing code', async () => {
     const identity = createBridgeIdentity();
     const first = await pairings.issue('vm-1');

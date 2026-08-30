@@ -28,7 +28,13 @@ local pairing = redis.call('GET', KEYS[1])
 if pairing ~= ARGV[1] then
   return 0
 end
-if redis.call('GET', KEYS[2]) ~= ARGV[2] then
+local generation = redis.call('GET', KEYS[2])
+if ARGV[2] == '' then
+  if generation then
+    redis.call('DEL', KEYS[1])
+    return 0
+  end
+elseif generation ~= ARGV[2] then
   redis.call('DEL', KEYS[1])
   return 0
 end
@@ -66,7 +72,7 @@ export interface BridgeWorkerBinding {
 interface StoredPairing {
   workerId: string;
   expiresAt: string;
-  generation: string;
+  generation?: string;
   binding?: BridgeWorkerBinding;
 }
 
@@ -227,7 +233,7 @@ export class RedisBridgePairingStore {
       workerIdentityKey(args.workerId),
       workerPairingIndexKey(args.workerId),
       raw,
-      pairing.generation,
+      pairing.generation ?? '',
       JSON.stringify(stored),
       String(this.credentialTtlSeconds),
       credentialDigest,
