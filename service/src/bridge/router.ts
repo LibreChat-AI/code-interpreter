@@ -344,6 +344,7 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         | {
             workerId: string;
             credentialId: string;
+            identityId?: string;
             binding?: BridgeWorkerBinding;
           }
         | undefined;
@@ -366,6 +367,9 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
           ...trustedRegistration,
           ...(authorization?.credentialId != null
             ? { credentialId: authorization.credentialId }
+            : {}),
+          ...(authorization?.identityId != null
+            ? { identityId: authorization.identityId }
             : {}),
           ...(authorization?.binding != null
             ? { binding: authorization.binding }
@@ -419,9 +423,9 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
           undefined,
           (
             res.locals.bridgeWorkerAuthorization as
-              | { credentialId: string }
+              | { identityId: string }
               | undefined
-          )?.credentialId,
+          )?.identityId,
         );
         res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
       } catch (error) {

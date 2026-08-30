@@ -271,6 +271,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
         tenantId: identity.storageNamespace,
         canonicalUserId: identity.canonicalUserId,
         executionProfile: env.EXECUTION_PROFILE,
+        sandboxBackend: env.SANDBOX_BACKEND,
         ...(bridgeWorkerId != null ? { bridgeWorkerId } : {}),
         ...(runtimeSessionId != null ? { runtimeSessionId } : {}),
         runtimeSessionMode,

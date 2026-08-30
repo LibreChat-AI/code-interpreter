@@ -123,6 +123,12 @@ execution.
   digest, timestamp, nonce, and credential.
 - Accepted proof nonces cannot be replayed, credentials rotate before expiry,
   and an administrator can revoke the active worker identity immediately.
+- Assignment leases bind to a stable paired identity rather than an individual
+  short-lived credential. Rotation preserves that identity; pairing again
+  replaces it and fences work queued for the previous owner.
+- Remote bridge deployments use backend-specific BullMQ queues and serialize
+  the expected backend on every new job, preventing Lambda or HTTP consumers
+  from accepting attached-worker executions.
 - Code API permits one active assignment per worker.
 - Dynamic workers are fenced to their server-issued tenant before assignment.
 - Each assignment has an absolute deadline, generation, and random lease token.

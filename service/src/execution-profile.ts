@@ -1,4 +1,9 @@
 export const EXECUTION_PROFILES = ['default', 'stateful'] as const;
+export const SANDBOX_BACKENDS = [
+  'http',
+  'lambda-microvm',
+  'remote-bridge',
+] as const;
 
 export type ExecutionProfile = typeof EXECUTION_PROFILES[number];
 export type ExecutionProfileSource = 'explicit' | 'inferred';
@@ -10,6 +15,8 @@ export interface ExecutionProfileQueueNames {
   python: string;
   other: string;
 }
+
+export type SandboxBackendName = typeof SANDBOX_BACKENDS[number];
 
 export function resolveExecutionProfile(
   raw: string | undefined,
@@ -54,10 +61,17 @@ const EXPLICIT_PROFILE_QUEUE_NAMES: Record<ExecutionProfile, ExecutionProfileQue
   },
 };
 
+const REMOTE_BRIDGE_QUEUE_NAMES: ExecutionProfileQueueNames = {
+  python: 'remote-bridge-python-queue',
+  other: 'remote-bridge-other-queue',
+};
+
 export function queueNamesForExecutionProfile(
   profile: ExecutionProfile,
   source: ExecutionProfileSource,
+  backend?: SandboxBackendName,
 ): ExecutionProfileQueueNames {
+  if (backend === 'remote-bridge') return REMOTE_BRIDGE_QUEUE_NAMES;
   /* A pre-profile affinity/strict deployment used the legacy queues. Keep
    * inferred profiles on those names so API and worker Deployments can roll
    * or roll back independently without temporarily losing their consumers.
@@ -130,6 +144,23 @@ export function validateQueuedExecutionProfile(
   if (jobProfile !== workerProfile) {
     throw new Error(
       `Queued job targets the ${jobProfile} execution profile, but worker serves ${workerProfile}`,
+    );
+  }
+}
+
+/** Reject backend drift before a consumer can invoke the wrong sandbox.
+ * Missing backend remains compatible with jobs queued before backend fencing. */
+export function validateQueuedSandboxBackend(
+  jobBackend: unknown,
+  workerBackend: SandboxBackendName,
+): void {
+  if (jobBackend == null) return;
+  if (!SANDBOX_BACKENDS.includes(jobBackend as SandboxBackendName)) {
+    throw new Error(`Queued job has invalid sandbox backend: ${String(jobBackend)}`);
+  }
+  if (jobBackend !== workerBackend) {
+    throw new Error(
+      `Queued job targets the ${jobBackend} sandbox backend, but worker serves ${workerBackend}`,
     );
   }
 }

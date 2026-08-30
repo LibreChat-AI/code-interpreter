@@ -60,6 +60,7 @@ const connection = new IORedis({
 const queueNames = queueNamesForExecutionProfile(
   env.EXECUTION_PROFILE,
   env.EXECUTION_PROFILE_SOURCE,
+  env.SANDBOX_BACKEND,
 );
 const pyQueue = new Queue<t.JobData, t.JobResult, Jobs.execute>(queueNames.python, { connection });
 const otherQueue = new Queue<t.JobData, t.JobResult, Jobs.execute>(queueNames.other, { connection });

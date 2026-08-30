@@ -47,12 +47,13 @@ export class BridgeStoreError extends Error {
 
 interface StoredAssignment extends CodeBridgeAssignment {
   leaseTokenHash: string;
-  workerCredentialId?: string;
+  workerIdentityId?: string;
 }
 
 export interface RegisteredBridgeWorker extends BridgeWorkerRegistration {
   binding?: BridgeWorkerBinding;
   credentialId?: string;
+  identityId?: string;
 }
 
 function workerKey(workerId: string): string {
@@ -263,8 +264,8 @@ export class RedisBridgeStore {
         generation,
         leaseToken,
         leaseTokenHash: tokenHash(leaseToken),
-        ...(registration.credentialId != null
-          ? { workerCredentialId: registration.credentialId }
+        ...(registration.identityId != null
+          ? { workerIdentityId: registration.identityId }
           : {}),
         expiresAt: new Date(args.deadlineAtMs).toISOString(),
         runtimeSessionId: args.runtimeSessionId,
@@ -316,7 +317,7 @@ export class RedisBridgeStore {
     incarnationId: string,
     waitMs: number,
     signal?: AbortSignal,
-    credentialId?: string,
+    identityId?: string,
   ): Promise<CodeBridgeAssignment | undefined> {
     const deadline = Date.now() + waitMs;
     while (signal?.aborted !== true && Date.now() < deadline) {
@@ -338,11 +339,11 @@ export class RedisBridgeStore {
           'Bridge worker incarnation was replaced',
         );
       }
-      if (assignment.workerCredentialId !== credentialId) continue;
+      if (assignment.workerIdentityId !== identityId) continue;
       if (Date.parse(assignment.expiresAt) <= Date.now()) continue;
       const {
         leaseTokenHash: _leaseTokenHash,
-        workerCredentialId: _workerCredentialId,
+        workerIdentityId: _workerIdentityId,
         ...wireAssignment
       } = assignment;
       return wireAssignment;

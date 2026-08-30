@@ -48,6 +48,18 @@ end
 redis.call('DEL', KEYS[1], KEYS[2])
 return pairing
 `;
+const ROTATE_CREDENTIAL_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+if redis.call('EXISTS', KEYS[2]) ~= 1 then
+  return 0
+end
+redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])
+redis.call('DEL', KEYS[2])
+return 1
+`;
 
 export type BridgePrincipalType = 'deployment' | 'tenant' | 'user' | 'role' | 'group';
 
@@ -307,7 +319,8 @@ export class RedisBridgePairingStore {
     expectedCredentialId?: string,
   ): Promise<BridgeWorkerCredential> {
     const identityKey = workerIdentityKey(workerId);
-    const previousDigest = expectedCredentialId ?? await this.redis.get(identityKey);
+    const previousDigest =
+      expectedCredentialId ?? (await this.redis.get(identityKey));
     const previousRaw =
       previousDigest == null
         ? null
@@ -325,6 +338,7 @@ export class RedisBridgePairingStore {
       previousDigest,
       previous.identityId,
       previous.binding,
+      previous.identityId ?? null,
     );
   }
 
@@ -334,6 +348,7 @@ export class RedisBridgePairingStore {
     previousDigest?: string,
     identityId = randomBytes(18).toString('base64url'),
     binding?: BridgeWorkerBinding,
+    identityId?: string | null,
   ): Promise<BridgeWorkerCredential> {
     const credential = randomBytes(32).toString('base64url');
     const credentialDigest = digest(credential);

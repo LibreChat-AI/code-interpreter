@@ -42,11 +42,11 @@ describe('RedisBridgeStore', () => {
     ).rejects.toMatchObject({ code: 'WORKER_UNAUTHORIZED' });
   });
 
-  test('does not lease an assignment to a newly rebound worker credential', async () => {
+  test('does not lease an assignment to a newly rebound worker identity', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'rebound-worker',
-      credentialId: 'tenant-a-credential',
+      identityId: 'tenant-a-identity',
       capabilities: {
         statefulWorkspace: true,
         sandboxProfile: 'nsjail',
@@ -69,8 +69,47 @@ describe('RedisBridgeStore', () => {
     });
 
     await expect(
-      store.lease('rebound-worker', 1_000, undefined, 'tenant-b-credential'),
+      store.lease('rebound-worker', 1_000, undefined, 'tenant-b-identity'),
     ).resolves.toBeUndefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
+  test('leases queued work after credential refresh preserves the paired identity', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'rotating-worker',
+      identityId: 'stable-paired-identity',
+      credentialId: 'credential-before-refresh',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      binding: {
+        tenantId: 'tenant-a',
+        principal: { type: 'user', id: 'user-a' },
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'rotating-worker',
+      tenantId: 'tenant-a',
+      requireTenantBinding: true,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+
+    const assignment = await store.lease(
+      'rotating-worker',
+      1_000,
+      undefined,
+      'stable-paired-identity',
+    );
+
+    expect(assignment).toBeDefined();
     controller.abort();
     await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
   });

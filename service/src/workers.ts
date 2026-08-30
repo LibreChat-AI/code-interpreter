@@ -17,7 +17,10 @@ import { isSyntheticPrincipalSource } from './auth/synthetic';
 import { withSpan, withTraceContext } from './telemetry';
 import { workerDeadlineFailure } from './worker-error';
 import logger from './logger';
-import { validateQueuedExecutionProfile } from './execution-profile';
+import {
+  validateQueuedExecutionProfile,
+  validateQueuedSandboxBackend,
+} from './execution-profile';
 
 const { INSTANCE_ID } = env;
 const WORKER_ID = `${INSTANCE_ID}-${process.pid}`;
@@ -60,6 +63,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       throw new Error(`Job timed out after ${env.JOB_TIMEOUT}ms`);
     }
     validateQueuedExecutionProfile(job.data.executionProfile, env.EXECUTION_PROFILE);
+    validateQueuedSandboxBackend(job.data.sandboxBackend, env.SANDBOX_BACKEND);
     let sandboxPayload = payload;
     let executionManifestClaims = job.data.executionManifestClaims;
     let egressGrantToken = job.data.egressGrantToken;

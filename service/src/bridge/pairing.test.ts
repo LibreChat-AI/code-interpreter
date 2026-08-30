@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'crypto';
 import RedisMock from 'ioredis-mock';
 
 import type Redis from 'ioredis';
@@ -29,7 +30,6 @@ describe('RedisBridgePairingStore', () => {
       code: pairing.code,
       publicKey: identity.publicKey,
     });
-    const rotated = await pairings.rotate('vm-bound');
     const requestFor = (
       credential: string,
       nonce: string,
@@ -49,12 +49,58 @@ describe('RedisBridgePairingStore', () => {
       };
     };
 
-    await expect(
-      pairings.authorize(requestFor(rotated.credential, 'bound-worker-proof')),
-    ).resolves.toMatchObject({ workerId: 'vm-bound', binding });
+    const originalAuthorization = await pairings.authorize(
+      requestFor(issued.credential, 'original-bound-worker-proof'),
+    );
+    const rotated = await pairings.rotate('vm-bound');
+
+    const rotatedAuthorization = await pairings.authorize(
+      requestFor(rotated.credential, 'bound-worker-proof'),
+    );
+    expect(rotatedAuthorization).toMatchObject({ workerId: 'vm-bound', binding });
+    expect(typeof originalAuthorization.identityId).toBe('string');
+    expect(rotatedAuthorization.identityId).toBe(
+      originalAuthorization.identityId,
+    );
     await expect(
       pairings.authorize(requestFor(issued.credential, 'superseded-bound-proof')),
     ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
+  });
+
+  test('preserves a legacy unmarked identity across its first rotation', async () => {
+    const identity = createBridgeIdentity();
+    const pairing = await pairings.issue('legacy-vm');
+    const issued = await pairings.redeem({
+      workerId: 'legacy-vm',
+      code: pairing.code,
+      publicKey: identity.publicKey,
+    });
+    const issuedDigest = createHash('sha256')
+      .update(issued.credential)
+      .digest('hex');
+    const credentialKey = `codeapi:bridge:v1:credential:${issuedDigest}`;
+    const stored = JSON.parse((await redis.get(credentialKey)) ?? '{}') as {
+      identityId?: string;
+    };
+    delete stored.identityId;
+    await redis.set(credentialKey, JSON.stringify(stored), 'EX', 300);
+
+    const rotated = await pairings.rotate('legacy-vm');
+    const proof = {
+      credential: rotated.credential,
+      method: 'POST',
+      path: '/v1/bridge/workers/legacy-vm/lease',
+      timestamp: new Date().toISOString(),
+      nonce: 'legacy-rotation-proof',
+      body: JSON.stringify({ protocolVersion: 1, waitMs: 25_000 }),
+    };
+    const authorization = await pairings.authorize({
+      ...proof,
+      workerId: 'legacy-vm',
+      signature: signBridgeRequest(identity.privateKey, proof),
+    });
+
+    expect(authorization.identityId).toBeUndefined();
   });
 
   test('redeems a pairing code exactly once for the intended worker identity', async () => {
@@ -291,6 +337,41 @@ describe('RedisBridgePairingStore', () => {
     await expect(
       pairings.authorize(proofFor(recovered.credential, 'refresh-recovered')),
     ).resolves.toMatchObject({ workerId: 'vm-1' });
+  });
+
+  test('rejects a stale credential refresh after the worker is paired again', async () => {
+    const originalIdentity = createBridgeIdentity();
+    const originalPairing = await pairings.issue('vm-1');
+    const original = await pairings.redeem({
+      workerId: 'vm-1',
+      code: originalPairing.code,
+      publicKey: originalIdentity.publicKey,
+    });
+    const proof = {
+      credential: original.credential,
+      method: 'POST',
+      path: '/v1/bridge/workers/vm-1/credentials/refresh',
+      timestamp: new Date().toISOString(),
+      nonce: 'authorized-before-repairing',
+      body: JSON.stringify({ protocolVersion: 1 }),
+    };
+    const staleAuthorization = await pairings.authorize({
+      ...proof,
+      workerId: 'vm-1',
+      signature: signBridgeRequest(originalIdentity.privateKey, proof),
+    });
+
+    const replacementIdentity = createBridgeIdentity();
+    const replacementPairing = await pairings.issue('vm-1');
+    await pairings.redeem({
+      workerId: 'vm-1',
+      code: replacementPairing.code,
+      publicKey: replacementIdentity.publicKey,
+    });
+
+    await expect(
+      pairings.rotate('vm-1', staleAuthorization.credentialId),
+    ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
   });
 
   test('repairing a worker invalidates its previously paired credential', async () => {
