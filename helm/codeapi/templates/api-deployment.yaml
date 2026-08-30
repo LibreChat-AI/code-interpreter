@@ -17,6 +17,8 @@ spec:
   {{- if not .Values.api.autoscaling.enabled }}
   replicas: {{ .Values.api.replicaCount }}
   {{- end }}
+  strategy:
+    {{- toYaml .Values.api.strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "codeapi.api.selectorLabels" . | nindent 6 }}

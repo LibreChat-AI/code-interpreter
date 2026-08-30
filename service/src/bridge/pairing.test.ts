@@ -350,6 +350,23 @@ describe('RedisBridgePairingStore', () => {
     ).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
   });
 
+  test('revocation removes pairing codes issued by a pre-fence replica', async () => {
+    const legacyCode = 'legacy-pairing-code';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    await redis.set(
+      legacyKey,
+      JSON.stringify({ workerId: 'vm-1', expiresAt: new Date(Date.now() + 60_000).toISOString() }),
+      'EX',
+      60,
+    );
+
+    await pairings.revoke('vm-1');
+
+    await expect(redis.get(legacyKey)).resolves.toBeNull();
+  });
+
   test('issuing a replacement invalidates the prior unredeemed pairing code', async () => {
     const identity = createBridgeIdentity();
     const first = await pairings.issue('vm-1');

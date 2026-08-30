@@ -320,10 +320,37 @@ export class RedisBridgePairingStore {
       'EX',
       this.pairingTtlSeconds,
     );
+    await this.removeLegacyPairings(workerId);
     const identityKey = workerIdentityKey(workerId);
     const credentialDigest = await this.redis.get(identityKey);
     if (credentialDigest == null) return;
     await this.redis.del(identityKey, credentialDigestKey(credentialDigest));
+  }
+
+  private async removeLegacyPairings(workerId: string): Promise<void> {
+    let cursor = '0';
+    do {
+      const [nextCursor, keys] = await this.redis.scan(
+        cursor,
+        'MATCH',
+        `${PREFIX}:pairing:*`,
+        'COUNT',
+        100,
+      );
+      cursor = nextCursor;
+      if (keys.length === 0) continue;
+      const values = await this.redis.mget(...keys);
+      const matching = keys.filter((_key, index) => {
+        const raw = values[index];
+        if (raw == null) return false;
+        try {
+          return (JSON.parse(raw) as Partial<StoredPairing>).workerId === workerId;
+        } catch {
+          return false;
+        }
+      });
+      if (matching.length > 0) await this.redis.del(...matching);
+    } while (cursor !== '0');
   }
 
   async rotate(

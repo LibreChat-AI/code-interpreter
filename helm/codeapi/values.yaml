@@ -68,6 +68,12 @@ api:
   enabled: true
   replicaCount: 2  # Start with 2 API pods
 
+  # Pairing revocation relies on every serving replica honoring the Redis
+  # generation fence. Recreate prevents a pre-fence binary from redeeming an
+  # already-revoked code during the first rollout of paired bridge workers.
+  strategy:
+    type: Recreate
+
   image:
     repository: codeapi-api
     tag: latest
