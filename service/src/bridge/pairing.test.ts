@@ -63,11 +63,8 @@ describe('RedisBridgePairingStore', () => {
       originalAuthorization.identityId,
     );
     await expect(
-      pairings.authorize(requestFor(issued.credential, 'overlap-bound-proof')),
-    ).resolves.toMatchObject({
-      workerId: 'vm-bound',
-      identityId: originalAuthorization.identityId,
-    });
+      pairings.authorize(requestFor(issued.credential, 'superseded-bound-proof')),
+    ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
   });
 
   test('preserves a legacy unmarked identity across its first rotation', async () => {
@@ -338,7 +335,43 @@ describe('RedisBridgePairingStore', () => {
     ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
   });
 
-  test('rotation keeps the prior same-identity credential usable for recovery', async () => {
+  test('revocation invalidates an unredeemed pairing code', async () => {
+    const identity = createBridgeIdentity();
+    const pairing = await pairings.issue('vm-1');
+
+    await pairings.revoke('vm-1');
+
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-1',
+        code: pairing.code,
+        publicKey: identity.publicKey,
+      }),
+    ).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
+  });
+
+  test('issuing a replacement invalidates the prior unredeemed pairing code', async () => {
+    const identity = createBridgeIdentity();
+    const first = await pairings.issue('vm-1');
+    const replacement = await pairings.issue('vm-1');
+
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-1',
+        code: first.code,
+        publicKey: identity.publicKey,
+      }),
+    ).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-1',
+        code: replacement.code,
+        publicKey: identity.publicKey,
+      }),
+    ).resolves.toMatchObject({ workerId: 'vm-1' });
+  });
+
+  test('rotation replaces rather than duplicates the active credential', async () => {
     const identity = createBridgeIdentity();
     const pairing = await pairings.issue('vm-1');
     const original = await pairings.redeem({
@@ -370,50 +403,9 @@ describe('RedisBridgePairingStore', () => {
 
     await expect(
       pairings.authorize(proofFor(original.credential, 'old-credential')),
-    ).resolves.toMatchObject({ workerId: 'vm-1' });
+    ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
     await expect(
       pairings.authorize(proofFor(rotated.credential, 'new-credential')),
-    ).resolves.toMatchObject({ workerId: 'vm-1' });
-  });
-
-  test('recovers when a refresh response is lost after the server commits it', async () => {
-    const identity = createBridgeIdentity();
-    const pairing = await pairings.issue('vm-1');
-    const original = await pairings.redeem({
-      workerId: 'vm-1',
-      code: pairing.code,
-      publicKey: identity.publicKey,
-    });
-    const proofFor = (
-      credential: string,
-      nonce: string,
-    ): Parameters<RedisBridgePairingStore['authorize']>[0] => {
-      const proof = {
-        credential,
-        method: 'POST',
-        path: '/v1/bridge/workers/vm-1/credentials/refresh',
-        timestamp: new Date().toISOString(),
-        nonce,
-        body: JSON.stringify({ protocolVersion: 1 }),
-      };
-      return {
-        ...proof,
-        workerId: 'vm-1',
-        signature: signBridgeRequest(identity.privateKey, proof),
-      };
-    };
-
-    await pairings.rotate('vm-1');
-    const retryAuthorization = await pairings.authorize(
-      proofFor(original.credential, 'refresh-response-lost'),
-    );
-    const recovered = await pairings.rotate(
-      'vm-1',
-      retryAuthorization.credentialId,
-    );
-
-    await expect(
-      pairings.authorize(proofFor(recovered.credential, 'refresh-recovered')),
     ).resolves.toMatchObject({ workerId: 'vm-1' });
   });
 
