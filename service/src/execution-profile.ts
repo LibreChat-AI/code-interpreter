@@ -24,10 +24,20 @@ export type SandboxBackendName = typeof SANDBOX_BACKENDS[number];
 export function resolveQueuedSandboxBackend(
   profile: ExecutionProfile,
   apiBackend: SandboxBackendName,
-): SandboxBackendName {
-  return profile === 'stateful' && apiBackend === 'http'
-    ? 'lambda-microvm'
-    : apiBackend;
+  source: ExecutionProfileSource = 'explicit',
+): SandboxBackendName | undefined {
+  if (profile === 'stateful' && apiBackend === 'http') {
+    return 'lambda-microvm';
+  }
+  /* An inferred default profile still uses the pre-fencing legacy queues.
+   * Its API-only process cannot distinguish the supported HTTP and Lambda
+   * consumers because Lambda-only configuration belongs to the worker pod.
+   * Preserve that rollout topology by leaving the backend absent, exactly as
+   * pre-fencing producers did; explicit profiles regain strict fencing. */
+  if (profile === 'default' && source === 'inferred' && apiBackend === 'http') {
+    return undefined;
+  }
+  return apiBackend;
 }
 
 export function resolveExecutionProfile(

@@ -275,6 +275,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
         sandboxBackend: resolveQueuedSandboxBackend(
           env.EXECUTION_PROFILE,
           env.SANDBOX_BACKEND,
+          env.EXECUTION_PROFILE_SOURCE,
         ),
         ...(bridgeWorkerId != null ? { bridgeWorkerId } : {}),
         ...(runtimeSessionId != null ? { runtimeSessionId } : {}),

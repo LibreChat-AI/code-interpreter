@@ -185,9 +185,7 @@ export class BridgeWorker {
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
-    if (
-      Date.parse(identity.expiresAt) > validThroughMs
-    ) {
+    if (Date.parse(identity.expiresAt) > validThroughMs) {
       return;
     }
     const credential = await this.request<BridgeWorkerCredentialResponse>(
@@ -201,7 +199,8 @@ export class BridgeWorker {
       credential.workerId !== this.options.workerId ||
       typeof credential.credential !== 'string' ||
       credential.credential.length < 32 ||
-      !Number.isFinite(Date.parse(credential.expiresAt))
+      !Number.isFinite(Date.parse(credential.expiresAt)) ||
+      Date.parse(credential.expiresAt) <= validThroughMs
     ) {
       throw new BridgeProtocolError(
         'Code API returned an invalid rotated worker credential',
@@ -253,6 +252,10 @@ export class BridgeWorker {
     );
     let settlement: BridgeSettlement;
     try {
+      await this.refreshCredential(
+        signal,
+        Date.parse(assignment.expiresAt),
+      );
       const headers = {
         ...assignment.request.headers,
         ...(assignment.runtimeSessionId

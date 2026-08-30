@@ -417,6 +417,7 @@ async function runReplayIteration(
     sandboxBackend: resolveQueuedSandboxBackend(
       env.EXECUTION_PROFILE,
       env.SANDBOX_BACKEND,
+      env.EXECUTION_PROFILE_SOURCE,
     ),
     ...(state.bridgeWorkerId != null ? { bridgeWorkerId: state.bridgeWorkerId } : {}),
     runtimeSessionMode: 'stateless',
@@ -1415,6 +1416,7 @@ async function handleBlocking(
       sandboxBackend: resolveQueuedSandboxBackend(
         env.EXECUTION_PROFILE,
         env.SANDBOX_BACKEND,
+        env.EXECUTION_PROFILE_SOURCE,
       ),
       ...(bridgeWorkerId != null ? { bridgeWorkerId } : {}),
       runtimeSessionMode: 'stateless',

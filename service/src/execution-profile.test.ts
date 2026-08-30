@@ -75,8 +75,12 @@ describe('execution profile queue isolation', () => {
 
   test('labels API-only stateful jobs with their Lambda worker backend', () => {
     expect(resolveQueuedSandboxBackend('stateful', 'http')).toBe('lambda-microvm');
-    expect(resolveQueuedSandboxBackend('default', 'http')).toBe('http');
+    expect(resolveQueuedSandboxBackend('default', 'http', 'explicit')).toBe('http');
     expect(resolveQueuedSandboxBackend('stateful', 'remote-bridge')).toBe('remote-bridge');
+  });
+
+  test('leaves the backend unfenced for inferred stateless legacy queues', () => {
+    expect(resolveQueuedSandboxBackend('default', 'http', 'inferred')).toBeUndefined();
   });
 });
 
