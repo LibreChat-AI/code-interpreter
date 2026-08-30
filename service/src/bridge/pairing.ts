@@ -359,16 +359,32 @@ export class RedisBridgePairingStore {
 
   private async removeLegacyPairings(workerId: string): Promise<void> {
     const deadlineKey = legacyPairingScanDeadlineKey();
-    const proposedDeadline = Date.now() + this.pairingTtlSeconds * 1000;
+    const now = Date.now();
+    const migrationWindowMs = this.pairingTtlSeconds * 1000;
+    const proposedDeadline = now + migrationWindowMs;
     const initialized = await this.redis.set(
       deadlineKey,
       String(proposedDeadline),
+      'PX',
+      migrationWindowMs,
       'NX',
     );
-    const deadline =
-      initialized === 'OK'
-        ? proposedDeadline
-        : Number(await this.redis.get(deadlineKey));
+    let deadline = proposedDeadline;
+    if (initialized !== 'OK') {
+      deadline = Number(await this.redis.get(deadlineKey));
+      if (!Number.isFinite(deadline) || deadline <= now) {
+        deadline = proposedDeadline;
+        await this.redis.set(
+          deadlineKey,
+          String(deadline),
+          'PX',
+          migrationWindowMs,
+        );
+      } else {
+        // Retrofit an expiry onto markers written by the preceding release.
+        await this.redis.pexpire(deadlineKey, Math.max(1, deadline - now));
+      }
+    }
     if (!Number.isFinite(deadline) || Date.now() > deadline) return;
     let cursor = '0';
     do {

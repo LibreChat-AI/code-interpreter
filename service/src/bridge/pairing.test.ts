@@ -169,16 +169,15 @@ describe('RedisBridgePairingStore', () => {
     });
     let paused = false;
     redis.eval = (async (script: string, ...args: unknown[]) => {
-      const result = await (originalEval as (...evalArgs: unknown[]) => Promise<unknown>)(
-        script,
-        ...args,
-      );
-      if (!paused && script.includes('return pairing')) {
+      if (!paused && script.includes('if pairing ~= ARGV[1]')) {
         paused = true;
         firstRedeemed();
         await releaseFirstPromise;
       }
-      return result;
+      return await (originalEval as (...evalArgs: unknown[]) => Promise<unknown>)(
+        script,
+        ...args,
+      );
     }) as typeof redis.eval;
 
     try {
@@ -365,6 +364,29 @@ describe('RedisBridgePairingStore', () => {
     await pairings.revoke('vm-1');
 
     await expect(redis.get(legacyKey)).resolves.toBeNull();
+  });
+
+  test('reopens legacy cleanup after a rollback outlives the prior scan window', async () => {
+    const legacyCode = 'later-rollback-pairing-code';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    const deadlineKey = 'codeapi:bridge:v1:migration:legacy-pairing-scan-until';
+    await redis.set(deadlineKey, '0');
+    await redis.set(
+      legacyKey,
+      JSON.stringify({
+        workerId: 'vm-later-rollback',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      'EX',
+      60,
+    );
+
+    await pairings.revoke('vm-later-rollback');
+
+    await expect(redis.get(legacyKey)).resolves.toBeNull();
+    expect(await redis.pttl(deadlineKey)).toBeGreaterThan(0);
   });
 
   test('redeems an unrevoked pairing code issued by a pre-fence replica', async () => {
