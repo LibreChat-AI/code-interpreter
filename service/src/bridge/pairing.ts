@@ -58,6 +58,15 @@ redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])
 redis.call('DEL', KEYS[2])
 return 1
 `;
+const REVOKE_PAIRING_SCRIPT = `
+local indexed = redis.call('GET', KEYS[1])
+redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+if indexed then
+  redis.call('DEL', indexed)
+end
+redis.call('DEL', KEYS[1])
+return 1
+`;
 
 export type BridgePrincipalType = 'deployment' | 'tenant' | 'user' | 'role' | 'group';
 
@@ -326,19 +335,18 @@ export class RedisBridgePairingStore {
   }
 
   async revoke(workerId: string): Promise<void> {
-    // Rotate the pending generation before touching active credentials so an
-    // unredeemed code cannot race lifecycle deletion and create a new worker.
-    await this.redis.set(
+    await this.removeLegacyPairings(workerId);
+    // Fence redemption and consume the currently indexed code atomically. An
+    // issue that linearized before this script is always removed; an issue
+    // that linearizes afterward installs a distinct generation and code.
+    await this.redis.eval(
+      REVOKE_PAIRING_SCRIPT,
+      2,
+      workerPairingIndexKey(workerId),
       workerPairingGenerationKey(workerId),
       randomBytes(24).toString('base64url'),
-      'EX',
-      this.pairingTtlSeconds,
+      String(this.pairingTtlSeconds),
     );
-    await this.removeLegacyPairings(workerId);
-    const indexedPairing = await this.redis.get(workerPairingIndexKey(workerId));
-    if (indexedPairing != null) {
-      await this.redis.del(indexedPairing, workerPairingIndexKey(workerId));
-    }
     const identityKey = workerIdentityKey(workerId);
     const credentialDigest = await this.redis.get(identityKey);
     if (credentialDigest == null) return;
