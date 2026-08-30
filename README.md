@@ -15,6 +15,8 @@ Code Interpreter (internally `codeapi`, the prefix used by its env vars, images,
 - **Package Delivery** - Bakes Python, Node, and Bun into the default microVM
   block-root image; a package-init PVC mode remains available for direct NsJail
   development
+- **Remote Code Bridge** - Lets an operator-owned VM connect outbound and serve
+  as a fenced, stateful sandbox through the `@librechat/code` worker
 
 ## Architecture
 
@@ -64,6 +66,18 @@ Two modes are supported:
 
 - **NsJail mode** (`kvmEnabled: false`): Direct NsJail sandboxing with Linux namespaces and cgroups
 - **MicroVM mode** (`kvmEnabled: true`): libkrun microVM with its own kernel, NsJail runs inside the guest
+
+## Remote stateful environments
+
+The `remote-bridge` backend keeps the Code API as the policy and queue boundary
+while moving execution to a sandbox on an operator-selected VM. The worker only
+makes outbound authenticated requests, so the VM does not need a public ingress
+port. Assignments carry a deadline, a single-active-worker lock, a monotonically
+increasing generation, and a one-time lease token to fence stale workers.
+
+See [Remote Code Bridge](docs/remote-bridge/README.md) for deployment and threat
+model details. The worker protocol and CLI live in the provider-neutral
+[`@librechat/code`](packages/code/README.md) package.
 
 ## Security disclaimer
 

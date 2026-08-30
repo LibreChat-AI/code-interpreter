@@ -14,6 +14,7 @@ describe('sandbox execution configuration', () => {
   test('accepts every supported backend and session mode', () => {
     expect(resolveSandboxBackend('http')).toBe('http');
     expect(resolveSandboxBackend('lambda-microvm')).toBe('lambda-microvm');
+    expect(resolveSandboxBackend('remote-bridge')).toBe('remote-bridge');
     expect(resolveRuntimeSessionMode('stateless')).toBe('stateless');
     expect(resolveRuntimeSessionMode('affinity')).toBe('affinity');
     expect(resolveRuntimeSessionMode('strict')).toBe('strict');
@@ -21,7 +22,7 @@ describe('sandbox execution configuration', () => {
 
   test('rejects unknown values instead of silently changing execution semantics', () => {
     expect(() => resolveSandboxBackend('lambda_microvm')).toThrow(
-      'CODEAPI_SANDBOX_BACKEND must be one of: http, lambda-microvm',
+      'CODEAPI_SANDBOX_BACKEND must be one of: http, lambda-microvm, remote-bridge',
     );
     expect(() => resolveSandboxBackend('')).toThrow('CODEAPI_SANDBOX_BACKEND');
     expect(() => resolveSandboxBackend(' ')).toThrow('CODEAPI_SANDBOX_BACKEND');

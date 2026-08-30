@@ -1,0 +1,33 @@
+# `@librechat/code`
+
+Provider-neutral protocol and worker CLI for attaching a stateful, sandboxed
+code environment to LibreChat Code API.
+
+The CLI is a transport bridge, not a sandbox. Run it beside a Code Interpreter
+sandbox (NsJail for trusted local development, or the hardened microVM stack for
+untrusted internet traffic). It connects outbound to Code API, long-polls for
+assignments, forwards them to the local sandbox, and returns fenced results.
+The VM does not need an inbound public port.
+
+## Run
+
+```bash
+npm install -g @librechat/code
+
+LIBRECHAT_CODE_URL=https://code.example.com/v1 \
+LIBRECHAT_CODE_WORKER_TOKEN='<strong random secret>' \
+LIBRECHAT_CODE_WORKER_ID=my-vm \
+LIBRECHAT_CODE_SANDBOX_ENDPOINT=http://127.0.0.1:2000/api/v2 \
+librechat-code
+```
+
+Optional environment variables:
+
+- `LIBRECHAT_CODE_SANDBOX_PROFILE`: capability label; defaults to `nsjail`.
+- `LIBRECHAT_CODE_RUNTIMES`: comma-separated capability labels.
+- `LIBRECHAT_CODE_POLICY`: local policy description hashed into the worker's
+  registration; defaults to `default-deny`.
+
+Use a unique worker ID and secret per Code API deployment, expose only the
+sandbox loopback endpoint to the CLI, and enforce VM/container egress policy
+independently of the bridge transport.

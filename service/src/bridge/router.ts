@@ -1,0 +1,186 @@
+import { timingSafeEqual } from 'crypto';
+
+import { Router } from 'express';
+import type { NextFunction, Request, Response } from 'express';
+import type { BridgeWorkerRegistration } from '../../../packages/code/src/protocol';
+import type { CodeBridgeSettlement } from './store';
+
+import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import { connection } from '../queue';
+import { env } from '../config';
+import { BridgeStoreError, RedisBridgeStore } from './store';
+
+const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const MAX_LEASE_WAIT_MS = 30_000;
+
+export const bridgeStore = new RedisBridgeStore(connection);
+
+function sameToken(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return (
+    leftBuffer.length === rightBuffer.length &&
+    timingSafeEqual(leftBuffer, rightBuffer)
+  );
+}
+
+function bridgeAuth(req: Request, res: Response, next: NextFunction): void {
+  if (!env.BRIDGE_TOKEN) {
+    res.status(503).json({ error: 'Code bridge is not configured' });
+    return;
+  }
+  const token =
+    req
+      .header('Authorization')
+      ?.match(/^Bearer\s+(.+)$/i)?.[1]
+      ?.trim() ?? '';
+  if (!token || !sameToken(token, env.BRIDGE_TOKEN)) {
+    res.status(401).json({ error: 'Invalid code bridge worker token' });
+    return;
+  }
+  next();
+}
+
+function validWorkerId(value: string): boolean {
+  return WORKER_ID_PATTERN.test(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function sendStoreError(error: BridgeStoreError, res: Response): void {
+  const status = error.code === 'ASSIGNMENT_NOT_FOUND' ? 404 : 409;
+  res.status(status).json({ error: error.message, code: error.code });
+}
+
+function isSettlement(value: unknown): value is CodeBridgeSettlement {
+  if (!isRecord(value)) return false;
+  if (
+    value.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+    typeof value.generation !== 'number' ||
+    !Number.isSafeInteger(value.generation) ||
+    value.generation < 1 ||
+    typeof value.leaseToken !== 'string' ||
+    value.leaseToken.length < 32
+  ) {
+    return false;
+  }
+  if (value.status === 'rejected') {
+    return typeof value.error === 'string' && value.error.length <= 4096;
+  }
+  return (
+    value.status === 'fulfilled' &&
+    typeof value.result === 'object' &&
+    value.result !== null
+  );
+}
+
+const router = Router();
+router.use(bridgeAuth);
+
+router.post('/workers/register', async (req: Request, res: Response) => {
+  const registration = req.body as unknown;
+  if (
+    !isRecord(registration) ||
+    registration.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+    typeof registration.workerId !== 'string' ||
+    !validWorkerId(registration.workerId) ||
+    !isRecord(registration.capabilities) ||
+    registration.capabilities.statefulWorkspace !== true ||
+    typeof registration.capabilities.sandboxProfile !== 'string' ||
+    registration.capabilities.sandboxProfile.trim().length === 0 ||
+    registration.capabilities.sandboxProfile.length > 128 ||
+    !Array.isArray(registration.capabilities.runtimes) ||
+    registration.capabilities.runtimes.length > 32 ||
+    !registration.capabilities.runtimes.every(
+      (runtime) =>
+        typeof runtime === 'string' && runtime.length > 0 && runtime.length <= 64,
+    ) ||
+    (registration.capabilities.policyDigest !== undefined &&
+      (typeof registration.capabilities.policyDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(registration.capabilities.policyDigest)))
+  ) {
+    res.status(400).json({ error: 'Invalid bridge worker registration' });
+    return;
+  }
+  if (env.BRIDGE_WORKER_ID && registration.workerId !== env.BRIDGE_WORKER_ID) {
+    res.status(403).json({
+      error: 'Worker is not authorized for this Code API deployment',
+    });
+    return;
+  }
+  await bridgeStore.register(registration as unknown as BridgeWorkerRegistration);
+  res.json({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    workerId: registration.workerId,
+    registeredAt: new Date().toISOString(),
+    leaseTtlMs: 60_000,
+  });
+});
+
+router.post('/workers/:workerId/lease', async (req: Request, res: Response) => {
+  const workerId = req.params.workerId;
+  const body = isRecord(req.body) ? req.body : {};
+  const requestedWait = Number(body.waitMs ?? 25_000);
+  if (
+    !validWorkerId(workerId) ||
+    !Number.isFinite(requestedWait) ||
+    requestedWait < 0
+  ) {
+    res.status(400).json({ error: 'Invalid bridge lease request' });
+    return;
+  }
+  if (env.BRIDGE_WORKER_ID && workerId !== env.BRIDGE_WORKER_ID) {
+    res.status(403).json({
+      error: 'Worker is not authorized for this Code API deployment',
+    });
+    return;
+  }
+  const assignment = await bridgeStore.lease(
+    workerId,
+    Math.min(requestedWait, MAX_LEASE_WAIT_MS),
+  );
+  res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
+});
+
+router.post(
+  '/workers/:workerId/assignments/:assignmentId/settle',
+  async (req, res) => {
+    const settlement = req.body as unknown;
+    if (!isSettlement(settlement)) {
+      res.status(400).json({ error: 'Invalid bridge settlement' });
+      return;
+    }
+    try {
+      await bridgeStore.settle(
+        req.params.workerId,
+        req.params.assignmentId,
+        settlement,
+      );
+      res.json({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        accepted: true,
+      });
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
+      }
+      throw error;
+    }
+  },
+);
+
+router.post(
+  '/workers/:workerId/assignments/:assignmentId/cancellation',
+  async (req, res) => {
+    const cancelled = await bridgeStore.cancelled(
+      req.params.workerId,
+      req.params.assignmentId,
+    );
+    res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, cancelled });
+  },
+);
+
+export default router;

@@ -18,6 +18,7 @@ COPY --from=install /temp/dev/node_modules node_modules
 COPY service/src ./src
 COPY service/scripts ./scripts
 COPY shared /shared
+COPY packages/code/src /packages/code/src
 COPY service/tsconfig.json ./
 RUN bun build ./src/file-server.ts --minify --outdir .build --target bun --external '@opentelemetry/*'
 RUN bun build ./src/api-server.ts --minify --outdir .build-api --target bun --external '@opentelemetry/*'
@@ -66,6 +67,7 @@ ENV NODE_ENV=development
 COPY --from=install /temp/dev/node_modules node_modules
 COPY service/src ./src
 COPY shared /shared
+COPY packages/code/src /packages/code/src
 COPY service/tsconfig.json ./
 EXPOSE 3000 9230
 CMD ["bun", "run", "--watch", "src/file-server.ts"]

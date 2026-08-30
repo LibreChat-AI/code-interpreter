@@ -171,28 +171,33 @@ fi
 	    chmod 777 "$SMOKE_DIR"
 	fi
 SMOKE_LOG=$(mktemp)
+SMOKE_STDERR=$(mktemp)
 
 NSJAIL_CGROUP_ARGS=()
 if [ "$SANDBOX_USE_CGROUPV2" = "true" ]; then
     NSJAIL_CGROUP_ARGS=(--use_cgroupv2)
 fi
 
-if timeout 10 /usr/sbin/nsjail --config "${NSJAIL_CONFIG:-/sandbox_api/config/sandbox.cfg}" \
+if timeout 10 "${NSJAIL_PATH:-/usr/sbin/nsjail}" --config "${NSJAIL_CONFIG:-/sandbox_api/config/sandbox.cfg}" \
     "${NSJAIL_CGROUP_ARGS[@]}" --log "$SMOKE_LOG" \
     --user "65534:${SMOKE_OUTSIDE_UID}:1" --group "65534:${SMOKE_OUTSIDE_GID}:1" \
     -s /usr/bin:/bin -s /usr/lib:/lib -s /usr/lib64:/lib64 \
     -B "$SMOKE_DIR:/mnt/data" \
-    -- /bin/sh -c 'printf "%s\n" sandbox_ok > /mnt/data/smoke.txt && test "$(cat /mnt/data/smoke.txt)" = sandbox_ok' > /dev/null 2>&1; then
+    -- /bin/sh -c 'printf "%s\n" sandbox_ok > /mnt/data/smoke.txt && test "$(cat /mnt/data/smoke.txt)" = sandbox_ok' > /dev/null 2>"$SMOKE_STDERR"; then
     echo "NsJail smoke test passed"
 else
     echo "FATAL: NsJail smoke test failed — sandbox cannot start"
     echo "NsJail log output:"
     cat "$SMOKE_LOG" 2>/dev/null || true
+    echo "NsJail stderr:"
+    cat "$SMOKE_STDERR" 2>/dev/null || true
     rm -f "$SMOKE_LOG"
+    rm -f "$SMOKE_STDERR"
     rm -rf "$SMOKE_DIR"
     exit 1
 fi
 rm -f "$SMOKE_LOG"
+rm -f "$SMOKE_STDERR"
 rm -rf "$SMOKE_DIR"
 
 echo "Starting sandbox API server..."

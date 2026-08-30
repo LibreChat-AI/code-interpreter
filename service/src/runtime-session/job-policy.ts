@@ -10,7 +10,7 @@ export type RuntimeSessionJobDecision = {
   runtimeSessionMode: RuntimeSessionMode;
 };
 
-type SandboxBackendName = 'http' | 'lambda-microvm';
+type SandboxBackendName = 'http' | 'lambda-microvm' | 'remote-bridge';
 
 function isRuntimeSessionMode(value: unknown): value is RuntimeSessionMode {
   return value === 'stateless' || value === 'affinity' || value === 'strict';
@@ -70,7 +70,10 @@ export function resolveRuntimeSessionForJob(args: {
   if (runtimeSessionId === undefined) {
     throw new Error(`${runtimeSessionMode} queued job requires a runtimeSessionId`);
   }
-  if (args.workerMode === 'stateless' || args.workerBackend !== 'lambda-microvm') {
+  if (
+    args.workerMode === 'stateless'
+    || (args.workerBackend !== 'lambda-microvm' && args.workerBackend !== 'remote-bridge')
+  ) {
     throw new Error(
       `${args.workerBackend}/${args.workerMode} worker cannot honor queued `
         + `${runtimeSessionMode} runtime session`,
