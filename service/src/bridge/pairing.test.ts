@@ -124,6 +124,27 @@ describe('RedisBridgePairingStore', () => {
     ).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
   });
 
+  test('preserves a pairing code after public-key validation fails', async () => {
+    const identity = createBridgeIdentity();
+    const pairing = await pairings.issue('vm-public-key-retry');
+
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-public-key-retry',
+        code: pairing.code,
+        publicKey: 'not-a-public-key',
+      }),
+    ).rejects.toMatchObject({ code: 'PUBLIC_KEY_INVALID' });
+
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-public-key-retry',
+        code: pairing.code,
+        publicKey: identity.publicKey,
+      }),
+    ).resolves.toMatchObject({ workerId: 'vm-public-key-retry' });
+  });
+
   test('only the newest pairing code can rebind a worker identity', async () => {
     const identity = createBridgeIdentity();
     const older = await pairings.issue('vm-1', {
@@ -397,6 +418,83 @@ describe('RedisBridgePairingStore', () => {
     await pairings.revoke('vm-scan-retry');
 
     await expect(redis.get(legacyKey)).resolves.toBeNull();
+  });
+
+  test('waits for a failed in-progress cleanup and confirms legacy removal itself', async () => {
+    const legacyCode = 'overlapping-legacy-pairing-code';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    await redis.set(
+      legacyKey,
+      JSON.stringify({
+        workerId: 'vm-overlapping-cleanup',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      'EX',
+      60,
+    );
+    const scan = redis.scan.bind(redis);
+    let releaseFirstScan = () => {};
+    const firstScanGate = new Promise<void>((resolve) => {
+      releaseFirstScan = resolve;
+    });
+    let markFirstScanStarted = () => {};
+    const firstScanStarted = new Promise<void>((resolve) => {
+      markFirstScanStarted = resolve;
+    });
+    let scanCalls = 0;
+    redis.scan = (async (...args: Parameters<Redis['scan']>) => {
+      scanCalls += 1;
+      if (scanCalls === 1) {
+        markFirstScanStarted();
+        await firstScanGate;
+        throw new Error('interrupted claimed scan');
+      }
+      return scan(...args);
+    }) as Redis['scan'];
+
+    const interrupted = pairings.revoke('vm-overlapping-cleanup');
+    await firstScanStarted;
+    const overlapping = pairings.revoke('vm-overlapping-cleanup');
+    let overlappingSettled = false;
+    void overlapping.then(
+      () => {
+        overlappingSettled = true;
+      },
+      () => {
+        overlappingSettled = true;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(overlappingSettled).toBe(false);
+    releaseFirstScan();
+
+    await expect(interrupted).rejects.toThrow('interrupted claimed scan');
+    await expect(overlapping).resolves.toBeUndefined();
+    redis.scan = scan;
+    await expect(redis.get(legacyKey)).resolves.toBeNull();
+  });
+
+  test('legacy cleanup does not delete generation-fenced pairings', async () => {
+    const fencedCode = 'concurrent-generation-pairing';
+    const fencedKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(fencedCode)
+      .digest('hex')}`;
+    await redis.set(
+      fencedKey,
+      JSON.stringify({
+        workerId: 'vm-generation-fenced',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        generation: 'new-generation',
+      }),
+      'EX',
+      60,
+    );
+
+    await pairings.revoke('vm-generation-fenced');
+
+    await expect(redis.get(fencedKey)).resolves.not.toBeNull();
   });
 
   test('reopens legacy cleanup after a rollback outlives the prior scan window', async () => {

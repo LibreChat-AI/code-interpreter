@@ -13,6 +13,9 @@ const DEFAULT_PAIRING_TTL_SECONDS = 10 * 60;
 const DEFAULT_CREDENTIAL_TTL_SECONDS = 5 * 60;
 const PROOF_NONCE_TTL_SECONDS = 2 * 60;
 const PROOF_CLOCK_SKEW_MS = 60_000;
+const LEGACY_SCAN_CLAIM_TTL_MS = 5_000;
+const LEGACY_SCAN_POLL_INTERVAL_MS = 25;
+const LEGACY_SCAN_COMPLETE = 'done';
 const ISSUE_PAIRING_SCRIPT = `
 local previous = redis.call('GET', KEYS[1])
 if previous then
@@ -71,6 +74,19 @@ if credential then
   redis.call('DEL', ARGV[3] .. credential)
 end
 return 1
+`;
+const RELEASE_LEGACY_SCAN_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
+const COMPLETE_LEGACY_SCAN_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+  return 1
+end
+return 0
 `;
 
 export type BridgePrincipalType = 'deployment' | 'tenant' | 'user' | 'role' | 'group';
@@ -232,7 +248,6 @@ export class RedisBridgePairingStore {
       );
     }
     if (!validEd25519PublicKey(args.publicKey)) {
-      await this.redis.del(codeKey);
       throw new BridgePairingError(
         'PUBLIC_KEY_INVALID',
         'Worker public key must be an Ed25519 key',
@@ -401,16 +416,35 @@ export class RedisBridgePairingStore {
     if (!rollbackDetected) {
       if (!Number.isFinite(deadline) || now > deadline) return;
       const key = legacyPairingWorkerScanKey(workerId);
-      const token = randomBytes(24).toString('base64url');
-      const claimed = await this.redis.set(
-        key,
-        token,
-        'PX',
-        Math.max(1, deadline - now),
-        'NX',
-      );
-      if (claimed !== 'OK') return;
-      scanClaim = { key, token };
+      while (scanClaim == null) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) return;
+        const existing = await this.redis.get(key);
+        if (
+          existing === LEGACY_SCAN_COMPLETE ||
+          (existing != null && !existing.startsWith('claim:'))
+        ) {
+          return;
+        }
+        const token = `claim:${randomBytes(24).toString('base64url')}`;
+        const claimed = await this.redis.set(
+          key,
+          token,
+          'PX',
+          Math.max(1, Math.min(LEGACY_SCAN_CLAIM_TTL_MS, remainingMs)),
+          'NX',
+        );
+        if (claimed === 'OK') {
+          scanClaim = { key, token };
+          break;
+        }
+        await new Promise((resolve) =>
+          setTimeout(
+            resolve,
+            Math.max(1, Math.min(LEGACY_SCAN_POLL_INTERVAL_MS, remainingMs)),
+          ),
+        );
+      }
     }
 
     try {
@@ -430,22 +464,31 @@ export class RedisBridgePairingStore {
           const raw = values[index];
           if (raw == null) return false;
           try {
-            return (JSON.parse(raw) as Partial<StoredPairing>).workerId === workerId;
+            const pairing = JSON.parse(raw) as Partial<StoredPairing>;
+            return pairing.workerId === workerId && pairing.generation == null;
           } catch {
             return false;
           }
         });
         if (matching.length > 0) await this.redis.del(...matching);
       } while (cursor !== '0');
+      if (scanClaim != null) {
+        const completed = await this.redis.eval(
+          COMPLETE_LEGACY_SCAN_CLAIM_SCRIPT,
+          1,
+          scanClaim.key,
+          scanClaim.token,
+          LEGACY_SCAN_COMPLETE,
+          String(Math.max(1, deadline - Date.now())),
+        );
+        if (completed !== 1) {
+          await this.removeLegacyPairings(workerId);
+        }
+      }
     } catch (error) {
       if (scanClaim != null) {
         await this.redis.eval(
-          [
-            "if redis.call('GET', KEYS[1]) == ARGV[1] then",
-            "  return redis.call('DEL', KEYS[1])",
-            'end',
-            'return 0',
-          ].join('\n'),
+          RELEASE_LEGACY_SCAN_CLAIM_SCRIPT,
           1,
           scanClaim.key,
           scanClaim.token,
