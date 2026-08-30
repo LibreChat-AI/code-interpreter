@@ -25,6 +25,11 @@ import { Jobs, Languages } from '../enum';
 import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-authorization';
 import { createUploadSessionRegistrar } from './upload-session';
 import { prepareSandboxJobSecurity } from '../sandbox-egress';
+import {
+  BridgeWorkerSelectionError,
+  CODEAPI_BRIDGE_WORKER_HEADER,
+  resolveBridgeWorkerSelection,
+} from '../bridge/selection';
 import logger from '../logger';
 
 const { INSTANCE_ID } = env;
@@ -140,6 +145,24 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
     return res.status(400).json({ error: `Unsupported language: ${rawLang}` });
   }
 
+  let bridgeWorkerId: string | undefined;
+  try {
+    const bridgeSelection = resolveBridgeWorkerSelection({
+      backend: env.SANDBOX_BACKEND,
+      configuredWorkerId: env.BRIDGE_WORKER_ID,
+      dynamicWorkers: env.BRIDGE_DYNAMIC_WORKERS,
+      requestedWorkerId: req.header(CODEAPI_BRIDGE_WORKER_HEADER),
+    });
+    bridgeWorkerId = bridgeSelection?.dynamic === true
+      ? bridgeSelection.workerId
+      : undefined;
+  } catch (error) {
+    if (error instanceof BridgeWorkerSelectionError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    throw error;
+  }
+
   let runtimeSessionId: string | undefined;
   try {
     runtimeSessionId = resolveRuntimeSessionIdForExecRequest({
@@ -247,6 +270,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
         tenantId: identity.storageNamespace,
         canonicalUserId: identity.canonicalUserId,
         executionProfile: env.EXECUTION_PROFILE,
+        ...(bridgeWorkerId != null ? { bridgeWorkerId } : {}),
         ...(runtimeSessionId != null ? { runtimeSessionId } : {}),
         runtimeSessionMode,
         executionManifestClaims: sandboxSecurity.executionManifestClaims,

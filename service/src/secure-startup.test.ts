@@ -15,6 +15,7 @@ const saved = {
   executionProfile: env.EXECUTION_PROFILE,
   executionProfileSource: env.EXECUTION_PROFILE_SOURCE,
   sandboxBackend: env.SANDBOX_BACKEND,
+  bridgeDynamicWorkers: env.BRIDGE_DYNAMIC_WORKERS,
   bridgeWorkerId: env.BRIDGE_WORKER_ID,
   bridgeAuthMode: env.BRIDGE_AUTH_MODE,
   bridgeToken: env.BRIDGE_TOKEN,
@@ -56,6 +57,7 @@ function restore(): void {
   env.EXECUTION_PROFILE = saved.executionProfile;
   env.EXECUTION_PROFILE_SOURCE = saved.executionProfileSource;
   env.SANDBOX_BACKEND = saved.sandboxBackend;
+  env.BRIDGE_DYNAMIC_WORKERS = saved.bridgeDynamicWorkers;
   env.BRIDGE_WORKER_ID = saved.bridgeWorkerId;
   env.BRIDGE_AUTH_MODE = saved.bridgeAuthMode;
   env.BRIDGE_TOKEN = saved.bridgeToken;
@@ -310,6 +312,23 @@ describe('sandbox backend policy', () => {
     expect(() => validateSandboxBackendPolicy()).toThrow('CODEAPI_BRIDGE_TOKEN');
 
     env.BRIDGE_TOKEN = 'development-bridge-token';
+    expect(() => validateSandboxBackendPolicy()).not.toThrow();
+  });
+
+  test('allows dynamic-only paired workers without a configured default', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.RUNTIME_SESSION_MODE = 'strict';
+    env.PTC_MODE = 'replay';
+    env.BRIDGE_DYNAMIC_WORKERS = true;
+    env.BRIDGE_WORKER_ID = '';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.BRIDGE_AUTH_MODE = 'static';
+
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'CODEAPI_BRIDGE_AUTH_MODE=paired',
+    );
+
+    env.BRIDGE_AUTH_MODE = 'paired';
     expect(() => validateSandboxBackendPolicy()).not.toThrow();
   });
 

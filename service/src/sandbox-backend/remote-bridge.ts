@@ -15,7 +15,7 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
   readonly name = 'remote-bridge' as const;
 
   constructor(
-    private readonly store: RedisBridgeStore = bridgeStore,
+    private readonly store: Pick<RedisBridgeStore, 'dispatch'> = bridgeStore,
     private readonly workerId: string = env.BRIDGE_WORKER_ID,
   ) {}
 
@@ -23,7 +23,8 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
     req: SandboxTransportRequest,
     ctx: SandboxExecuteContext,
   ): Promise<SandboxRawResponse> {
-    if (!this.workerId) {
+    const workerId = ctx.bridgeWorkerId ?? this.workerId;
+    if (workerId.length === 0) {
       throw new SandboxBackendError(
         'BRIDGE_WORKER_OFFLINE',
         'No bridge worker is configured',
@@ -32,7 +33,9 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
     const sessionResultFinalizer = ctx.sessionResultFinalizer;
     try {
       const settlement = await this.store.dispatch({
-        workerId: this.workerId,
+        workerId,
+        tenantId: ctx.tenantId,
+        requireTenantBinding: ctx.bridgeWorkerId != null,
         body: req.body,
         headers: req.headers,
         runtimeSessionId: ctx.runtimeSessionId,
@@ -57,6 +60,13 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
       return settlement.result as SandboxRawResponse;
     } catch (error) {
       if (!(error instanceof BridgeStoreError)) throw error;
+      if (error.code === 'WORKER_UNAUTHORIZED') {
+        throw new SandboxBackendError(
+          'BRIDGE_WORKER_UNAUTHORIZED',
+          error.message,
+          error,
+        );
+      }
       if (error.code === 'WORKER_BUSY') {
         throw new SandboxBackendError(
           'BRIDGE_WORKER_BUSY',

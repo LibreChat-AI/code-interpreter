@@ -365,6 +365,8 @@ export const env = {
    * - `remote-bridge`: dispatch to an outbound-connected @librechat/code worker.
    */
   SANDBOX_BACKEND: sandboxBackend,
+  /** Permit trusted callers to route each execution to a paired worker ID. */
+  BRIDGE_DYNAMIC_WORKERS: process.env.CODEAPI_BRIDGE_DYNAMIC_WORKERS === 'true',
   /** Outbound worker selected by the remote-bridge backend. */
   BRIDGE_WORKER_ID: process.env.CODEAPI_BRIDGE_WORKER_ID ?? '',
   /** Static compatibility auth or short-lived proof-of-possession credentials. */

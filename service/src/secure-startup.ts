@@ -119,7 +119,15 @@ export function validateSandboxBackendPolicy(): void {
     );
   }
   if (env.SANDBOX_BACKEND === 'remote-bridge') {
-    requireValue('CODEAPI_BRIDGE_WORKER_ID', env.BRIDGE_WORKER_ID);
+    if (env.BRIDGE_DYNAMIC_WORKERS) {
+      if (env.BRIDGE_AUTH_MODE !== 'paired') {
+        throw new SecureStartupConfigError(
+          'Dynamic remote bridge workers require CODEAPI_BRIDGE_AUTH_MODE=paired',
+        );
+      }
+    } else {
+      requireValue('CODEAPI_BRIDGE_WORKER_ID', env.BRIDGE_WORKER_ID);
+    }
     if (env.HARDENED_SANDBOX_MODE) {
       requireStrongSecret('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
       if (env.BRIDGE_AUTH_MODE !== 'paired') {

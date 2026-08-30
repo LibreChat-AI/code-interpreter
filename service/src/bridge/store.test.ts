@@ -14,6 +14,34 @@ afterEach(async () => {
 });
 
 describe('RedisBridgeStore', () => {
+  test('rejects a dynamic worker lease outside its bound tenant', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'tenant-worker',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      binding: {
+        tenantId: 'tenant-1',
+        principal: { type: 'user', id: 'user-1' },
+      },
+    });
+
+    await expect(
+      store.dispatch({
+        workerId: 'tenant-worker',
+        tenantId: 'tenant-2',
+        requireTenantBinding: true,
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        deadlineAtMs: Date.now() + 1_000,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_UNAUTHORIZED' });
+  });
+
   test('delivers and settles one fenced stateful assignment', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,

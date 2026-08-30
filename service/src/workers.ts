@@ -38,7 +38,7 @@ async function processJob(job: t.ExecuteJob): Promise<t.ExecuteResult> {
 }
 
 async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
-  const { code, payload, isPyPlot } = job.data;
+  const { payload, isPyPlot } = job.data;
   const isSyntheticJob = job.data.isSynthetic === true || isSyntheticPrincipalSource(job.data.principalSource);
   const language = payload?.language ?? 'unknown';
   const endTimer = jobProcessingDuration.startTimer({ language });
@@ -139,6 +139,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
         deadlineAtMs,
         tenantId: job.data.tenantId,
         canonicalUserId: job.data.canonicalUserId,
+        bridgeWorkerId: job.data.bridgeWorkerId,
         runtimeSessionId: runtimeSession.runtimeSessionId,
         runtimeSessionMode: runtimeSession.runtimeSessionMode,
         /* Stateful backends run this as a commit barrier after user code but

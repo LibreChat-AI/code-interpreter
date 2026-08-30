@@ -251,6 +251,8 @@ export type JobData = {
   executionId?: string;
   tenantId?: string;
   canonicalUserId?: string;
+  /** Trusted dynamic outbound worker selection. */
+  bridgeWorkerId?: string;
   /** Producer deployment identity. Optional only for pre-profile queued jobs. */
   executionProfile?: ExecutionProfile;
   /**

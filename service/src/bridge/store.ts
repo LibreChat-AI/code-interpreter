@@ -9,6 +9,7 @@ import type {
 } from '../../../packages/code/src/protocol';
 
 import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import type { BridgeWorkerBinding } from './pairing';
 
 const PREFIX = 'codeapi:bridge:v1';
 const POLL_INTERVAL_MS = 100;
@@ -28,6 +29,7 @@ export class BridgeStoreError extends Error {
   constructor(
     public readonly code:
       | 'WORKER_OFFLINE'
+      | 'WORKER_UNAUTHORIZED'
       | 'WORKER_BUSY'
       | 'ASSIGNMENT_EXPIRED'
       | 'ASSIGNMENT_FENCED'
@@ -45,6 +47,10 @@ export class BridgeStoreError extends Error {
 
 interface StoredAssignment extends CodeBridgeAssignment {
   leaseTokenHash: string;
+}
+
+export interface RegisteredBridgeWorker extends BridgeWorkerRegistration {
+  binding?: BridgeWorkerBinding;
 }
 
 function workerKey(workerId: string): string {
@@ -132,7 +138,7 @@ export class RedisBridgeStore {
     private readonly workerTtlSeconds = DEFAULT_WORKER_TTL_SECONDS,
   ) {}
 
-  async register(registration: BridgeWorkerRegistration): Promise<void> {
+  async register(registration: RegisteredBridgeWorker): Promise<void> {
     const script = [
       'if redis.call(\'EXISTS\', KEYS[3]) == 1 then return -2 end',
       'if redis.call(\'EXISTS\', KEYS[2]) == 1 then return -1 end',
@@ -176,6 +182,8 @@ export class RedisBridgeStore {
 
   async dispatch(args: {
     workerId: string;
+    tenantId?: string;
+    requireTenantBinding?: boolean;
     body: t.PayloadBody;
     headers: Record<string, string>;
     runtimeSessionId?: string;
@@ -190,6 +198,18 @@ export class RedisBridgeStore {
       throw new BridgeStoreError(
         'WORKER_OFFLINE',
         `Bridge worker ${args.workerId} is offline`,
+      );
+    }
+    if (
+      (args.requireTenantBinding === true && registration.binding == null) ||
+      (registration.binding != null &&
+        (args.tenantId == null ||
+          args.tenantId.length === 0 ||
+          registration.binding.tenantId !== args.tenantId))
+    ) {
+      throw new BridgeStoreError(
+        'WORKER_UNAUTHORIZED',
+        `Bridge worker ${args.workerId} is not authorized for this tenant`,
       );
     }
     if (
@@ -403,9 +423,9 @@ export class RedisBridgeStore {
 
   private async registration(
     workerId: string,
-  ): Promise<BridgeWorkerRegistration | undefined> {
+  ): Promise<RegisteredBridgeWorker | undefined> {
     const raw = await this.redis.get(workerKey(workerId));
-    return raw == null ? undefined : (JSON.parse(raw) as BridgeWorkerRegistration);
+    return raw == null ? undefined : (JSON.parse(raw) as RegisteredBridgeWorker);
   }
 
   private async readAssignment(

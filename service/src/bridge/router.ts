@@ -4,15 +4,23 @@ import { Router } from 'express';
 
 import type { NextFunction, Request, Response } from 'express';
 import type { BridgeWorkerRegistration } from '../../../packages/code/src/protocol';
+import type { BridgeWorkerBinding, BridgePrincipalType } from './pairing';
 import type { CodeBridgeSettlement } from './store';
 
 import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
 import { BridgePairingError, RedisBridgePairingStore } from './pairing';
+import { BRIDGE_WORKER_ID_PATTERN } from './selection';
 import { BridgeStoreError, RedisBridgeStore } from './store';
 
-const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const INCARNATION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const MAX_LEASE_WAIT_MS = 30_000;
+const PRINCIPAL_TYPES = new Set<BridgePrincipalType>([
+  'deployment',
+  'tenant',
+  'user',
+  'role',
+  'group',
+]);
 
 export type BridgeAuthMode = 'static' | 'paired';
 
@@ -22,6 +30,7 @@ export interface BridgeRouterOptions {
   authMode: BridgeAuthMode;
   adminToken: string;
   configuredWorkerId?: string;
+  allowDynamicWorkers?: boolean;
 }
 
 function sameToken(left: string, right: string): boolean {
@@ -34,7 +43,7 @@ function sameToken(left: string, right: string): boolean {
 }
 
 function validWorkerId(value: string): boolean {
-  return WORKER_ID_PATTERN.test(value);
+  return BRIDGE_WORKER_ID_PATTERN.test(value);
 }
 
 function validIncarnationId(value: unknown): value is string {
@@ -43,6 +52,28 @@ function validIncarnationId(value: unknown): value is string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function parseBinding(value: unknown): BridgeWorkerBinding | undefined {
+  if (!isRecord(value) || !isRecord(value.principal)) return undefined;
+  const { tenantId, principal } = value;
+  if (
+    typeof tenantId !== 'string' ||
+    !BRIDGE_WORKER_ID_PATTERN.test(tenantId) ||
+    typeof principal.type !== 'string' ||
+    !PRINCIPAL_TYPES.has(principal.type as BridgePrincipalType) ||
+    typeof principal.id !== 'string' ||
+    !BRIDGE_WORKER_ID_PATTERN.test(principal.id)
+  ) {
+    return undefined;
+  }
+  return {
+    tenantId,
+    principal: {
+      type: principal.type as BridgePrincipalType,
+      id: principal.id,
+    },
+  };
 }
 
 function sendStoreError(error: BridgeStoreError, res: Response): void {
@@ -77,8 +108,7 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
   const router = Router();
 
   const configuredWorker = (workerId: string): boolean =>
-    options.configuredWorkerId == null ||
-    options.configuredWorkerId === '' ||
+    options.allowDynamicWorkers === true ||
     workerId === options.configuredWorkerId;
 
   const bearerToken = (req: Request): string =>
@@ -186,7 +216,12 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
       res.status(400).json({ error: 'Invalid bridge worker ID' });
       return;
     }
-    const pairing = await options.pairings.issue(workerId);
+    const binding = isRecord(req.body) ? parseBinding(req.body.binding) : undefined;
+    if (options.allowDynamicWorkers === true && binding == null) {
+      res.status(400).json({ error: 'Dynamic bridge workers require a valid principal binding' });
+      return;
+    }
+    const pairing = await options.pairings.issue(workerId, binding);
     res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ...pairing });
   });
 
@@ -304,10 +339,33 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         });
         return;
       }
+      const authorization = res.locals.bridgeWorkerAuthorization as
+        | {
+            workerId: string;
+            binding?: BridgeWorkerBinding;
+          }
+        | undefined;
+      const capabilities = registration.capabilities;
+      const trustedRegistration: BridgeWorkerRegistration = {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: registration.workerId,
+        incarnationId: registration.incarnationId,
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: capabilities.sandboxProfile as string,
+          runtimes: capabilities.runtimes as string[],
+          ...(typeof capabilities.policyDigest === 'string'
+            ? { policyDigest: capabilities.policyDigest }
+            : {}),
+        },
+      };
       try {
-        await options.store.register(
-          registration as unknown as BridgeWorkerRegistration,
-        );
+        await options.store.register({
+          ...trustedRegistration,
+          ...(authorization?.binding != null
+            ? { binding: authorization.binding }
+            : {}),
+        });
       } catch (error) {
         if (error instanceof BridgeStoreError) {
           sendStoreError(error, res);

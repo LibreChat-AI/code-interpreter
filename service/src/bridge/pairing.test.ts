@@ -17,6 +17,46 @@ afterEach(async () => {
 });
 
 describe('RedisBridgePairingStore', () => {
+  test('preserves a tenant and generic principal binding across credential rotation', async () => {
+    const identity = createBridgeIdentity();
+    const binding = {
+      tenantId: 'tenant-1',
+      principal: { type: 'group' as const, id: 'engineering' },
+    };
+    const pairing = await pairings.issue('vm-bound', binding);
+    const issued = await pairings.redeem({
+      workerId: 'vm-bound',
+      code: pairing.code,
+      publicKey: identity.publicKey,
+    });
+    const rotated = await pairings.rotate('vm-bound');
+    const requestFor = (
+      credential: string,
+      nonce: string,
+    ): Parameters<RedisBridgePairingStore['authorize']>[0] => {
+      const proof = {
+        credential,
+        method: 'POST',
+        path: '/v1/bridge/workers/vm-bound/lease',
+        timestamp: new Date().toISOString(),
+        nonce,
+        body: JSON.stringify({ protocolVersion: 1, waitMs: 25_000 }),
+      };
+      return {
+        ...proof,
+        workerId: 'vm-bound',
+        signature: signBridgeRequest(identity.privateKey, proof),
+      };
+    };
+
+    await expect(
+      pairings.authorize(requestFor(rotated.credential, 'bound-worker-proof')),
+    ).resolves.toEqual({ workerId: 'vm-bound', binding });
+    await expect(
+      pairings.authorize(requestFor(issued.credential, 'superseded-bound-proof')),
+    ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
+  });
+
   test('redeems a pairing code exactly once for the intended worker identity', async () => {
     const identity = createBridgeIdentity();
     const pairing = await pairings.issue('vm-1');

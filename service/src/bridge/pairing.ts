@@ -28,9 +28,20 @@ redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
 return 1
 `;
 
+export type BridgePrincipalType = 'deployment' | 'tenant' | 'user' | 'role' | 'group';
+
+export interface BridgeWorkerBinding {
+  tenantId: string;
+  principal: {
+    type: BridgePrincipalType;
+    id: string;
+  };
+}
+
 interface StoredPairing {
   workerId: string;
   expiresAt: string;
+  binding?: BridgeWorkerBinding;
 }
 
 interface StoredCredential {
@@ -38,6 +49,7 @@ interface StoredCredential {
   identityId: string;
   publicKey: string;
   expiresAt: string;
+  binding?: BridgeWorkerBinding;
 }
 
 export interface BridgePairing {
@@ -75,10 +87,6 @@ function pairingKey(code: string): string {
   return `${PREFIX}:pairing:${digest(code)}`;
 }
 
-function credentialKey(credential: string): string {
-  return credentialDigestKey(digest(credential));
-}
-
 function credentialDigestKey(credentialDigest: string): string {
   return `${PREFIX}:credential:${credentialDigest}`;
 }
@@ -110,12 +118,15 @@ export class RedisBridgePairingStore {
     private readonly credentialTtlSeconds = DEFAULT_CREDENTIAL_TTL_SECONDS,
   ) {}
 
-  async issue(workerId: string): Promise<BridgePairing> {
+  async issue(
+    workerId: string,
+    binding?: BridgeWorkerBinding,
+  ): Promise<BridgePairing> {
     const code = randomBytes(24).toString('base64url');
     const expiresAt = new Date(
       Date.now() + this.pairingTtlSeconds * 1000,
     ).toISOString();
-    const pairing: StoredPairing = { workerId, expiresAt };
+    const pairing: StoredPairing = { workerId, expiresAt, binding };
     await this.redis.set(
       pairingKey(code),
       JSON.stringify(pairing),
@@ -151,7 +162,13 @@ export class RedisBridgePairingStore {
       );
     }
 
-    return await this.issueCredential(args.workerId, args.publicKey);
+    return await this.issueCredential(
+      args.workerId,
+      args.publicKey,
+      undefined,
+      undefined,
+      pairing.binding,
+    );
   }
 
   async authorize(args: {
@@ -168,6 +185,7 @@ export class RedisBridgePairingStore {
     credentialId: string;
     activeCredentialId: string;
     identityId: string;
+    binding?: BridgeWorkerBinding;
   }> {
     const proofTime = Date.parse(args.timestamp);
     if (
@@ -235,6 +253,7 @@ export class RedisBridgePairingStore {
       credentialId: credentialDigest,
       activeCredentialId: activeDigest,
       identityId: stored.identityId,
+      ...(stored.binding ? { binding: stored.binding } : {}),
     };
   }
 
@@ -271,6 +290,7 @@ export class RedisBridgePairingStore {
       previous.publicKey,
       previousDigest,
       previous.identityId,
+      previous.binding,
     );
   }
 
@@ -279,13 +299,20 @@ export class RedisBridgePairingStore {
     publicKey: string,
     previousDigest?: string,
     identityId = randomBytes(18).toString('base64url'),
+    binding?: BridgeWorkerBinding,
   ): Promise<BridgeWorkerCredential> {
     const credential = randomBytes(32).toString('base64url');
     const credentialDigest = digest(credential);
     const expiresAt = new Date(
       Date.now() + this.credentialTtlSeconds * 1000,
     ).toISOString();
-    const stored: StoredCredential = { workerId, identityId, publicKey, expiresAt };
+    const stored: StoredCredential = {
+      workerId,
+      identityId,
+      publicKey,
+      expiresAt,
+      binding,
+    };
     if (previousDigest !== undefined) {
       const rotated = await this.redis.eval(
         ROTATE_CREDENTIAL_SCRIPT,

@@ -32,6 +32,21 @@ session hint. In hardened mode, startup requires the bridge token to be at least
 32 bytes. `PTC_MODE=blocking` is rejected; replay mode is required because a
 remote execution cannot retain an open Code API process across tool callbacks.
 
+To attach multiple principal-owned workers to one Code API deployment, enable
+dynamic routing. A compatibility default worker is optional in this mode:
+
+```dotenv
+CODEAPI_BRIDGE_DYNAMIC_WORKERS=true
+CODEAPI_BRIDGE_AUTH_MODE=paired
+# CODEAPI_BRIDGE_WORKER_ID=my-default-vm
+```
+
+Dynamic routing is accepted only with paired authentication. The trusted
+LibreChat-to-Code-API request selects a worker with
+`X-LibreChat-Code-Worker-ID`; Code API validates the identifier before it
+crosses the queue boundary and requires that worker's stored tenant binding
+before creating a lease.
+
 Create a single-use pairing code with the administrator secret:
 
 ```bash
@@ -40,6 +55,28 @@ curl -fsS https://code.example.com/v1/bridge/pairings \
   -H 'Content-Type: application/json' \
   --data '{"workerId":"my-vm"}'
 ```
+
+With dynamic routing enabled, the trusted control plane must bind each pairing
+to one tenant and generic principal. Code API treats the principal as lifecycle
+and audit metadata; LibreChat remains responsible for resolving user, role, and
+group membership before selecting the worker:
+
+```bash
+curl -fsS https://code.example.com/v1/bridge/pairings \
+  -H "Authorization: Bearer $CODEAPI_BRIDGE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "workerId":"user-vm",
+    "binding":{
+      "tenantId":"tenant-1",
+      "principal":{"type":"user","id":"user-1"}
+    }
+  }'
+```
+
+Principal types are `deployment`, `tenant`, `user`, `role`, and `group`.
+Pairing and registration bodies from the VM cannot replace the server-issued
+binding, and credential rotation preserves it.
 
 Redeem the returned code on the VM using
 [`@librechat/code`](../../packages/code/README.md). The CLI generates its key
@@ -84,7 +121,8 @@ execution.
   digest, timestamp, nonce, and credential.
 - Accepted proof nonces cannot be replayed, credentials rotate before expiry,
   and an administrator can revoke the active worker identity immediately.
-- Code API permits one active assignment per configured worker.
+- Code API permits one active assignment per worker.
+- Dynamic workers are fenced to their server-issued tenant before assignment.
 - Each assignment has an absolute deadline, generation, and random lease token.
 - Settlements with the wrong worker, generation, token, or expired deadline are
   rejected.
@@ -104,6 +142,6 @@ administrator token immediately. Pairing secures worker transport identity; it
 cannot attest that a compromised VM truthfully reports or enforces its sandbox
 capabilities.
 
-The next control-plane layer can add owner-scoped environment records and a
-multi-worker directory without changing the execution protocol or moving code
-tools into the Agents SDK.
+LibreChat's owner-scoped environment registry can issue these principal-bound
+pairings without changing the worker execution protocol or moving code tools
+into the Agents SDK.

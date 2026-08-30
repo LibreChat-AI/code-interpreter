@@ -13,4 +13,5 @@ export default createBridgeRouter({
   authMode: env.BRIDGE_AUTH_MODE,
   adminToken: env.BRIDGE_TOKEN,
   configuredWorkerId: env.BRIDGE_WORKER_ID,
+  allowDynamicWorkers: env.BRIDGE_DYNAMIC_WORKERS,
 });
