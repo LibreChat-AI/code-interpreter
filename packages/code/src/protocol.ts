@@ -24,6 +24,20 @@ export interface BridgeWorkerRegistrationResponse {
   leaseTtlMs: number;
 }
 
+export interface BridgePairingRedemption {
+  protocolVersion: BridgeProtocolVersion;
+  workerId: string;
+  code: string;
+  publicKey: string;
+}
+
+export interface BridgeWorkerCredentialResponse {
+  protocolVersion: BridgeProtocolVersion;
+  workerId: string;
+  credential: string;
+  expiresAt: string;
+}
+
 export interface BridgeSandboxRequest<TBody = object> {
   body: TBody;
   headers: Record<string, string>;

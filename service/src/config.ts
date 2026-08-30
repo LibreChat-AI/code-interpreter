@@ -263,8 +263,20 @@ export function resolveRuntimeSessionMode(
   );
 }
 
+export function resolveBridgeAuthMode(
+  raw: string | undefined,
+): 'static' | 'paired' {
+  return configuredChoice(
+    raw,
+    'CODEAPI_BRIDGE_AUTH_MODE',
+    'static',
+    ['static', 'paired'],
+  );
+}
+
 const sandboxBackend = resolveSandboxBackend(process.env.CODEAPI_SANDBOX_BACKEND);
 const runtimeSessionMode = resolveRuntimeSessionMode(process.env.CODEAPI_RUNTIME_SESSION_MODE);
+const bridgeAuthMode = resolveBridgeAuthMode(process.env.CODEAPI_BRIDGE_AUTH_MODE);
 
 export const env = {
   PORT: process.env.SERVICE_PORT ?? 3112,
@@ -355,6 +367,8 @@ export const env = {
   SANDBOX_BACKEND: sandboxBackend,
   /** Outbound worker selected by the remote-bridge backend. */
   BRIDGE_WORKER_ID: process.env.CODEAPI_BRIDGE_WORKER_ID ?? '',
+  /** Static compatibility auth or short-lived proof-of-possession credentials. */
+  BRIDGE_AUTH_MODE: bridgeAuthMode,
   /** Enrollment and lease credential shared only with the configured worker. */
   BRIDGE_TOKEN: process.env.CODEAPI_BRIDGE_TOKEN ?? '',
   /**

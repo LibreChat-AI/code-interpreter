@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BridgeWorker } from './worker.js';
+import {
+  createBridgeIdentity,
+  verifyBridgeRequest,
+} from './identity.js';
+import { BridgeWorker, reconnectDelayMs } from './worker.js';
 
 import type { BridgeAssignment } from './protocol.js';
 
@@ -27,9 +31,7 @@ test('worker forwards a fenced assignment to the sandbox and settles the result'
     codeApiUrl: 'https://code.example/v1/',
     token: 'worker-secret',
     workerId: 'vm-1',
-    incarnationId: 'incarnation-00000001',
-    sandboxEndpoint:
-      'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2/',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2/',
     capabilities: {
       statefulWorkspace: true,
       sandboxProfile: 'nsjail',
@@ -41,7 +43,6 @@ test('worker forwards a fenced assignment to the sandbox and settles the result'
     protocolVersion: 1,
     assignmentId: 'assignment-1',
     workerId: 'vm-1',
-    incarnationId: 'incarnation-00000001',
     generation: 3,
     leaseToken: 'lease-token-that-is-long-enough-for-testing',
     expiresAt: new Date(Date.now() + 10_000).toISOString(),
@@ -55,10 +56,7 @@ test('worker forwards a fenced assignment to the sandbox and settles the result'
   await worker.executeAndSettle(assignment);
 
   assert.equal(requests.length, 2);
-  assert.equal(
-    requests[0].url,
-    'http://127.0.0.1:2000/sessions/rt-user-1/api/v2/execute',
-  );
+  assert.equal(requests[0].url, 'http://127.0.0.1:2000/api/v2/execute');
   assert.equal(
     (requests[0].init?.headers as Record<string, string>)[
       'X-Runtime-Session-Id'
@@ -70,112 +68,116 @@ test('worker forwards a fenced assignment to the sandbox and settles the result'
     protocolVersion: 1,
     generation: 3,
     leaseToken: 'lease-token-that-is-long-enough-for-testing',
-    incarnationId: 'incarnation-00000001',
     status: 'fulfilled',
     result: { session_id: 'run-1', files: [] },
   });
 });
 
-test('worker aborts sandbox execution at the absolute assignment deadline', async () => {
-  let settlement: Record<string, unknown> | undefined;
+test('paired worker proves possession on bridge requests', async () => {
+  const key = createBridgeIdentity();
+  let bridgeRequest: { url: string; init?: RequestInit } | undefined;
   const fetchImpl: typeof fetch = async (input, init) => {
-    if (String(input).endsWith('/execute')) {
-      return await new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener(
-          'abort',
-          () => reject(new DOMException('aborted', 'AbortError')),
-          { once: true },
-        );
-      });
-    }
-    settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    return new Response(
-      JSON.stringify({ protocolVersion: 1, accepted: true }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    );
+    bridgeRequest = { url: String(input), init };
+    return Response.json({
+      protocolVersion: 1,
+      workerId: 'vm-1',
+      registeredAt: new Date().toISOString(),
+      leaseTtlMs: 60_000,
+    });
   };
   const worker = new BridgeWorker({
     codeApiUrl: 'https://code.example/v1',
-    token: 'worker-secret',
     workerId: 'vm-1',
-    incarnationId: 'incarnation-00000001',
     sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'issued-short-lived-credential-value',
+      expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    },
     capabilities: {
-      statefulWorkspace: false,
+      statefulWorkspace: true,
       sandboxProfile: 'nsjail',
       runtimes: ['bash'],
     },
     fetchImpl,
   });
 
-  await worker.executeAndSettle({
-    protocolVersion: 1,
-    assignmentId: 'assignment-deadline',
-    workerId: 'vm-1',
-    incarnationId: 'incarnation-00000001',
-    generation: 1,
-    leaseToken: 'lease-token-that-is-long-enough-for-testing',
-    expiresAt: new Date(Date.now() + 30).toISOString(),
-    request: { body: { language: 'bash' }, headers: {} },
-  });
+  await worker.register();
 
-  assert.equal(settlement?.status, 'rejected');
-  assert.equal(settlement?.incarnationId, 'incarnation-00000001');
+  assert.ok(bridgeRequest);
+  const headers = bridgeRequest.init?.headers as Record<string, string>;
+  const body = String(bridgeRequest.init?.body);
+  assert.equal(
+    verifyBridgeRequest(
+      key.publicKey,
+      {
+        credential: 'issued-short-lived-credential-value',
+        method: 'POST',
+        path: '/v1/bridge/workers/register',
+        timestamp: headers['X-LibreChat-Code-Timestamp'],
+        nonce: headers['X-LibreChat-Code-Nonce'],
+        body,
+      },
+      headers['X-LibreChat-Code-Signature'],
+    ),
+    true,
+  );
 });
 
-test('worker refreshes its registration during a long assignment', async () => {
-  let registrations = 0;
+test('paired worker rotates an expiring credential before registration', async () => {
+  const key = createBridgeIdentity();
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  let persistedCredential = '';
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
-    if (url.endsWith('/workers/register')) {
-      registrations += 1;
-      return new Response(
-        JSON.stringify({
-          protocolVersion: 1,
-          workerId: 'vm-1',
-          incarnationId: 'incarnation-00000001',
-          registeredAt: new Date().toISOString(),
-          leaseTtlMs: 50,
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      );
-    }
-    if (url.endsWith('/execute')) {
-      await new Promise((resolve) => setTimeout(resolve, 90));
-      return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
+    requests.push({ url, init });
+    if (url.endsWith('/credentials/refresh')) {
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: 'rotated-short-lived-credential-value',
+        expiresAt: new Date(Date.now() + 300_000).toISOString(),
       });
     }
-    return new Response(
-      JSON.stringify({ protocolVersion: 1, accepted: true, body: init?.body }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    );
+    return Response.json({
+      protocolVersion: 1,
+      workerId: 'vm-1',
+      registeredAt: new Date().toISOString(),
+      leaseTtlMs: 60_000,
+    });
   };
   const worker = new BridgeWorker({
     codeApiUrl: 'https://code.example/v1',
-    token: 'worker-secret',
     workerId: 'vm-1',
-    incarnationId: 'incarnation-00000001',
     sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'original-short-lived-credential-value',
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
+    },
     capabilities: {
-      statefulWorkspace: false,
+      statefulWorkspace: true,
       sandboxProfile: 'nsjail',
       runtimes: ['bash'],
     },
     fetchImpl,
-  });
-  await worker.register();
-  await worker.executeAndSettle({
-    protocolVersion: 1,
-    assignmentId: 'assignment-heartbeat',
-    workerId: 'vm-1',
-    incarnationId: 'incarnation-00000001',
-    generation: 1,
-    leaseToken: 'lease-token-that-is-long-enough-for-testing',
-    expiresAt: new Date(Date.now() + 1_000).toISOString(),
-    request: { body: { language: 'bash' }, headers: {} },
+    onIdentityChange: (identity) => {
+      persistedCredential = identity.credential;
+    },
   });
 
-  assert.ok(registrations >= 2);
+  await worker.refreshCredential();
+  await worker.register();
+
+  assert.equal(persistedCredential, 'rotated-short-lived-credential-value');
+  assert.equal(
+    (requests[1].init?.headers as Record<string, string>).Authorization,
+    'Bridge rotated-short-lived-credential-value',
+  );
+});
+
+test('reconnect delay uses bounded exponential jitter', () => {
+  assert.equal(reconnectDelayMs(0, 1_000, 30_000, () => 0), 500);
+  assert.equal(reconnectDelayMs(0, 1_000, 30_000, () => 1), 1_000);
+  assert.equal(reconnectDelayMs(10, 1_000, 30_000, () => 1), 30_000);
 });

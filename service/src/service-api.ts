@@ -5,7 +5,7 @@ import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-
 import { executionProfileMiddleware } from './middleware/execution-profile';
 import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
-import bridgeRouter from './bridge/router';
+import bridgeRouter from './bridge';
 import { connection } from './queue';
 import { env } from './config';
 import logger from './logger';

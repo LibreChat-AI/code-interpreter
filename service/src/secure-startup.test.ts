@@ -15,6 +15,7 @@ const saved = {
   executionProfileSource: env.EXECUTION_PROFILE_SOURCE,
   sandboxBackend: env.SANDBOX_BACKEND,
   bridgeWorkerId: env.BRIDGE_WORKER_ID,
+  bridgeAuthMode: env.BRIDGE_AUTH_MODE,
   bridgeToken: env.BRIDGE_TOKEN,
   ptcMode: env.PTC_MODE,
   runtimeSessionMode: env.RUNTIME_SESSION_MODE,
@@ -55,6 +56,7 @@ function restore(): void {
   env.EXECUTION_PROFILE_SOURCE = saved.executionProfileSource;
   env.SANDBOX_BACKEND = saved.sandboxBackend;
   env.BRIDGE_WORKER_ID = saved.bridgeWorkerId;
+  env.BRIDGE_AUTH_MODE = saved.bridgeAuthMode;
   env.BRIDGE_TOKEN = saved.bridgeToken;
   env.PTC_MODE = saved.ptcMode;
   env.RUNTIME_SESSION_MODE = saved.runtimeSessionMode;
@@ -310,7 +312,7 @@ describe('sandbox backend policy', () => {
     expect(() => validateSandboxBackendPolicy()).not.toThrow();
   });
 
-  test('remote bridge requires replay PTC and a strong token in hardened mode', () => {
+  test('hardened remote bridge requires replay PTC, paired auth, and a strong administrator token', () => {
     env.SANDBOX_BACKEND = 'remote-bridge';
     env.RUNTIME_SESSION_MODE = 'affinity';
     env.BRIDGE_WORKER_ID = 'engineering-vm';
@@ -325,6 +327,11 @@ describe('sandbox backend policy', () => {
     expect(() => validateSandboxBackendPolicy()).toThrow('at least 32 bytes');
 
     env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'CODEAPI_BRIDGE_AUTH_MODE=paired',
+    );
+
+    env.BRIDGE_AUTH_MODE = 'paired';
     expect(() => validateSandboxBackendPolicy()).not.toThrow();
   });
 
