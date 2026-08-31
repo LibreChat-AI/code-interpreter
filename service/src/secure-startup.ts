@@ -53,6 +53,22 @@ export function validateApiHardenedConfig(): void {
   requireValue(INTERNAL_SERVICE_TOKEN_ENV, process.env[INTERNAL_SERVICE_TOKEN_ENV]);
 }
 
+/** Validate bridge credentials in every process that exposes bridge routes. */
+export function validateApiBridgePolicy(): void {
+  if (env.SANDBOX_BACKEND !== 'remote-bridge') return;
+  requireValue('CODEAPI_BRIDGE_WORKER_ID', env.BRIDGE_WORKER_ID);
+  if (env.HARDENED_SANDBOX_MODE) {
+    requireStrongSecret('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
+  } else {
+    requireValue('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
+  }
+  if (env.PTC_MODE === 'blocking') {
+    throw new SecureStartupConfigError(
+      'PTC replay is the only supported PTC mode for the remote-bridge backend (unset PTC_MODE=blocking)',
+    );
+  }
+}
+
 export function validateWorkerHardenedConfig(): void {
   if (!env.HARDENED_SANDBOX_MODE) return;
   rejectValue('CODEAPI_EGRESS_GRANT_SECRET', process.env.CODEAPI_EGRESS_GRANT_SECRET);
@@ -119,17 +135,7 @@ export function validateSandboxBackendPolicy(): void {
     );
   }
   if (env.SANDBOX_BACKEND === 'remote-bridge') {
-    requireValue('CODEAPI_BRIDGE_WORKER_ID', env.BRIDGE_WORKER_ID);
-    if (env.HARDENED_SANDBOX_MODE) {
-      requireStrongSecret('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
-    } else {
-      requireValue('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
-    }
-    if (env.PTC_MODE === 'blocking') {
-      throw new SecureStartupConfigError(
-        'PTC replay is the only supported PTC mode for the remote-bridge backend (unset PTC_MODE=blocking)',
-      );
-    }
+    validateApiBridgePolicy();
     return;
   }
   if (env.SANDBOX_BACKEND !== 'lambda-microvm') return;

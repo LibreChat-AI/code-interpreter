@@ -169,6 +169,8 @@ export class BridgeWorker {
       cancellationController.signal,
     );
     let settlement: BridgeSettlement;
+    let ambiguousSandboxError: unknown;
+    let sandboxRejectedExecution = false;
     try {
       const sandboxSessionId = this.sandboxSessionIdFor(assignment);
       const headers = {
@@ -192,6 +194,7 @@ export class BridgeWorker {
       const payload = (await response.json()) as object;
       if (heartbeatError != null) throw heartbeatError;
       if (!response.ok) {
+        sandboxRejectedExecution = true;
         throw new BridgeProtocolError(
           errorMessage(payload) ??
             `Sandbox rejected execution with HTTP ${response.status}`,
@@ -207,6 +210,12 @@ export class BridgeWorker {
         result: payload,
       };
     } catch (error) {
+      if (
+        assignment.runtimeSessionId != null &&
+        !sandboxRejectedExecution
+      ) {
+        ambiguousSandboxError = error;
+      }
       settlement = {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         generation: assignment.generation,
@@ -222,6 +231,12 @@ export class BridgeWorker {
     cancellationController.abort();
     await cancellationWatcher;
     try {
+      if (ambiguousSandboxError != null) {
+        throw new BridgeWorkspaceQuarantinedError(
+          `Stateful workspace ${assignment.runtimeSessionId} was quarantined after an ambiguous sandbox execution`,
+          ambiguousSandboxError,
+        );
+      }
       await this.settleWithRetry(assignment, settlement, signal);
     } finally {
       heartbeatController.abort();

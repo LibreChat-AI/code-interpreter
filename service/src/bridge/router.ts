@@ -55,7 +55,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function sendStoreError(error: BridgeStoreError, res: Response): void {
-  const status = error.code === 'ASSIGNMENT_NOT_FOUND' ? 404 : 409;
+  const status =
+    error.code === 'ASSIGNMENT_NOT_FOUND'
+      ? 404
+      : error.code === 'WORKER_BUSY'
+        ? 503
+        : 409;
   res.status(status).json({ error: error.message, code: error.code });
 }
 

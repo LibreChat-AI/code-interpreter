@@ -8,8 +8,12 @@ import { RedisBridgeStore } from './store';
 const redis = new RedisMock() as unknown as Redis;
 const store = new RedisBridgeStore(redis);
 const incarnationId = 'incarnation-00000001';
+const redisEval = redis.eval.bind(redis);
+const redisDel = redis.del.bind(redis);
 
 afterEach(async () => {
+  redis.eval = redisEval as Redis['eval'];
+  redis.del = redisDel as Redis['del'];
   await redis.flushall();
 });
 
@@ -186,6 +190,121 @@ describe('RedisBridgeStore', () => {
     });
   });
 
+  test('dispatch retries atomically against a replacement incarnation', async () => {
+    const workerId = 'racing-worker';
+    const replacementIncarnationId = 'incarnation-00000002';
+    const capabilities = {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: [] as string[],
+    };
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId,
+      incarnationId,
+      capabilities,
+    });
+    const originalEval = redis.eval.bind(redis);
+    let replaced = false;
+    redis.eval = (async (...args: Parameters<Redis['eval']>) => {
+      if (!replaced && String(args[0]).includes("redis.call('RPUSH'")) {
+        replaced = true;
+        const replacement = {
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          workerId,
+          incarnationId: replacementIncarnationId,
+          capabilities,
+        };
+        await redis.set(
+          `codeapi:bridge:v1:worker:${workerId}`,
+          JSON.stringify(replacement),
+          'EX',
+          60,
+        );
+        await redis.set(
+          `codeapi:bridge:v1:worker:${workerId}:incarnation`,
+          replacementIncarnationId,
+          'EX',
+          60,
+        );
+      }
+      return originalEval(...args);
+    }) as Redis['eval'];
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+
+    const assignment = await store.lease(
+      workerId,
+      replacementIncarnationId,
+      1_000,
+    );
+    expect(assignment?.incarnationId).toBe(replacementIncarnationId);
+    redis.eval = originalEval as Redis['eval'];
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
+  test('defers worker replacement while an assignment is active', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'busy-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'busy-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease('busy-worker', incarnationId, 1_000);
+    expect(assignment).toBeDefined();
+
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'busy-worker',
+        incarnationId: 'incarnation-00000002',
+        capabilities: {
+          statefulWorkspace: false,
+          sandboxProfile: 'nsjail',
+          runtimes: [],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_BUSY' });
+
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'busy-worker',
+        incarnationId: 'incarnation-00000002',
+        capabilities: {
+          statefulWorkspace: false,
+          sandboxProfile: 'nsjail',
+          runtimes: [],
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   test('keeps assignment state through deadlines longer than ten minutes', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -216,6 +335,110 @@ describe('RedisBridgeStore', () => {
     await expect(completion).rejects.toMatchObject({
       code: 'ASSIGNMENT_EXPIRED',
     });
+  });
+
+  test('observes a settlement accepted during the final poll delay', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'deadline-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const deadlineAtMs = Date.now() + 500;
+    const completion = store.dispatch({
+      workerId: 'deadline-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-deadline',
+      deadlineAtMs,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease(
+      'deadline-worker',
+      incarnationId,
+      1_000,
+    );
+    expect(assignment).toBeDefined();
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.max(0, deadlineAtMs - Date.now() - 30)),
+    );
+    await store.settle('deadline-worker', assignment?.assignmentId ?? '', {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      generation: assignment?.generation ?? 0,
+      leaseToken: assignment?.leaseToken ?? '',
+      incarnationId,
+      status: 'fulfilled',
+      result: {
+        language: 'bash',
+        version: '5.2.0',
+        session_id: 'run-deadline',
+        files: [],
+      },
+    });
+
+    await expect(completion).resolves.toMatchObject({
+      status: 'fulfilled',
+      result: { session_id: 'run-deadline' },
+    });
+  });
+
+  test('preserves a committed result across transient cleanup failures', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'cleanup-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'cleanup-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-cleanup',
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease(
+      'cleanup-worker',
+      incarnationId,
+      1_000,
+    );
+    const originalDel = redis.del.bind(redis);
+    let cleanupAttempts = 0;
+    redis.del = (async (...args: Parameters<Redis['del']>) => {
+      cleanupAttempts += 1;
+      if (cleanupAttempts === 1) throw new Error('transient cleanup failure');
+      return originalDel(...args);
+    }) as Redis['del'];
+    await store.settle('cleanup-worker', assignment?.assignmentId ?? '', {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      generation: assignment?.generation ?? 0,
+      leaseToken: assignment?.leaseToken ?? '',
+      incarnationId,
+      status: 'fulfilled',
+      result: {
+        language: 'bash',
+        version: '5.2.0',
+        session_id: 'run-cleanup',
+        files: [],
+      },
+    });
+
+    await expect(completion).resolves.toMatchObject({
+      status: 'fulfilled',
+      result: { session_id: 'run-cleanup' },
+    });
+    expect(cleanupAttempts).toBeGreaterThanOrEqual(2);
+    redis.del = originalDel as Redis['del'];
   });
 
   test('releases the worker lock when generation allocation fails', async () => {

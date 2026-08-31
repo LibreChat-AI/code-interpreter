@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { env } from './config';
 import {
+  validateApiBridgePolicy,
   validateApiHardenedConfig,
   validateEgressGatewayHardenedConfig,
   validateExecutionProfilePolicy,
@@ -326,6 +327,19 @@ describe('sandbox backend policy', () => {
 
     env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
     expect(() => validateSandboxBackendPolicy()).not.toThrow();
+  });
+
+  test('API bridge policy requires a strong token in hardened mode', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = 'short-token';
+    env.PTC_MODE = 'replay';
+    env.HARDENED_SANDBOX_MODE = true;
+
+    expect(() => validateApiBridgePolicy()).toThrow('at least 32 bytes');
+
+    env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
+    expect(() => validateApiBridgePolicy()).not.toThrow();
   });
 
   test('rejects blocking PTC on the lambda backend', () => {

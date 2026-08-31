@@ -132,6 +132,7 @@ export class RedisBridgeStore {
       'local current = redis.call(\'GET\', KEYS[4])',
       'if current then',
       '  if current ~= ARGV[1] then',
+      '    if redis.call(\'EXISTS\', KEYS[5]) == 1 then return -3 end',
       '    redis.call(\'SET\', ARGV[4] .. current .. \':fenced\', \"1\")',
       '  end',
       'end',
@@ -142,11 +143,12 @@ export class RedisBridgeStore {
     const result = Number(
       await this.redis.eval(
         script,
-        4,
+        5,
         workerKey(registration.workerId),
         incarnationFenceKey(registration.workerId, registration.incarnationId),
         quarantineKey(registration.workerId, registration.incarnationId),
         workerIncarnationKey(registration.workerId),
+        lockKey(registration.workerId),
         registration.incarnationId,
         JSON.stringify(registration),
         String(this.workerTtlSeconds),
@@ -165,6 +167,12 @@ export class RedisBridgeStore {
         'Bridge worker incarnation was replaced',
       );
     }
+    if (result === -3) {
+      throw new BridgeStoreError(
+        'WORKER_BUSY',
+        'Bridge worker cannot be replaced during an active assignment',
+      );
+    }
   }
 
   async dispatch(args: {
@@ -178,7 +186,7 @@ export class RedisBridgeStore {
       settlement: CodeBridgeSettlement,
     ) => Promise<CodeBridgeSettlement>;
   }): Promise<CodeBridgeSettlement> {
-    const registration = await this.registration(args.workerId);
+    let registration = await this.registration(args.workerId);
     if (registration == null) {
       throw new BridgeStoreError(
         'WORKER_OFFLINE',
@@ -224,6 +232,7 @@ export class RedisBridgeStore {
     }
 
     let assignment: StoredAssignment | undefined;
+    let resultCommitted = false;
     try {
       const generation = await this.redis.incr(generationKey(args.workerId));
       assignment = {
@@ -241,30 +250,50 @@ export class RedisBridgeStore {
           headers: args.headers,
         },
       };
-      const transaction = this.redis.multi();
-      transaction.set(
-        assignmentKey(assignmentId),
-        JSON.stringify(assignment),
-        'EX',
-        ttlSeconds,
-      );
-      const assignmentQueueKey = queueKey(
-        args.workerId,
-        assignment.incarnationId,
-      );
-      transaction.rpush(assignmentQueueKey, assignmentId);
-      transaction.expire(assignmentQueueKey, ttlSeconds);
-      await transaction.exec();
+      let queued = false;
+      for (let attempt = 0; attempt < 8 && !queued; attempt += 1) {
+        assignment.incarnationId = registration.incarnationId;
+        queued = await this.enqueueForActiveIncarnation(assignment, ttlSeconds);
+        if (queued) break;
+        const replacement = await this.registration(args.workerId);
+        if (replacement == null) {
+          throw new BridgeStoreError(
+            'WORKER_OFFLINE',
+            `Bridge worker ${args.workerId} went offline during dispatch`,
+          );
+        }
+        if (
+          args.runtimeSessionId !== undefined &&
+          replacement.capabilities.statefulWorkspace !== true
+        ) {
+          throw new BridgeStoreError(
+            'WORKER_MISMATCH',
+            `Bridge worker ${args.workerId} does not provide a stateful workspace`,
+          );
+        }
+        registration = replacement;
+      }
+      if (!queued) {
+        throw new BridgeStoreError(
+          'WORKER_OFFLINE',
+          `Bridge worker ${args.workerId} changed incarnation repeatedly during dispatch`,
+        );
+      }
       const settlement = await this.waitForSettlement(
         assignment,
         args.deadlineAtMs,
         args.signal,
       );
-      if (args.finalize == null) return settlement;
+      if (args.finalize == null) {
+        resultCommitted = true;
+        return settlement;
+      }
       try {
-        return await args.finalize(settlement);
+        const result = await args.finalize(settlement);
+        resultCommitted = true;
+        return result;
       } catch (error) {
-        await this.quarantine(args.workerId, registration.incarnationId);
+        await this.quarantine(args.workerId, assignment.incarnationId);
         if (args.runtimeSessionId !== undefined) {
           await this.redis.set(
             workspaceQuarantineKey(args.workerId, args.runtimeSessionId),
@@ -274,11 +303,16 @@ export class RedisBridgeStore {
         throw error;
       }
     } finally {
-      await this.cancel(assignmentId);
-      if (assignment == null) {
-        await this.releaseLock(args.workerId, assignmentId);
+      if (resultCommitted) {
+        try {
+          await this.cleanupWithRetry(args.workerId, assignmentId, assignment);
+        } catch {
+          // The lock and assignment have deadline-derived TTLs. Preserve the
+          // already committed result rather than turning cleanup availability
+          // into a client-visible failure that could prompt duplicate work.
+        }
       } else {
-        await this.cleanup(assignment);
+        await this.cleanupDispatch(args.workerId, assignmentId, assignment);
       }
     }
   }
@@ -355,12 +389,27 @@ export class RedisBridgeStore {
       );
     }
     const ttlSeconds = assignmentTtlSeconds(Date.parse(assignment.expiresAt));
-    await this.redis.set(
-      settlementKey(assignmentId),
-      JSON.stringify(settlement),
-      'EX',
-      ttlSeconds,
+    const script = [
+      'if redis.call(\'EXISTS\', KEYS[1]) == 0 then return 0 end',
+      'redis.call(\'SET\', KEYS[2], ARGV[1], \"EX\", ARGV[2])',
+      'return 1',
+    ].join('\n');
+    const accepted = Number(
+      await this.redis.eval(
+        script,
+        2,
+        assignmentKey(assignmentId),
+        settlementKey(assignmentId),
+        JSON.stringify(settlement),
+        String(ttlSeconds),
+      ),
     );
+    if (accepted !== 1) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_EXPIRED',
+        'Bridge assignment closed before settlement was committed',
+      );
+    }
   }
 
   async cancelled(
@@ -424,6 +473,21 @@ export class RedisBridgeStore {
       if (raw != null) return JSON.parse(raw) as CodeBridgeSettlement;
       await delay(POLL_INTERVAL_MS, signal);
     }
+    const closeScript = [
+      'local settlement = redis.call(\'GET\', KEYS[2])',
+      'if settlement then return settlement end',
+      'redis.call(\'DEL\', KEYS[1])',
+      'return nil',
+    ].join('\n');
+    const finalSettlement = await this.redis.eval(
+      closeScript,
+      2,
+      assignmentKey(assignment.assignmentId),
+      settlementKey(assignment.assignmentId),
+    );
+    if (finalSettlement != null) {
+      return JSON.parse(String(finalSettlement)) as CodeBridgeSettlement;
+    }
     throw new BridgeStoreError(
       'ASSIGNMENT_EXPIRED',
       'Bridge assignment exceeded its deadline',
@@ -432,6 +496,62 @@ export class RedisBridgeStore {
 
   private async cancel(assignmentId: string): Promise<void> {
     await this.redis.set(cancellationKey(assignmentId), '1', 'EX', 30);
+  }
+
+  private async enqueueForActiveIncarnation(
+    assignment: StoredAssignment,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    const script = [
+      'if redis.call(\'GET\', KEYS[1]) ~= ARGV[1] then return 0 end',
+      'redis.call(\'SET\', KEYS[2], ARGV[2], \"EX\", ARGV[3])',
+      'redis.call(\'RPUSH\', KEYS[3], ARGV[4])',
+      'redis.call(\'EXPIRE\', KEYS[3], ARGV[3])',
+      'return 1',
+    ].join('\n');
+    const result = await this.redis.eval(
+      script,
+      3,
+      workerIncarnationKey(assignment.workerId),
+      assignmentKey(assignment.assignmentId),
+      queueKey(assignment.workerId, assignment.incarnationId),
+      assignment.incarnationId,
+      JSON.stringify(assignment),
+      String(ttlSeconds),
+      assignment.assignmentId,
+    );
+    return Number(result) === 1;
+  }
+
+  private async cleanupDispatch(
+    workerId: string,
+    assignmentId: string,
+    assignment: StoredAssignment | undefined,
+  ): Promise<void> {
+    await this.cancel(assignmentId);
+    if (assignment == null) {
+      await this.releaseLock(workerId, assignmentId);
+      return;
+    }
+    await this.cleanup(assignment);
+  }
+
+  private async cleanupWithRetry(
+    workerId: string,
+    assignmentId: string,
+    assignment: StoredAssignment | undefined,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await this.cleanupDispatch(workerId, assignmentId, assignment);
+        return;
+      } catch (error) {
+        lastError = error;
+        await delay(25);
+      }
+    }
+    throw lastError;
   }
 
   private async cleanup(assignment: StoredAssignment): Promise<void> {
