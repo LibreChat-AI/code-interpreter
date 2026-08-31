@@ -32,6 +32,9 @@ export class BridgeStoreError extends Error {
       | 'ASSIGNMENT_EXPIRED'
       | 'ASSIGNMENT_FENCED'
       | 'ASSIGNMENT_NOT_FOUND'
+      | 'WORKER_FENCED'
+      | 'WORKER_QUARANTINED'
+      | 'WORKSPACE_QUARANTINED'
       | 'WORKER_MISMATCH',
     message: string,
   ) {
@@ -46,6 +49,28 @@ interface StoredAssignment extends CodeBridgeAssignment {
 
 function workerKey(workerId: string): string {
   return `${PREFIX}:worker:${workerId}`;
+}
+
+function workerIncarnationKey(workerId: string): string {
+  return `${PREFIX}:worker:${workerId}:incarnation`;
+}
+
+function incarnationFenceKey(workerId: string, incarnationId: string): string {
+  return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:fenced`;
+}
+
+function quarantineKey(workerId: string, incarnationId: string): string {
+  return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:quarantined`;
+}
+
+function workspaceQuarantineKey(
+  workerId: string,
+  runtimeSessionId: string,
+): string {
+  const sessionHash = createHash('sha256')
+    .update(runtimeSessionId)
+    .digest('hex');
+  return `${PREFIX}:worker:${workerId}:workspace:${sessionHash}:quarantined`;
 }
 
 function queueKey(workerId: string): string {
@@ -108,12 +133,45 @@ export class RedisBridgeStore {
   ) {}
 
   async register(registration: BridgeWorkerRegistration): Promise<void> {
-    await this.redis.set(
-      workerKey(registration.workerId),
-      JSON.stringify(registration),
-      'EX',
-      this.workerTtlSeconds,
+    const script = [
+      'if redis.call(\'EXISTS\', KEYS[3]) == 1 then return -2 end',
+      'if redis.call(\'EXISTS\', KEYS[2]) == 1 then return -1 end',
+      'local current = redis.call(\'GET\', KEYS[4])',
+      'if current then',
+      '  if current ~= ARGV[1] then',
+      '    redis.call(\'SET\', ARGV[4] .. current .. \':fenced\', \"1\")',
+      '  end',
+      'end',
+      'redis.call(\'SET\', KEYS[1], ARGV[2], \"EX\", ARGV[3])',
+      'redis.call(\'SET\', KEYS[4], ARGV[1], \"EX\", ARGV[3])',
+      'return 1',
+    ].join('\n');
+    const result = Number(
+      await this.redis.eval(
+        script,
+        4,
+        workerKey(registration.workerId),
+        incarnationFenceKey(registration.workerId, registration.incarnationId),
+        quarantineKey(registration.workerId, registration.incarnationId),
+        workerIncarnationKey(registration.workerId),
+        registration.incarnationId,
+        JSON.stringify(registration),
+        String(this.workerTtlSeconds),
+        `${PREFIX}:worker:${registration.workerId}:incarnation:`,
+      ),
     );
+    if (result === -2) {
+      throw new BridgeStoreError(
+        'WORKER_QUARANTINED',
+        'Bridge worker incarnation is quarantined',
+      );
+    }
+    if (result === -1) {
+      throw new BridgeStoreError(
+        'WORKER_FENCED',
+        'Bridge worker incarnation was replaced',
+      );
+    }
   }
 
   async dispatch(args: {
@@ -123,6 +181,9 @@ export class RedisBridgeStore {
     runtimeSessionId?: string;
     deadlineAtMs: number;
     signal: AbortSignal;
+    finalize?: (
+      settlement: CodeBridgeSettlement,
+    ) => Promise<CodeBridgeSettlement>;
   }): Promise<CodeBridgeSettlement> {
     const registration = await this.registration(args.workerId);
     if (registration == null) {
@@ -138,6 +199,17 @@ export class RedisBridgeStore {
       throw new BridgeStoreError(
         'WORKER_MISMATCH',
         `Bridge worker ${args.workerId} does not provide a stateful workspace`,
+      );
+    }
+    if (
+      args.runtimeSessionId !== undefined &&
+      (await this.redis.exists(
+        workspaceQuarantineKey(args.workerId, args.runtimeSessionId),
+      )) === 1
+    ) {
+      throw new BridgeStoreError(
+        'WORKSPACE_QUARANTINED',
+        'Bridge workspace is quarantined after an incomplete result commit',
       );
     }
 
@@ -158,23 +230,24 @@ export class RedisBridgeStore {
       );
     }
 
-    const generation = await this.redis.incr(generationKey(args.workerId));
-    const assignment: StoredAssignment = {
-      protocolVersion: BRIDGE_PROTOCOL_VERSION,
-      assignmentId,
-      workerId: args.workerId,
-      generation,
-      leaseToken,
-      leaseTokenHash: tokenHash(leaseToken),
-      expiresAt: new Date(args.deadlineAtMs).toISOString(),
-      runtimeSessionId: args.runtimeSessionId,
-      request: {
-        body: args.body,
-        headers: args.headers,
-      },
-    };
-
+    let assignment: StoredAssignment | undefined;
     try {
+      const generation = await this.redis.incr(generationKey(args.workerId));
+      assignment = {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        assignmentId,
+        workerId: args.workerId,
+        incarnationId: registration.incarnationId,
+        generation,
+        leaseToken,
+        leaseTokenHash: tokenHash(leaseToken),
+        expiresAt: new Date(args.deadlineAtMs).toISOString(),
+        runtimeSessionId: args.runtimeSessionId,
+        request: {
+          body: args.body,
+          headers: args.headers,
+        },
+      };
       const transaction = this.redis.multi();
       transaction.set(
         assignmentKey(assignmentId),
@@ -185,19 +258,37 @@ export class RedisBridgeStore {
       transaction.rpush(queueKey(args.workerId), assignmentId);
       transaction.expire(queueKey(args.workerId), ttlSeconds);
       await transaction.exec();
-      return await this.waitForSettlement(
+      const settlement = await this.waitForSettlement(
         assignment,
         args.deadlineAtMs,
         args.signal,
       );
+      if (args.finalize == null) return settlement;
+      try {
+        return await args.finalize(settlement);
+      } catch (error) {
+        await this.quarantine(args.workerId, registration.incarnationId);
+        if (args.runtimeSessionId !== undefined) {
+          await this.redis.set(
+            workspaceQuarantineKey(args.workerId, args.runtimeSessionId),
+            '1',
+          );
+        }
+        throw error;
+      }
     } finally {
       await this.cancel(assignmentId);
-      await this.cleanup(assignment);
+      if (assignment == null) {
+        await this.releaseLock(args.workerId, assignmentId);
+      } else {
+        await this.cleanup(assignment);
+      }
     }
   }
 
   async lease(
     workerId: string,
+    incarnationId: string,
     waitMs: number,
     signal?: AbortSignal,
   ): Promise<CodeBridgeAssignment | undefined> {
@@ -213,6 +304,14 @@ export class RedisBridgeStore {
       }
       const assignment = await this.readAssignment(assignmentId);
       if (assignment == null || assignment.workerId !== workerId) continue;
+      if (assignment.incarnationId !== incarnationId) continue;
+      const registration = await this.registration(workerId);
+      if (registration?.incarnationId !== incarnationId) {
+        throw new BridgeStoreError(
+          'WORKER_FENCED',
+          'Bridge worker incarnation was replaced',
+        );
+      }
       if (Date.parse(assignment.expiresAt) <= Date.now()) continue;
       const { leaseTokenHash: _leaseTokenHash, ...wireAssignment } = assignment;
       return wireAssignment;
@@ -238,7 +337,10 @@ export class RedisBridgeStore {
         'Bridge assignment belongs to another worker',
       );
     }
+    const registration = await this.registration(workerId);
     if (
+      settlement.incarnationId !== assignment.incarnationId ||
+      registration?.incarnationId !== settlement.incarnationId ||
       settlement.generation !== assignment.generation ||
       tokenHash(settlement.leaseToken) !== assignment.leaseTokenHash
     ) {
@@ -262,10 +364,41 @@ export class RedisBridgeStore {
     );
   }
 
-  async cancelled(workerId: string, assignmentId: string): Promise<boolean> {
+  async cancelled(
+    workerId: string,
+    incarnationId: string,
+    assignmentId: string,
+  ): Promise<boolean> {
     const assignment = await this.readAssignment(assignmentId);
-    if (assignment == null || assignment.workerId !== workerId) return true;
+    const registration = await this.registration(workerId);
+    if (
+      assignment == null ||
+      assignment.workerId !== workerId ||
+      assignment.incarnationId !== incarnationId ||
+      registration?.incarnationId !== incarnationId
+    ) {
+      return true;
+    }
     return (await this.redis.exists(cancellationKey(assignmentId))) === 1;
+  }
+
+  async quarantine(workerId: string, incarnationId: string): Promise<void> {
+    const script = [
+      'redis.call(\'SET\', KEYS[2], \"1\")',
+      'local current = redis.call(\'GET\', KEYS[3])',
+      'if current == ARGV[1] then',
+      '  return redis.call(\'DEL\', KEYS[1], KEYS[3])',
+      'end',
+      'return 0',
+    ].join('\n');
+    await this.redis.eval(
+      script,
+      3,
+      workerKey(workerId),
+      quarantineKey(workerId, incarnationId),
+      workerIncarnationKey(workerId),
+      incarnationId,
+    );
   }
 
   private async registration(
@@ -303,23 +436,25 @@ export class RedisBridgeStore {
   }
 
   private async cleanup(assignment: StoredAssignment): Promise<void> {
+    await Promise.all([
+      this.redis.del(
+        assignmentKey(assignment.assignmentId),
+        settlementKey(assignment.assignmentId),
+      ),
+      this.releaseLock(assignment.workerId, assignment.assignmentId),
+    ]);
+  }
+
+  private async releaseLock(
+    workerId: string,
+    assignmentId: string,
+  ): Promise<void> {
     const script = [
       'if redis.call(\'GET\', KEYS[1]) == ARGV[1] then',
       '  return redis.call(\'DEL\', KEYS[1])',
       'end',
       'return 0',
     ].join('\n');
-    await Promise.all([
-      this.redis.del(
-        assignmentKey(assignment.assignmentId),
-        settlementKey(assignment.assignmentId),
-      ),
-      this.redis.eval(
-        script,
-        1,
-        lockKey(assignment.workerId),
-        assignment.assignmentId,
-      ),
-    ]);
+    await this.redis.eval(script, 1, lockKey(workerId), assignmentId);
   }
 }

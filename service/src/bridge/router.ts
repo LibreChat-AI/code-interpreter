@@ -11,6 +11,7 @@ import { env } from '../config';
 import { BridgeStoreError, RedisBridgeStore } from './store';
 
 const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const INCARNATION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const MAX_LEASE_WAIT_MS = 30_000;
 
 export const bridgeStore = new RedisBridgeStore(connection);
@@ -45,6 +46,10 @@ function validWorkerId(value: string): boolean {
   return WORKER_ID_PATTERN.test(value);
 }
 
+function validIncarnationId(value: unknown): value is string {
+  return typeof value === 'string' && INCARNATION_ID_PATTERN.test(value);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -62,7 +67,8 @@ function isSettlement(value: unknown): value is CodeBridgeSettlement {
     !Number.isSafeInteger(value.generation) ||
     value.generation < 1 ||
     typeof value.leaseToken !== 'string' ||
-    value.leaseToken.length < 32
+    value.leaseToken.length < 32 ||
+    !validIncarnationId(value.incarnationId)
   ) {
     return false;
   }
@@ -86,8 +92,9 @@ router.post('/workers/register', async (req: Request, res: Response) => {
     registration.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
     typeof registration.workerId !== 'string' ||
     !validWorkerId(registration.workerId) ||
+    !validIncarnationId(registration.incarnationId) ||
     !isRecord(registration.capabilities) ||
-    registration.capabilities.statefulWorkspace !== true ||
+    typeof registration.capabilities.statefulWorkspace !== 'boolean' ||
     typeof registration.capabilities.sandboxProfile !== 'string' ||
     registration.capabilities.sandboxProfile.trim().length === 0 ||
     registration.capabilities.sandboxProfile.length > 128 ||
@@ -110,10 +117,21 @@ router.post('/workers/register', async (req: Request, res: Response) => {
     });
     return;
   }
-  await bridgeStore.register(registration as unknown as BridgeWorkerRegistration);
+  try {
+    await bridgeStore.register(
+      registration as unknown as BridgeWorkerRegistration,
+    );
+  } catch (error) {
+    if (error instanceof BridgeStoreError) {
+      sendStoreError(error, res);
+      return;
+    }
+    throw error;
+  }
   res.json({
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
     workerId: registration.workerId,
+    incarnationId: registration.incarnationId,
     registeredAt: new Date().toISOString(),
     leaseTtlMs: 60_000,
   });
@@ -125,6 +143,8 @@ router.post('/workers/:workerId/lease', async (req: Request, res: Response) => {
   const requestedWait = Number(body.waitMs ?? 25_000);
   if (
     !validWorkerId(workerId) ||
+    body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+    !validIncarnationId(body.incarnationId) ||
     !Number.isFinite(requestedWait) ||
     requestedWait < 0
   ) {
@@ -137,11 +157,20 @@ router.post('/workers/:workerId/lease', async (req: Request, res: Response) => {
     });
     return;
   }
-  const assignment = await bridgeStore.lease(
-    workerId,
-    Math.min(requestedWait, MAX_LEASE_WAIT_MS),
-  );
-  res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
+  try {
+    const assignment = await bridgeStore.lease(
+      workerId,
+      body.incarnationId,
+      Math.min(requestedWait, MAX_LEASE_WAIT_MS),
+    );
+    res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
+  } catch (error) {
+    if (error instanceof BridgeStoreError) {
+      sendStoreError(error, res);
+      return;
+    }
+    throw error;
+  }
 });
 
 router.post(
@@ -175,8 +204,17 @@ router.post(
 router.post(
   '/workers/:workerId/assignments/:assignmentId/cancellation',
   async (req, res) => {
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      !validIncarnationId(body.incarnationId)
+    ) {
+      res.status(400).json({ error: 'Invalid bridge cancellation request' });
+      return;
+    }
     const cancelled = await bridgeStore.cancelled(
       req.params.workerId,
+      body.incarnationId,
       req.params.assignmentId,
     );
     res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, cancelled });

@@ -29,6 +29,7 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
         'No bridge worker is configured',
       );
     }
+    const sessionResultFinalizer = ctx.sessionResultFinalizer;
     try {
       const settlement = await this.store.dispatch({
         workerId: this.workerId,
@@ -37,6 +38,15 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
         runtimeSessionId: ctx.runtimeSessionId,
         deadlineAtMs: ctx.deadlineAtMs ?? Date.now() + env.JOB_TIMEOUT,
         signal: ctx.signal,
+        finalize: sessionResultFinalizer
+          ? async (settlement) => {
+              if (settlement.status === 'rejected') return settlement;
+              return {
+                ...settlement,
+                result: await sessionResultFinalizer(settlement.result),
+              };
+            }
+          : undefined,
       });
       if (settlement.status === 'rejected') {
         throw new SandboxBackendError(

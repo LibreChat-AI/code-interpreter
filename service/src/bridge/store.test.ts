@@ -7,6 +7,7 @@ import { RedisBridgeStore } from './store';
 
 const redis = new RedisMock() as unknown as Redis;
 const store = new RedisBridgeStore(redis);
+const incarnationId = 'incarnation-00000001';
 
 afterEach(async () => {
   await redis.flushall();
@@ -17,6 +18,7 @@ describe('RedisBridgeStore', () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'vm-1',
+      incarnationId,
       capabilities: {
         statefulWorkspace: true,
         sandboxProfile: 'nsjail',
@@ -32,7 +34,7 @@ describe('RedisBridgeStore', () => {
       deadlineAtMs: Date.now() + 5_000,
       signal: controller.signal,
     });
-    const assignment = await store.lease('vm-1', 1_000);
+    const assignment = await store.lease('vm-1', incarnationId, 1_000);
     expect(assignment).toBeDefined();
     expect(assignment?.runtimeSessionId).toBe('rt-user-1');
 
@@ -40,6 +42,7 @@ describe('RedisBridgeStore', () => {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       generation: assignment?.generation ?? 0,
       leaseToken: assignment?.leaseToken ?? '',
+      incarnationId,
       status: 'fulfilled',
       result: {
         language: 'bash',
@@ -72,6 +75,7 @@ describe('RedisBridgeStore', () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'vm-1',
+      incarnationId,
       capabilities: {
         statefulWorkspace: true,
         sandboxProfile: 'nsjail',
@@ -86,13 +90,14 @@ describe('RedisBridgeStore', () => {
       deadlineAtMs: Date.now() + 5_000,
       signal: controller.signal,
     });
-    const assignment = await store.lease('vm-1', 1_000);
+    const assignment = await store.lease('vm-1', incarnationId, 1_000);
 
     await expect(
       store.settle('vm-1', assignment?.assignmentId ?? '', {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         generation: assignment?.generation ?? 0,
         leaseToken: 'stale-token-that-is-long-enough-to-pass-validation',
+        incarnationId,
         status: 'rejected',
         error: 'unused',
       }),
@@ -101,5 +106,172 @@ describe('RedisBridgeStore', () => {
     await expect(completion).rejects.toMatchObject({
       code: 'ASSIGNMENT_EXPIRED',
     });
+  });
+
+  test('fences a replaced worker incarnation', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000002',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'vm-1',
+        incarnationId,
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: [],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_FENCED' });
+  });
+
+  test('releases the worker lock when generation allocation fails', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const originalIncr = redis.incr.bind(redis);
+    let failOnce = true;
+    redis.incr = (async (...args: Parameters<Redis['incr']>) => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error('incr failed');
+      }
+      return originalIncr(...args);
+    }) as Redis['incr'];
+    const controller = new AbortController();
+    await expect(
+      store.dispatch({
+        workerId: 'vm-1',
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        deadlineAtMs: Date.now() + 1_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('incr failed');
+    redis.incr = originalIncr as Redis['incr'];
+
+    const completion = store.dispatch({
+      workerId: 'vm-1',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 1_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease('vm-1', incarnationId, 500);
+    expect(assignment).toBeDefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
+  test('quarantines a workspace when result finalization fails', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'vm-1',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-user-1',
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+      finalize: async () => {
+        await expect(
+          store.dispatch({
+            workerId: 'vm-1',
+            body: { language: 'bash' } as t.PayloadBody,
+            headers: {},
+            runtimeSessionId: 'rt-user-1',
+            deadlineAtMs: Date.now() + 1_000,
+            signal: controller.signal,
+          }),
+        ).rejects.toMatchObject({ code: 'WORKER_BUSY' });
+        throw new Error('restore failed');
+      },
+    });
+    const assignment = await store.lease('vm-1', incarnationId, 1_000);
+    await store.settle('vm-1', assignment?.assignmentId ?? '', {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      generation: assignment?.generation ?? 0,
+      leaseToken: assignment?.leaseToken ?? '',
+      incarnationId,
+      status: 'fulfilled',
+      result: {
+        language: 'bash',
+        version: '5.2.0',
+        session_id: 'run-1',
+        files: [],
+      },
+    });
+
+    await expect(completion).rejects.toThrow('restore failed');
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'vm-1',
+        incarnationId,
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: [],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_QUARANTINED' });
+
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000002',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    await expect(
+      store.dispatch({
+        workerId: 'vm-1',
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        runtimeSessionId: 'rt-user-1',
+        deadlineAtMs: Date.now() + 1_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
   });
 });

@@ -12,12 +12,14 @@ export interface BridgeWorkerCapabilities {
 export interface BridgeWorkerRegistration {
   protocolVersion: BridgeProtocolVersion;
   workerId: string;
+  incarnationId: string;
   capabilities: BridgeWorkerCapabilities;
 }
 
 export interface BridgeWorkerRegistrationResponse {
   protocolVersion: BridgeProtocolVersion;
   workerId: string;
+  incarnationId: string;
   registeredAt: string;
   leaseTtlMs: number;
 }
@@ -31,6 +33,7 @@ export interface BridgeAssignment<TBody = object> {
   protocolVersion: BridgeProtocolVersion;
   assignmentId: string;
   workerId: string;
+  incarnationId: string;
   generation: number;
   leaseToken: string;
   expiresAt: string;
@@ -47,6 +50,7 @@ export interface BridgeFulfilledSettlement<TResult = object> {
   protocolVersion: BridgeProtocolVersion;
   generation: number;
   leaseToken: string;
+  incarnationId: string;
   status: 'fulfilled';
   result: TResult;
 }
@@ -55,6 +59,7 @@ export interface BridgeRejectedSettlement {
   protocolVersion: BridgeProtocolVersion;
   generation: number;
   leaseToken: string;
+  incarnationId: string;
   status: 'rejected';
   error: string;
 }

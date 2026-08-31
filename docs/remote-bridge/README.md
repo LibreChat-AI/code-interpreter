@@ -33,6 +33,10 @@ remote execution cannot retain an open Code API process across tool callbacks.
 
 Start the CLI beside a sandbox using the same worker ID and secret; see
 [`@librechat/code`](../../packages/code/README.md).
+Stateful deployments must also set `LIBRECHAT_CODE_STATEFUL_WORKSPACE=true`
+and route the CLI's `{runtimeSessionId}` endpoint template to an isolated,
+persistent local runner per session. A single sandbox endpoint is stateless and
+is rejected for runtime-session assignments.
 
 ## LibreChat configuration
 

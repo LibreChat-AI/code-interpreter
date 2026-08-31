@@ -27,6 +27,16 @@ Optional environment variables:
 - `LIBRECHAT_CODE_RUNTIMES`: comma-separated capability labels.
 - `LIBRECHAT_CODE_POLICY`: local policy description hashed into the worker's
   registration; defaults to `default-deny`.
+- `LIBRECHAT_CODE_STATEFUL_WORKSPACE`: defaults to `false`. Set it to `true`
+  only when the local sandbox supervisor provides a distinct persistent runner
+  for every runtime session. In that mode the endpoint must contain a
+  `{runtimeSessionId}` placeholder, for example
+  `http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2`. The worker URL-
+  encodes and substitutes the assigned session ID before execution.
+
+A single built-in sandbox runner binds itself to one runtime session and must
+not be advertised as stateful. Use the default stateless capability until a
+session-routing supervisor is configured.
 
 Use a unique worker ID and secret per Code API deployment, expose only the
 sandbox loopback endpoint to the CLI, and enforce VM/container egress policy

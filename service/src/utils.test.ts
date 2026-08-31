@@ -145,6 +145,30 @@ describe('sandbox error formatting', () => {
     });
   });
 
+  test('maps remote bridge failures without exposing worker details', () => {
+    const cases = [
+      ['BRIDGE_WORKER_OFFLINE', 503, 'Remote code worker is unavailable'],
+      ['BRIDGE_WORKER_BUSY', 409, 'Remote code worker is busy'],
+      ['BRIDGE_EXECUTION_FAILED', 502, 'Remote code execution failed'],
+      [
+        'BRIDGE_DEADLINE_EXCEEDED',
+        504,
+        'Remote code execution deadline exceeded',
+      ],
+    ] as const;
+    for (const [code, status, message] of cases) {
+      const failure = publicExecutionFailure(
+        new Error(`${code}: worker vm-private failed at redis.internal`),
+      );
+      expect(failure).toEqual({
+        status,
+        body: { error: code.toLowerCase(), message },
+      });
+      expect(JSON.stringify(failure)).not.toContain('vm-private');
+      expect(JSON.stringify(failure)).not.toContain('redis.internal');
+    }
+  });
+
   test('maps a recycled dirty session to a retryable public failure', () => {
     const failure = publicExecutionFailure(
       new Error('MICROVM_UNHEALTHY: Runtime session rt_private workspace was dirty and has been recycled'),

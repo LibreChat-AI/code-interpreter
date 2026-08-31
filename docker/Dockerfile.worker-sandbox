@@ -85,6 +85,7 @@ WORKDIR /app
 COPY service/package.json service/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY service/src ./src
+COPY packages/code/src /packages/code/src
 COPY shared /shared
 COPY service/tsconfig.json ./
 RUN bun build ./src/worker-server.ts --minify --outdir .build --target bun --external '@opentelemetry/*'

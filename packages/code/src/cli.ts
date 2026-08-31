@@ -22,15 +22,23 @@ process.once('SIGINT', () => controller.abort());
 process.once('SIGTERM', () => controller.abort());
 
 const policy = process.env.LIBRECHAT_CODE_POLICY ?? 'default-deny';
+const statefulWorkspace =
+  process.env.LIBRECHAT_CODE_STATEFUL_WORKSPACE?.trim().toLowerCase() === 'true';
+const sandboxEndpoint =
+  process.env.LIBRECHAT_CODE_SANDBOX_ENDPOINT ??
+  'http://127.0.0.1:2000/api/v2';
+if (statefulWorkspace && !sandboxEndpoint.includes('{runtimeSessionId}')) {
+  throw new Error(
+    'LIBRECHAT_CODE_STATEFUL_WORKSPACE requires LIBRECHAT_CODE_SANDBOX_ENDPOINT to contain {runtimeSessionId}',
+  );
+}
 const worker = new BridgeWorker({
   codeApiUrl: required('LIBRECHAT_CODE_URL'),
   token: required('LIBRECHAT_CODE_WORKER_TOKEN'),
   workerId: required('LIBRECHAT_CODE_WORKER_ID'),
-  sandboxEndpoint:
-    process.env.LIBRECHAT_CODE_SANDBOX_ENDPOINT ??
-    'http://127.0.0.1:2000/api/v2',
+  sandboxEndpoint,
   capabilities: {
-    statefulWorkspace: true,
+    statefulWorkspace,
     sandboxProfile: process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ?? 'nsjail',
     runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
     policyDigest: createHash('sha256').update(policy).digest('hex'),
