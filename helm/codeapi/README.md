@@ -73,6 +73,9 @@ after re-discovering every API Deployment and explicitly deletes any remaining
 API pods, so a partially applied rollback cannot leave a mixed-version API
 running. The operator running it needs permission to read/scale Deployments,
 delete HPAs and pods, and create or update the rollback ConfigMap.
+Pass the intended cluster context to both `kubectl` and `helm` before invoking
+the helper; it rejects forwarded kubeconfig, context, identity, API-server, and
+namespace flags so the drain and rollback cannot target different clusters.
 
 **Execution profile.** By default this chart leaves
 `CODEAPI_EXECUTION_PROFILE` unset. Its bundled HTTP/stateless configuration is

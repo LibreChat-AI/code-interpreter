@@ -34,6 +34,14 @@ if [[ ! -x "$rollback" ]]; then
   exit 1
 fi
 bash -n "$rollback"
+if "$rollback" codeapi 1 default --kube-context other >/dev/null 2>&1; then
+  echo 'rollback must reject a Helm context that differs from the kubectl drain' >&2
+  exit 1
+fi
+if "$rollback" codeapi 1 default --kubeconfig=/tmp/other >/dev/null 2>&1; then
+  echo 'rollback must reject a Helm kubeconfig that differs from the kubectl drain' >&2
+  exit 1
+fi
 if ! grep -q 'delete horizontalpodautoscaler' "$rollback" ||
   ! grep -q 'scale "$deployment" --replicas=0' "$rollback" ||
   ! grep -q -- '--for=delete' "$rollback" ||

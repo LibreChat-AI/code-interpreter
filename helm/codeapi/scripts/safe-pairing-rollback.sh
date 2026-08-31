@@ -22,6 +22,18 @@ if [[ ! "$namespace" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
   echo "invalid Kubernetes namespace: $namespace" >&2
   exit 64
 fi
+for flag in "$@"; do
+  case "$flag" in
+    -n|-n?*|--namespace|--namespace=*|--kube-context|--kube-context=*|\
+    --kubeconfig|--kubeconfig=*|--kube-apiserver|--kube-apiserver=*|\
+    --kube-ca-file|--kube-ca-file=*|--kube-token|--kube-token=*|\
+    --kube-as-user|--kube-as-user=*|--kube-as-group|--kube-as-group=*|\
+    --kube-insecure-skip-tls-verify|--kube-insecure-skip-tls-verify=*)
+      echo "refusing target-changing Helm rollback flag: $flag" >&2
+      exit 64
+      ;;
+  esac
+done
 
 timeout=${CODEAPI_ROLLBACK_TIMEOUT:-10m}
 selector="app.kubernetes.io/instance=${release},app.kubernetes.io/component=api"
