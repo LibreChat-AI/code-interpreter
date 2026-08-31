@@ -17,6 +17,7 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
   constructor(
     private readonly store: Pick<RedisBridgeStore, 'dispatch'> = bridgeStore,
     private readonly workerId: string = env.BRIDGE_WORKER_ID,
+    private readonly dynamicWorkers: boolean = env.BRIDGE_DYNAMIC_WORKERS,
   ) {}
 
   async execute(
@@ -36,7 +37,8 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
         workerId,
         tenantId: ctx.tenantId,
         requireTenantBinding:
-          ctx.bridgeWorkerId != null && ctx.bridgeWorkerId !== this.workerId,
+          ctx.bridgeWorkerId != null &&
+          (this.dynamicWorkers || ctx.bridgeWorkerId !== this.workerId),
         body: req.body,
         headers: req.headers,
         runtimeSessionId: ctx.runtimeSessionId,

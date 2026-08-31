@@ -96,6 +96,10 @@ describe('RedisBridgeStore', () => {
   });
 
   test('does not lease an assignment to a newly rebound worker identity', async () => {
+    await redis.set(
+      'codeapi:bridge:v1:stable-identity:rebound-worker',
+      'tenant-a-identity',
+    );
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'rebound-worker',
@@ -145,6 +149,10 @@ describe('RedisBridgeStore', () => {
   });
 
   test('a stale identity poll cannot consume work queued for the replacement identity', async () => {
+    await redis.set(
+      'codeapi:bridge:v1:stable-identity:replacement-worker',
+      'replacement-identity',
+    );
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'replacement-worker',
@@ -193,8 +201,54 @@ describe('RedisBridgeStore', () => {
     await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
   });
 
+  test('a revoked identity poll cannot consume its previously queued work', async () => {
+    const workerId = 'revoked-lease-worker';
+    const stableIdentityKey = `codeapi:bridge:v1:stable-identity:${workerId}`;
+    await redis.set(stableIdentityKey, 'revoked-identity');
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId,
+      incarnationId,
+      identityId: 'revoked-identity',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      binding: {
+        tenantId: 'tenant-a',
+        principal: { type: 'user', id: 'user-a' },
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId,
+      tenantId: 'tenant-a',
+      requireTenantBinding: true,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await redis.set(stableIdentityKey, 'replacement-identity');
+
+    await expect(
+      store.lease(workerId, incarnationId, 100, undefined, 'revoked-identity'),
+    ).resolves.toBeUndefined();
+    await expect(
+      redis.llen(`codeapi:bridge:v1:worker:${workerId}:assignments`),
+    ).resolves.toBe(1);
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
   test('a stale incarnation poll cannot consume replacement incarnation work', async () => {
     const replacementIncarnationId = 'incarnation-00000002';
+    await redis.set(
+      'codeapi:bridge:v1:stable-identity:restarted-worker',
+      'stable-restarted-identity',
+    );
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'restarted-worker',
@@ -239,6 +293,10 @@ describe('RedisBridgeStore', () => {
 
   test('leases an assignment queued by the prior identity-only encoding', async () => {
     const identityId = 'rollout-compatible-identity';
+    await redis.set(
+      'codeapi:bridge:v1:stable-identity:rollout-worker',
+      identityId,
+    );
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'rollout-worker',
@@ -306,6 +364,10 @@ describe('RedisBridgeStore', () => {
   });
 
   test('leases queued work after credential refresh preserves the paired identity', async () => {
+    await redis.set(
+      'codeapi:bridge:v1:stable-identity:rotating-worker',
+      'stable-paired-identity',
+    );
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'rotating-worker',

@@ -60,6 +60,10 @@ function workerKey(workerId: string): string {
   return `${PREFIX}:worker:${workerId}`;
 }
 
+function workerStableIdentityKey(workerId: string): string {
+  return `${PREFIX}:stable-identity:${workerId}`;
+}
+
 function workerIncarnationKey(workerId: string): string {
   return `${PREFIX}:worker:${workerId}:incarnation`;
 }
@@ -185,7 +189,7 @@ export class RedisBridgeStore {
         incarnationFenceKey(registration.workerId, registration.incarnationId),
         quarantineKey(registration.workerId, registration.incarnationId),
         workerIncarnationKey(registration.workerId),
-        `${PREFIX}:stable-identity:${registration.workerId}`,
+        workerStableIdentityKey(registration.workerId),
         `${PREFIX}:identity:${registration.workerId}`,
         registration.incarnationId,
         JSON.stringify(registration),
@@ -362,6 +366,11 @@ export class RedisBridgeStore {
     while (signal?.aborted !== true && Date.now() < deadline) {
       const raw = await this.redis.eval(
         [
+          "if ARGV[3] ~= '' then",
+          "  if redis.call('GET', KEYS[2]) ~= ARGV[3] then return nil end",
+          "elseif redis.call('EXISTS', KEYS[2]) == 1 then",
+          '  return nil',
+          'end',
           "local entries = redis.call('LRANGE', KEYS[1], 0, -1)",
           'for _, entry in ipairs(entries) do',
           "  local separator = string.find(entry, ':', 1, true)",
@@ -402,8 +411,9 @@ export class RedisBridgeStore {
           'end',
           'return nil',
         ].join('\n'),
-        1,
+        2,
         queueKey(workerId),
+        workerStableIdentityKey(workerId),
         `${PREFIX}:assignment:`,
         workerId,
         identityId ?? '',
@@ -501,7 +511,7 @@ export class RedisBridgeStore {
         4,
         assignmentKey(assignmentId),
         workerKey(workerId),
-        `${PREFIX}:stable-identity:${workerId}`,
+        workerStableIdentityKey(workerId),
         settlementKey(assignmentId),
         rawAssignment,
         rawRegistration ?? '',
