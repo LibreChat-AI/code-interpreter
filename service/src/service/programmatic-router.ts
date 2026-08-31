@@ -30,6 +30,7 @@ import {
 import { Jobs } from '../enum';
 import { env, jobCompletionWaitTimeoutMs } from '../config';
 import { resolveQueuedSandboxBackend } from '../execution-profile';
+import { publicExecutionFailure } from '../utils';
 import {
   normalizeEgressGatewayUrl,
   normalizeProgrammaticTimeoutMs,
@@ -408,6 +409,8 @@ async function runReplayIteration(
   const { queue, events, language } = getExecutionQueueBinding(
     state.language ?? 'python',
     replayBackend,
+    state.executionProfile ?? env.EXECUTION_PROFILE,
+    state.executionProfileSource ?? env.EXECUTION_PROFILE_SOURCE,
   );
   const job = await queue.add(Jobs.execute, {
     code: state.userCode ?? '',
@@ -419,7 +422,7 @@ async function runReplayIteration(
     executionId: state.execution_id,
     tenantId: state.tenantId,
     canonicalUserId: state.canonicalUserId,
-    executionProfile: env.EXECUTION_PROFILE,
+    executionProfile: state.executionProfile ?? env.EXECUTION_PROFILE,
     sandboxBackend: replayBackend,
     ...(state.bridgeWorkerId != null ? { bridgeWorkerId: state.bridgeWorkerId } : {}),
     runtimeSessionMode: 'stateless',
@@ -576,6 +579,8 @@ async function handleReplayInitial(
     timeout,
     language,
     bridgeWorkerId,
+    executionProfile: env.EXECUTION_PROFILE,
+    executionProfileSource: env.EXECUTION_PROFILE_SOURCE,
     sandboxBackend: resolveReplayStateSandboxBackend({
       executionProfile: env.EXECUTION_PROFILE,
       executionProfileSource: env.EXECUTION_PROFILE_SOURCE,
@@ -854,7 +859,8 @@ async function runAndRespond(
     logger.error('Replay iteration failed', { execution_id: state.execution_id, err });
     await cleanupExecution(state.execution_id, 'replay');
     if (!isDisconnected()) {
-      const message = (err as Error).message;
+      const publicFailure = publicExecutionFailure(err);
+      const message = publicFailure?.body.message ?? (err as Error).message;
       res.status(200).json({
         status: 'error',
         error: message !== '' ? message : 'Sandbox execution failed',

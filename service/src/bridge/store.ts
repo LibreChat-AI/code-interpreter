@@ -149,8 +149,12 @@ export class RedisBridgeStore {
     private readonly workerTtlSeconds = DEFAULT_WORKER_TTL_SECONDS,
   ) {}
 
-  async register(registration: RegisteredBridgeWorker): Promise<void> {
+  async register(
+    registration: RegisteredBridgeWorker,
+    expectedActiveCredentialId?: string,
+  ): Promise<void> {
     const script = [
+      'if ARGV[5] ~= "" and redis.call(\'GET\', KEYS[5]) ~= ARGV[5] then return -3 end',
       'if redis.call(\'EXISTS\', KEYS[3]) == 1 then return -2 end',
       'if redis.call(\'EXISTS\', KEYS[2]) == 1 then return -1 end',
       'local current = redis.call(\'GET\', KEYS[4])',
@@ -166,15 +170,17 @@ export class RedisBridgeStore {
     const result = Number(
       await this.redis.eval(
         script,
-        4,
+        5,
         workerKey(registration.workerId),
         incarnationFenceKey(registration.workerId, registration.incarnationId),
         quarantineKey(registration.workerId, registration.incarnationId),
         workerIncarnationKey(registration.workerId),
+        `${PREFIX}:identity:${registration.workerId}`,
         registration.incarnationId,
         JSON.stringify(registration),
         String(this.workerTtlSeconds),
         `${PREFIX}:worker:${registration.workerId}:incarnation:`,
+        expectedActiveCredentialId ?? '',
       ),
     );
     if (result === -2) {
@@ -187,6 +193,12 @@ export class RedisBridgeStore {
       throw new BridgeStoreError(
         'WORKER_FENCED',
         'Bridge worker incarnation was replaced',
+      );
+    }
+    if (result === -3) {
+      throw new BridgeStoreError(
+        'WORKER_UNAUTHORIZED',
+        `Bridge worker ${registration.workerId} identity changed during registration`,
       );
     }
   }

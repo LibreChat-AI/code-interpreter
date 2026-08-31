@@ -78,7 +78,9 @@ function parseBinding(value: unknown): BridgeWorkerBinding | undefined {
 }
 
 function sendStoreError(error: BridgeStoreError, res: Response): void {
-  const status = error.code === 'ASSIGNMENT_NOT_FOUND' ? 404 : 409;
+  let status = 409;
+  if (error.code === 'ASSIGNMENT_NOT_FOUND') status = 404;
+  if (error.code === 'WORKER_UNAUTHORIZED') status = 403;
   res.status(status).json({ error: error.message, code: error.code });
 }
 
@@ -217,7 +219,13 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
       res.status(400).json({ error: 'Invalid bridge worker ID' });
       return;
     }
+    const hasBinding = isRecord(req.body) &&
+      Object.prototype.hasOwnProperty.call(req.body, 'binding');
     const binding = isRecord(req.body) ? parseBinding(req.body.binding) : undefined;
+    if (hasBinding && binding == null) {
+      res.status(400).json({ error: 'Invalid bridge worker principal binding' });
+      return;
+    }
     if (options.allowDynamicWorkers === true && binding == null) {
       res.status(400).json({ error: 'Dynamic bridge workers require a valid principal binding' });
       return;
@@ -344,6 +352,7 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         | {
             workerId: string;
             credentialId: string;
+            activeCredentialId: string;
             identityId?: string;
             binding?: BridgeWorkerBinding;
           }
@@ -374,7 +383,7 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
           ...(authorization?.binding != null
             ? { binding: authorization.binding }
             : {}),
-        });
+        }, authorization?.activeCredentialId);
       } catch (error) {
         if (error instanceof BridgeStoreError) {
           sendStoreError(error, res);

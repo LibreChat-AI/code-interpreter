@@ -25,6 +25,44 @@ afterEach(async () => {
 });
 
 describe('paired bridge HTTP API', () => {
+  test('rejects a malformed optional binding for a configured worker', async () => {
+    const app = express();
+    app.use(json());
+    app.use(
+      '/v1/bridge',
+      createBridgeRouter({
+        store: new RedisBridgeStore(redis),
+        pairings: new RedisBridgePairingStore(redis),
+        authMode: 'paired',
+        adminToken: 'strong-administrator-bootstrap-token',
+        configuredWorkerId: 'vm-1',
+      }),
+    );
+    server = createServer(app);
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') {
+      throw new Error('Expected TCP listener');
+    }
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/v1/bridge/pairings`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer strong-administrator-bootstrap-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          workerId: 'vm-1',
+          binding: { tenantId: 'tenant-1', principal: { type: 'user' } },
+        }),
+      },
+    );
+
+    expect(response.status).toBe(400);
+  });
+
   test('requires and persists a trusted principal binding for dynamic workers', async () => {
     const store = new RedisBridgeStore(redis);
     const app = express();

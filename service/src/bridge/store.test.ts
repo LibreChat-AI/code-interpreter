@@ -14,6 +14,31 @@ afterEach(async () => {
 });
 
 describe('RedisBridgeStore', () => {
+  test('rejects a registration whose authenticated identity was replaced', async () => {
+    await redis.set(
+      'codeapi:bridge:v1:identity:fenced-worker',
+      'replacement-credential-digest',
+    );
+
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'fenced-worker',
+        credentialId: 'stale-credential-digest',
+        identityId: 'stale-identity',
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: ['bash'],
+        },
+      }, 'stale-credential-digest'),
+    ).rejects.toMatchObject({ code: 'WORKER_UNAUTHORIZED' });
+
+    await expect(
+      redis.get('codeapi:bridge:v1:worker:fenced-worker'),
+    ).resolves.toBeNull();
+  });
+
   test('rejects a dynamic worker lease outside its bound tenant', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,

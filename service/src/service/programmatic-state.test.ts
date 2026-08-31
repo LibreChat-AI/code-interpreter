@@ -40,6 +40,8 @@ function build(
     isPyPlot: false,
     timeout: 300000,
     language: 'python',
+    executionProfile: 'default',
+    executionProfileSource: 'inferred',
     now: 1778250000000,
     ...overrides,
   });
@@ -82,6 +84,8 @@ describe('buildReplayExecutionState', () => {
       authContext,
       bridgeWorkerId: 'code-user_123',
       sandboxBackend: 'remote-bridge',
+      executionProfile: 'stateful',
+      executionProfileSource: 'explicit',
     });
 
     expect(state).toMatchObject({
@@ -99,6 +103,8 @@ describe('buildReplayExecutionState', () => {
       apiKeyId: 'key_legacy',
       bridgeWorkerId: 'code-user_123',
       sandboxBackend: 'remote-bridge',
+      executionProfile: 'stateful',
+      executionProfileSource: 'explicit',
       mode: 'replay',
       userCode: 'print("hello")',
       tools: TOOLS,

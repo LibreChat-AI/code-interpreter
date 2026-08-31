@@ -63,8 +63,11 @@ describe('RedisBridgePairingStore', () => {
       originalAuthorization.identityId,
     );
     await expect(
-      pairings.authorize(requestFor(issued.credential, 'superseded-bound-proof')),
-    ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
+      pairings.authorize(requestFor(issued.credential, 'overlap-bound-proof')),
+    ).resolves.toMatchObject({
+      workerId: 'vm-bound',
+      identityId: originalAuthorization.identityId,
+    });
   });
 
   test('preserves a legacy unmarked identity across its first rotation', async () => {

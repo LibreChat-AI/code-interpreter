@@ -39,6 +39,8 @@ export interface BuildReplayExecutionStateParams {
   language: 'python' | 'bash';
   bridgeWorkerId?: string;
   sandboxBackend?: SandboxBackendName;
+  executionProfile: ExecutionProfile;
+  executionProfileSource: ExecutionProfileSource;
   now?: number;
 }
 
@@ -65,6 +67,8 @@ export function buildReplayExecutionState(
     apiKeyId: params.apiKeyId,
     bridgeWorkerId: params.bridgeWorkerId,
     sandboxBackend: params.sandboxBackend,
+    executionProfile: params.executionProfile,
+    executionProfileSource: params.executionProfileSource,
     startTime: now,
     lastActivity: now,
     mode: 'replay',

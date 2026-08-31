@@ -11,7 +11,11 @@ import {
   queueNameForExecution,
   queueNamesForExecutionProfile,
 } from './execution-profile';
-import type { SandboxBackendName } from './execution-profile';
+import type {
+  ExecutionProfile,
+  ExecutionProfileSource,
+  SandboxBackendName,
+} from './execution-profile';
 import logger from './logger';
 import { redisKeepAliveOptions } from './redis-options';
 import { bullmqQueueJobs, registerBullmqQueueMetricsCollector } from './metrics';
@@ -94,11 +98,13 @@ function getQueueResources(
 export function getExecutionQueueBinding(
   language: 'python' | 'bash',
   backend: SandboxBackendName | undefined = env.SANDBOX_BACKEND,
+  profile: ExecutionProfile = env.EXECUTION_PROFILE,
+  source: ExecutionProfileSource = env.EXECUTION_PROFILE_SOURCE,
 ): QueueBinding {
   const name = queueNameForExecution(
     language,
-    env.EXECUTION_PROFILE,
-    env.EXECUTION_PROFILE_SOURCE,
+    profile,
+    source,
     backend,
   );
   return { ...getQueueResources(name), language };
