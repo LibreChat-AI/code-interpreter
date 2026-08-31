@@ -255,22 +255,31 @@ export class BridgeWorker {
         (Date.now() - acknowledgementStartedAtMs),
     );
     if (remainingMs <= 0) {
-      await this.settleWithRetry(
-        adjustedAssignment,
-        {
-          protocolVersion: BRIDGE_PROTOCOL_VERSION,
-          generation: adjustedAssignment.generation,
-          leaseToken: adjustedAssignment.leaseToken,
-          incarnationId: this.incarnationId,
-          status: 'rejected',
-          error: 'Bridge assignment expired during lease acknowledgement',
-        },
-        Date.now() +
-          Math.max(
-            0,
-            this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
-          ),
-      );
+      const heartbeatController = new AbortController();
+      const heartbeat = this.maintainRegistration(
+        heartbeatController.signal,
+      ).catch(() => undefined);
+      try {
+        await this.settleWithRetry(
+          adjustedAssignment,
+          {
+            protocolVersion: BRIDGE_PROTOCOL_VERSION,
+            generation: adjustedAssignment.generation,
+            leaseToken: adjustedAssignment.leaseToken,
+            incarnationId: this.incarnationId,
+            status: 'rejected',
+            error: 'Bridge assignment expired during lease acknowledgement',
+          },
+          Date.now() +
+            Math.max(
+              0,
+              this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
+            ),
+        );
+      } finally {
+        heartbeatController.abort();
+        await heartbeat;
+      }
       throw new BridgeProtocolError(
         'Bridge assignment expired during lease acknowledgement',
       );
@@ -369,7 +378,6 @@ export class BridgeWorker {
         },
       );
       const payload = (await response.json()) as object;
-      if (heartbeatError != null) throw heartbeatError;
       if (!response.ok) {
         sandboxRejectedExecution =
           response.status >= 400 &&
@@ -383,6 +391,7 @@ export class BridgeWorker {
           response.status,
         );
       }
+      if (heartbeatError != null) throw heartbeatError;
       settlement = {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         generation: assignment.generation,

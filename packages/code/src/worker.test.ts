@@ -750,6 +750,70 @@ test('worker retries a known-clean rejection after shutdown until acknowledged',
   assert.ok(registrations > 1);
 });
 
+test('worker preserves a definite rejection when its heartbeat fails', async () => {
+  let registrations = 0;
+  let rejectedSettlement = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint:
+      'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input, init) => {
+      if (String(input).endsWith('/workers/register')) {
+        registrations += 1;
+        if (registrations > 1) throw new TypeError('registration unavailable');
+        return new Response(
+          JSON.stringify({
+            protocolVersion: 1,
+            workerId: 'vm-1',
+            incarnationId: 'incarnation-00000001',
+            registeredAt: new Date().toISOString(),
+            leaseTtlMs: 50,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (String(input).endsWith('/execute')) {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return new Response(JSON.stringify({ error: 'syntax_error' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      rejectedSettlement =
+        JSON.parse(String(init?.body) || '{}').status === 'rejected';
+      return new Response(
+        JSON.stringify({ protocolVersion: 1, accepted: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    },
+  });
+
+  await worker.register();
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'clean-rejection-after-heartbeat-error',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    remainingMs: 1_000,
+    runtimeSessionId: 'rt-user-1',
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.ok(registrations > 1);
+  assert.equal(rejectedSettlement, true);
+});
+
 test('worker quarantines a stateful workspace after a sandbox 5xx response', async () => {
   let settlementAttempted = false;
   const worker = new BridgeWorker({
@@ -1086,8 +1150,10 @@ test('worker subtracts lease response transit from the server budget', async () 
 
 test('worker rejects a lease whose acknowledgement exhausts its budget', async () => {
   const originalNow = Date.now;
-  let now = 20_000;
+  let now = 100_000;
   let abandonedSettlement: Record<string, unknown> | undefined;
+  let registrations = 0;
+  let settlementAttempts = 0;
   Date.now = () => now;
   try {
     const worker = new BridgeWorker({
@@ -1102,6 +1168,19 @@ test('worker rejects a lease whose acknowledgement exhausts its budget', async (
         runtimes: ['bash'],
       },
       fetchImpl: async (input, init) => {
+        if (String(input).endsWith('/workers/register')) {
+          registrations += 1;
+          return new Response(
+            JSON.stringify({
+              protocolVersion: 1,
+              workerId: 'vm-1',
+              incarnationId: 'incarnation-00000001',
+              registeredAt: new Date().toISOString(),
+              leaseTtlMs: 50,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
         if (String(input).endsWith('/ack')) {
           now += 10;
           return new Response(
@@ -1110,9 +1189,16 @@ test('worker rejects a lease whose acknowledgement exhausts its budget', async (
           );
         }
         if (String(input).endsWith('/settle')) {
+          settlementAttempts += 1;
           abandonedSettlement = JSON.parse(
             String(init?.body),
           ) as Record<string, unknown>;
+          if (settlementAttempts === 1) {
+            return new Response(JSON.stringify({ error: 'unavailable' }), {
+              status: 503,
+              headers: { 'Content-Type': 'application/json' },
+            });
+          }
           return new Response(
             JSON.stringify({ protocolVersion: 1, accepted: true }),
             { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -1141,6 +1227,8 @@ test('worker rejects a lease whose acknowledgement exhausts its budget', async (
 
     await assert.rejects(worker.lease(), /expired during lease acknowledgement/);
     assert.equal(abandonedSettlement?.status, 'rejected');
+    assert.ok(registrations > 0);
+    assert.equal(settlementAttempts, 2);
   } finally {
     Date.now = originalNow;
   }

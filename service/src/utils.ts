@@ -131,7 +131,7 @@ export function publicExecutionFailure(error: unknown): { status: number; body: 
    * MicroVM, and bridge codes describe sandbox availability; SESSION_INPUT_* codes
    * describe the caller's declared input set or its upstream object source. */
   const backendMatch = message.match(
-    /^(RUNTIME_SESSION_BUSY|MICROVM_[A-Z_]+|BRIDGE_[A-Z_]+|SESSION_INPUT_[A-Z_]+):\s*(.+)$/,
+    /^(RUNTIME_SESSION_BUSY|MICROVM_[A-Z_]+|BRIDGE_[A-Z_]+|SESSION_INPUT_[A-Z_]+):/,
   );
   if (backendMatch) {
     const code = backendMatch[1];
