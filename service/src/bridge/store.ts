@@ -13,6 +13,7 @@ import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
 const PREFIX = 'codeapi:bridge:v1';
 const POLL_INTERVAL_MS = 100;
 const DEFAULT_WORKER_TTL_SECONDS = 60;
+const DEFAULT_REDIS_COMMAND_TIMEOUT_MS = 1_000;
 
 export type CodeBridgeAssignment = BridgeAssignment<t.PayloadBody>;
 export type CodeBridgeSettlement = BridgeSettlement<
@@ -127,10 +128,49 @@ function signalAborted(signal?: AbortSignal): boolean {
   return signal?.aborted === true;
 }
 
+async function boundedCommand<T>(
+  command: Promise<T>,
+  timeoutMs: number,
+  label: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  void command.catch(() => undefined);
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = (): void =>
+      finish(() =>
+        reject(
+          signal?.reason instanceof Error
+            ? signal.reason
+            : new Error(`${label} aborted`),
+        ),
+      );
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`${label} timed out`))),
+      timeoutMs,
+    );
+    timer.unref?.();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    command.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
 export class RedisBridgeStore {
   constructor(
     private readonly redis: Redis,
     private readonly workerTtlSeconds = DEFAULT_WORKER_TTL_SECONDS,
+    private readonly redisCommandTimeoutMs = DEFAULT_REDIS_COMMAND_TIMEOUT_MS,
   ) {}
 
   async register(registration: BridgeWorkerRegistration): Promise<void> {
@@ -672,7 +712,15 @@ export class RedisBridgeStore {
     signal: AbortSignal,
   ): Promise<CodeBridgeSettlement> {
     while (!signal.aborted && Date.now() < deadlineAtMs) {
-      const raw = await this.redis.get(settlementKey(assignment.assignmentId));
+      const raw = await boundedCommand(
+        this.redis.get(settlementKey(assignment.assignmentId)),
+        Math.max(
+          1,
+          Math.min(this.redisCommandTimeoutMs, deadlineAtMs - Date.now()),
+        ),
+        'Bridge settlement poll',
+        signal,
+      );
       if (raw != null) return JSON.parse(raw) as CodeBridgeSettlement;
       await delay(POLL_INTERVAL_MS, signal);
     }
@@ -682,11 +730,15 @@ export class RedisBridgeStore {
       'redis.call(\'DEL\', KEYS[1])',
       'return nil',
     ].join('\n');
-    const finalSettlement = await this.redis.eval(
-      closeScript,
-      2,
-      assignmentKey(assignment.assignmentId),
-      settlementKey(assignment.assignmentId),
+    const finalSettlement = await boundedCommand(
+      this.redis.eval(
+        closeScript,
+        2,
+        assignmentKey(assignment.assignmentId),
+        settlementKey(assignment.assignmentId),
+      ),
+      this.redisCommandTimeoutMs,
+      'Bridge settlement close',
     );
     if (finalSettlement != null) {
       return JSON.parse(String(finalSettlement)) as CodeBridgeSettlement;
@@ -698,7 +750,11 @@ export class RedisBridgeStore {
   }
 
   private async cancel(assignmentId: string): Promise<void> {
-    await this.redis.set(cancellationKey(assignmentId), '1', 'EX', 30);
+    await boundedCommand(
+      this.redis.set(cancellationKey(assignmentId), '1', 'EX', 30),
+      this.redisCommandTimeoutMs,
+      'Bridge assignment cancellation',
+    );
   }
 
   private async enqueueForActiveIncarnation(
@@ -779,7 +835,11 @@ export class RedisBridgeStore {
   ): Promise<void> {
     await this.cancel(assignmentId);
     if (assignment == null) {
-      await this.releaseLock(workerId, assignmentId);
+      await boundedCommand(
+        this.releaseLock(workerId, assignmentId),
+        this.redisCommandTimeoutMs,
+        'Bridge assignment lock release',
+      );
       return;
     }
     await this.cleanup(assignment);
@@ -839,9 +899,41 @@ export class RedisBridgeStore {
   }
 
   private async cleanup(assignment: StoredAssignment): Promise<void> {
+    const keys = [
+      assignmentKey(assignment.assignmentId),
+      queueKey(assignment.workerId, assignment.incarnationId),
+    ];
+    if (assignment.runtimeSessionId !== undefined) {
+      keys.push(
+        workspaceQuarantineKey(
+          assignment.workerId,
+          assignment.runtimeSessionId,
+        ),
+      );
+    }
+    const cleanupScript = [
+      "local queued = redis.call('LREM', KEYS[2], 0, ARGV[1])",
+      'if queued > 0 and #KEYS == 3 and redis.call(\'GET\', KEYS[3]) == ARGV[1] then',
+      "  redis.call('DEL', KEYS[3])",
+      'end',
+      "return redis.call('DEL', KEYS[1])",
+    ].join('\n');
     await Promise.all([
-      this.redis.del(assignmentKey(assignment.assignmentId)),
-      this.releaseLock(assignment.workerId, assignment.assignmentId),
+      boundedCommand(
+        this.redis.eval(
+          cleanupScript,
+          keys.length,
+          ...keys,
+          assignment.assignmentId,
+        ),
+        this.redisCommandTimeoutMs,
+        'Bridge assignment cleanup',
+      ),
+      boundedCommand(
+        this.releaseLock(assignment.workerId, assignment.assignmentId),
+        this.redisCommandTimeoutMs,
+        'Bridge assignment lock release',
+      ),
     ]);
   }
 

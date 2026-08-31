@@ -198,6 +198,43 @@ describe('RedisBridgeStore', () => {
     });
   });
 
+  test('clears a workspace fence when dispatch cancels before lease', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'vm-1',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-cancelled-queue',
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+    expect(
+      await redis.keys(
+        'codeapi:bridge:v1:worker:vm-1:workspace:*:quarantined',
+      ),
+    ).toHaveLength(0);
+    expect(
+      await redis.llen(
+        `codeapi:bridge:v1:worker:vm-1:incarnation:${incarnationId}:assignments`,
+      ),
+    ).toBe(0);
+  });
+
   test('returns a popped assignment when its lease request is aborted', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -596,6 +633,37 @@ describe('RedisBridgeStore', () => {
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
 
+  test('bounds a stalled Redis settlement poll command', async () => {
+    const timedStore = new RedisBridgeStore(redis, 60, 20);
+    await timedStore.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'stalled-redis-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    redis.get = ((key: string) => {
+      if (key.endsWith(':settlement')) {
+        return new Promise<string | null>(() => {});
+      }
+      return redisGet(key);
+    }) as Redis['get'];
+    const controller = new AbortController();
+
+    await expect(
+      timedStore.dispatch({
+        workerId: 'stalled-redis-worker',
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        deadlineAtMs: Date.now() + 5_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('Bridge settlement poll timed out');
+  });
+
   test('keeps assignment state through deadlines longer than ten minutes', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -703,13 +771,16 @@ describe('RedisBridgeStore', () => {
       incarnationId,
       1_000,
     );
-    const originalDel = redis.del.bind(redis);
     let cleanupAttempts = 0;
-    redis.del = (async (...args: Parameters<Redis['del']>) => {
-      cleanupAttempts += 1;
-      if (cleanupAttempts === 1) throw new Error('transient cleanup failure');
-      return originalDel(...args);
-    }) as Redis['del'];
+    redis.eval = (async (...args: Parameters<Redis['eval']>) => {
+      if (String(args[0]).includes("local queued = redis.call('LREM'")) {
+        cleanupAttempts += 1;
+        if (cleanupAttempts === 1) {
+          throw new Error('transient cleanup failure');
+        }
+      }
+      return await redisEval(...args);
+    }) as Redis['eval'];
     await store.settle('cleanup-worker', assignment?.assignmentId ?? '', {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       generation: assignment?.generation ?? 0,
@@ -729,7 +800,7 @@ describe('RedisBridgeStore', () => {
       result: { session_id: 'run-cleanup' },
     });
     expect(cleanupAttempts).toBeGreaterThanOrEqual(2);
-    redis.del = originalDel as Redis['del'];
+    redis.eval = redisEval as Redis['eval'];
   });
 
   test('holds a durable workspace marker until finalization commits', async () => {

@@ -79,11 +79,13 @@ execution.
   worker or VM loss leaves it in place so later reuse fails closed. Settlement
   receipts outlive assignment cleanup briefly so retries are idempotent and
   cannot recreate a cleared marker.
-- To recover a fenced session, first stop the worker and discard/reset that
-  session's local sandbox workspace. Restart registration, then run
+- To recover a fenced session, stop the normal worker process and discard/reset
+  that session's local sandbox workspace. While it remains stopped, run
   `librechat-code reset-workspace <runtime-session-id>` with the same worker
-  configuration. Code API refuses the acknowledgement while work is active or
-  when it is not made by the currently registered incarnation.
+  configuration; the command temporarily registers its own incarnation and
+  exits. Start the normal worker only after the reset command succeeds. Code API
+  refuses the acknowledgement while work is active or when it is not made by
+  the currently registered incarnation.
 - Request cancellation is polled by the worker and aborts the local sandbox
   request.
 - The sandbox receives the stable runtime session ID separately from the lease;

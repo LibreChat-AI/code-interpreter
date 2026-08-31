@@ -49,7 +49,8 @@ API did not commit.
 After discarding or resetting that session's local runner, acknowledge recovery
 with `librechat-code reset-workspace <runtime-session-id>`. The command uses the
 configured worker credentials, registers a fresh incarnation, and only clears
-the server fence when no assignment is active.
+the server fence when no assignment is active. Run it while the normal worker
+process is stopped, then restart the normal worker after the command exits.
 
 Use a unique worker ID and secret per Code API deployment, expose only the
 sandbox loopback endpoint to the CLI, and enforce VM/container egress policy
