@@ -45,6 +45,8 @@ export interface BridgeAssignment<TBody = object> {
 
 export interface BridgeLeaseResponse<TBody = object> {
   protocolVersion: BridgeProtocolVersion;
+  /** Time spent handling the lease request on Code API, excluding transit. */
+  serverElapsedMs?: number;
   assignment?: BridgeAssignment<TBody>;
 }
 

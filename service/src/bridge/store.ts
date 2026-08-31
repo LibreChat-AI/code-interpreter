@@ -173,6 +173,28 @@ export class RedisBridgeStore {
     private readonly redisCommandTimeoutMs = DEFAULT_REDIS_COMMAND_TIMEOUT_MS,
   ) {}
 
+  private async dispatchCommand<T>(
+    command: () => Promise<T>,
+    args: { deadlineAtMs: number; signal: AbortSignal },
+    label: string,
+  ): Promise<T> {
+    this.assertDispatchActive(args.signal, args.deadlineAtMs);
+    try {
+      return await boundedCommand(
+        command(),
+        Math.max(
+          1,
+          Math.min(this.redisCommandTimeoutMs, args.deadlineAtMs - Date.now()),
+        ),
+        label,
+        args.signal,
+      );
+    } catch (error) {
+      this.assertDispatchActive(args.signal, args.deadlineAtMs);
+      throw error;
+    }
+  }
+
   async register(registration: BridgeWorkerRegistration): Promise<void> {
     const script = [
       'if redis.call(\'EXISTS\', KEYS[3]) == 1 then return -2 end',
@@ -240,7 +262,11 @@ export class RedisBridgeStore {
     ) => Promise<CodeBridgeSettlement>;
   }): Promise<CodeBridgeSettlement> {
     this.assertDispatchActive(args.signal, args.deadlineAtMs);
-    let registration = await this.registration(args.workerId);
+    let registration = await this.dispatchCommand(
+      () => this.registration(args.workerId),
+      args,
+      'Bridge worker registration read',
+    );
     if (registration == null) {
       throw new BridgeStoreError(
         'WORKER_OFFLINE',
@@ -258,8 +284,13 @@ export class RedisBridgeStore {
     }
     if (
       args.runtimeSessionId !== undefined &&
-      (await this.redis.exists(
-        workspaceQuarantineKey(args.workerId, args.runtimeSessionId),
+      (await this.dispatchCommand(
+        () =>
+          this.redis.exists(
+            workspaceQuarantineKey(args.workerId, args.runtimeSessionId ?? ''),
+          ),
+        args,
+        'Bridge workspace fence read',
       )) === 1
     ) {
       throw new BridgeStoreError(
@@ -271,24 +302,33 @@ export class RedisBridgeStore {
     const assignmentId = randomBytes(18).toString('base64url');
     const leaseToken = randomBytes(32).toString('base64url');
     const ttlSeconds = assignmentTtlSeconds(args.deadlineAtMs);
-    const locked = await this.acquireLock(
-      args.workerId,
-      assignmentId,
-      registration.incarnationId,
-      ttlSeconds,
-    );
-    if (!locked) {
-      throw new BridgeStoreError(
-        'WORKER_BUSY',
-        `Bridge worker ${args.workerId} is busy`,
-      );
-    }
-
+    const lockIncarnationId = registration.incarnationId;
     let assignment: StoredAssignment | undefined;
     let resultCommitted = false;
     try {
+      const locked = await this.dispatchCommand(
+        () =>
+          this.acquireLock(
+            args.workerId,
+            assignmentId,
+            lockIncarnationId,
+            ttlSeconds,
+          ),
+        args,
+        'Bridge assignment lock acquisition',
+      );
+      if (!locked) {
+        throw new BridgeStoreError(
+          'WORKER_BUSY',
+          `Bridge worker ${args.workerId} is busy`,
+        );
+      }
       this.assertDispatchActive(args.signal, args.deadlineAtMs);
-      const generation = await this.redis.incr(generationKey(args.workerId));
+      const generation = await this.dispatchCommand(
+        () => this.redis.incr(generationKey(args.workerId)),
+        args,
+        'Bridge assignment generation allocation',
+      );
       assignment = {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         assignmentId,
@@ -308,9 +348,17 @@ export class RedisBridgeStore {
       for (let attempt = 0; attempt < 8 && !queued; attempt += 1) {
         this.assertDispatchActive(args.signal, args.deadlineAtMs);
         assignment.incarnationId = registration.incarnationId;
-        queued = await this.enqueueForActiveIncarnation(assignment, ttlSeconds);
+        queued = await this.dispatchCommand(
+          () => this.enqueueForActiveIncarnation(assignment!, ttlSeconds),
+          args,
+          'Bridge assignment enqueue',
+        );
         if (queued) break;
-        const replacement = await this.registration(args.workerId);
+        const replacement = await this.dispatchCommand(
+          () => this.registration(args.workerId),
+          args,
+          'Bridge replacement registration read',
+        );
         if (replacement == null) {
           throw new BridgeStoreError(
             'WORKER_OFFLINE',
@@ -539,7 +587,10 @@ export class RedisBridgeStore {
         'Bridge assignment lease is stale',
       );
     }
-    if (Date.parse(assignment.expiresAt) <= Date.now()) {
+    if (
+      settlement.status !== 'rejected' &&
+      Date.parse(assignment.expiresAt) <= Date.now()
+    ) {
       throw new BridgeStoreError(
         'ASSIGNMENT_EXPIRED',
         'Bridge assignment has expired',
@@ -724,18 +775,31 @@ export class RedisBridgeStore {
       if (raw != null) return JSON.parse(raw) as CodeBridgeSettlement;
       await delay(POLL_INTERVAL_MS, signal);
     }
+    const closeKeys = [
+      assignmentKey(assignment.assignmentId),
+      settlementKey(assignment.assignmentId),
+    ];
+    if (assignment.runtimeSessionId !== undefined) {
+      closeKeys.push(
+        workspaceQuarantineKey(
+          assignment.workerId,
+          assignment.runtimeSessionId,
+        ),
+      );
+    }
     const closeScript = [
       'local settlement = redis.call(\'GET\', KEYS[2])',
       'if settlement then return settlement end',
+      'if #KEYS == 3 and redis.call(\'GET\', KEYS[3]) == ARGV[1] then return nil end',
       'redis.call(\'DEL\', KEYS[1])',
       'return nil',
     ].join('\n');
     const finalSettlement = await boundedCommand(
       this.redis.eval(
         closeScript,
-        2,
-        assignmentKey(assignment.assignmentId),
-        settlementKey(assignment.assignmentId),
+        closeKeys.length,
+        ...closeKeys,
+        assignment.assignmentId,
       ),
       this.redisCommandTimeoutMs,
       'Bridge settlement close',
@@ -833,16 +897,16 @@ export class RedisBridgeStore {
     assignmentId: string,
     assignment: StoredAssignment | undefined,
   ): Promise<void> {
-    await this.cancel(assignmentId);
-    if (assignment == null) {
-      await boundedCommand(
-        this.releaseLock(workerId, assignmentId),
-        this.redisCommandTimeoutMs,
-        'Bridge assignment lock release',
-      );
-      return;
-    }
-    await this.cleanup(assignment);
+    await Promise.all([
+      this.cancel(assignmentId),
+      assignment == null
+        ? boundedCommand(
+            this.releaseLock(workerId, assignmentId),
+            this.redisCommandTimeoutMs,
+            'Bridge assignment lock release',
+          )
+        : this.cleanup(assignment),
+    ]);
   }
 
   private async commitPendingWorkspace(
@@ -915,6 +979,9 @@ export class RedisBridgeStore {
       "local queued = redis.call('LREM', KEYS[2], 0, ARGV[1])",
       'if queued > 0 and #KEYS == 3 and redis.call(\'GET\', KEYS[3]) == ARGV[1] then',
       "  redis.call('DEL', KEYS[3])",
+      'end',
+      'if queued == 0 and #KEYS == 3 and redis.call(\'GET\', KEYS[3]) == ARGV[1] then',
+      '  return 0',
       'end',
       "return redis.call('DEL', KEYS[1])",
     ].join('\n');

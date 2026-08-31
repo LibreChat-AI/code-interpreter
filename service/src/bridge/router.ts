@@ -203,6 +203,7 @@ router.post(
 router.post(
   '/workers/:workerId/lease',
   asyncRoute(async (req, res) => {
+    const requestStartedAtMs = Date.now();
     const workerId = req.params.workerId;
     const body = isRecord(req.body) ? req.body : {};
     const requestedWait = Number(body.waitMs ?? 25_000);
@@ -250,7 +251,11 @@ router.post(
           };
           res.once('finish', onFinish);
           res.once('close', onClose);
-          res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
+          res.json({
+            protocolVersion: BRIDGE_PROTOCOL_VERSION,
+            serverElapsedMs: Math.max(0, Date.now() - requestStartedAtMs),
+            assignment,
+          });
         });
         if (!delivered && assignment != null) {
           await bridgeStore.returnLease(assignment);

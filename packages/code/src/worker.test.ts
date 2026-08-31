@@ -146,7 +146,7 @@ test('worker continues after an assignment-scoped settlement conflict', async ()
     if (url.endsWith('/lease')) {
       leases += 1;
       return new Response(
-        JSON.stringify({ protocolVersion: 1, assignment }),
+        JSON.stringify({ protocolVersion: 1, serverElapsedMs: 0, assignment }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }
@@ -621,6 +621,7 @@ test('worker keeps a definite stateful rejection nonfatal when settlement is amb
       runtimes: ['bash'],
     },
     fetchImpl,
+    rejectionAckGraceMs: 0,
   });
 
   await assert.rejects(
@@ -639,6 +640,61 @@ test('worker keeps a definite stateful rejection nonfatal when settlement is amb
       error instanceof TypeError &&
       !(error instanceof BridgeWorkspaceQuarantinedError),
   );
+});
+
+test('worker retries a known-clean rejection after shutdown until acknowledged', async () => {
+  const controller = new AbortController();
+  let settlementAttempts = 0;
+  const fetchImpl: typeof fetch = async (input) => {
+    if (String(input).endsWith('/execute')) {
+      return new Response(JSON.stringify({ error: 'syntax_error' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    settlementAttempts += 1;
+    if (settlementAttempts === 1) {
+      controller.abort();
+      throw new TypeError('connection reset');
+    }
+    return new Response(JSON.stringify({ protocolVersion: 1, accepted: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint:
+      'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    rejectionAckGraceMs: 500,
+    fetchImpl,
+  });
+
+  await worker.executeAndSettle(
+    {
+      protocolVersion: 1,
+      assignmentId: 'late-clean-rejection',
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
+      generation: 1,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 20).toISOString(),
+      remainingMs: 20,
+      runtimeSessionId: 'rt-user-1',
+      request: { body: { language: 'bash' }, headers: {} },
+    },
+    controller.signal,
+  );
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(settlementAttempts, 2);
 });
 
 test('worker quarantines a stateful workspace after the sandbox request aborts', async () => {
@@ -722,7 +778,7 @@ test('worker surfaces quarantine when shutdown aborts stateful execution', async
     }
     if (url.endsWith('/lease')) {
       return new Response(
-        JSON.stringify({ protocolVersion: 1, assignment }),
+        JSON.stringify({ protocolVersion: 1, serverElapsedMs: 0, assignment }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }
@@ -874,6 +930,52 @@ test('worker bounds a stalled lease transport beyond its long poll', async () =>
   });
 
   await assert.rejects(worker.lease(), { name: 'AbortError' });
+});
+
+test('worker subtracts lease response transit from the server budget', async () => {
+  const originalNow = Date.now;
+  let now = 10_000;
+  Date.now = () => now;
+  try {
+    const worker = new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1',
+      token: 'worker-secret',
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
+      sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      fetchImpl: async () => {
+        now += 50;
+        return new Response(
+          JSON.stringify({
+            protocolVersion: 1,
+            serverElapsedMs: 20,
+            assignment: {
+              protocolVersion: 1,
+              assignmentId: 'transit-budget',
+              workerId: 'vm-1',
+              incarnationId: 'incarnation-00000001',
+              generation: 1,
+              leaseToken: 'lease-token-that-is-long-enough-for-testing',
+              expiresAt: new Date(0).toISOString(),
+              remainingMs: 1_000,
+              request: { body: { language: 'bash' }, headers: {} },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      },
+    });
+
+    const assignment = await worker.lease();
+    assert.equal(assignment?.remainingMs, 970);
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test('worker quarantines an explicitly dirty stateful sandbox response', async () => {

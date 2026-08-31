@@ -26,6 +26,7 @@ export interface BridgeWorkerOptions {
   registrationTransportTimeoutMs?: number;
   cancellationPollIntervalMs?: number;
   cancellationTransportTimeoutMs?: number;
+  rejectionAckGraceMs?: number;
   reconnectDelayMs?: number;
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
@@ -42,6 +43,7 @@ const DEFAULT_CANCELLATION_POLL_INTERVAL_MS = 500;
 const DEFAULT_CANCELLATION_TRANSPORT_TIMEOUT_MS = 2_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
 const SETTLEMENT_RETRY_DELAY_MS = 100;
+const REJECTION_ACK_GRACE_MS = 30_000;
 const RUNTIME_SESSION_PLACEHOLDER = '{runtimeSessionId}';
 
 function normalizedBaseUrl(value: string): string {
@@ -170,6 +172,7 @@ export class BridgeWorker {
         ),
     );
     let response: BridgeLeaseResponse;
+    const requestStartedAtMs = Date.now();
     try {
       response = await this.request<BridgeLeaseResponse>(
         `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/lease`,
@@ -201,7 +204,26 @@ export class BridgeWorker {
         'Code API leased an assignment without a valid server-relative deadline',
       );
     }
-    return response.assignment;
+    if (response.assignment == null) return undefined;
+    if (
+      !Number.isSafeInteger(response.serverElapsedMs) ||
+      (response.serverElapsedMs ?? -1) < 0
+    ) {
+      throw new BridgeProtocolError(
+        'Code API leased an assignment without valid server timing',
+      );
+    }
+    const transportElapsedMs = Math.max(
+      0,
+      Date.now() - requestStartedAtMs - (response.serverElapsedMs ?? 0),
+    );
+    return {
+      ...response.assignment,
+      remainingMs: Math.max(
+        0,
+        (response.assignment.remainingMs ?? 0) - transportElapsedMs,
+      ),
+    };
   }
 
   async run(signal?: AbortSignal): Promise<void> {
@@ -339,11 +361,21 @@ export class BridgeWorker {
           ambiguousSandboxError,
         );
       }
+      const knownCleanStatefulRejection =
+        assignment.runtimeSessionId != null &&
+        settlement.status === 'rejected' &&
+        sandboxRejectedExecution;
       await this.settleWithRetry(
         assignment,
         settlement,
-        localDeadlineAtMs,
-        signal,
+        localDeadlineAtMs +
+          (knownCleanStatefulRejection
+            ? Math.max(
+                0,
+                this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
+              )
+            : 0),
+        knownCleanStatefulRejection ? undefined : signal,
       );
     } finally {
       heartbeatController.abort();

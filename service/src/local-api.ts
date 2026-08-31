@@ -10,6 +10,7 @@
 import express, { json, Router } from 'express';
 import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
+import bridgeRouter from './bridge/router';
 import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-error-logger';
 import { executionProfileMiddleware } from './middleware/execution-profile';
 import { localAuth } from './auth/local';
@@ -45,6 +46,7 @@ app.get('/v1/health', async (_, res) => {
   }
 });
 
+v1.use('/bridge', bridgeRouter);
 v1.use(localAuth);
 v1.use(serviceRouter);
 v1.use(programmaticRouter);

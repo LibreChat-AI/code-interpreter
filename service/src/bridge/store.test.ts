@@ -664,6 +664,31 @@ describe('RedisBridgeStore', () => {
     ).rejects.toThrow('Bridge settlement poll timed out');
   });
 
+  test('bounds a stalled Redis dispatch preparation command', async () => {
+    const timedStore = new RedisBridgeStore(redis, 60, 20);
+    await timedStore.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'stalled-preparation-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    redis.get = (() => new Promise<string | null>(() => {})) as Redis['get'];
+
+    await expect(
+      timedStore.dispatch({
+        workerId: 'stalled-preparation-worker',
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        deadlineAtMs: Date.now() + 5_000,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow('Bridge worker registration read timed out');
+  });
+
   test('keeps assignment state through deadlines longer than ten minutes', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -1010,6 +1035,53 @@ describe('RedisBridgeStore', () => {
 
     await expect(completion).resolves.toMatchObject({ status: 'rejected' });
     expect(await redis.exists(marker)).toBe(0);
+  });
+
+  test('accepts a late clean rejection and recovers its workspace fence', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'late-rejection-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const completion = store.dispatch({
+      workerId: 'late-rejection-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-late-rejection',
+      deadlineAtMs: Date.now() + 200,
+      signal: new AbortController().signal,
+    });
+    const assignment = await store.lease(
+      'late-rejection-worker',
+      incarnationId,
+      1_000,
+    );
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+
+    await store.settle(
+      'late-rejection-worker',
+      assignment?.assignmentId ?? '',
+      {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        generation: assignment?.generation ?? 0,
+        leaseToken: assignment?.leaseToken ?? '',
+        incarnationId,
+        status: 'rejected',
+        error: 'syntax_error',
+      },
+    );
+    expect(
+      await redis.keys(
+        'codeapi:bridge:v1:worker:late-rejection-worker:workspace:*:quarantined',
+      ),
+    ).toHaveLength(0);
   });
 
   test('releases the worker lock when generation allocation fails', async () => {
