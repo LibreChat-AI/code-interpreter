@@ -365,7 +365,10 @@ export class RedisBridgeStore {
             'Bridge worker incarnation was replaced',
           );
         }
-        if (Date.parse(assignment.expiresAt) <= Date.now()) continue;
+        if (Date.parse(assignment.expiresAt) <= Date.now()) {
+          await this.clearUndeliveredWorkspaceFence(assignment);
+          continue;
+        }
         if (signalAborted(signal)) {
           await this.returnLease(assignment);
           return undefined;
@@ -433,6 +436,26 @@ export class RedisBridgeStore {
       }
     }
     throw lastError;
+  }
+
+  private async clearUndeliveredWorkspaceFence(
+    assignment: StoredAssignment,
+  ): Promise<void> {
+    if (assignment.runtimeSessionId === undefined) return;
+    await this.redis.eval(
+      [
+        "if redis.call('GET', KEYS[1]) == ARGV[1] then",
+        "  return redis.call('DEL', KEYS[1])",
+        'end',
+        'return 0',
+      ].join('\n'),
+      1,
+      workspaceQuarantineKey(
+        assignment.workerId,
+        assignment.runtimeSessionId,
+      ),
+      assignment.assignmentId,
+    );
   }
 
   async settle(

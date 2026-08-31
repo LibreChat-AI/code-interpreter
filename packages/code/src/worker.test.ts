@@ -250,13 +250,13 @@ test('worker refreshes its registration during a long assignment', async () => {
           workerId: 'vm-1',
           incarnationId: 'incarnation-00000001',
           registeredAt: new Date().toISOString(),
-          leaseTtlMs: 50,
+          leaseTtlMs: 100,
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }
     if (url.endsWith('/execute')) {
-      await new Promise((resolve) => setTimeout(resolve, 90));
+      await new Promise((resolve) => setTimeout(resolve, 20));
       return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -285,6 +285,7 @@ test('worker refreshes its registration during a long assignment', async () => {
     fetchImpl,
   });
   await worker.register();
+  await new Promise((resolve) => setTimeout(resolve, 45));
   await worker.executeAndSettle({
     protocolVersion: 1,
     assignmentId: 'assignment-heartbeat',
@@ -297,6 +298,73 @@ test('worker refreshes its registration during a long assignment', async () => {
   });
 
   assert.ok(registrations >= 2);
+});
+
+test('worker continues cancellation polling after a stalled response', async () => {
+  let cancellationAttempts = 0;
+  let settlementAttempted = false;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/execute')) {
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+      });
+    }
+    if (url.endsWith('/cancellation')) {
+      cancellationAttempts += 1;
+      if (cancellationAttempts === 1) {
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true },
+          );
+        });
+      }
+      return new Response(JSON.stringify({ cancelled: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    settlementAttempted = true;
+    return new Response(JSON.stringify({ protocolVersion: 1, accepted: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    cancellationPollIntervalMs: 5,
+    cancellationTransportTimeoutMs: 10,
+    fetchImpl,
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'cancel-after-stall',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    remainingMs: 1_000,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+  assert.equal(cancellationAttempts, 2);
+  assert.equal(settlementAttempted, true);
 });
 
 test('worker routes a hintless assignment to an ephemeral template session', async () => {

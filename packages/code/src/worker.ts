@@ -24,6 +24,8 @@ export interface BridgeWorkerOptions {
   leaseWaitMs?: number;
   leaseTransportGraceMs?: number;
   registrationTransportTimeoutMs?: number;
+  cancellationPollIntervalMs?: number;
+  cancellationTransportTimeoutMs?: number;
   reconnectDelayMs?: number;
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
@@ -36,6 +38,8 @@ const DEFAULT_LEASE_TRANSPORT_GRACE_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_REGISTRATION_TTL_MS = 60_000;
 const DEFAULT_REGISTRATION_TRANSPORT_TIMEOUT_MS = 10_000;
+const DEFAULT_CANCELLATION_POLL_INTERVAL_MS = 500;
+const DEFAULT_CANCELLATION_TRANSPORT_TIMEOUT_MS = 2_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
 const SETTLEMENT_RETRY_DELAY_MS = 100;
 const RUNTIME_SESSION_PLACEHOLDER = '{runtimeSessionId}';
@@ -70,6 +74,7 @@ export class BridgeWorker {
   private readonly sandboxEndpoint: string;
   private readonly incarnationId: string;
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
+  private lastRegisteredAtMs = 0;
 
   constructor(private readonly options: BridgeWorkerOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -120,6 +125,7 @@ export class BridgeWorker {
       );
     }
     this.registrationTtlMs = registration.leaseTtlMs;
+    this.lastRegisteredAtMs = Date.now();
     return registration;
   }
 
@@ -245,6 +251,9 @@ export class BridgeWorker {
       () => executionController.abort(),
       deadlineDelay,
     );
+    if (this.lastRegisteredAtMs === 0) {
+      this.lastRegisteredAtMs = Date.now();
+    }
     const heartbeatController = new AbortController();
     let heartbeatError: unknown;
     const heartbeat = this.maintainRegistration(
@@ -394,10 +403,14 @@ export class BridgeWorker {
     executionController: AbortController,
   ): Promise<void> {
     while (!signal.aborted && !executionController.signal.aborted) {
+      const heartbeatIntervalMs = Math.max(
+        MIN_REGISTRATION_HEARTBEAT_MS,
+        Math.floor(this.registrationTtlMs / 2),
+      );
       await this.delay(
         Math.max(
-          MIN_REGISTRATION_HEARTBEAT_MS,
-          Math.floor(this.registrationTtlMs / 2),
+          0,
+          this.lastRegisteredAtMs + heartbeatIntervalMs - Date.now(),
         ),
         signal,
       );
@@ -514,8 +527,26 @@ export class BridgeWorker {
     signal: AbortSignal,
   ): Promise<void> {
     while (!signal.aborted && !executionController.signal.aborted) {
-      await this.delay(500, signal);
+      await this.delay(
+        Math.max(
+          1,
+          this.options.cancellationPollIntervalMs ??
+            DEFAULT_CANCELLATION_POLL_INTERVAL_MS,
+        ),
+        signal,
+      );
       if (signal.aborted || executionController.signal.aborted) return;
+      const pollController = new AbortController();
+      const abortPoll = (): void => pollController.abort();
+      signal.addEventListener('abort', abortPoll, { once: true });
+      const timeout = setTimeout(
+        abortPoll,
+        Math.max(
+          1,
+          this.options.cancellationTransportTimeoutMs ??
+            DEFAULT_CANCELLATION_TRANSPORT_TIMEOUT_MS,
+        ),
+      );
       try {
         const response = await this.request<{ cancelled: boolean }>(
           this.assignmentUrl(assignment, 'cancellation'),
@@ -523,7 +554,7 @@ export class BridgeWorker {
             protocolVersion: BRIDGE_PROTOCOL_VERSION,
             incarnationId: this.incarnationId,
           },
-          signal,
+          pollController.signal,
         );
         if (response.cancelled) {
           executionController.abort();
@@ -535,6 +566,9 @@ export class BridgeWorker {
           executionController.abort();
           return;
         }
+      } finally {
+        clearTimeout(timeout);
+        signal.removeEventListener('abort', abortPoll);
       }
     }
   }

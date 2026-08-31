@@ -150,6 +150,54 @@ describe('RedisBridgeStore', () => {
     expect(await redis.exists('codeapi:bridge:v1:worker:vm-1:lock')).toBe(0);
   });
 
+  test('clears a workspace fence when a queued assignment expires undelivered', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'vm-1',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-expired-queue',
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const queue =
+      'codeapi:bridge:v1:worker:vm-1:incarnation:' +
+      `${incarnationId}:assignments`;
+    const assignmentId = await redis.lindex(queue, 0);
+    const assignmentKey = `codeapi:bridge:v1:assignment:${assignmentId}`;
+    const rawAssignment = await redis.get(assignmentKey);
+    const assignment = JSON.parse(rawAssignment ?? '{}') as Record<
+      string,
+      unknown
+    >;
+    assignment.expiresAt = new Date(0).toISOString();
+    await redis.set(assignmentKey, JSON.stringify(assignment), 'EX', 30);
+
+    await expect(
+      store.lease('vm-1', incarnationId, 100),
+    ).resolves.toBeUndefined();
+    expect(
+      await redis.keys(
+        'codeapi:bridge:v1:worker:vm-1:workspace:*:quarantined',
+      ),
+    ).toHaveLength(0);
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
   test('returns a popped assignment when its lease request is aborted', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
