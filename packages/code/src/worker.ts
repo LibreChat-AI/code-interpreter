@@ -353,6 +353,15 @@ export class BridgeWorker {
             error.status !== 408 &&
             error.status !== 429
           ) {
+            if (
+              assignment.runtimeSessionId != null &&
+              settlement.status === 'fulfilled'
+            ) {
+              throw new BridgeWorkspaceQuarantinedError(
+                `Stateful workspace ${assignment.runtimeSessionId} was quarantined after Code API rejected its fulfilled settlement`,
+                error,
+              );
+            }
             throw error;
           }
           const remainingMs = deadlineAtMs - Date.now();

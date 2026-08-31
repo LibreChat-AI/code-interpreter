@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { getEventListeners } from 'node:events';
 import RedisMock from 'ioredis-mock';
 import type Redis from 'ioredis';
 import type * as t from '../types';
@@ -303,6 +304,90 @@ describe('RedisBridgeStore', () => {
         },
       }),
     ).resolves.toBeUndefined();
+  });
+
+  test('recovers only the assignment owner after registration expiry', async () => {
+    const workerId = 'expired-registration-worker';
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId,
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease(workerId, incarnationId, 1_000);
+    expect(assignment).toBeDefined();
+    await redis.del(
+      `codeapi:bridge:v1:worker:${workerId}`,
+      `codeapi:bridge:v1:worker:${workerId}:incarnation`,
+    );
+
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId,
+        incarnationId: 'incarnation-00000002',
+        capabilities: {
+          statefulWorkspace: false,
+          sandboxProfile: 'nsjail',
+          runtimes: [],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_BUSY' });
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId,
+        incarnationId,
+        capabilities: {
+          statefulWorkspace: false,
+          sandboxProfile: 'nsjail',
+          runtimes: [],
+        },
+      }),
+    ).resolves.toBeUndefined();
+
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
+  test('removes abort listeners after each settlement poll delay', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'listener-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'listener-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 350,
+      signal: controller.signal,
+    });
+
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
 
   test('keeps assignment state through deadlines longer than ten minutes', async () => {

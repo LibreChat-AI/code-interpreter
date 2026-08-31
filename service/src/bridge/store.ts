@@ -84,6 +84,10 @@ function lockKey(workerId: string): string {
   return `${PREFIX}:worker:${workerId}:lock`;
 }
 
+function lockIncarnationKey(workerId: string): string {
+  return `${PREFIX}:worker:${workerId}:lock:incarnation`;
+}
+
 function assignmentKey(assignmentId: string): string {
   return `${PREFIX}:assignment:${assignmentId}`;
 }
@@ -107,15 +111,15 @@ function assignmentTtlSeconds(deadlineAtMs: number): number {
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted === true) return;
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 
@@ -130,6 +134,10 @@ export class RedisBridgeStore {
       'if redis.call(\'EXISTS\', KEYS[3]) == 1 then return -2 end',
       'if redis.call(\'EXISTS\', KEYS[2]) == 1 then return -1 end',
       'local current = redis.call(\'GET\', KEYS[4])',
+      'if not current and redis.call(\'EXISTS\', KEYS[5]) == 1 then',
+      '  local owner = redis.call(\'GET\', KEYS[6])',
+      '  if owner ~= ARGV[1] then return -3 end',
+      'end',
       'if current then',
       '  if current ~= ARGV[1] then',
       '    if redis.call(\'EXISTS\', KEYS[5]) == 1 then return -3 end',
@@ -143,12 +151,13 @@ export class RedisBridgeStore {
     const result = Number(
       await this.redis.eval(
         script,
-        5,
+        6,
         workerKey(registration.workerId),
         incarnationFenceKey(registration.workerId, registration.incarnationId),
         quarantineKey(registration.workerId, registration.incarnationId),
         workerIncarnationKey(registration.workerId),
         lockKey(registration.workerId),
+        lockIncarnationKey(registration.workerId),
         registration.incarnationId,
         JSON.stringify(registration),
         String(this.workerTtlSeconds),
@@ -217,14 +226,13 @@ export class RedisBridgeStore {
     const assignmentId = randomBytes(18).toString('base64url');
     const leaseToken = randomBytes(32).toString('base64url');
     const ttlSeconds = assignmentTtlSeconds(args.deadlineAtMs);
-    const locked = await this.redis.set(
-      lockKey(args.workerId),
+    const locked = await this.acquireLock(
+      args.workerId,
       assignmentId,
-      'PX',
-      ttlSeconds * 1000,
-      'NX',
+      registration.incarnationId,
+      ttlSeconds,
     );
-    if (locked !== 'OK') {
+    if (!locked) {
       throw new BridgeStoreError(
         'WORKER_BUSY',
         `Bridge worker ${args.workerId} is busy`,
@@ -293,13 +301,11 @@ export class RedisBridgeStore {
         resultCommitted = true;
         return result;
       } catch (error) {
-        await this.quarantine(args.workerId, assignment.incarnationId);
-        if (args.runtimeSessionId !== undefined) {
-          await this.redis.set(
-            workspaceQuarantineKey(args.workerId, args.runtimeSessionId),
-            '1',
-          );
-        }
+        await this.quarantine(
+          args.workerId,
+          assignment.incarnationId,
+          args.runtimeSessionId,
+        );
         throw error;
       }
     } finally {
@@ -430,21 +436,32 @@ export class RedisBridgeStore {
     return (await this.redis.exists(cancellationKey(assignmentId))) === 1;
   }
 
-  async quarantine(workerId: string, incarnationId: string): Promise<void> {
+  async quarantine(
+    workerId: string,
+    incarnationId: string,
+    runtimeSessionId?: string,
+  ): Promise<void> {
     const script = [
       'redis.call(\'SET\', KEYS[2], \"1\")',
+      'if #KEYS == 4 then redis.call(\'SET\', KEYS[4], \"1\") end',
       'local current = redis.call(\'GET\', KEYS[3])',
       'if current == ARGV[1] then',
       '  return redis.call(\'DEL\', KEYS[1], KEYS[3])',
       'end',
       'return 0',
     ].join('\n');
-    await this.redis.eval(
-      script,
-      3,
+    const keys = [
       workerKey(workerId),
       quarantineKey(workerId, incarnationId),
       workerIncarnationKey(workerId),
+    ];
+    if (runtimeSessionId !== undefined) {
+      keys.push(workspaceQuarantineKey(workerId, runtimeSessionId));
+    }
+    await this.redis.eval(
+      script,
+      keys.length,
+      ...keys,
       incarnationId,
     );
   }
@@ -507,18 +524,45 @@ export class RedisBridgeStore {
       'redis.call(\'SET\', KEYS[2], ARGV[2], \"EX\", ARGV[3])',
       'redis.call(\'RPUSH\', KEYS[3], ARGV[4])',
       'redis.call(\'EXPIRE\', KEYS[3], ARGV[3])',
+      'redis.call(\'SET\', KEYS[4], ARGV[1], \"PX\", ARGV[5])',
       'return 1',
     ].join('\n');
     const result = await this.redis.eval(
       script,
-      3,
+      4,
       workerIncarnationKey(assignment.workerId),
       assignmentKey(assignment.assignmentId),
       queueKey(assignment.workerId, assignment.incarnationId),
+      lockIncarnationKey(assignment.workerId),
       assignment.incarnationId,
       JSON.stringify(assignment),
       String(ttlSeconds),
       assignment.assignmentId,
+      String(ttlSeconds * 1000),
+    );
+    return Number(result) === 1;
+  }
+
+  private async acquireLock(
+    workerId: string,
+    assignmentId: string,
+    incarnationId: string,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    const script = [
+      'if redis.call(\'EXISTS\', KEYS[1]) == 1 then return 0 end',
+      'redis.call(\'SET\', KEYS[1], ARGV[1], \"PX\", ARGV[3])',
+      'redis.call(\'SET\', KEYS[2], ARGV[2], \"PX\", ARGV[3])',
+      'return 1',
+    ].join('\n');
+    const result = await this.redis.eval(
+      script,
+      2,
+      lockKey(workerId),
+      lockIncarnationKey(workerId),
+      assignmentId,
+      incarnationId,
+      String(ttlSeconds * 1000),
     );
     return Number(result) === 1;
   }
@@ -570,10 +614,16 @@ export class RedisBridgeStore {
   ): Promise<void> {
     const script = [
       'if redis.call(\'GET\', KEYS[1]) == ARGV[1] then',
-      '  return redis.call(\'DEL\', KEYS[1])',
+      '  return redis.call(\'DEL\', KEYS[1], KEYS[2])',
       'end',
       'return 0',
     ].join('\n');
-    await this.redis.eval(script, 1, lockKey(workerId), assignmentId);
+    await this.redis.eval(
+      script,
+      2,
+      lockKey(workerId),
+      lockIncarnationKey(workerId),
+      assignmentId,
+    );
   }
 }

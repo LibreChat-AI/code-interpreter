@@ -239,7 +239,7 @@ test('worker routes a hintless assignment to an ephemeral template session', asy
   assert.equal(runtimeSessionHeader, 'assignment-hintless-assignment');
 });
 
-test('worker surfaces a definite settlement rejection without quarantining', async () => {
+test('worker quarantines a fulfilled stateful settlement rejected by Code API', async () => {
   const fetchImpl: typeof fetch = async (input) => {
     if (String(input).endsWith('/execute')) {
       return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
@@ -276,6 +276,48 @@ test('worker surfaces a definite settlement rejection without quarantining', asy
       leaseToken: 'lease-token-that-is-long-enough-for-testing',
       expiresAt: new Date(Date.now() + 1_000).toISOString(),
       runtimeSessionId: 'rt-user-1',
+      request: { body: { language: 'bash' }, headers: {} },
+    }),
+    BridgeWorkspaceQuarantinedError,
+  );
+});
+
+test('worker surfaces a definite stateless settlement rejection directly', async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    if (String(input).endsWith('/execute')) {
+      return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ error: 'assignment was fenced' }), {
+      status: 409,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'fenced-stateless-settlement',
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
+      generation: 1,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 1_000).toISOString(),
       request: { body: { language: 'bash' }, headers: {} },
     }),
     (error: unknown) =>
