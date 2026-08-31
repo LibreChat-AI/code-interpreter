@@ -37,6 +37,8 @@ export interface BridgeAssignment<TBody = object> {
   generation: number;
   leaseToken: string;
   expiresAt: string;
+  /** Server-calculated execution budget at lease time; avoids VM clock skew. */
+  remainingMs?: number;
   runtimeSessionId?: string;
   request: BridgeSandboxRequest<TBody>;
 }

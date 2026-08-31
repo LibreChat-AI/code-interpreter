@@ -3,7 +3,7 @@ import { timingSafeEqual } from 'crypto';
 import { Router } from 'express';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { BridgeWorkerRegistration } from '../../../packages/code/src/protocol';
-import type { CodeBridgeSettlement } from './store';
+import type { CodeBridgeAssignment, CodeBridgeSettlement } from './store';
 
 import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
 import { connection } from '../queue';
@@ -181,11 +181,23 @@ router.post(
       return;
     }
     try {
-      const assignment = await bridgeStore.lease(
-        workerId,
-        body.incarnationId,
-        Math.min(requestedWait, MAX_LEASE_WAIT_MS),
-      );
+      const leaseController = new AbortController();
+      const abortLease = (): void => leaseController.abort();
+      req.once('aborted', abortLease);
+      res.once('close', abortLease);
+      let assignment: CodeBridgeAssignment | undefined;
+      try {
+        assignment = await bridgeStore.lease(
+          workerId,
+          body.incarnationId,
+          Math.min(requestedWait, MAX_LEASE_WAIT_MS),
+          leaseController.signal,
+        );
+      } finally {
+        req.off('aborted', abortLease);
+        res.off('close', abortLease);
+      }
+      if (leaseController.signal.aborted) return;
       res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
     } catch (error) {
       if (error instanceof BridgeStoreError) {

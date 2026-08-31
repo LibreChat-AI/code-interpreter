@@ -353,7 +353,10 @@ export class RedisBridgeStore {
       }
       if (Date.parse(assignment.expiresAt) <= Date.now()) continue;
       const { leaseTokenHash: _leaseTokenHash, ...wireAssignment } = assignment;
-      return wireAssignment;
+      return {
+        ...wireAssignment,
+        remainingMs: Math.max(0, Date.parse(assignment.expiresAt) - Date.now()),
+      };
     }
     return undefined;
   }

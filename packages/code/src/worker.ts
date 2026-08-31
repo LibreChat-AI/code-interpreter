@@ -23,6 +23,7 @@ export interface BridgeWorkerOptions {
   capabilities: BridgeWorkerCapabilities;
   leaseWaitMs?: number;
   leaseTransportGraceMs?: number;
+  registrationTransportTimeoutMs?: number;
   reconnectDelayMs?: number;
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
@@ -34,6 +35,7 @@ const MAX_LEASE_WAIT_MS = 30_000;
 const DEFAULT_LEASE_TRANSPORT_GRACE_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_REGISTRATION_TTL_MS = 60_000;
+const DEFAULT_REGISTRATION_TRANSPORT_TIMEOUT_MS = 10_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
 const SETTLEMENT_RETRY_DELAY_MS = 100;
 const RUNTIME_SESSION_PLACEHOLDER = '{runtimeSessionId}';
@@ -75,16 +77,38 @@ export class BridgeWorker {
   async register(
     signal?: AbortSignal,
   ): Promise<BridgeWorkerRegistrationResponse> {
-    const registration = await this.request<BridgeWorkerRegistrationResponse>(
-      `${this.codeApiUrl}/bridge/workers/register`,
-      {
-        protocolVersion: BRIDGE_PROTOCOL_VERSION,
-        workerId: this.options.workerId,
-        incarnationId: this.incarnationId,
-        capabilities: this.options.capabilities,
-      },
-      signal,
+    const registrationController = new AbortController();
+    const abortRegistration = (): void => registrationController.abort();
+    if (signal?.aborted) {
+      abortRegistration();
+    } else {
+      signal?.addEventListener('abort', abortRegistration, { once: true });
+    }
+    const timeoutMs = Math.min(
+      Math.max(1, this.registrationTtlMs - 1),
+      Math.max(
+        1,
+        this.options.registrationTransportTimeoutMs ??
+          DEFAULT_REGISTRATION_TRANSPORT_TIMEOUT_MS,
+      ),
     );
+    const timeout = setTimeout(abortRegistration, timeoutMs);
+    let registration: BridgeWorkerRegistrationResponse;
+    try {
+      registration = await this.request<BridgeWorkerRegistrationResponse>(
+        `${this.codeApiUrl}/bridge/workers/register`,
+        {
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          workerId: this.options.workerId,
+          incarnationId: this.incarnationId,
+          capabilities: this.options.capabilities,
+        },
+        registrationController.signal,
+      );
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abortRegistration);
+    }
     if (registration.incarnationId !== this.incarnationId) {
       throw new BridgeProtocolError(
         'Code API registered a different worker incarnation',
@@ -138,6 +162,15 @@ export class BridgeWorker {
         'Code API leased an assignment for a different worker incarnation',
       );
     }
+    if (
+      response.assignment != null &&
+      (!Number.isSafeInteger(response.assignment.remainingMs) ||
+        (response.assignment.remainingMs ?? -1) < 0)
+    ) {
+      throw new BridgeProtocolError(
+        'Code API leased an assignment without a valid server-relative deadline',
+      );
+    }
     return response.assignment;
   }
 
@@ -174,10 +207,8 @@ export class BridgeWorker {
     const executionController = new AbortController();
     const abortExecution = (): void => executionController.abort();
     signal?.addEventListener('abort', abortExecution, { once: true });
-    const deadlineDelay = Math.max(
-      0,
-      Date.parse(assignment.expiresAt) - Date.now(),
-    );
+    const deadlineDelay = this.assignmentRemainingMs(assignment);
+    const localDeadlineAtMs = Date.now() + deadlineDelay;
     const deadlineTimer = setTimeout(
       () => executionController.abort(),
       deadlineDelay,
@@ -267,7 +298,12 @@ export class BridgeWorker {
           ambiguousSandboxError,
         );
       }
-      await this.settleWithRetry(assignment, settlement, signal);
+      await this.settleWithRetry(
+        assignment,
+        settlement,
+        localDeadlineAtMs,
+        signal,
+      );
     } finally {
       heartbeatController.abort();
       await heartbeat;
@@ -285,6 +321,16 @@ export class BridgeWorker {
       return `assignment-${assignment.assignmentId}`;
     }
     return undefined;
+  }
+
+  private assignmentRemainingMs(assignment: BridgeAssignment): number {
+    if (
+      Number.isSafeInteger(assignment.remainingMs) &&
+      (assignment.remainingMs ?? -1) >= 0
+    ) {
+      return assignment.remainingMs ?? 0;
+    }
+    return Math.max(0, Date.parse(assignment.expiresAt) - Date.now());
   }
 
   private sandboxEndpointFor(assignment: BridgeAssignment): string {
@@ -353,9 +399,9 @@ export class BridgeWorker {
   private async settleWithRetry(
     assignment: BridgeAssignment,
     settlement: BridgeSettlement,
+    deadlineAtMs: number,
     signal?: AbortSignal,
   ): Promise<void> {
-    const deadlineAtMs = Date.parse(assignment.expiresAt);
     const settlementController = new AbortController();
     const abortSettlement = (): void => settlementController.abort();
     signal?.addEventListener('abort', abortSettlement, { once: true });

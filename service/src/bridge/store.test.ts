@@ -42,6 +42,8 @@ describe('RedisBridgeStore', () => {
     const assignment = await store.lease('vm-1', incarnationId, 1_000);
     expect(assignment).toBeDefined();
     expect(assignment?.runtimeSessionId).toBe('rt-user-1');
+    expect(assignment?.remainingMs).toBeGreaterThan(0);
+    expect(assignment?.remainingMs).toBeLessThanOrEqual(5_000);
 
     await store.settle('vm-1', assignment?.assignmentId ?? '', {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,

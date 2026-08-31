@@ -477,6 +477,7 @@ test('worker surfaces quarantine when shutdown aborts stateful execution', async
     generation: 1,
     leaseToken: 'lease-token-that-is-long-enough-for-testing',
     expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    remainingMs: 5_000,
     runtimeSessionId: 'rt-user-1',
     request: { body: { language: 'bash' }, headers: {} },
   };
@@ -612,4 +613,72 @@ test('worker quarantines an explicitly dirty stateful sandbox response', async (
     BridgeWorkspaceQuarantinedError,
   );
   assert.equal(settlementAttempted, false);
+});
+
+test('worker bounds a stalled registration below its lease TTL', async () => {
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    registrationTransportTimeoutMs: 20,
+    fetchImpl: async (_input, init) =>
+      await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+      }),
+  });
+
+  await assert.rejects(worker.register(), { name: 'AbortError' });
+});
+
+test('worker uses the server-relative lease budget despite VM clock skew', async () => {
+  let settlementAttempted = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('/execute')) {
+        return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      settlementAttempted = true;
+      return new Response(
+        JSON.stringify({ protocolVersion: 1, accepted: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'skewed-clock-assignment',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(0).toISOString(),
+    remainingMs: 1_000,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+  assert.equal(settlementAttempted, true);
 });
