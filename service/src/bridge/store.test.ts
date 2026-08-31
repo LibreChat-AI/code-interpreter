@@ -526,6 +526,71 @@ describe('RedisBridgeStore', () => {
     redis.del = originalDel as Redis['del'];
   });
 
+  test('holds a durable workspace marker until finalization commits', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'commit-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    let releaseFinalizer!: () => void;
+    const finalizerGate = new Promise<void>((resolve) => {
+      releaseFinalizer = resolve;
+    });
+    let finalizerStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      finalizerStarted = resolve;
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'commit-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-commit',
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+      finalize: async (settlement) => {
+        finalizerStarted();
+        await finalizerGate;
+        return settlement;
+      },
+    });
+    const assignment = await store.lease(
+      'commit-worker',
+      incarnationId,
+      1_000,
+    );
+    await store.settle('commit-worker', assignment?.assignmentId ?? '', {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      generation: assignment?.generation ?? 0,
+      leaseToken: assignment?.leaseToken ?? '',
+      incarnationId,
+      status: 'fulfilled',
+      result: {
+        language: 'bash',
+        version: '5.2.0',
+        session_id: 'run-commit',
+        files: [],
+      },
+    });
+    await started;
+    const [pendingMarker] = await redis.keys(
+      'codeapi:bridge:v1:worker:commit-worker:workspace:*:quarantined',
+    );
+    expect(pendingMarker).toBeDefined();
+    expect(await redis.get(pendingMarker)).toBe(
+      assignment?.assignmentId ?? null,
+    );
+
+    releaseFinalizer();
+    await expect(completion).resolves.toMatchObject({ status: 'fulfilled' });
+    expect(await redis.exists(pendingMarker)).toBe(0);
+  });
+
   test('releases the worker lock when generation allocation fails', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -602,7 +667,7 @@ describe('RedisBridgeStore', () => {
             deadlineAtMs: Date.now() + 1_000,
             signal: controller.signal,
           }),
-        ).rejects.toMatchObject({ code: 'WORKER_BUSY' });
+        ).rejects.toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
         throw new Error('restore failed');
       },
     });

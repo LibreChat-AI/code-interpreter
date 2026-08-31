@@ -74,6 +74,9 @@ execution.
 - Ambiguous settlement delivery is retried through the assignment deadline. If
   a stateful settlement remains ambiguous, the CLI exits and the affected local
   session runner must be reset or discarded before restart.
+- A fulfilled stateful settlement creates a durable pending-workspace marker
+  before Code API acknowledges it. Result finalization clears that marker; a
+  worker-process crash leaves it in place so later reuse fails closed.
 - Request cancellation is polled by the worker and aborts the local sandbox
   request.
 - The sandbox receives the stable runtime session ID separately from the lease;

@@ -292,12 +292,12 @@ export class RedisBridgeStore {
         args.deadlineAtMs,
         args.signal,
       );
-      if (args.finalize == null) {
-        resultCommitted = true;
-        return settlement;
-      }
       try {
-        const result = await args.finalize(settlement);
+        const result =
+          args.finalize == null
+            ? settlement
+            : await args.finalize(settlement);
+        await this.commitPendingWorkspace(assignment, settlement);
         resultCommitted = true;
         return result;
       } catch (error) {
@@ -395,19 +395,32 @@ export class RedisBridgeStore {
       );
     }
     const ttlSeconds = assignmentTtlSeconds(Date.parse(assignment.expiresAt));
+    const settlementKeys = [
+      assignmentKey(assignmentId),
+      settlementKey(assignmentId),
+    ];
+    if (
+      settlement.status === 'fulfilled' &&
+      assignment.runtimeSessionId !== undefined
+    ) {
+      settlementKeys.push(
+        workspaceQuarantineKey(workerId, assignment.runtimeSessionId),
+      );
+    }
     const script = [
       'if redis.call(\'EXISTS\', KEYS[1]) == 0 then return 0 end',
       'redis.call(\'SET\', KEYS[2], ARGV[1], \"EX\", ARGV[2])',
+      'if #KEYS == 3 then redis.call(\'SET\', KEYS[3], ARGV[3]) end',
       'return 1',
     ].join('\n');
     const accepted = Number(
       await this.redis.eval(
         script,
-        2,
-        assignmentKey(assignmentId),
-        settlementKey(assignmentId),
+        settlementKeys.length,
+        ...settlementKeys,
         JSON.stringify(settlement),
         String(ttlSeconds),
+        assignmentId,
       ),
     );
     if (accepted !== 1) {
@@ -578,6 +591,41 @@ export class RedisBridgeStore {
       return;
     }
     await this.cleanup(assignment);
+  }
+
+  private async commitPendingWorkspace(
+    assignment: StoredAssignment,
+    settlement: CodeBridgeSettlement,
+  ): Promise<void> {
+    if (
+      assignment.runtimeSessionId === undefined ||
+      settlement.status !== 'fulfilled'
+    ) {
+      return;
+    }
+    const script = [
+      'if redis.call(\'GET\', KEYS[1]) == ARGV[1] then',
+      '  return redis.call(\'DEL\', KEYS[1])',
+      'end',
+      'return 0',
+    ].join('\n');
+    const committed = Number(
+      await this.redis.eval(
+        script,
+        1,
+        workspaceQuarantineKey(
+          assignment.workerId,
+          assignment.runtimeSessionId,
+        ),
+        assignment.assignmentId,
+      ),
+    );
+    if (committed !== 1) {
+      throw new BridgeStoreError(
+        'WORKSPACE_QUARANTINED',
+        'Bridge workspace commit marker was lost before finalization completed',
+      );
+    }
   }
 
   private async cleanupWithRetry(

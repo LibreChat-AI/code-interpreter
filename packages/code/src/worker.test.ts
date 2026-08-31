@@ -537,3 +537,79 @@ test('worker surfaces quarantine when shutdown aborts stateful execution', async
   );
   assert.equal(executeStarted, true);
 });
+
+test('worker bounds a stalled lease transport beyond its long poll', async () => {
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    leaseWaitMs: 10,
+    leaseTransportGraceMs: 20,
+    fetchImpl: async (_input, init) =>
+      await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+      }),
+  });
+
+  await assert.rejects(worker.lease(), { name: 'AbortError' });
+});
+
+test('worker quarantines an explicitly dirty stateful sandbox response', async () => {
+  let settlementAttempted = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint:
+      'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('/execute')) {
+        return new Response(
+          JSON.stringify({
+            error: 'session_workspace_dirty',
+            message: 'restore required',
+          }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      settlementAttempted = true;
+      return new Response(
+        JSON.stringify({ protocolVersion: 1, accepted: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'dirty-execution',
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
+      generation: 1,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 1_000).toISOString(),
+      runtimeSessionId: 'rt-user-1',
+      request: { body: { language: 'bash' }, headers: {} },
+    }),
+    BridgeWorkspaceQuarantinedError,
+  );
+  assert.equal(settlementAttempted, false);
+});

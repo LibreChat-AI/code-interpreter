@@ -22,6 +22,7 @@ export interface BridgeWorkerOptions {
   sandboxEndpoint: string;
   capabilities: BridgeWorkerCapabilities;
   leaseWaitMs?: number;
+  leaseTransportGraceMs?: number;
   reconnectDelayMs?: number;
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
@@ -29,6 +30,8 @@ export interface BridgeWorkerOptions {
 }
 
 const DEFAULT_LEASE_WAIT_MS = 25_000;
+const MAX_LEASE_WAIT_MS = 30_000;
+const DEFAULT_LEASE_TRANSPORT_GRACE_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_REGISTRATION_TTL_MS = 60_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
@@ -92,15 +95,41 @@ export class BridgeWorker {
   }
 
   async lease(signal?: AbortSignal): Promise<BridgeAssignment | undefined> {
-    const response = await this.request<BridgeLeaseResponse>(
-      `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/lease`,
-      {
-        protocolVersion: BRIDGE_PROTOCOL_VERSION,
-        waitMs: this.options.leaseWaitMs ?? DEFAULT_LEASE_WAIT_MS,
-        incarnationId: this.incarnationId,
-      },
-      signal,
+    const waitMs = Math.min(
+      MAX_LEASE_WAIT_MS,
+      Math.max(0, this.options.leaseWaitMs ?? DEFAULT_LEASE_WAIT_MS),
     );
+    const leaseController = new AbortController();
+    const abortLease = (): void => leaseController.abort();
+    if (signal?.aborted) {
+      abortLease();
+    } else {
+      signal?.addEventListener('abort', abortLease, { once: true });
+    }
+    const timeout = setTimeout(
+      abortLease,
+      waitMs +
+        Math.max(
+          0,
+          this.options.leaseTransportGraceMs ??
+            DEFAULT_LEASE_TRANSPORT_GRACE_MS,
+        ),
+    );
+    let response: BridgeLeaseResponse;
+    try {
+      response = await this.request<BridgeLeaseResponse>(
+        `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/lease`,
+        {
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          waitMs,
+          incarnationId: this.incarnationId,
+        },
+        leaseController.signal,
+      );
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abortLease);
+    }
     if (
       response.assignment != null &&
       response.assignment.incarnationId !== this.incarnationId
@@ -194,7 +223,8 @@ export class BridgeWorker {
       const payload = (await response.json()) as object;
       if (heartbeatError != null) throw heartbeatError;
       if (!response.ok) {
-        sandboxRejectedExecution = true;
+        sandboxRejectedExecution =
+          errorMessage(payload) !== 'session_workspace_dirty';
         throw new BridgeProtocolError(
           errorMessage(payload) ??
             `Sandbox rejected execution with HTTP ${response.status}`,
@@ -392,7 +422,7 @@ export class BridgeWorker {
     signal: AbortSignal,
   ): Promise<void> {
     while (!signal.aborted && !executionController.signal.aborted) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await this.delay(500, signal);
       if (signal.aborted || executionController.signal.aborted) return;
       try {
         const response = await this.request<{ cancelled: boolean }>(

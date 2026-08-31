@@ -56,6 +56,7 @@ export function validateApiHardenedConfig(): void {
 /** Validate bridge credentials in every process that exposes bridge routes. */
 export function validateApiBridgePolicy(): void {
   if (env.SANDBOX_BACKEND !== 'remote-bridge') return;
+  requireSafeWholeNumber('JOB_TIMEOUT', env.JOB_TIMEOUT, 1);
   requireValue('CODEAPI_BRIDGE_WORKER_ID', env.BRIDGE_WORKER_ID);
   if (env.HARDENED_SANDBOX_MODE) {
     requireStrongSecret('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);

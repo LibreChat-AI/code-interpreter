@@ -342,6 +342,20 @@ describe('sandbox backend policy', () => {
     expect(() => validateApiBridgePolicy()).not.toThrow();
   });
 
+  test('remote bridge requires a positive finite job timeout', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.PTC_MODE = 'replay';
+
+    env.JOB_TIMEOUT = -1;
+    expect(() => validateApiBridgePolicy()).toThrow('JOB_TIMEOUT');
+    env.JOB_TIMEOUT = Number.POSITIVE_INFINITY;
+    expect(() => validateApiBridgePolicy()).toThrow('JOB_TIMEOUT');
+    env.JOB_TIMEOUT = 300_000;
+    expect(() => validateApiBridgePolicy()).not.toThrow();
+  });
+
   test('rejects blocking PTC on the lambda backend', () => {
     configureValidLambda();
     env.PTC_MODE = 'blocking';
