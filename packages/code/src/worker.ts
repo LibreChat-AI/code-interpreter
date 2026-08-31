@@ -415,6 +415,17 @@ export class BridgeWorker {
     deadlineAtMs: number,
     signal?: AbortSignal,
   ): Promise<void> {
+    if (signal?.aborted === true) {
+      if (assignment.runtimeSessionId != null) {
+        throw new BridgeWorkspaceQuarantinedError(
+          `Stateful workspace ${assignment.runtimeSessionId} was quarantined before settlement during shutdown`,
+          signal.reason,
+        );
+      }
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException('aborted', 'AbortError');
+    }
     const settlementController = new AbortController();
     const abortSettlement = (): void => settlementController.abort();
     signal?.addEventListener('abort', abortSettlement, { once: true });

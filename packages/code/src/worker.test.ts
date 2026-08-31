@@ -663,6 +663,50 @@ test('worker does not start execution after shutdown is already aborted', async 
   assert.equal(executeStarted, false);
 });
 
+test('worker does not start settlement after shutdown is already aborted', async () => {
+  const controller = new AbortController();
+  let settlementAttempted = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('/execute')) {
+        controller.abort(new DOMException('shutdown', 'AbortError'));
+        throw new DOMException('aborted', 'AbortError');
+      }
+      settlementAttempted = true;
+      return new Response('{}', { status: 200 });
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle(
+      {
+        protocolVersion: 1,
+        assignmentId: 'shutdown-before-settlement',
+        workerId: 'vm-1',
+        incarnationId: 'incarnation-00000001',
+        generation: 1,
+        leaseToken: 'lease-token-that-is-long-enough-for-testing',
+        expiresAt: new Date(Date.now() + 5_000).toISOString(),
+        remainingMs: 5_000,
+        request: { body: { language: 'bash' }, headers: {} },
+      },
+      controller.signal,
+    ),
+    { name: 'AbortError' },
+  );
+  assert.equal(settlementAttempted, false);
+});
+
 test('worker bounds a stalled lease transport beyond its long poll', async () => {
   const worker = new BridgeWorker({
     codeApiUrl: 'https://code.example/v1',

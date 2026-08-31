@@ -347,35 +347,59 @@ export class RedisBridgeStore {
         );
         continue;
       }
-      const assignment = await this.readAssignment(assignmentId);
-      if (assignment == null || assignment.workerId !== workerId) continue;
-      if (assignment.incarnationId !== incarnationId) continue;
-      if (signalAborted(signal)) {
-        await this.returnLease(assignment);
-        return undefined;
-      }
-      const registration = await this.registration(workerId);
-      if (registration?.incarnationId !== incarnationId) {
-        throw new BridgeStoreError(
-          'WORKER_FENCED',
-          'Bridge worker incarnation was replaced',
+      try {
+        const assignment = await this.readAssignment(assignmentId);
+        if (assignment == null || assignment.workerId !== workerId) continue;
+        if (assignment.incarnationId !== incarnationId) continue;
+        if (signalAborted(signal)) {
+          await this.returnLease(assignment);
+          return undefined;
+        }
+        const registration = await this.registration(workerId);
+        if (registration?.incarnationId !== incarnationId) {
+          throw new BridgeStoreError(
+            'WORKER_FENCED',
+            'Bridge worker incarnation was replaced',
+          );
+        }
+        if (Date.parse(assignment.expiresAt) <= Date.now()) continue;
+        if (signalAborted(signal)) {
+          await this.returnLease(assignment);
+          return undefined;
+        }
+        const { leaseTokenHash: _leaseTokenHash, ...wireAssignment } = assignment;
+        return {
+          ...wireAssignment,
+          remainingMs: Math.max(
+            0,
+            Date.parse(assignment.expiresAt) - Date.now(),
+          ),
+        };
+      } catch (error) {
+        await this.returnLeaseByIdWithRetry(
+          workerId,
+          incarnationId,
+          assignmentId,
         );
+        throw error;
       }
-      if (Date.parse(assignment.expiresAt) <= Date.now()) continue;
-      if (signalAborted(signal)) {
-        await this.returnLease(assignment);
-        return undefined;
-      }
-      const { leaseTokenHash: _leaseTokenHash, ...wireAssignment } = assignment;
-      return {
-        ...wireAssignment,
-        remainingMs: Math.max(0, Date.parse(assignment.expiresAt) - Date.now()),
-      };
     }
     return undefined;
   }
 
   async returnLease(assignment: CodeBridgeAssignment): Promise<void> {
+    await this.returnLeaseById(
+      assignment.workerId,
+      assignment.incarnationId,
+      assignment.assignmentId,
+    );
+  }
+
+  private async returnLeaseById(
+    workerId: string,
+    incarnationId: string,
+    assignmentId: string,
+  ): Promise<void> {
     await this.redis.eval(
       [
         "if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end",
@@ -384,10 +408,28 @@ export class RedisBridgeStore {
         'return 1',
       ].join('\n'),
       2,
-      assignmentKey(assignment.assignmentId),
-      queueKey(assignment.workerId, assignment.incarnationId),
-      assignment.assignmentId,
+      assignmentKey(assignmentId),
+      queueKey(workerId, incarnationId),
+      assignmentId,
     );
+  }
+
+  private async returnLeaseByIdWithRetry(
+    workerId: string,
+    incarnationId: string,
+    assignmentId: string,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await this.returnLeaseById(workerId, incarnationId, assignmentId);
+        return;
+      } catch (error) {
+        lastError = error;
+        await delay(25);
+      }
+    }
+    throw lastError;
   }
 
   async settle(

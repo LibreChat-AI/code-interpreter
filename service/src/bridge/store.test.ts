@@ -12,11 +12,13 @@ const incarnationId = 'incarnation-00000001';
 const redisEval = redis.eval.bind(redis);
 const redisDel = redis.del.bind(redis);
 const redisLpop = redis.lpop.bind(redis);
+const redisGet = redis.get.bind(redis);
 
 afterEach(async () => {
   redis.eval = redisEval as Redis['eval'];
   redis.del = redisDel as Redis['del'];
   redis.lpop = redisLpop as Redis['lpop'];
+  redis.get = redisGet as Redis['get'];
   await redis.flushall();
 });
 
@@ -115,6 +117,50 @@ describe('RedisBridgeStore', () => {
     expect(recovered).toBeDefined();
     expect(recovered?.workerId).toBe('vm-1');
     dispatchController.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
+  test('returns a popped assignment after a transient Redis read failure', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'vm-1',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    let failAssignmentRead = true;
+    redis.get = (async (key: string) => {
+      if (
+        failAssignmentRead &&
+        key.includes(':assignment:') &&
+        !key.endsWith(':settlement')
+      ) {
+        failAssignmentRead = false;
+        throw new Error('redis read failed');
+      }
+      return await redisGet(key);
+    }) as Redis['get'];
+
+    await expect(store.lease('vm-1', incarnationId, 1_000)).rejects.toThrow(
+      'redis read failed',
+    );
+    redis.get = redisGet as Redis['get'];
+    const recovered = await store.lease('vm-1', incarnationId, 1_000);
+    expect(recovered).toBeDefined();
+    controller.abort();
     await expect(completion).rejects.toMatchObject({
       code: 'ASSIGNMENT_EXPIRED',
     });
