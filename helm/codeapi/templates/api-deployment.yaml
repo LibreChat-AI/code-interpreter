@@ -59,6 +59,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "codeapi.fullname" . }}-secrets
                   key: redis-password
+            - name: CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codeapi.fullname" . }}-pairing-rollback
+                  key: epoch
+                  optional: true
             # Service URLs
             - name: FILE_SERVER_URL
               value: "http://{{ include "codeapi.fullname" . }}-file-server:{{ .Values.fileServer.service.port }}"

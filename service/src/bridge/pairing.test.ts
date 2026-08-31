@@ -696,6 +696,40 @@ describe('RedisBridgePairingStore', () => {
     await expect(redis.get(deadlineKey)).resolves.toBe('0');
   });
 
+  test('restarts legacy cleanup once for an explicit rollback epoch', async () => {
+    const legacyCode = 'unindexed-rollback-epoch-code';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    const deadlineKey = 'codeapi:bridge:v1:migration:legacy-pairing-scan-until';
+    await redis.set(deadlineKey, '0');
+    await redis.set(
+      legacyKey,
+      JSON.stringify({
+        workerId: 'vm-rollback-epoch',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      'EX',
+      60,
+    );
+    await redis.set(
+      'codeapi:bridge:v1:migration:legacy-pairing-scanned:vm-rollback-epoch',
+      'done',
+    );
+    const rollbackAwarePairings = new RedisBridgePairingStore(
+      redis,
+      600,
+      300,
+      5_000,
+      'rollback-epoch-1',
+    );
+
+    await rollbackAwarePairings.revoke('vm-rollback-epoch');
+
+    await expect(redis.get(legacyKey)).resolves.toBeNull();
+    await expect(redis.get(deadlineKey)).resolves.toBe('0');
+  });
+
   test('redeems an unrevoked pairing code issued by a pre-fence replica', async () => {
     const identity = createBridgeIdentity();
     const legacyCode = 'unrevoked-legacy-pairing';

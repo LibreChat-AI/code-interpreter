@@ -204,8 +204,13 @@ function legacyPairingScanDeadlineKey(): string {
   return `${PREFIX}:migration:legacy-pairing-scan-until`;
 }
 
-function legacyPairingWorkerScanKey(workerId: string): string {
-  return `${PREFIX}:migration:legacy-pairing-scanned:${workerId}`;
+function legacyPairingWorkerScanKey(
+  workerId: string,
+  rollbackEpoch?: string,
+): string {
+  const epoch = rollbackEpoch?.trim();
+  const epochSuffix = epoch ? `:${digest(epoch)}` : '';
+  return `${PREFIX}:migration:legacy-pairing-scanned:${workerId}${epochSuffix}`;
 }
 
 function proofNonceKey(credential: string, nonce: string): string {
@@ -226,6 +231,8 @@ export class RedisBridgePairingStore {
     private readonly pairingTtlSeconds = DEFAULT_PAIRING_TTL_SECONDS,
     private readonly credentialTtlSeconds = DEFAULT_CREDENTIAL_TTL_SECONDS,
     private readonly legacyScanClaimTtlMs = LEGACY_SCAN_CLAIM_TTL_MS,
+    private readonly rollbackEpoch =
+      process.env.CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH?.trim() ?? '',
   ) {}
 
   async issue(
@@ -469,7 +476,8 @@ export class RedisBridgePairingStore {
     }
 
     const deadline = Number(rawDeadline);
-    const stateKey = legacyPairingWorkerScanKey(workerId);
+    const stateKey = legacyPairingWorkerScanKey(workerId, this.rollbackEpoch);
+    const rollbackEpochDetected = this.rollbackEpoch.trim().length > 0;
     while (true) {
       const state = await this.redis.get(stateKey);
       if (state === LEGACY_SCAN_COMPLETE && !rollbackDetected) return;
@@ -477,6 +485,7 @@ export class RedisBridgePairingStore {
       if (state == null) {
         if (
           !rollbackDetected &&
+          !rollbackEpochDetected &&
           (!Number.isFinite(deadline) || Date.now() > deadline)
         ) {
           return;

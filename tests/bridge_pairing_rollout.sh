@@ -37,7 +37,15 @@ bash -n "$rollback"
 if ! grep -q 'delete horizontalpodautoscaler' "$rollback" ||
   ! grep -q 'scale "$deployment" --replicas=0' "$rollback" ||
   ! grep -q -- '--for=delete' "$rollback" ||
+  ! grep -q 'create configmap "$rollback_config_map"' "$rollback" ||
+  ! grep -q 'replica_state=' "$rollback" ||
+  [[ $(grep -c '^  drain_api$' "$rollback") -lt 1 ]] ||
   ! grep -q 'helm rollback' "$rollback"; then
-  echo 'rollback must remove autoscaling, drain API pods, then invoke Helm' >&2
+  echo 'rollback must record an epoch, remove autoscaling, verify the drain, and fail closed' >&2
+  exit 1
+fi
+if ! grep -q 'CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH' "$deployment" ||
+  ! grep -q 'optional: true' "$deployment"; then
+  echo 'the API Deployment must consume the optional rollback epoch' >&2
   exit 1
 fi
