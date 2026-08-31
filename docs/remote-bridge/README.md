@@ -88,6 +88,9 @@ execution.
   the currently registered incarnation.
 - Request cancellation is polled by the worker and aborts the local sandbox
   request.
+- A leased assignment remains in a Redis-backed delivery claim until the worker
+  explicitly acknowledges it; reconnecting before acknowledgement redelivers
+  the same fenced assignment instead of losing it after an HTTP disconnect.
 - The sandbox receives the stable runtime session ID separately from the lease;
   workspace state belongs to that session, not to a transient assignment.
 

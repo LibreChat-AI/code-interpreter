@@ -240,30 +240,49 @@ router.post(
           if (assignment != null) await bridgeStore.returnLease(assignment);
           return;
         }
-        const delivered = await new Promise<boolean>((resolve) => {
-          const onFinish = (): void => {
-            res.off('close', onClose);
-            resolve(true);
-          };
-          const onClose = (): void => {
-            res.off('finish', onFinish);
-            resolve(false);
-          };
-          res.once('finish', onFinish);
-          res.once('close', onClose);
-          res.json({
-            protocolVersion: BRIDGE_PROTOCOL_VERSION,
-            serverElapsedMs: Math.max(0, Date.now() - requestStartedAtMs),
-            assignment,
-          });
+        res.json({
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          serverElapsedMs: Math.max(0, Date.now() - requestStartedAtMs),
+          assignment,
         });
-        if (!delivered && assignment != null) {
-          await bridgeStore.returnLease(assignment);
-        }
       } finally {
         req.off('aborted', abortLease);
         res.off('close', abortLease);
       }
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
+      }
+      throw error;
+    }
+  }),
+);
+
+router.post(
+  '/workers/:workerId/assignments/:assignmentId/ack',
+  asyncRoute(async (req, res) => {
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      !validIncarnationId(body.incarnationId) ||
+      !Number.isSafeInteger(body.generation) ||
+      Number(body.generation) < 1 ||
+      typeof body.leaseToken !== 'string' ||
+      body.leaseToken.length < 32
+    ) {
+      res.status(400).json({ error: 'Invalid bridge lease acknowledgement' });
+      return;
+    }
+    try {
+      await bridgeStore.acknowledgeLease(
+        req.params.workerId,
+        body.incarnationId,
+        req.params.assignmentId,
+        Number(body.generation),
+        body.leaseToken,
+      );
+      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, accepted: true });
     } catch (error) {
       if (error instanceof BridgeStoreError) {
         sendStoreError(error, res);

@@ -24,6 +24,8 @@ export interface BridgeWorkerOptions {
   leaseWaitMs?: number;
   leaseTransportGraceMs?: number;
   registrationTransportTimeoutMs?: number;
+  leaseAckTransportTimeoutMs?: number;
+  resetTransportTimeoutMs?: number;
   cancellationPollIntervalMs?: number;
   cancellationTransportTimeoutMs?: number;
   rejectionAckGraceMs?: number;
@@ -39,6 +41,7 @@ const DEFAULT_LEASE_TRANSPORT_GRACE_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_REGISTRATION_TTL_MS = 60_000;
 const DEFAULT_REGISTRATION_TRANSPORT_TIMEOUT_MS = 10_000;
+const DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS = 10_000;
 const DEFAULT_CANCELLATION_POLL_INTERVAL_MS = 500;
 const DEFAULT_CANCELLATION_TRANSPORT_TIMEOUT_MS = 2_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
@@ -138,7 +141,7 @@ export class BridgeWorker {
     if (runtimeSessionId.trim().length === 0) {
       throw new BridgeProtocolError('Runtime session ID is required');
     }
-    await this.request(
+    await this.timedRequest(
       `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/workspaces/reset`,
       {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -146,6 +149,11 @@ export class BridgeWorker {
         runtimeSessionId,
         confirmDiscarded: true,
       },
+      Math.max(
+        1,
+        this.options.resetTransportTimeoutMs ??
+          DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+      ),
       signal,
     );
   }
@@ -217,11 +225,35 @@ export class BridgeWorker {
       0,
       Date.now() - requestStartedAtMs - (response.serverElapsedMs ?? 0),
     );
-    return {
+    const adjustedAssignment = {
       ...response.assignment,
       remainingMs: Math.max(
         0,
         (response.assignment.remainingMs ?? 0) - transportElapsedMs,
+      ),
+    };
+    const acknowledgementStartedAtMs = Date.now();
+    await this.timedRequest(
+      this.assignmentUrl(adjustedAssignment, 'ack'),
+      {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        incarnationId: this.incarnationId,
+        generation: adjustedAssignment.generation,
+        leaseToken: adjustedAssignment.leaseToken,
+      },
+      Math.max(
+        1,
+        this.options.leaseAckTransportTimeoutMs ??
+          DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+      ),
+      signal,
+    );
+    return {
+      ...adjustedAssignment,
+      remainingMs: Math.max(
+        0,
+        (adjustedAssignment.remainingMs ?? 0) -
+          (Date.now() - acknowledgementStartedAtMs),
       ),
     };
   }
@@ -629,5 +661,28 @@ export class BridgeWorker {
       );
     }
     return payload as T;
+  }
+
+  private async timedRequest<T>(
+    url: string,
+    body: object,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const controller = new AbortController();
+    const abortRequest = (): void => controller.abort();
+    if (signal?.aborted) {
+      abortRequest();
+    } else {
+      signal?.addEventListener('abort', abortRequest, { once: true });
+    }
+    const timeout = setTimeout(abortRequest, timeoutMs);
+    timeout.unref?.();
+    try {
+      return await this.request<T>(url, body, controller.signal);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abortRequest);
+    }
   }
 }

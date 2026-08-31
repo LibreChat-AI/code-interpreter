@@ -108,10 +108,39 @@ test('worker acknowledges a discarded workspace through the reset endpoint', asy
   });
 });
 
+test('worker bounds a stalled workspace reset request', async () => {
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    resetTransportTimeoutMs: 20,
+    fetchImpl: async (_input, init) =>
+      await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+      }),
+  });
+
+  await assert.rejects(worker.resetWorkspace('rt-user-1'), {
+    name: 'AbortError',
+  });
+});
+
 test('worker continues after an assignment-scoped settlement conflict', async () => {
   const controller = new AbortController();
   let registrations = 0;
   let leases = 0;
+  let leaseAcknowledged = false;
   let observedError: unknown;
   const assignment: BridgeAssignment = {
     protocolVersion: 1,
@@ -150,7 +179,15 @@ test('worker continues after an assignment-scoped settlement conflict', async ()
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }
+    if (url.endsWith('/ack')) {
+      leaseAcknowledged = true;
+      return new Response(
+        JSON.stringify({ protocolVersion: 1, accepted: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
     if (url.endsWith('/execute')) {
+      assert.equal(leaseAcknowledged, true);
       return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -948,7 +985,13 @@ test('worker subtracts lease response transit from the server budget', async () 
         sandboxProfile: 'nsjail',
         runtimes: ['bash'],
       },
-      fetchImpl: async () => {
+      fetchImpl: async (input) => {
+        if (String(input).endsWith('/ack')) {
+          return new Response(
+            JSON.stringify({ protocolVersion: 1, accepted: true }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
         now += 50;
         return new Response(
           JSON.stringify({

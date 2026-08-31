@@ -69,6 +69,50 @@ describe('RedisBridgeStore', () => {
     });
   });
 
+  test('redelivers a lease claim until the worker acknowledges it', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'claim-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const completion = store.dispatch({
+      workerId: 'claim-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: new AbortController().signal,
+    });
+    const first = await store.lease('claim-worker', incarnationId, 1_000);
+    const redelivered = await store.lease(
+      'claim-worker',
+      incarnationId,
+      1_000,
+    );
+    expect(redelivered?.assignmentId).toBe(first?.assignmentId);
+
+    await store.acknowledgeLease(
+      'claim-worker',
+      incarnationId,
+      first?.assignmentId ?? '',
+      first?.generation ?? 0,
+      first?.leaseToken ?? '',
+    );
+    await store.settle('claim-worker', first?.assignmentId ?? '', {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      generation: first?.generation ?? 0,
+      leaseToken: first?.leaseToken ?? '',
+      incarnationId,
+      status: 'rejected',
+      error: 'test complete',
+    });
+    await expect(completion).resolves.toMatchObject({ status: 'rejected' });
+  });
+
   test('rejects dispatch to an offline worker', async () => {
     const controller = new AbortController();
     await expect(
@@ -255,16 +299,23 @@ describe('RedisBridgeStore', () => {
       signal: dispatchController.signal,
     });
     const leaseController = new AbortController();
-    redis.lpop = (async (...args: Parameters<Redis['lpop']>) => {
-      const assignmentId = await redisLpop(...args);
-      if (assignmentId != null) leaseController.abort();
-      return assignmentId;
-    }) as Redis['lpop'];
+    redis.eval = (async (...args: Parameters<Redis['eval']>) => {
+      const result = await redisEval(...args);
+      if (
+        String(args[0]).includes(
+          "local claimed = redis.call('GET', KEYS[2])",
+        ) &&
+        result != null
+      ) {
+        leaseController.abort();
+      }
+      return result;
+    }) as Redis['eval'];
 
     await expect(
       store.lease('vm-1', incarnationId, 1_000, leaseController.signal),
     ).resolves.toBeUndefined();
-    redis.lpop = redisLpop as Redis['lpop'];
+    redis.eval = redisEval as Redis['eval'];
 
     const recovered = await store.lease('vm-1', incarnationId, 1_000);
     expect(recovered).toBeDefined();
@@ -932,6 +983,13 @@ describe('RedisBridgeStore', () => {
       1_000,
     );
     expect(assignment).toBeDefined();
+    await store.acknowledgeLease(
+      'lost-worker',
+      incarnationId,
+      assignment?.assignmentId ?? '',
+      assignment?.generation ?? 0,
+      assignment?.leaseToken ?? '',
+    );
     const [marker] = await redis.keys(
       'codeapi:bridge:v1:worker:lost-worker:workspace:*:quarantined',
     );
@@ -1060,6 +1118,13 @@ describe('RedisBridgeStore', () => {
       'late-rejection-worker',
       incarnationId,
       1_000,
+    );
+    await store.acknowledgeLease(
+      'late-rejection-worker',
+      incarnationId,
+      assignment?.assignmentId ?? '',
+      assignment?.generation ?? 0,
+      assignment?.leaseToken ?? '',
     );
     await expect(completion).rejects.toMatchObject({
       code: 'ASSIGNMENT_EXPIRED',

@@ -77,6 +77,14 @@ function queueKey(workerId: string, incarnationId: string): string {
   return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:assignments`;
 }
 
+function leaseClaimKey(workerId: string, incarnationId: string): string {
+  return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:lease-claim`;
+}
+
+function leaseAckKey(workerId: string, incarnationId: string): string {
+  return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:lease-ack`;
+}
+
 function generationKey(workerId: string): string {
   return `${PREFIX}:worker:${workerId}:generation`;
 }
@@ -428,9 +436,7 @@ export class RedisBridgeStore {
   ): Promise<CodeBridgeAssignment | undefined> {
     const deadline = Date.now() + waitMs;
     while (!signalAborted(signal) && Date.now() < deadline) {
-      const assignmentId = await this.redis.lpop(
-        queueKey(workerId, incarnationId),
-      );
+      const assignmentId = await this.claimOrPopLease(workerId, incarnationId);
       if (assignmentId == null) {
         await delay(
           Math.min(POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())),
@@ -440,8 +446,14 @@ export class RedisBridgeStore {
       }
       try {
         const assignment = await this.readAssignment(assignmentId);
-        if (assignment == null || assignment.workerId !== workerId) continue;
-        if (assignment.incarnationId !== incarnationId) continue;
+        if (
+          assignment == null ||
+          assignment.workerId !== workerId ||
+          assignment.incarnationId !== incarnationId
+        ) {
+          await this.discardLeaseClaim(workerId, incarnationId, assignmentId);
+          continue;
+        }
         if (signalAborted(signal)) {
           await this.returnLease(assignment);
           return undefined;
@@ -455,6 +467,7 @@ export class RedisBridgeStore {
         }
         if (Date.parse(assignment.expiresAt) <= Date.now()) {
           await this.clearUndeliveredWorkspaceFence(assignment);
+          await this.discardLeaseClaim(workerId, incarnationId, assignmentId);
           continue;
         }
         if (signalAborted(signal)) {
@@ -481,6 +494,91 @@ export class RedisBridgeStore {
     return undefined;
   }
 
+  async acknowledgeLease(
+    workerId: string,
+    incarnationId: string,
+    assignmentId: string,
+    generation: number,
+    leaseToken: string,
+  ): Promise<void> {
+    const assignment = await this.readAssignment(assignmentId);
+    const registration = await this.registration(workerId);
+    if (
+      assignment == null ||
+      assignment.workerId !== workerId ||
+      assignment.incarnationId !== incarnationId ||
+      registration?.incarnationId !== incarnationId ||
+      assignment.generation !== generation ||
+      tokenHash(leaseToken) !== assignment.leaseTokenHash
+    ) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_FENCED',
+        'Bridge assignment lease acknowledgement is stale',
+      );
+    }
+    const ttlSeconds = assignmentTtlSeconds(Date.parse(assignment.expiresAt));
+    const acknowledged = Number(
+      await this.redis.eval(
+        [
+          "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
+          "redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])",
+          'return 1',
+        ].join('\n'),
+        2,
+        leaseClaimKey(workerId, incarnationId),
+        leaseAckKey(workerId, incarnationId),
+        assignmentId,
+        String(ttlSeconds),
+      ),
+    );
+    if (acknowledged !== 1) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_FENCED',
+        'Bridge assignment is not the active lease claim',
+      );
+    }
+  }
+
+  private async claimOrPopLease(
+    workerId: string,
+    incarnationId: string,
+  ): Promise<string | null> {
+    const result = await this.redis.eval(
+      [
+        "local claimed = redis.call('GET', KEYS[2])",
+        'if claimed then return claimed end',
+        "local ttl = redis.call('TTL', KEYS[1])",
+        "local assignment = redis.call('LPOP', KEYS[1])",
+        'if not assignment then return nil end',
+        "redis.call('SET', KEYS[2], assignment, 'EX', math.max(1, ttl))",
+        'return assignment',
+      ].join('\n'),
+      2,
+      queueKey(workerId, incarnationId),
+      leaseClaimKey(workerId, incarnationId),
+    );
+    return result == null ? null : String(result);
+  }
+
+  private async discardLeaseClaim(
+    workerId: string,
+    incarnationId: string,
+    assignmentId: string,
+  ): Promise<void> {
+    await this.redis.eval(
+      [
+        "if redis.call('GET', KEYS[1]) == ARGV[1] then",
+        "  return redis.call('DEL', KEYS[1], KEYS[2])",
+        'end',
+        'return 0',
+      ].join('\n'),
+      2,
+      leaseClaimKey(workerId, incarnationId),
+      leaseAckKey(workerId, incarnationId),
+      assignmentId,
+    );
+  }
+
   async returnLease(assignment: CodeBridgeAssignment): Promise<void> {
     await this.returnLeaseById(
       assignment.workerId,
@@ -497,13 +595,17 @@ export class RedisBridgeStore {
     await this.redis.eval(
       [
         "if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end",
+        "if redis.call('GET', KEYS[3]) ~= ARGV[1] then return 0 end",
+        "redis.call('DEL', KEYS[3], KEYS[4])",
         "redis.call('LREM', KEYS[2], 0, ARGV[1])",
         "redis.call('LPUSH', KEYS[2], ARGV[1])",
         'return 1',
       ].join('\n'),
-      2,
+      4,
       assignmentKey(assignmentId),
       queueKey(workerId, incarnationId),
+      leaseClaimKey(workerId, incarnationId),
+      leaseAckKey(workerId, incarnationId),
       assignmentId,
     );
   }
@@ -600,6 +702,8 @@ export class RedisBridgeStore {
     const settlementKeys = [
       assignmentKey(assignmentId),
       settlementKey(assignmentId),
+      leaseClaimKey(workerId, assignment.incarnationId),
+      leaseAckKey(workerId, assignment.incarnationId),
     ];
     if (assignment.runtimeSessionId !== undefined) {
       settlementKeys.push(
@@ -613,9 +717,10 @@ export class RedisBridgeStore {
       '  return -1',
       'end',
       'if redis.call(\'EXISTS\', KEYS[1]) == 0 then return 0 end',
-      'if #KEYS == 3 and redis.call(\'GET\', KEYS[3]) ~= ARGV[3] then return -2 end',
+      'if #KEYS == 5 and redis.call(\'GET\', KEYS[5]) ~= ARGV[3] then return -2 end',
       'redis.call(\'SET\', KEYS[2], ARGV[1], \"EX\", ARGV[2])',
-      'if #KEYS == 3 and ARGV[4] == \"rejected\" then redis.call(\'DEL\', KEYS[3]) end',
+      'if redis.call(\'GET\', KEYS[3]) == ARGV[3] then redis.call(\'DEL\', KEYS[3], KEYS[4]) end',
+      'if #KEYS == 5 and ARGV[4] == \"rejected\" then redis.call(\'DEL\', KEYS[5]) end',
       'return 1',
     ].join('\n');
     const accepted = Number(
@@ -966,24 +1071,29 @@ export class RedisBridgeStore {
     const keys = [
       assignmentKey(assignment.assignmentId),
       queueKey(assignment.workerId, assignment.incarnationId),
+      leaseClaimKey(assignment.workerId, assignment.incarnationId),
+      leaseAckKey(assignment.workerId, assignment.incarnationId),
+      assignment.runtimeSessionId === undefined
+        ? `${assignmentKey(assignment.assignmentId)}:no-workspace`
+        : workspaceQuarantineKey(
+            assignment.workerId,
+            assignment.runtimeSessionId,
+          ),
     ];
-    if (assignment.runtimeSessionId !== undefined) {
-      keys.push(
-        workspaceQuarantineKey(
-          assignment.workerId,
-          assignment.runtimeSessionId,
-        ),
-      );
-    }
     const cleanupScript = [
       "local queued = redis.call('LREM', KEYS[2], 0, ARGV[1])",
-      'if queued > 0 and #KEYS == 3 and redis.call(\'GET\', KEYS[3]) == ARGV[1] then',
-      "  redis.call('DEL', KEYS[3])",
+      "local claimed = redis.call('GET', KEYS[3]) == ARGV[1]",
+      "local acknowledged = redis.call('GET', KEYS[4]) == ARGV[1]",
+      'if ARGV[2] == "1" and (queued > 0 or (claimed and not acknowledged)) and redis.call(\'GET\', KEYS[5]) == ARGV[1] then',
+      "  redis.call('DEL', KEYS[5])",
       'end',
-      'if queued == 0 and #KEYS == 3 and redis.call(\'GET\', KEYS[3]) == ARGV[1] then',
+      'if claimed and not acknowledged then',
+      "  redis.call('DEL', KEYS[3], KEYS[4])",
+      'end',
+      'if queued == 0 and acknowledged and ARGV[2] == "1" and redis.call(\'GET\', KEYS[5]) == ARGV[1] then',
       '  return 0',
       'end',
-      "return redis.call('DEL', KEYS[1])",
+      "return redis.call('DEL', KEYS[1], KEYS[3], KEYS[4])",
     ].join('\n');
     await Promise.all([
       boundedCommand(
@@ -992,6 +1102,7 @@ export class RedisBridgeStore {
           keys.length,
           ...keys,
           assignment.assignmentId,
+          assignment.runtimeSessionId === undefined ? '0' : '1',
         ),
         this.redisCommandTimeoutMs,
         'Bridge assignment cleanup',

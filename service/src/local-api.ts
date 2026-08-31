@@ -21,7 +21,11 @@ import './workers';
 import { env } from './config';
 import logger from './logger';
 import { shutdownTelemetry, traceHttpRequest } from './telemetry';
-import { validateExecutionProfilePolicy } from './secure-startup';
+import {
+  validateApiBridgePolicy,
+  validateExecutionProfilePolicy,
+  validateSandboxBackendPolicy,
+} from './secure-startup';
 import { configureExecutionProfileMetrics } from './metrics';
 
 const app = express();
@@ -58,7 +62,9 @@ app.use(requestErrorLogger);
 async function localStartup(): Promise<void> {
   logger.info('Starting local development server...');
   logger.info('⚠️  LOCAL MODE - No authentication required');
+  validateApiBridgePolicy();
   validateExecutionProfilePolicy();
+  validateSandboxBackendPolicy();
   configureExecutionProfileMetrics({
     profile: env.EXECUTION_PROFILE,
     sandboxBackend: env.SANDBOX_BACKEND,
