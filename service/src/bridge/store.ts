@@ -440,7 +440,12 @@ export class RedisBridgeStore {
     signal?: AbortSignal,
   ): Promise<CodeBridgeAssignment | undefined> {
     const deadline = Date.now() + waitMs;
-    while (!signalAborted(signal) && Date.now() < deadline) {
+    let firstPoll = true;
+    while (
+      !signalAborted(signal) &&
+      (firstPoll || Date.now() < deadline)
+    ) {
+      firstPoll = false;
       const assignmentId = await this.claimOrPopLease(workerId, incarnationId);
       if (assignmentId == null) {
         await delay(
@@ -799,11 +804,15 @@ export class RedisBridgeStore {
     if (runtimeSessionId !== undefined) {
       keys.push(workspaceQuarantineKey(workerId, runtimeSessionId));
     }
-    await this.redis.eval(
-      script,
-      keys.length,
-      ...keys,
-      incarnationId,
+    await boundedCommand(
+      this.redis.eval(
+        script,
+        keys.length,
+        ...keys,
+        incarnationId,
+      ),
+      this.redisCommandTimeoutMs,
+      'Bridge worker quarantine',
     );
   }
 

@@ -255,6 +255,22 @@ export class BridgeWorker {
         (Date.now() - acknowledgementStartedAtMs),
     );
     if (remainingMs <= 0) {
+      await this.settleWithRetry(
+        adjustedAssignment,
+        {
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          generation: adjustedAssignment.generation,
+          leaseToken: adjustedAssignment.leaseToken,
+          incarnationId: this.incarnationId,
+          status: 'rejected',
+          error: 'Bridge assignment expired during lease acknowledgement',
+        },
+        Date.now() +
+          Math.max(
+            0,
+            this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
+          ),
+      );
       throw new BridgeProtocolError(
         'Bridge assignment expired during lease acknowledgement',
       );
@@ -319,7 +335,6 @@ export class BridgeWorker {
     let heartbeatError: unknown;
     const heartbeat = this.maintainRegistration(
       heartbeatController.signal,
-      executionController,
     ).catch((error) => {
       heartbeatError = error;
       executionController.abort();
@@ -357,6 +372,10 @@ export class BridgeWorker {
       if (heartbeatError != null) throw heartbeatError;
       if (!response.ok) {
         sandboxRejectedExecution =
+          response.status >= 400 &&
+          response.status < 500 &&
+          response.status !== 408 &&
+          response.status !== 429 &&
           errorMessage(payload) !== 'session_workspace_dirty';
         throw new BridgeProtocolError(
           errorMessage(payload) ??
@@ -474,9 +493,8 @@ export class BridgeWorker {
 
   private async maintainRegistration(
     signal: AbortSignal,
-    executionController: AbortController,
   ): Promise<void> {
-    while (!signal.aborted && !executionController.signal.aborted) {
+    while (!signal.aborted) {
       const heartbeatIntervalMs = Math.max(
         MIN_REGISTRATION_HEARTBEAT_MS,
         Math.floor(this.registrationTtlMs / 2),
@@ -488,7 +506,7 @@ export class BridgeWorker {
         ),
         signal,
       );
-      if (signal.aborted || executionController.signal.aborted) return;
+      if (signal.aborted) return;
       await this.register(signal);
     }
   }

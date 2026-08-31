@@ -113,6 +113,63 @@ describe('RedisBridgeStore', () => {
     await expect(completion).resolves.toMatchObject({ status: 'rejected' });
   });
 
+  test('performs one immediate lease poll when wait is zero', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'nonblocking-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const completion = store.dispatch({
+      workerId: 'nonblocking-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: new AbortController().signal,
+    });
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (
+        (
+          await redis.keys(
+            'codeapi:bridge:v1:assignment:*',
+          )
+        ).length > 0
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+
+    const assignment = await store.lease(
+      'nonblocking-worker',
+      incarnationId,
+      0,
+    );
+    expect(assignment).toBeDefined();
+    await store.settle('nonblocking-worker', assignment?.assignmentId ?? '', {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      generation: assignment?.generation ?? 0,
+      leaseToken: assignment?.leaseToken ?? '',
+      incarnationId,
+      status: 'rejected',
+      error: 'test complete',
+    });
+    await expect(completion).resolves.toMatchObject({ status: 'rejected' });
+  });
+
+  test('bounds a stalled quarantine command', async () => {
+    const timedStore = new RedisBridgeStore(redis, 60, 10);
+    redis.eval = (() => new Promise(() => undefined)) as Redis['eval'];
+
+    await expect(
+      timedStore.quarantine('stalled-worker', incarnationId, 'rt-user-1'),
+    ).rejects.toThrow('Bridge worker quarantine timed out');
+  });
+
   test('rejects dispatch to an offline worker', async () => {
     const controller = new AbortController();
     await expect(
