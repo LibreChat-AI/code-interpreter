@@ -69,9 +69,10 @@ matching pod have converged to zero, and only then invokes `helm rollback`.
 When a fenced revision is deployed again, the epoch forces one fresh cleanup of
 legacy pairing codes even if the original migration window has expired. This
 causes an API outage by design. If rollback fails, the helper repeats the drain
-so a partially applied rollback cannot leave a mixed-version API running. The
-operator running it needs permission to read/scale Deployments, delete HPAs,
-and create or update the rollback ConfigMap.
+after re-discovering every API Deployment and explicitly deletes any remaining
+API pods, so a partially applied rollback cannot leave a mixed-version API
+running. The operator running it needs permission to read/scale Deployments,
+delete HPAs and pods, and create or update the rollback ConfigMap.
 
 **Execution profile.** By default this chart leaves
 `CODEAPI_EXECUTION_PROFILE` unset. Its bundled HTTP/stateless configuration is

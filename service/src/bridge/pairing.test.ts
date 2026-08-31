@@ -728,6 +728,49 @@ describe('RedisBridgePairingStore', () => {
 
     await expect(redis.get(legacyKey)).resolves.toBeNull();
     await expect(redis.get(deadlineKey)).resolves.toBe('0');
+    const epochHash = createHash('sha256')
+      .update('rollback-epoch-1')
+      .digest('hex');
+    const epochStateKey =
+      `codeapi:bridge:v1:migration:legacy-pairing-scanned:` +
+      `vm-rollback-epoch:${epochHash}`;
+    await expect(redis.get(epochStateKey)).resolves.toBe('done');
+    await expect(redis.pttl(epochStateKey)).resolves.toBe(-1);
+  });
+
+  test('cleans a revoked legacy code before rollback-epoch redemption', async () => {
+    const identity = createBridgeIdentity();
+    const workerId = 'vm-rollback-redeem';
+    const legacyCode = 'revoked-rollback-pairing';
+    const legacyKey = `codeapi:bridge:v1:pairing:${createHash('sha256')
+      .update(legacyCode)
+      .digest('hex')}`;
+    await redis.set('codeapi:bridge:v1:migration:legacy-pairing-scan-until', '0');
+    await redis.set(
+      legacyKey,
+      JSON.stringify({
+        workerId,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      'EX',
+      60,
+    );
+    const rollbackAwarePairings = new RedisBridgePairingStore(
+      redis,
+      600,
+      300,
+      5_000,
+      'rollback-epoch-redeem',
+    );
+
+    await expect(
+      rollbackAwarePairings.redeem({
+        workerId,
+        code: legacyCode,
+        publicKey: identity.publicKey,
+      }),
+    ).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
+    await expect(redis.get(legacyKey)).resolves.toBeNull();
   });
 
   test('redeems an unrevoked pairing code issued by a pre-fence replica', async () => {

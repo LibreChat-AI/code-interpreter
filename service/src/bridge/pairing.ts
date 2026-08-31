@@ -108,7 +108,9 @@ return 0
 const COMPLETE_LEGACY_SCAN_CLAIM_SCRIPT = `
 if redis.call('GET', KEYS[2]) == ARGV[1] then
   local remaining = tonumber(ARGV[3])
-  if remaining > 0 then
+  if ARGV[4] == '1' then
+    redis.call('SET', KEYS[1], ARGV[2])
+  elseif remaining > 0 then
     redis.call('SET', KEYS[1], ARGV[2], 'PX', remaining)
   else
     redis.call('DEL', KEYS[1])
@@ -273,6 +275,12 @@ export class RedisBridgePairingStore {
     code: string;
     publicKey: string;
   }): Promise<BridgeWorkerCredential> {
+    // A rollback epoch means an older binary may have issued or failed to
+    // revoke an unindexed code. Complete that worker's epoch scan before any
+    // legacy redemption can mint a credential.
+    if (this.rollbackEpoch.trim().length > 0) {
+      await this.removeLegacyPairings(args.workerId);
+    }
     const codeKey = pairingKey(args.code);
     const raw = await this.redis.get(codeKey);
     if (raw == null) {
@@ -599,6 +607,7 @@ export class RedisBridgePairingStore {
         scanClaim.token,
         LEGACY_SCAN_COMPLETE,
         String(deadline - Date.now()),
+        rollbackEpochDetected ? '1' : '0',
       );
       if (completed !== 1) {
         await this.removeLegacyPairings(workerId);

@@ -25,12 +25,33 @@ fi
 
 timeout=${CODEAPI_ROLLBACK_TIMEOUT:-10m}
 selector="app.kubernetes.io/instance=${release},app.kubernetes.io/component=api"
-deployment=$(kubectl --namespace "$namespace" get deployment \
-  --selector "$selector" --output name)
-if [[ -z "$deployment" || "$deployment" == *$'\n'* ]]; then
+
+discover_api_deployments() {
+  local output
+  output=$(kubectl --namespace "$namespace" get deployment \
+    --selector "$selector" --output name) || return
+  deployments=()
+  if [[ -n "$output" ]]; then
+    mapfile -t deployments <<< "$output"
+  fi
+}
+
+list_api_pods() {
+  local output
+  output=$(kubectl --namespace "$namespace" get pod \
+    --selector "$selector" --output name) || return
+  pods=()
+  if [[ -n "$output" ]]; then
+    mapfile -t pods <<< "$output"
+  fi
+}
+
+discover_api_deployments
+if (( ${#deployments[@]} != 1 )); then
   echo "expected exactly one Code API deployment for $selector" >&2
   exit 1
 fi
+deployment=${deployments[0]}
 
 fence=$(kubectl --namespace "$namespace" get "$deployment" \
   --output 'jsonpath={.spec.template.metadata.annotations.codeapi\.librechat\.ai/pairing-fence-version}')
@@ -49,38 +70,60 @@ kubectl --namespace "$namespace" create configmap "$rollback_config_map" \
   kubectl --namespace "$namespace" apply --filename -
 
 drain_api() {
+  local pod_action=${1:-wait}
+  local replica_state desired current ready available updated
+
+  # Helm may have partially installed a target with a different fullname.
+  # Resolve every matching API Deployment on each drain attempt.
+  discover_api_deployments
+  if (( ${#deployments[@]} == 0 )) && [[ "$pod_action" != delete ]]; then
+    echo "refusing rollback: no API deployment matched $selector" >&2
+    return 1
+  fi
+
   echo "Deleting API autoscalers before the rollback fence is lowered..." >&2
   kubectl --namespace "$namespace" delete horizontalpodautoscaler \
     --selector "$selector" --ignore-not-found --wait=true
 
   echo "Scaling the fenced API deployment to zero..." >&2
-  kubectl --namespace "$namespace" scale "$deployment" --replicas=0
-  kubectl --namespace "$namespace" rollout status "$deployment" \
-    --timeout "$timeout"
+  for deployment in "${deployments[@]}"; do
+    kubectl --namespace "$namespace" scale "$deployment" --replicas=0
+    kubectl --namespace "$namespace" rollout status "$deployment" \
+      --timeout "$timeout"
+  done
 
-  mapfile -t pods < <(kubectl --namespace "$namespace" get pod \
-    --selector "$selector" --output name)
+  list_api_pods
   if (( ${#pods[@]} > 0 )); then
-    kubectl --namespace "$namespace" wait "${pods[@]}" \
-      --for=delete --timeout "$timeout"
+    if [[ "$pod_action" == delete ]]; then
+      kubectl --namespace "$namespace" delete pod \
+        --selector "$selector" --wait=true --timeout "$timeout"
+    else
+      kubectl --namespace "$namespace" wait "${pods[@]}" \
+        --for=delete --timeout "$timeout"
+    fi
   fi
 
   # Relist immediately before Helm can lower the fence. This catches a new
   # matching pod that appeared after the first snapshot.
-  replica_state=$(kubectl --namespace "$namespace" get "$deployment" \
-    --output 'jsonpath={.spec.replicas},{.status.replicas},{.status.readyReplicas},{.status.availableReplicas},{.status.updatedReplicas}')
-  IFS=, read -r desired current ready available updated <<< "$replica_state"
-  mapfile -t pods < <(kubectl --namespace "$namespace" get pod \
-    --selector "$selector" --output name)
-  if (( ${#pods[@]} > 0 )) ||
-    [[ ${desired:-0} != 0 || ${current:-0} != 0 || ${ready:-0} != 0 ||
+  discover_api_deployments
+  for deployment in "${deployments[@]}"; do
+    replica_state=$(kubectl --namespace "$namespace" get "$deployment" \
+      --output 'jsonpath={.spec.replicas},{.status.replicas},{.status.readyReplicas},{.status.availableReplicas},{.status.updatedReplicas}') || return
+    IFS=, read -r desired current ready available updated <<< "$replica_state"
+    if [[ ${desired:-0} != 0 || ${current:-0} != 0 || ${ready:-0} != 0 ||
       ${available:-0} != 0 || ${updated:-0} != 0 ]]; then
-    echo "refusing rollback: API deployment did not converge to zero replicas" >&2
+      echo "refusing rollback: API deployment did not converge to zero replicas" >&2
+      return 1
+    fi
+  done
+  list_api_pods
+  if (( ${#pods[@]} > 0 )); then
+    echo "refusing rollback: API pods appeared after the drain" >&2
     return 1
   fi
 }
 
-drain_api
+drain_api wait
 
 echo "All fenced API pods are gone; starting Helm rollback..." >&2
 if helm rollback "$release" "$revision" \
@@ -89,6 +132,6 @@ if helm rollback "$release" "$revision" \
 else
   rollback_status=$?
   echo "Helm rollback failed; restoring the fail-closed API drain..." >&2
-  drain_api
+  drain_api delete
   exit "$rollback_status"
 fi

@@ -39,7 +39,9 @@ if ! grep -q 'delete horizontalpodautoscaler' "$rollback" ||
   ! grep -q -- '--for=delete' "$rollback" ||
   ! grep -q 'create configmap "$rollback_config_map"' "$rollback" ||
   ! grep -q 'replica_state=' "$rollback" ||
-  [[ $(grep -c '^  drain_api$' "$rollback") -lt 1 ]] ||
+  ! grep -q 'discover_api_deployments' "$rollback" ||
+  ! grep -q 'list_api_pods' "$rollback" ||
+  ! grep -q '^  drain_api delete$' "$rollback" ||
   ! grep -q 'helm rollback' "$rollback"; then
   echo 'rollback must record an epoch, remove autoscaling, verify the drain, and fail closed' >&2
   exit 1
