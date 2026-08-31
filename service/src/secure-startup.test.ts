@@ -337,7 +337,7 @@ describe('sandbox backend policy', () => {
   });
 
   test('API-only hardened bridge validation rejects static worker auth', () => {
-    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.SANDBOX_BACKEND = 'http';
     env.HARDENED_SANDBOX_MODE = true;
     env.BRIDGE_AUTH_MODE = 'static';
     expect(() => validateApiBridgePolicy()).toThrow(

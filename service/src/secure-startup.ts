@@ -231,12 +231,11 @@ export function validateSandboxBackendPolicy(): void {
  * invariant without requiring worker-only Lambda or checkpoint settings. */
 export function validateApiBridgePolicy(): void {
   if (
-    env.SANDBOX_BACKEND === 'remote-bridge' &&
     env.HARDENED_SANDBOX_MODE &&
     env.BRIDGE_AUTH_MODE !== 'paired'
   ) {
     throw new SecureStartupConfigError(
-      'Hardened remote bridge deployments require CODEAPI_BRIDGE_AUTH_MODE=paired',
+      'Hardened API deployments require CODEAPI_BRIDGE_AUTH_MODE=paired because bridge routes are always exposed',
     );
   }
 }
