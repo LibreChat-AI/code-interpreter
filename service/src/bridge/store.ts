@@ -395,6 +395,17 @@ export class RedisBridgeStore {
     assignmentId: string,
     settlement: CodeBridgeSettlement,
   ): Promise<void> {
+    const serializedSettlement = JSON.stringify(settlement);
+    const existingSettlement = await this.redis.get(
+      settlementKey(assignmentId),
+    );
+    if (existingSettlement === serializedSettlement) return;
+    if (existingSettlement != null) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_FENCED',
+        'Bridge assignment was already settled with a different result',
+      );
+    }
     const assignment = await this.readAssignment(assignmentId);
     if (assignment == null) {
       throw new BridgeStoreError(
@@ -431,18 +442,21 @@ export class RedisBridgeStore {
       assignmentKey(assignmentId),
       settlementKey(assignmentId),
     ];
-    if (
-      settlement.status === 'fulfilled' &&
-      assignment.runtimeSessionId !== undefined
-    ) {
+    if (assignment.runtimeSessionId !== undefined) {
       settlementKeys.push(
         workspaceQuarantineKey(workerId, assignment.runtimeSessionId),
       );
     }
     const script = [
+      'local existing = redis.call(\'GET\', KEYS[2])',
+      'if existing then',
+      '  if existing == ARGV[1] then return 2 end',
+      '  return -1',
+      'end',
       'if redis.call(\'EXISTS\', KEYS[1]) == 0 then return 0 end',
+      'if #KEYS == 3 and redis.call(\'GET\', KEYS[3]) ~= ARGV[3] then return -2 end',
       'redis.call(\'SET\', KEYS[2], ARGV[1], \"EX\", ARGV[2])',
-      'if #KEYS == 3 then redis.call(\'SET\', KEYS[3], ARGV[3]) end',
+      'if #KEYS == 3 and ARGV[4] == \"rejected\" then redis.call(\'DEL\', KEYS[3]) end',
       'return 1',
     ].join('\n');
     const accepted = Number(
@@ -450,12 +464,25 @@ export class RedisBridgeStore {
         script,
         settlementKeys.length,
         ...settlementKeys,
-        JSON.stringify(settlement),
+        serializedSettlement,
         String(ttlSeconds),
         assignmentId,
+        settlement.status,
       ),
     );
-    if (accepted !== 1) {
+    if (accepted === -1) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_FENCED',
+        'Bridge assignment was already settled with a different result',
+      );
+    }
+    if (accepted === -2) {
+      throw new BridgeStoreError(
+        'WORKSPACE_QUARANTINED',
+        'Bridge workspace in-flight marker was lost before settlement',
+      );
+    }
+    if (accepted !== 1 && accepted !== 2) {
       throw new BridgeStoreError(
         'ASSIGNMENT_EXPIRED',
         'Bridge assignment closed before settlement was committed',
@@ -566,25 +593,44 @@ export class RedisBridgeStore {
   ): Promise<boolean> {
     const script = [
       'if redis.call(\'GET\', KEYS[1]) ~= ARGV[1] then return 0 end',
+      'if #KEYS == 5 and redis.call(\'EXISTS\', KEYS[5]) == 1 then return -1 end',
       'redis.call(\'SET\', KEYS[2], ARGV[2], \"EX\", ARGV[3])',
       'redis.call(\'RPUSH\', KEYS[3], ARGV[4])',
       'redis.call(\'EXPIRE\', KEYS[3], ARGV[3])',
       'redis.call(\'SET\', KEYS[4], ARGV[1], \"PX\", ARGV[5])',
+      'if #KEYS == 5 then redis.call(\'SET\', KEYS[5], ARGV[4]) end',
       'return 1',
     ].join('\n');
-    const result = await this.redis.eval(
-      script,
-      4,
+    const keys = [
       workerIncarnationKey(assignment.workerId),
       assignmentKey(assignment.assignmentId),
       queueKey(assignment.workerId, assignment.incarnationId),
       lockIncarnationKey(assignment.workerId),
+    ];
+    if (assignment.runtimeSessionId !== undefined) {
+      keys.push(
+        workspaceQuarantineKey(
+          assignment.workerId,
+          assignment.runtimeSessionId,
+        ),
+      );
+    }
+    const result = await this.redis.eval(
+      script,
+      keys.length,
+      ...keys,
       assignment.incarnationId,
       JSON.stringify(assignment),
       String(ttlSeconds),
       assignment.assignmentId,
       String(ttlSeconds * 1000),
     );
+    if (Number(result) === -1) {
+      throw new BridgeStoreError(
+        'WORKSPACE_QUARANTINED',
+        'Bridge workspace already has incomplete stateful work',
+      );
+    }
     return Number(result) === 1;
   }
 
@@ -680,10 +726,7 @@ export class RedisBridgeStore {
 
   private async cleanup(assignment: StoredAssignment): Promise<void> {
     await Promise.all([
-      this.redis.del(
-        assignmentKey(assignment.assignmentId),
-        settlementKey(assignment.assignmentId),
-      ),
+      this.redis.del(assignmentKey(assignment.assignmentId)),
       this.releaseLock(assignment.workerId, assignment.assignmentId),
     ]);
   }

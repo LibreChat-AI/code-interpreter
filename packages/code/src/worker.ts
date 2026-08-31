@@ -49,6 +49,11 @@ function errorMessage(value: object): string | undefined {
   return undefined;
 }
 
+function errorCode(value: object): string | undefined {
+  if ('code' in value && typeof value.code === 'string') return value.code;
+  return undefined;
+}
+
 export class BridgeWorkspaceQuarantinedError extends Error {
   constructor(
     message: string,
@@ -188,7 +193,10 @@ export class BridgeWorker {
         if (signal?.aborted) return;
         if (
           error instanceof BridgeProtocolError &&
-          (error.status === 401 || error.status === 403 || error.status === 409)
+          (error.status === 401 ||
+            error.status === 403 ||
+            error.code === 'WORKER_FENCED' ||
+            error.code === 'WORKER_QUARANTINED')
         ) {
           throw error;
         }
@@ -518,6 +526,7 @@ export class BridgeWorker {
         errorMessage(payload) ??
           `Bridge request failed with HTTP ${response.status}`,
         response.status,
+        errorCode(payload),
       );
     }
     return payload as T;

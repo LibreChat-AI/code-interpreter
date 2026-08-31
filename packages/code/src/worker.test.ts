@@ -76,6 +76,89 @@ test('worker forwards a fenced assignment to the sandbox and settles the result'
   });
 });
 
+test('worker continues after an assignment-scoped settlement conflict', async () => {
+  const controller = new AbortController();
+  let registrations = 0;
+  let leases = 0;
+  let observedError: unknown;
+  const assignment: BridgeAssignment = {
+    protocolVersion: 1,
+    assignmentId: 'expired-settlement',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    remainingMs: 5_000,
+    request: { body: { language: 'bash' }, headers: {} },
+  };
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/workers/register')) {
+      registrations += 1;
+      if (registrations === 2) controller.abort();
+      return new Response(
+        JSON.stringify({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          incarnationId: 'incarnation-00000001',
+          registeredAt: new Date().toISOString(),
+          leaseTtlMs: 60_000,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (init?.signal?.aborted === true) {
+      throw new DOMException('aborted', 'AbortError');
+    }
+    if (url.endsWith('/lease')) {
+      leases += 1;
+      return new Response(
+        JSON.stringify({ protocolVersion: 1, assignment }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (url.endsWith('/execute')) {
+      return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        error: 'Bridge assignment has expired',
+        code: 'ASSIGNMENT_EXPIRED',
+      }),
+      { status: 409, headers: { 'Content-Type': 'application/json' } },
+    );
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    reconnectDelayMs: 0,
+    fetchImpl,
+    onError: (error) => {
+      observedError = error;
+    },
+  });
+
+  await worker.run(controller.signal);
+  assert.equal(registrations, 2);
+  assert.equal(leases, 1);
+  assert.equal(
+    observedError instanceof Error ? observedError.message : undefined,
+    'Bridge assignment has expired',
+  );
+});
+
 test('worker aborts sandbox execution at the absolute assignment deadline', async () => {
   let settlement: Record<string, unknown> | undefined;
   const fetchImpl: typeof fetch = async (input, init) => {

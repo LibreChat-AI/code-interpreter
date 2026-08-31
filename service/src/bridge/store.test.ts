@@ -608,19 +608,24 @@ describe('RedisBridgeStore', () => {
       incarnationId,
       1_000,
     );
-    await store.settle('commit-worker', assignment?.assignmentId ?? '', {
+    const settlement = {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       generation: assignment?.generation ?? 0,
       leaseToken: assignment?.leaseToken ?? '',
       incarnationId,
-      status: 'fulfilled',
+      status: 'fulfilled' as const,
       result: {
         language: 'bash',
         version: '5.2.0',
         session_id: 'run-commit',
         files: [],
       },
-    });
+    };
+    await store.settle(
+      'commit-worker',
+      assignment?.assignmentId ?? '',
+      settlement,
+    );
     await started;
     const [pendingMarker] = await redis.keys(
       'codeapi:bridge:v1:worker:commit-worker:workspace:*:quarantined',
@@ -633,6 +638,117 @@ describe('RedisBridgeStore', () => {
     releaseFinalizer();
     await expect(completion).resolves.toMatchObject({ status: 'fulfilled' });
     expect(await redis.exists(pendingMarker)).toBe(0);
+    await expect(
+      store.settle(
+        'commit-worker',
+        assignment?.assignmentId ?? '',
+        settlement,
+      ),
+    ).resolves.toBeUndefined();
+    expect(await redis.exists(pendingMarker)).toBe(0);
+  });
+
+  test('keeps an in-flight workspace fenced when execution never settles', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'lost-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'lost-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-lost',
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease(
+      'lost-worker',
+      incarnationId,
+      1_000,
+    );
+    expect(assignment).toBeDefined();
+    const [marker] = await redis.keys(
+      'codeapi:bridge:v1:worker:lost-worker:workspace:*:quarantined',
+    );
+    expect(await redis.get(marker)).toBe(assignment?.assignmentId ?? null);
+
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'lost-worker',
+      incarnationId: 'incarnation-00000002',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    await expect(
+      store.dispatch({
+        workerId: 'lost-worker',
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        runtimeSessionId: 'rt-lost',
+        deadlineAtMs: Date.now() + 1_000,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
+  });
+
+  test('clears an in-flight workspace marker after a definite rejection', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'rejected-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'rejected-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-rejected',
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease(
+      'rejected-worker',
+      incarnationId,
+      1_000,
+    );
+    const [marker] = await redis.keys(
+      'codeapi:bridge:v1:worker:rejected-worker:workspace:*:quarantined',
+    );
+    expect(await redis.get(marker)).toBe(assignment?.assignmentId ?? null);
+    await store.settle(
+      'rejected-worker',
+      assignment?.assignmentId ?? '',
+      {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        generation: assignment?.generation ?? 0,
+        leaseToken: assignment?.leaseToken ?? '',
+        incarnationId,
+        status: 'rejected',
+        error: 'sandbox rejected before execution',
+      },
+    );
+
+    await expect(completion).resolves.toMatchObject({ status: 'rejected' });
+    expect(await redis.exists(marker)).toBe(0);
   });
 
   test('releases the worker lock when generation allocation fails', async () => {
