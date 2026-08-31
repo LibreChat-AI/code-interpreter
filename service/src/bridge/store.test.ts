@@ -11,10 +11,12 @@ const store = new RedisBridgeStore(redis);
 const incarnationId = 'incarnation-00000001';
 const redisEval = redis.eval.bind(redis);
 const redisDel = redis.del.bind(redis);
+const redisLpop = redis.lpop.bind(redis);
 
 afterEach(async () => {
   redis.eval = redisEval as Redis['eval'];
   redis.del = redisDel as Redis['del'];
+  redis.lpop = redisLpop as Redis['lpop'];
   await redis.flushall();
 });
 
@@ -76,6 +78,46 @@ describe('RedisBridgeStore', () => {
         signal: controller.signal,
       }),
     ).rejects.toMatchObject({ code: 'WORKER_OFFLINE' });
+  });
+
+  test('returns a popped assignment when its lease request is aborted', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const dispatchController = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'vm-1',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: dispatchController.signal,
+    });
+    const leaseController = new AbortController();
+    redis.lpop = (async (...args: Parameters<Redis['lpop']>) => {
+      const assignmentId = await redisLpop(...args);
+      if (assignmentId != null) leaseController.abort();
+      return assignmentId;
+    }) as Redis['lpop'];
+
+    await expect(
+      store.lease('vm-1', incarnationId, 1_000, leaseController.signal),
+    ).resolves.toBeUndefined();
+    redis.lpop = redisLpop as Redis['lpop'];
+
+    const recovered = await store.lease('vm-1', incarnationId, 1_000);
+    expect(recovered).toBeDefined();
+    expect(recovered?.workerId).toBe('vm-1');
+    dispatchController.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
   });
 
   test('rejects a stale lease token', async () => {
@@ -722,5 +764,61 @@ describe('RedisBridgeStore', () => {
         signal: controller.signal,
       }),
     ).rejects.toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
+  });
+
+  test('does not quarantine a stateless worker when finalization fails', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'stateless-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'stateless-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+      finalize: async () => {
+        throw new Error('restore failed');
+      },
+    });
+    const assignment = await store.lease(
+      'stateless-worker',
+      incarnationId,
+      1_000,
+    );
+    await store.settle('stateless-worker', assignment?.assignmentId ?? '', {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      generation: assignment?.generation ?? 0,
+      leaseToken: assignment?.leaseToken ?? '',
+      incarnationId,
+      status: 'fulfilled',
+      result: {
+        language: 'bash',
+        version: '5.2.0',
+        session_id: 'run-1',
+        files: [],
+      },
+    });
+
+    await expect(completion).rejects.toThrow('restore failed');
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'stateless-worker',
+        incarnationId,
+        capabilities: {
+          statefulWorkspace: false,
+          sandboxProfile: 'nsjail',
+          runtimes: [],
+        },
+      }),
+    ).resolves.toBeUndefined();
   });
 });

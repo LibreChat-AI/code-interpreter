@@ -204,6 +204,11 @@ export class BridgeWorker {
     assignment: BridgeAssignment,
     signal?: AbortSignal,
   ): Promise<void> {
+    if (signal?.aborted === true) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException('aborted', 'AbortError');
+    }
     const executionController = new AbortController();
     const abortExecution = (): void => executionController.abort();
     signal?.addEventListener('abort', abortExecution, { once: true });

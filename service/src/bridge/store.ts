@@ -123,6 +123,10 @@ async function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+function signalAborted(signal?: AbortSignal): boolean {
+  return signal?.aborted === true;
+}
+
 export class RedisBridgeStore {
   constructor(
     private readonly redis: Redis,
@@ -301,11 +305,13 @@ export class RedisBridgeStore {
         resultCommitted = true;
         return result;
       } catch (error) {
-        await this.quarantine(
-          args.workerId,
-          assignment.incarnationId,
-          args.runtimeSessionId,
-        );
+        if (args.runtimeSessionId !== undefined) {
+          await this.quarantine(
+            args.workerId,
+            assignment.incarnationId,
+            args.runtimeSessionId,
+          );
+        }
         throw error;
       }
     } finally {
@@ -330,7 +336,7 @@ export class RedisBridgeStore {
     signal?: AbortSignal,
   ): Promise<CodeBridgeAssignment | undefined> {
     const deadline = Date.now() + waitMs;
-    while (signal?.aborted !== true && Date.now() < deadline) {
+    while (!signalAborted(signal) && Date.now() < deadline) {
       const assignmentId = await this.redis.lpop(
         queueKey(workerId, incarnationId),
       );
@@ -344,6 +350,10 @@ export class RedisBridgeStore {
       const assignment = await this.readAssignment(assignmentId);
       if (assignment == null || assignment.workerId !== workerId) continue;
       if (assignment.incarnationId !== incarnationId) continue;
+      if (signalAborted(signal)) {
+        await this.returnLease(assignment);
+        return undefined;
+      }
       const registration = await this.registration(workerId);
       if (registration?.incarnationId !== incarnationId) {
         throw new BridgeStoreError(
@@ -352,6 +362,10 @@ export class RedisBridgeStore {
         );
       }
       if (Date.parse(assignment.expiresAt) <= Date.now()) continue;
+      if (signalAborted(signal)) {
+        await this.returnLease(assignment);
+        return undefined;
+      }
       const { leaseTokenHash: _leaseTokenHash, ...wireAssignment } = assignment;
       return {
         ...wireAssignment,
@@ -359,6 +373,21 @@ export class RedisBridgeStore {
       };
     }
     return undefined;
+  }
+
+  async returnLease(assignment: CodeBridgeAssignment): Promise<void> {
+    await this.redis.eval(
+      [
+        "if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end",
+        "redis.call('LREM', KEYS[2], 0, ARGV[1])",
+        "redis.call('LPUSH', KEYS[2], ARGV[1])",
+        'return 1',
+      ].join('\n'),
+      2,
+      assignmentKey(assignment.assignmentId),
+      queueKey(assignment.workerId, assignment.incarnationId),
+      assignment.assignmentId,
+    );
   }
 
   async settle(

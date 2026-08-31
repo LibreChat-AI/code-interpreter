@@ -193,12 +193,30 @@ router.post(
           Math.min(requestedWait, MAX_LEASE_WAIT_MS),
           leaseController.signal,
         );
+        if (leaseController.signal.aborted) {
+          if (assignment != null) await bridgeStore.returnLease(assignment);
+          return;
+        }
+        const delivered = await new Promise<boolean>((resolve) => {
+          const onFinish = (): void => {
+            res.off('close', onClose);
+            resolve(true);
+          };
+          const onClose = (): void => {
+            res.off('finish', onFinish);
+            resolve(false);
+          };
+          res.once('finish', onFinish);
+          res.once('close', onClose);
+          res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
+        });
+        if (!delivered && assignment != null) {
+          await bridgeStore.returnLease(assignment);
+        }
       } finally {
         req.off('aborted', abortLease);
         res.off('close', abortLease);
       }
-      if (leaseController.signal.aborted) return;
-      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
     } catch (error) {
       if (error instanceof BridgeStoreError) {
         sendStoreError(error, res);

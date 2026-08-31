@@ -539,6 +539,47 @@ test('worker surfaces quarantine when shutdown aborts stateful execution', async
   assert.equal(executeStarted, true);
 });
 
+test('worker does not start execution after shutdown is already aborted', async () => {
+  const controller = new AbortController();
+  controller.abort(new DOMException('shutdown', 'AbortError'));
+  let executeStarted = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async () => {
+      executeStarted = true;
+      return new Response('{}', { status: 200 });
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle(
+      {
+        protocolVersion: 1,
+        assignmentId: 'shutdown-before-execution',
+        workerId: 'vm-1',
+        incarnationId: 'incarnation-00000001',
+        generation: 1,
+        leaseToken: 'lease-token-that-is-long-enough-for-testing',
+        expiresAt: new Date(Date.now() + 5_000).toISOString(),
+        remainingMs: 5_000,
+        request: { body: { language: 'bash' }, headers: {} },
+      },
+      controller.signal,
+    ),
+    { name: 'AbortError' },
+  );
+  assert.equal(executeStarted, false);
+});
+
 test('worker bounds a stalled lease transport beyond its long poll', async () => {
   const worker = new BridgeWorker({
     codeApiUrl: 'https://code.example/v1',
