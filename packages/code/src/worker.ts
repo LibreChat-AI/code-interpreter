@@ -159,7 +159,10 @@ export class BridgeWorker {
         if (signal?.aborted) return;
         if (
           error instanceof BridgeProtocolError &&
-          (error.status === 401 || error.status === 403 || error.status === 409)
+          (error.status === 401 ||
+            error.status === 403 ||
+            error.code === 'WORKER_FENCED' ||
+            error.code === 'WORKER_QUARANTINED')
         ) {
           throw error;
         }
@@ -402,6 +405,9 @@ export class BridgeWorker {
         errorMessage(payload) ??
           `Bridge request failed with HTTP ${response.status}`,
         response.status,
+        'code' in payload && typeof payload.code === 'string'
+          ? payload.code
+          : undefined,
       );
     }
     return payload as T;

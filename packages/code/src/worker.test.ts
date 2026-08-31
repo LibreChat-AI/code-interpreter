@@ -126,6 +126,72 @@ test('worker aborts sandbox execution at the absolute assignment deadline', asyn
   assert.equal(settlement?.incarnationId, incarnationId);
 });
 
+test('worker continues after an expired assignment settlement conflict', async () => {
+  const controller = new AbortController();
+  let registrations = 0;
+  let leases = 0;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    reconnectDelayMs: 0,
+    reconnectMaxDelayMs: 0,
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/workers/register')) {
+        registrations += 1;
+        if (registrations === 2) controller.abort();
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          incarnationId,
+          registeredAt: new Date().toISOString(),
+          leaseTtlMs: 60_000,
+        });
+      }
+      if (url.endsWith('/lease')) {
+        leases += 1;
+        return Response.json({
+          protocolVersion: 1,
+          assignment: leases === 1
+            ? {
+                protocolVersion: 1,
+                assignmentId: 'assignment-expired',
+                workerId: 'vm-1',
+                incarnationId,
+                generation: 1,
+                leaseToken: 'lease-token-that-is-long-enough-for-testing',
+                expiresAt: new Date(Date.now() + 10_000).toISOString(),
+                request: { body: { language: 'bash' }, headers: {} },
+              }
+            : undefined,
+        });
+      }
+      if (url.endsWith('/execute')) {
+        return Response.json({ session_id: 'run-1', files: [] });
+      }
+      if (url.endsWith('/settle')) {
+        return Response.json(
+          { error: 'Bridge assignment has expired', code: 'ASSIGNMENT_EXPIRED' },
+          { status: 409 },
+        );
+      }
+      return Response.json({ cancelled: false });
+    },
+  });
+
+  await worker.run(controller.signal);
+
+  assert.equal(registrations, 2);
+});
+
 test('worker refreshes its registration during a long assignment', async () => {
   let registrations = 0;
   const fetchImpl: typeof fetch = async (input) => {
