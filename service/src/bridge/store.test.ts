@@ -237,6 +237,74 @@ describe('RedisBridgeStore', () => {
     await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
   });
 
+  test('leases an assignment queued by the prior identity-only encoding', async () => {
+    const identityId = 'rollout-compatible-identity';
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'rollout-worker',
+      incarnationId,
+      identityId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'rollout-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const [storedKey] = await redis.keys('codeapi:bridge:v1:assignment:*');
+    const assignmentId = storedKey.replace('codeapi:bridge:v1:assignment:', '');
+    const queue = 'codeapi:bridge:v1:worker:rollout-worker:assignments';
+    await redis.del(queue);
+    await redis.rpush(queue, `${identityId.length}:${identityId}${assignmentId}`);
+
+    await expect(
+      store.lease('rollout-worker', incarnationId, 1_000, undefined, identityId),
+    ).resolves.toMatchObject({ assignmentId });
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
+  test('leases an assignment queued by the original raw encoding', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'legacy-queue-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'legacy-queue-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const [storedKey] = await redis.keys('codeapi:bridge:v1:assignment:*');
+    const assignmentId = storedKey.replace('codeapi:bridge:v1:assignment:', '');
+    const queue = 'codeapi:bridge:v1:worker:legacy-queue-worker:assignments';
+    await redis.del(queue);
+    await redis.rpush(queue, assignmentId);
+
+    await expect(
+      store.lease('legacy-queue-worker', incarnationId, 1_000),
+    ).resolves.toMatchObject({ assignmentId });
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
   test('leases queued work after credential refresh preserves the paired identity', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -320,6 +388,62 @@ describe('RedisBridgeStore', () => {
       status: 'fulfilled',
       result: { session_id: 'run-1' },
     });
+  });
+
+  test('rejects settlement after the paired identity is replaced', async () => {
+    const identityId = 'settlement-owner-identity';
+    await redis.set(
+      'codeapi:bridge:v1:stable-identity:settlement-worker',
+      identityId,
+    );
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'settlement-worker',
+      incarnationId,
+      identityId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'settlement-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease(
+      'settlement-worker',
+      incarnationId,
+      1_000,
+      undefined,
+      identityId,
+    );
+    await redis.set(
+      'codeapi:bridge:v1:stable-identity:settlement-worker',
+      'replacement-owner-identity',
+    );
+
+    await expect(
+      store.settle(
+        'settlement-worker',
+        assignment?.assignmentId ?? '',
+        {
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          generation: assignment?.generation ?? 0,
+          leaseToken: assignment?.leaseToken ?? '',
+          incarnationId,
+          status: 'rejected',
+          error: 'sandbox failed',
+        },
+        identityId,
+      ),
+    ).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
   });
 
   test('rejects dispatch to an offline worker', async () => {

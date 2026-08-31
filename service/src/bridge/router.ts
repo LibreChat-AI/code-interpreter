@@ -461,6 +461,11 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
           req.params.workerId,
           req.params.assignmentId,
           settlement,
+          (
+            res.locals.bridgeWorkerAuthorization as
+              | { identityId: string }
+              | undefined
+          )?.identityId,
         );
         res.json({
           protocolVersion: BRIDGE_PROTOCOL_VERSION,

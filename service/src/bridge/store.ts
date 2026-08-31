@@ -368,6 +368,7 @@ export class RedisBridgeStore {
           '  local id = nil',
           "  local identity = ''",
           "  local incarnation = ''",
+          '  local legacy = false',
           '  if separator then',
           '    local identityLength = tonumber(string.sub(entry, 1, separator - 1))',
           '    if identityLength then',
@@ -380,14 +381,20 @@ export class RedisBridgeStore {
           '          incarnation = string.sub(entry, incarnationSeparator + 1, incarnationSeparator + incarnationLength)',
           '          id = string.sub(entry, incarnationSeparator + incarnationLength + 1)',
           '        end',
+          '      else',
+          '        id = string.sub(entry, incarnationLengthStart)',
+          '        legacy = true',
           '      end',
           '    end',
+          "  elseif ARGV[3] == '' then",
+          '    id = entry',
+          '    legacy = true',
           '  end',
-          '  if id and identity == ARGV[3] and incarnation == ARGV[4] then',
+          '  if id and identity == ARGV[3] then',
           "  local raw = redis.call('GET', ARGV[1] .. id)",
           '  if not raw then',
           "    redis.call('LREM', KEYS[1], 1, entry)",
-          '  else',
+          "  elseif incarnation == ARGV[4] or (legacy and string.find(raw, '\"incarnationId\":\"' .. ARGV[4] .. '\"', 1, true)) then",
           "      redis.call('LREM', KEYS[1], 1, entry)",
           '      return raw',
           '  end',
@@ -439,26 +446,32 @@ export class RedisBridgeStore {
     workerId: string,
     assignmentId: string,
     settlement: CodeBridgeSettlement,
+    identityId?: string,
   ): Promise<void> {
-    const assignment = await this.readAssignment(assignmentId);
-    if (assignment == null) {
+    const rawAssignment = await this.redis.get(assignmentKey(assignmentId));
+    if (rawAssignment == null) {
       throw new BridgeStoreError(
         'ASSIGNMENT_NOT_FOUND',
         'Bridge assignment was not found',
       );
     }
+    const assignment = JSON.parse(rawAssignment) as StoredAssignment;
     if (assignment.workerId !== workerId) {
       throw new BridgeStoreError(
         'WORKER_MISMATCH',
         'Bridge assignment belongs to another worker',
       );
     }
-    const registration = await this.registration(workerId);
+    const rawRegistration = await this.redis.get(workerKey(workerId));
+    const registration = rawRegistration == null
+      ? undefined
+      : JSON.parse(rawRegistration) as RegisteredBridgeWorker;
     if (
       settlement.incarnationId !== assignment.incarnationId ||
       registration?.incarnationId !== settlement.incarnationId ||
       settlement.generation !== assignment.generation ||
-      tokenHash(settlement.leaseToken) !== assignment.leaseTokenHash
+      tokenHash(settlement.leaseToken) !== assignment.leaseTokenHash ||
+      assignment.workerIdentityId !== identityId
     ) {
       throw new BridgeStoreError(
         'ASSIGNMENT_FENCED',
@@ -472,12 +485,37 @@ export class RedisBridgeStore {
       );
     }
     const ttlSeconds = assignmentTtlSeconds(Date.parse(assignment.expiresAt));
-    await this.redis.set(
-      settlementKey(assignmentId),
-      JSON.stringify(settlement),
-      'EX',
-      ttlSeconds,
+    const accepted = Number(
+      await this.redis.eval(
+        [
+          "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
+          "if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end",
+          'if ARGV[3] ~= "" then',
+          "  if redis.call('GET', KEYS[3]) ~= ARGV[3] then return 0 end",
+          "elseif redis.call('EXISTS', KEYS[3]) == 1 then",
+          '  return 0',
+          'end',
+          "redis.call('SET', KEYS[4], ARGV[4], 'EX', ARGV[5])",
+          'return 1',
+        ].join('\n'),
+        4,
+        assignmentKey(assignmentId),
+        workerKey(workerId),
+        `${PREFIX}:stable-identity:${workerId}`,
+        settlementKey(assignmentId),
+        rawAssignment,
+        rawRegistration ?? '',
+        identityId ?? '',
+        JSON.stringify(settlement),
+        String(ttlSeconds),
+      ),
     );
+    if (accepted !== 1) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_FENCED',
+        'Bridge assignment lease is stale',
+      );
+    }
   }
 
   async cancelled(
