@@ -188,6 +188,19 @@ describe('RedisBridgeStore', () => {
     ).rejects.toThrow('Bridge worker registration timed out');
   });
 
+  test('bounds stalled Redis reads during cancellation polling', async () => {
+    const timedStore = new RedisBridgeStore(redis, 60, 10);
+    redis.get = (() => new Promise(() => undefined)) as Redis['get'];
+
+    await expect(
+      timedStore.cancelled(
+        'stalled-cancellation-worker',
+        incarnationId,
+        'assignment-stalled-cancellation',
+      ),
+    ).rejects.toThrow('Bridge cancellation assignment read timed out');
+  });
+
   test('retains cancellation through the assignment lifetime', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -1294,6 +1307,25 @@ describe('RedisBridgeStore', () => {
     await expect(completion).rejects.toMatchObject({
       code: 'ASSIGNMENT_EXPIRED',
     });
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'lost-worker',
+        incarnationId: 'incarnation-00000002',
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: [],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_BUSY' });
+    expect(
+      await redis.get('codeapi:bridge:v1:worker:lost-worker:lock'),
+    ).toBe(assignment?.assignmentId ?? null);
+    await redis.del(
+      'codeapi:bridge:v1:worker:lost-worker:lock',
+      'codeapi:bridge:v1:worker:lost-worker:lock:incarnation',
+    );
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'lost-worker',

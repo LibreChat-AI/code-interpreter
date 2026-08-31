@@ -830,9 +830,18 @@ export class RedisBridgeStore {
     workerId: string,
     incarnationId: string,
     assignmentId: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
-    const assignment = await this.readAssignment(assignmentId);
-    const registration = await this.registration(workerId);
+    const assignment = await this.leaseCommand(
+      this.readAssignment(assignmentId),
+      signal,
+      'Bridge cancellation assignment read',
+    );
+    const registration = await this.leaseCommand(
+      this.registration(workerId),
+      signal,
+      'Bridge cancellation registration read',
+    );
     if (
       assignment == null ||
       assignment.workerId !== workerId ||
@@ -841,7 +850,13 @@ export class RedisBridgeStore {
     ) {
       return true;
     }
-    return (await this.redis.exists(cancellationKey(assignmentId))) === 1;
+    return (
+      (await this.leaseCommand(
+        this.redis.exists(cancellationKey(assignmentId)),
+        signal,
+        'Bridge cancellation marker read',
+      )) === 1
+    );
   }
 
   async quarantine(
@@ -1190,12 +1205,12 @@ export class RedisBridgeStore {
       "  redis.call('DEL', KEYS[3], KEYS[4])",
       'end',
       'if queued == 0 and acknowledged and ARGV[2] == "1" and redis.call(\'GET\', KEYS[5]) == ARGV[1] then',
-      '  return 0',
+      '  return -1',
       'end',
       "return redis.call('DEL', KEYS[1], KEYS[3], KEYS[4])",
     ].join('\n');
-    await Promise.all([
-      boundedCommand(
+    const cleanupResult = Number(
+      await boundedCommand(
         this.redis.eval(
           cleanupScript,
           keys.length,
@@ -1206,12 +1221,14 @@ export class RedisBridgeStore {
         this.redisCommandTimeoutMs,
         'Bridge assignment cleanup',
       ),
-      boundedCommand(
+    );
+    if (cleanupResult !== -1) {
+      await boundedCommand(
         this.releaseLock(assignment.workerId, assignment.assignmentId),
         this.redisCommandTimeoutMs,
         'Bridge assignment lock release',
-      ),
-    ]);
+      );
+    }
   }
 
   private async releaseLock(

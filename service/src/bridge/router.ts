@@ -334,12 +334,24 @@ router.post(
       res.status(400).json({ error: 'Invalid bridge cancellation request' });
       return;
     }
-    const cancelled = await bridgeStore.cancelled(
-      req.params.workerId,
-      body.incarnationId,
-      req.params.assignmentId,
-    );
-    res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, cancelled });
+    const cancellationController = new AbortController();
+    const abortCancellation = (): void => cancellationController.abort();
+    req.once('aborted', abortCancellation);
+    res.once('close', abortCancellation);
+    try {
+      const cancelled = await bridgeStore.cancelled(
+        req.params.workerId,
+        body.incarnationId,
+        req.params.assignmentId,
+        cancellationController.signal,
+      );
+      if (!cancellationController.signal.aborted) {
+        res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, cancelled });
+      }
+    } finally {
+      req.off('aborted', abortCancellation);
+      res.off('close', abortCancellation);
+    }
   }),
 );
 
