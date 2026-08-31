@@ -186,12 +186,24 @@ router.post(
       return;
     }
     try {
-      await bridgeStore.resetWorkspace(
-        workerId,
-        body.incarnationId,
-        body.runtimeSessionId,
-      );
-      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, reset: true });
+      const resetController = new AbortController();
+      const abortReset = (): void => resetController.abort();
+      req.once('aborted', abortReset);
+      res.once('close', abortReset);
+      try {
+        await bridgeStore.resetWorkspace(
+          workerId,
+          body.incarnationId,
+          body.runtimeSessionId,
+          resetController.signal,
+        );
+        if (!resetController.signal.aborted) {
+          res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, reset: true });
+        }
+      } finally {
+        req.off('aborted', abortReset);
+        res.off('close', abortReset);
+      }
     } catch (error) {
       if (error instanceof BridgeStoreError) {
         sendStoreError(error, res);

@@ -925,20 +925,25 @@ export class RedisBridgeStore {
     workerId: string,
     incarnationId: string,
     runtimeSessionId: string,
+    signal?: AbortSignal,
   ): Promise<void> {
     const result = Number(
-      await this.redis.eval(
-        [
-          "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return -1 end",
-          "if redis.call('EXISTS', KEYS[2]) == 1 then return -2 end",
-          "redis.call('DEL', KEYS[3])",
-          'return 1',
-        ].join('\n'),
-        3,
-        workerIncarnationKey(workerId),
-        lockKey(workerId),
-        workspaceQuarantineKey(workerId, runtimeSessionId),
-        incarnationId,
+      await this.leaseCommand(
+        this.redis.eval(
+          [
+            "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return -1 end",
+            "if redis.call('EXISTS', KEYS[2]) == 1 then return -2 end",
+            "redis.call('DEL', KEYS[3])",
+            'return 1',
+          ].join('\n'),
+          3,
+          workerIncarnationKey(workerId),
+          lockKey(workerId),
+          workspaceQuarantineKey(workerId, runtimeSessionId),
+          incarnationId,
+        ),
+        signal,
+        'Bridge workspace reset',
       ),
     );
     if (result === -1) {

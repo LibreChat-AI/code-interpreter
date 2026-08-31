@@ -232,6 +232,19 @@ describe('RedisBridgeStore', () => {
     ).rejects.toThrow('Bridge settlement existing read timed out');
   });
 
+  test('bounds a stalled Redis workspace reset', async () => {
+    const timedStore = new RedisBridgeStore(redis, 60, 10);
+    redis.eval = (() => new Promise(() => undefined)) as Redis['eval'];
+
+    await expect(
+      timedStore.resetWorkspace(
+        'stalled-reset-worker',
+        incarnationId,
+        'rt-stalled-reset',
+      ),
+    ).rejects.toThrow('Bridge workspace reset timed out');
+  });
+
   test('encodes worker IDs so Redis key families cannot collide', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
