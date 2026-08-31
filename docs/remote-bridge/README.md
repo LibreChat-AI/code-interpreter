@@ -47,6 +47,11 @@ locally, proves possession on every request, and rotates its short-lived
 credential before expiry. `CODEAPI_BRIDGE_AUTH_MODE=static` remains available
 for non-hardened development compatibility only.
 
+Stateful deployments must also set `LIBRECHAT_CODE_STATEFUL_WORKSPACE=true`
+and route the CLI's `{runtimeSessionId}` endpoint template to an isolated,
+persistent local runner per session. A single sandbox endpoint is stateless and
+is rejected for runtime-session assignments.
+
 ## LibreChat configuration
 
 Expose the Code API deployment as an environment under the Agents endpoint:

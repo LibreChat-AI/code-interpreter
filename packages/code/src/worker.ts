@@ -31,6 +31,7 @@ export interface BridgeWorkerOptions {
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
   onIdentityChange?: (identity: BridgeWorkerIdentity) => void | Promise<void>;
+  incarnationId?: string;
 }
 
 export interface BridgeWorkerIdentity {
@@ -43,6 +44,9 @@ const DEFAULT_LEASE_WAIT_MS = 25_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
 const CREDENTIAL_REFRESH_WINDOW_MS = 60_000;
+const DEFAULT_REGISTRATION_TTL_MS = 60_000;
+const MIN_REGISTRATION_HEARTBEAT_MS = 25;
+const RUNTIME_SESSION_PLACEHOLDER = '{runtimeSessionId}';
 
 export function reconnectDelayMs(
   attempt: number,
@@ -82,6 +86,8 @@ export class BridgeWorker {
   private readonly fetchImpl: typeof fetch;
   private readonly codeApiUrl: string;
   private readonly sandboxEndpoint: string;
+  private readonly incarnationId: string;
+  private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
 
   constructor(private readonly options: BridgeWorkerOptions) {
     if (!options.token && !options.identity) {
@@ -92,20 +98,30 @@ export class BridgeWorker {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.codeApiUrl = normalizedBaseUrl(options.codeApiUrl);
     this.sandboxEndpoint = normalizedBaseUrl(options.sandboxEndpoint);
+    this.incarnationId =
+      options.incarnationId ?? randomBytes(18).toString('base64url');
   }
 
   async register(
     signal?: AbortSignal,
   ): Promise<BridgeWorkerRegistrationResponse> {
-    return this.request<BridgeWorkerRegistrationResponse>(
+    const registration = await this.request<BridgeWorkerRegistrationResponse>(
       `${this.codeApiUrl}/bridge/workers/register`,
       {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         workerId: this.options.workerId,
+        incarnationId: this.incarnationId,
         capabilities: this.options.capabilities,
       },
       signal,
     );
+    if (registration.incarnationId !== this.incarnationId) {
+      throw new BridgeProtocolError(
+        'Code API registered a different worker incarnation',
+      );
+    }
+    this.registrationTtlMs = registration.leaseTtlMs;
+    return registration;
   }
 
   async lease(signal?: AbortSignal): Promise<BridgeAssignment | undefined> {
@@ -114,9 +130,18 @@ export class BridgeWorker {
       {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         waitMs: this.options.leaseWaitMs ?? DEFAULT_LEASE_WAIT_MS,
+        incarnationId: this.incarnationId,
       },
       signal,
     );
+    if (
+      response.assignment != null &&
+      response.assignment.incarnationId !== this.incarnationId
+    ) {
+      throw new BridgeProtocolError(
+        'Code API leased an assignment for a different worker incarnation',
+      );
+    }
     return response.assignment;
   }
 
@@ -134,7 +159,7 @@ export class BridgeWorker {
         if (signal?.aborted) return;
         if (
           error instanceof BridgeProtocolError &&
-          (error.status === 401 || error.status === 403)
+          (error.status === 401 || error.status === 403 || error.status === 409)
         ) {
           throw error;
         }
@@ -179,9 +204,14 @@ export class BridgeWorker {
         'Code API returned an invalid rotated worker credential',
       );
     }
-    identity.credential = credential.credential;
-    identity.expiresAt = credential.expiresAt;
-    await this.options.onIdentityChange?.(identity);
+    const rotatedIdentity: BridgeWorkerIdentity = {
+      ...identity,
+      credential: credential.credential,
+      expiresAt: credential.expiresAt,
+    };
+    await this.options.onIdentityChange?.(rotatedIdentity);
+    identity.credential = rotatedIdentity.credential;
+    identity.expiresAt = rotatedIdentity.expiresAt;
   }
 
   async executeAndSettle(
@@ -195,6 +225,23 @@ export class BridgeWorker {
     const executionController = new AbortController();
     const abortExecution = (): void => executionController.abort();
     signal?.addEventListener('abort', abortExecution, { once: true });
+    const deadlineDelay = Math.max(
+      0,
+      Date.parse(assignment.expiresAt) - Date.now(),
+    );
+    const deadlineTimer = setTimeout(
+      () => executionController.abort(),
+      deadlineDelay,
+    );
+    const heartbeatController = new AbortController();
+    let heartbeatError: unknown;
+    const heartbeat = this.maintainRegistration(
+      heartbeatController.signal,
+      executionController,
+    ).catch((error) => {
+      heartbeatError = error;
+      executionController.abort();
+    });
     const cancellationController = new AbortController();
     const cancellationWatcher = this.watchCancellation(
       assignment,
@@ -209,16 +256,20 @@ export class BridgeWorker {
           ? { 'X-Runtime-Session-Id': assignment.runtimeSessionId }
           : {}),
       };
-      const response = await this.fetchImpl(`${this.sandboxEndpoint}/execute`, {
-        method: 'POST',
-        headers: {
-          ...headers,
-          'Content-Type': 'application/json',
+      const response = await this.fetchImpl(
+        `${this.sandboxEndpointFor(assignment)}/execute`,
+        {
+          method: 'POST',
+          headers: {
+            ...headers,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(assignment.request.body),
+          signal: executionController.signal,
         },
-        body: JSON.stringify(assignment.request.body),
-        signal: executionController.signal,
-      });
+      );
       const payload = (await response.json()) as object;
+      if (heartbeatError != null) throw heartbeatError;
       if (!response.ok) {
         throw new BridgeProtocolError(
           errorMessage(payload) ??
@@ -230,6 +281,7 @@ export class BridgeWorker {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         generation: assignment.generation,
         leaseToken: assignment.leaseToken,
+        incarnationId: this.incarnationId,
         status: 'fulfilled',
         result: payload,
       };
@@ -238,12 +290,16 @@ export class BridgeWorker {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         generation: assignment.generation,
         leaseToken: assignment.leaseToken,
+        incarnationId: this.incarnationId,
         status: 'rejected',
         error:
           error instanceof Error ? error.message : 'Sandbox execution failed',
       };
     }
 
+    clearTimeout(deadlineTimer);
+    heartbeatController.abort();
+    await heartbeat;
     cancellationController.abort();
     await cancellationWatcher;
     signal?.removeEventListener('abort', abortExecution);
@@ -252,6 +308,39 @@ export class BridgeWorker {
       settlement,
       signal,
     );
+  }
+
+  private sandboxEndpointFor(assignment: BridgeAssignment): string {
+    if (assignment.runtimeSessionId == null) return this.sandboxEndpoint;
+    if (
+      this.options.capabilities.statefulWorkspace !== true ||
+      !this.sandboxEndpoint.includes(RUNTIME_SESSION_PLACEHOLDER)
+    ) {
+      throw new BridgeProtocolError(
+        'Stateful assignments require a sandbox endpoint template containing {runtimeSessionId}',
+      );
+    }
+    return this.sandboxEndpoint.replace(
+      RUNTIME_SESSION_PLACEHOLDER,
+      encodeURIComponent(assignment.runtimeSessionId),
+    );
+  }
+
+  private async maintainRegistration(
+    signal: AbortSignal,
+    executionController: AbortController,
+  ): Promise<void> {
+    while (!signal.aborted && !executionController.signal.aborted) {
+      await abortableDelay(
+        Math.max(
+          MIN_REGISTRATION_HEARTBEAT_MS,
+          Math.floor(this.registrationTtlMs / 2),
+        ),
+        signal,
+      );
+      if (signal.aborted || executionController.signal.aborted) return;
+      await this.register(signal);
+    }
   }
 
   private assignmentUrl(assignment: BridgeAssignment, action: string): string {
@@ -272,7 +361,10 @@ export class BridgeWorker {
       try {
         const response = await this.request<{ cancelled: boolean }>(
           this.assignmentUrl(assignment, 'cancellation'),
-          { protocolVersion: BRIDGE_PROTOCOL_VERSION },
+          {
+            protocolVersion: BRIDGE_PROTOCOL_VERSION,
+            incarnationId: this.incarnationId,
+          },
           signal,
         );
         if (response.cancelled) {

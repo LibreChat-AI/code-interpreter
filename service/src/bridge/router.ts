@@ -11,6 +11,7 @@ import { BridgePairingError, RedisBridgePairingStore } from './pairing';
 import { BridgeStoreError, RedisBridgeStore } from './store';
 
 const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const INCARNATION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const MAX_LEASE_WAIT_MS = 30_000;
 
 export type BridgeAuthMode = 'static' | 'paired';
@@ -36,6 +37,10 @@ function validWorkerId(value: string): boolean {
   return WORKER_ID_PATTERN.test(value);
 }
 
+function validIncarnationId(value: unknown): value is string {
+  return typeof value === 'string' && INCARNATION_ID_PATTERN.test(value);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -53,7 +58,8 @@ function isSettlement(value: unknown): value is CodeBridgeSettlement {
     !Number.isSafeInteger(value.generation) ||
     value.generation < 1 ||
     typeof value.leaseToken !== 'string' ||
-    value.leaseToken.length < 32
+    value.leaseToken.length < 32 ||
+    !validIncarnationId(value.incarnationId)
   ) {
     return false;
   }
@@ -271,8 +277,9 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         registration.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
         typeof registration.workerId !== 'string' ||
         !validWorkerId(registration.workerId) ||
+        !validIncarnationId(registration.incarnationId) ||
         !isRecord(registration.capabilities) ||
-        registration.capabilities.statefulWorkspace !== true ||
+        typeof registration.capabilities.statefulWorkspace !== 'boolean' ||
         typeof registration.capabilities.sandboxProfile !== 'string' ||
         registration.capabilities.sandboxProfile.trim().length === 0 ||
         registration.capabilities.sandboxProfile.length > 128 ||
@@ -297,12 +304,21 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         });
         return;
       }
-      await options.store.register(
-        registration as unknown as BridgeWorkerRegistration,
-      );
+      try {
+        await options.store.register(
+          registration as unknown as BridgeWorkerRegistration,
+        );
+      } catch (error) {
+        if (error instanceof BridgeStoreError) {
+          sendStoreError(error, res);
+          return;
+        }
+        throw error;
+      }
       res.json({
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         workerId: registration.workerId,
+        incarnationId: registration.incarnationId,
         registeredAt: new Date().toISOString(),
         leaseTtlMs: 60_000,
       });
@@ -318,6 +334,8 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
       const requestedWait = Number(body.waitMs ?? 25_000);
       if (
         !validWorkerId(workerId) ||
+        body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+        !validIncarnationId(body.incarnationId) ||
         !Number.isFinite(requestedWait) ||
         requestedWait < 0
       ) {
@@ -330,11 +348,20 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         });
         return;
       }
-      const assignment = await options.store.lease(
-        workerId,
-        Math.min(requestedWait, MAX_LEASE_WAIT_MS),
-      );
-      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
+      try {
+        const assignment = await options.store.lease(
+          workerId,
+          body.incarnationId,
+          Math.min(requestedWait, MAX_LEASE_WAIT_MS),
+        );
+        res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
+      } catch (error) {
+        if (error instanceof BridgeStoreError) {
+          sendStoreError(error, res);
+          return;
+        }
+        throw error;
+      }
     },
   );
 
@@ -371,8 +398,17 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     '/workers/:workerId/assignments/:assignmentId/cancellation',
     workerAuth,
     async (req: Request, res: Response) => {
+      const body = isRecord(req.body) ? req.body : {};
+      if (
+        body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+        !validIncarnationId(body.incarnationId)
+      ) {
+        res.status(400).json({ error: 'Invalid bridge cancellation request' });
+        return;
+      }
       const cancelled = await options.store.cancelled(
         req.params.workerId,
+        body.incarnationId,
         req.params.assignmentId,
       );
       res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, cancelled });

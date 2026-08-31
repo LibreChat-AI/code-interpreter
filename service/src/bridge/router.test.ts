@@ -76,6 +76,7 @@ describe('paired bridge HTTP API', () => {
     const body = JSON.stringify({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
       capabilities: {
         statefulWorkspace: true,
         sandboxProfile: 'nsjail',
@@ -110,6 +111,7 @@ describe('paired bridge HTTP API', () => {
     expect(registrationResponse.status).toBe(200);
     await expect(registrationResponse.json()).resolves.toMatchObject({
       workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
     });
 
     const crossDeploymentRevoke = await fetch(
