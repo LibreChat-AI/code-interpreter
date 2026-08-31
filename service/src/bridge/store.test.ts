@@ -957,6 +957,85 @@ describe('RedisBridgeStore', () => {
     expect(await redis.exists(pendingMarker)).toBe(0);
   });
 
+  test('bounds a stalled Redis workspace commit command', async () => {
+    const timedStore = new RedisBridgeStore(redis, 60, 20);
+    await timedStore.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'stalled-commit-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    let releaseFinalizer!: () => void;
+    const finalizerGate = new Promise<void>((resolve) => {
+      releaseFinalizer = resolve;
+    });
+    let finalizerStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      finalizerStarted = resolve;
+    });
+    const completion = timedStore.dispatch({
+      workerId: 'stalled-commit-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-stalled-commit',
+      deadlineAtMs: Date.now() + 5_000,
+      signal: new AbortController().signal,
+      finalize: async (settlement) => {
+        finalizerStarted();
+        await finalizerGate;
+        return settlement;
+      },
+    });
+    const assignment = await timedStore.lease(
+      'stalled-commit-worker',
+      incarnationId,
+      1_000,
+    );
+    await timedStore.acknowledgeLease(
+      'stalled-commit-worker',
+      incarnationId,
+      assignment?.assignmentId ?? '',
+      assignment?.generation ?? 0,
+      assignment?.leaseToken ?? '',
+    );
+    await timedStore.settle(
+      'stalled-commit-worker',
+      assignment?.assignmentId ?? '',
+      {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        generation: assignment?.generation ?? 0,
+        leaseToken: assignment?.leaseToken ?? '',
+        incarnationId,
+        status: 'fulfilled',
+        result: {
+          language: 'bash',
+          version: '5.2.0',
+          session_id: 'run-stalled-commit',
+          files: [],
+        },
+      },
+    );
+    await started;
+    redis.eval = ((...args: Parameters<Redis['eval']>) => {
+      if (
+        Number(args[1]) === 1 &&
+        String(args[0]).includes("return redis.call('DEL', KEYS[1])")
+      ) {
+        return new Promise<never>(() => {});
+      }
+      return redisEval(...args);
+    }) as Redis['eval'];
+    releaseFinalizer();
+
+    await expect(completion).rejects.toThrow(
+      'Bridge workspace commit timed out',
+    );
+  });
+
   test('keeps an in-flight workspace fenced when execution never settles', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,

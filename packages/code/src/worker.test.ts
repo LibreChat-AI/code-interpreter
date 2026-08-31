@@ -1021,6 +1021,102 @@ test('worker subtracts lease response transit from the server budget', async () 
   }
 });
 
+test('worker rejects a lease whose acknowledgement exhausts its budget', async () => {
+  const originalNow = Date.now;
+  let now = 20_000;
+  Date.now = () => now;
+  try {
+    const worker = new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1',
+      token: 'worker-secret',
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
+      sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      fetchImpl: async (input) => {
+        if (String(input).endsWith('/ack')) {
+          now += 10;
+          return new Response(
+            JSON.stringify({ protocolVersion: 1, accepted: true }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            protocolVersion: 1,
+            serverElapsedMs: 0,
+            assignment: {
+              protocolVersion: 1,
+              assignmentId: 'expired-after-ack',
+              workerId: 'vm-1',
+              incarnationId: 'incarnation-00000001',
+              generation: 1,
+              leaseToken: 'lease-token-that-is-long-enough-for-testing',
+              expiresAt: new Date(0).toISOString(),
+              remainingMs: 10,
+              request: { body: { language: 'bash' }, headers: {} },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      },
+    });
+
+    await assert.rejects(worker.lease(), /expired during lease acknowledgement/);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test('worker clamps rejected settlement errors to the protocol limit', async () => {
+  let rejection = '';
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint:
+      'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input, init) => {
+      if (String(input).endsWith('/execute')) {
+        return new Response(JSON.stringify({ error: 'x'.repeat(5_000) }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const settlement = JSON.parse(String(init?.body)) as { error: string };
+      rejection = settlement.error;
+      return new Response(
+        JSON.stringify({ protocolVersion: 1, accepted: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'long-rejection',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    remainingMs: 1_000,
+    runtimeSessionId: 'rt-long-rejection',
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+  assert.equal(rejection.length, 4_096);
+});
+
 test('worker quarantines an explicitly dirty stateful sandbox response', async () => {
   let settlementAttempted = false;
   const worker = new BridgeWorker({

@@ -400,7 +400,12 @@ export class RedisBridgeStore {
           args.finalize == null
             ? settlement
             : await args.finalize(settlement);
-        await this.commitPendingWorkspace(assignment, settlement);
+        await this.commitPendingWorkspace(
+          assignment,
+          settlement,
+          args.deadlineAtMs,
+          args.signal,
+        );
         resultCommitted = true;
         return result;
       } catch (error) {
@@ -1017,6 +1022,8 @@ export class RedisBridgeStore {
   private async commitPendingWorkspace(
     assignment: StoredAssignment,
     settlement: CodeBridgeSettlement,
+    deadlineAtMs: number,
+    signal: AbortSignal,
   ): Promise<void> {
     if (
       assignment.runtimeSessionId === undefined ||
@@ -1024,6 +1031,7 @@ export class RedisBridgeStore {
     ) {
       return;
     }
+    const runtimeSessionId = assignment.runtimeSessionId;
     const script = [
       'if redis.call(\'GET\', KEYS[1]) == ARGV[1] then',
       '  return redis.call(\'DEL\', KEYS[1])',
@@ -1031,14 +1039,22 @@ export class RedisBridgeStore {
       'return 0',
     ].join('\n');
     const committed = Number(
-      await this.redis.eval(
-        script,
-        1,
-        workspaceQuarantineKey(
-          assignment.workerId,
-          assignment.runtimeSessionId,
+      await boundedCommand(
+        this.redis.eval(
+          script,
+          1,
+          workspaceQuarantineKey(
+            assignment.workerId,
+            runtimeSessionId,
+          ),
+          assignment.assignmentId,
         ),
-        assignment.assignmentId,
+        Math.max(
+          1,
+          Math.min(this.redisCommandTimeoutMs, deadlineAtMs - Date.now()),
+        ),
+        'Bridge workspace commit',
+        signal,
       ),
     );
     if (committed !== 1) {

@@ -47,6 +47,7 @@ const DEFAULT_CANCELLATION_TRANSPORT_TIMEOUT_MS = 2_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
 const SETTLEMENT_RETRY_DELAY_MS = 100;
 const REJECTION_ACK_GRACE_MS = 30_000;
+const MAX_SETTLEMENT_ERROR_LENGTH = 4_096;
 const RUNTIME_SESSION_PLACEHOLDER = '{runtimeSessionId}';
 
 function normalizedBaseUrl(value: string): string {
@@ -248,13 +249,19 @@ export class BridgeWorker {
       ),
       signal,
     );
+    const remainingMs = Math.max(
+      0,
+      (adjustedAssignment.remainingMs ?? 0) -
+        (Date.now() - acknowledgementStartedAtMs),
+    );
+    if (remainingMs <= 0) {
+      throw new BridgeProtocolError(
+        'Bridge assignment expired during lease acknowledgement',
+      );
+    }
     return {
       ...adjustedAssignment,
-      remainingMs: Math.max(
-        0,
-        (adjustedAssignment.remainingMs ?? 0) -
-          (Date.now() - acknowledgementStartedAtMs),
-      ),
+      remainingMs,
     };
   }
 
@@ -379,7 +386,10 @@ export class BridgeWorker {
         incarnationId: this.incarnationId,
         status: 'rejected',
         error:
-          error instanceof Error ? error.message : 'Sandbox execution failed',
+          (error instanceof Error
+            ? error.message
+            : 'Sandbox execution failed'
+          ).slice(0, MAX_SETTLEMENT_ERROR_LENGTH),
       };
     }
 
