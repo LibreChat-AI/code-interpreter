@@ -42,6 +42,10 @@ if "$rollback" codeapi 1 default --kubeconfig=/tmp/other >/dev/null 2>&1; then
   echo 'rollback must reject a Helm kubeconfig that differs from the kubectl drain' >&2
   exit 1
 fi
+if HELM_KUBECONTEXT=other "$rollback" codeapi 1 default >/dev/null 2>&1; then
+  echo 'rollback must reject a Helm context inherited from the environment' >&2
+  exit 1
+fi
 if ! grep -q 'delete horizontalpodautoscaler' "$rollback" ||
   ! grep -q 'scale "$deployment" --replicas=0' "$rollback" ||
   ! grep -q -- '--for=delete' "$rollback" ||
@@ -50,6 +54,7 @@ if ! grep -q 'delete horizontalpodautoscaler' "$rollback" ||
   ! grep -q 'discover_api_deployments' "$rollback" ||
   ! grep -q 'list_api_pods' "$rollback" ||
   ! grep -q '^  drain_api delete$' "$rollback" ||
+  ! grep -q 'recover_interrupted_rollback' "$rollback" ||
   ! grep -q 'helm rollback' "$rollback"; then
   echo 'rollback must record an epoch, remove autoscaling, verify the drain, and fail closed' >&2
   exit 1

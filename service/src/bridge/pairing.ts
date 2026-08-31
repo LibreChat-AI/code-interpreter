@@ -275,12 +275,6 @@ export class RedisBridgePairingStore {
     code: string;
     publicKey: string;
   }): Promise<BridgeWorkerCredential> {
-    // A rollback epoch means an older binary may have issued or failed to
-    // revoke an unindexed code. Complete that worker's epoch scan before any
-    // legacy redemption can mint a credential.
-    if (this.rollbackEpoch.trim().length > 0) {
-      await this.removeLegacyPairings(args.workerId);
-    }
     const codeKey = pairingKey(args.code);
     const raw = await this.redis.get(codeKey);
     if (raw == null) {
@@ -301,6 +295,19 @@ export class RedisBridgePairingStore {
       throw new BridgePairingError(
         'PUBLIC_KEY_INVALID',
         'Worker public key must be an Ed25519 key',
+      );
+    }
+    // Validate the supplied code before it can trigger a shared-keyspace scan.
+    // A rollback epoch means any generation-less code may have survived a
+    // legacy revoke, so clean the authenticated worker and reject that code.
+    if (
+      pairing.generation == null &&
+      this.rollbackEpoch.trim().length > 0
+    ) {
+      await this.removeLegacyPairings(args.workerId);
+      throw new BridgePairingError(
+        'PAIRING_INVALID',
+        'Pairing code is invalid or expired',
       );
     }
 

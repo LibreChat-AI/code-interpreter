@@ -773,6 +773,41 @@ describe('RedisBridgePairingStore', () => {
     await expect(redis.get(legacyKey)).resolves.toBeNull();
   });
 
+  test('does not scan for a nonexistent rollback-epoch pairing code', async () => {
+    const identity = createBridgeIdentity();
+    const scan = redis.scan.bind(redis);
+    let scanCalls = 0;
+    redis.scan = (async (...args: Parameters<Redis['scan']>) => {
+      scanCalls += 1;
+      return scan(...args);
+    }) as Redis['scan'];
+    const rollbackAwarePairings = new RedisBridgePairingStore(
+      redis,
+      600,
+      300,
+      5_000,
+      'rollback-epoch-missing-code',
+    );
+
+    try {
+      await expect(
+        rollbackAwarePairings.redeem({
+          workerId: 'attacker-chosen-worker',
+          code: 'nonexistent-code',
+          publicKey: identity.publicKey,
+        }),
+      ).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
+      expect(scanCalls).toBe(0);
+      await expect(
+        redis.keys(
+          'codeapi:bridge:v1:migration:legacy-pairing-scanned:attacker-chosen-worker*',
+        ),
+      ).resolves.toEqual([]);
+    } finally {
+      redis.scan = scan;
+    }
+  });
+
   test('redeems an unrevoked pairing code issued by a pre-fence replica', async () => {
     const identity = createBridgeIdentity();
     const legacyCode = 'unrevoked-legacy-pairing';

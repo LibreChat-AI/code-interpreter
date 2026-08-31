@@ -27,12 +27,28 @@ for flag in "$@"; do
     -n|-n?*|--namespace|--namespace=*|--kube-context|--kube-context=*|\
     --kubeconfig|--kubeconfig=*|--kube-apiserver|--kube-apiserver=*|\
     --kube-ca-file|--kube-ca-file=*|--kube-token|--kube-token=*|\
+    --kube-tls-server-name|--kube-tls-server-name=*|\
     --kube-as-user|--kube-as-user=*|--kube-as-group|--kube-as-group=*|\
     --kube-insecure-skip-tls-verify|--kube-insecure-skip-tls-verify=*)
       echo "refusing target-changing Helm rollback flag: $flag" >&2
       exit 64
       ;;
   esac
+done
+for variable in \
+  HELM_KUBEAPISERVER \
+  HELM_KUBEASGROUPS \
+  HELM_KUBEASUSER \
+  HELM_KUBECAFILE \
+  HELM_KUBECONTEXT \
+  HELM_KUBEINSECURE_SKIP_TLS_VERIFY \
+  HELM_KUBETLS_SERVER_NAME \
+  HELM_KUBETOKEN \
+  HELM_NAMESPACE; do
+  if [[ -n ${!variable:-} ]]; then
+    echo "refusing Helm target override from environment: $variable" >&2
+    exit 64
+  fi
 done
 
 timeout=${CODEAPI_ROLLBACK_TIMEOUT:-10m}
@@ -138,11 +154,36 @@ drain_api() {
 drain_api wait
 
 echo "All fenced API pods are gone; starting Helm rollback..." >&2
-if helm rollback "$release" "$revision" \
-  --namespace "$namespace" --wait --wait-for-jobs --timeout "$timeout" "$@"; then
+rollback_pid=
+recover_interrupted_rollback() {
+  local exit_status=$1
+  trap - HUP INT TERM
+  if [[ -n "$rollback_pid" ]]; then
+    kill -TERM "$rollback_pid" 2>/dev/null || true
+    wait "$rollback_pid" 2>/dev/null || true
+  fi
+  echo "Helm rollback interrupted; restoring the fail-closed API drain..." >&2
+  set -e
+  drain_api delete
+  exit "$exit_status"
+}
+trap 'recover_interrupted_rollback 129' HUP
+trap 'recover_interrupted_rollback 130' INT
+trap 'recover_interrupted_rollback 143' TERM
+
+helm rollback "$release" "$revision" \
+  --namespace "$namespace" --wait --wait-for-jobs --timeout "$timeout" "$@" &
+rollback_pid=$!
+set +e
+wait "$rollback_pid"
+rollback_status=$?
+set -e
+rollback_pid=
+trap - HUP INT TERM
+
+if (( rollback_status == 0 )); then
   exit 0
 else
-  rollback_status=$?
   echo "Helm rollback failed; restoring the fail-closed API drain..." >&2
   drain_api delete
   exit "$rollback_status"

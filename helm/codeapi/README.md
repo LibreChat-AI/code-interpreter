@@ -75,7 +75,9 @@ running. The operator running it needs permission to read/scale Deployments,
 delete HPAs and pods, and create or update the rollback ConfigMap.
 Pass the intended cluster context to both `kubectl` and `helm` before invoking
 the helper; it rejects forwarded kubeconfig, context, identity, API-server, and
-namespace flags so the drain and rollback cannot target different clusters.
+namespace flags and Helm-specific target environment overrides so the drain and
+rollback cannot target different clusters. Termination signals during Helm
+also trigger a final recovery drain before the helper exits.
 
 **Execution profile.** By default this chart leaves
 `CODEAPI_EXECUTION_PROFILE` unset. Its bundled HTTP/stateless configuration is
