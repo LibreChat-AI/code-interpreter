@@ -13,7 +13,6 @@ import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
 const PREFIX = 'codeapi:bridge:v1';
 const POLL_INTERVAL_MS = 100;
 const DEFAULT_WORKER_TTL_SECONDS = 60;
-const MAX_ASSIGNMENT_TTL_SECONDS = 10 * 60;
 
 export type CodeBridgeAssignment = BridgeAssignment<t.PayloadBody>;
 export type CodeBridgeSettlement = BridgeSettlement<
@@ -73,8 +72,8 @@ function workspaceQuarantineKey(
   return `${PREFIX}:worker:${workerId}:workspace:${sessionHash}:quarantined`;
 }
 
-function queueKey(workerId: string): string {
-  return `${PREFIX}:worker:${workerId}:assignments`;
+function queueKey(workerId: string, incarnationId: string): string {
+  return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:assignments`;
 }
 
 function generationKey(workerId: string): string {
@@ -102,13 +101,7 @@ function tokenHash(token: string): string {
 }
 
 function assignmentTtlSeconds(deadlineAtMs: number): number {
-  return Math.max(
-    1,
-    Math.min(
-      MAX_ASSIGNMENT_TTL_SECONDS,
-      Math.ceil((deadlineAtMs - Date.now()) / 1000) + 30,
-    ),
-  );
+  return Math.max(1, Math.ceil((deadlineAtMs - Date.now()) / 1000) + 30);
 }
 
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -255,8 +248,12 @@ export class RedisBridgeStore {
         'EX',
         ttlSeconds,
       );
-      transaction.rpush(queueKey(args.workerId), assignmentId);
-      transaction.expire(queueKey(args.workerId), ttlSeconds);
+      const assignmentQueueKey = queueKey(
+        args.workerId,
+        assignment.incarnationId,
+      );
+      transaction.rpush(assignmentQueueKey, assignmentId);
+      transaction.expire(assignmentQueueKey, ttlSeconds);
       await transaction.exec();
       const settlement = await this.waitForSettlement(
         assignment,
@@ -294,7 +291,9 @@ export class RedisBridgeStore {
   ): Promise<CodeBridgeAssignment | undefined> {
     const deadline = Date.now() + waitMs;
     while (signal?.aborted !== true && Date.now() < deadline) {
-      const assignmentId = await this.redis.lpop(queueKey(workerId));
+      const assignmentId = await this.redis.lpop(
+        queueKey(workerId, incarnationId),
+      );
       if (assignmentId == null) {
         await delay(
           Math.min(POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())),

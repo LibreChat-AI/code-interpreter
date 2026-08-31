@@ -67,6 +67,13 @@ execution.
 - Each assignment has an absolute deadline, generation, and random lease token.
 - Settlements with the wrong worker, generation, token, or expired deadline are
   rejected.
+- Assignments are queued for the exact registered worker incarnation, so an
+  outstanding poll from a replaced process cannot consume replacement work.
+- Assignment records and the worker lock live through the full configured job
+  deadline plus cleanup grace.
+- Ambiguous settlement delivery is retried through the assignment deadline. If
+  a stateful settlement remains ambiguous, the CLI exits and the affected local
+  session runner must be reset or discarded before restart.
 - Request cancellation is polled by the worker and aborts the local sandbox
   request.
 - The sandbox receives the stable runtime session ID separately from the lease;

@@ -144,6 +144,80 @@ describe('RedisBridgeStore', () => {
     ).rejects.toMatchObject({ code: 'WORKER_FENCED' });
   });
 
+  test('a stale incarnation poll cannot consume replacement work', async () => {
+    const replacementIncarnationId = 'incarnation-00000002';
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'restarted-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const stalePoll = store.lease('restarted-worker', incarnationId, 100);
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'restarted-worker',
+      incarnationId: replacementIncarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'restarted-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+
+    await expect(stalePoll).resolves.toBeUndefined();
+    await expect(
+      store.lease('restarted-worker', replacementIncarnationId, 1_000),
+    ).resolves.toBeDefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
+  test('keeps assignment state through deadlines longer than ten minutes', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'long-running-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'long-running-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 15 * 60_000,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const [assignmentKey] = await redis.keys('codeapi:bridge:v1:assignment:*');
+
+    expect(await redis.ttl(assignmentKey)).toBeGreaterThan(10 * 60);
+    expect(
+      await redis.pttl('codeapi:bridge:v1:worker:long-running-worker:lock'),
+    ).toBeGreaterThan(10 * 60_000);
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
   test('releases the worker lock when generation allocation fails', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,

@@ -32,6 +32,7 @@ const DEFAULT_LEASE_WAIT_MS = 25_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_REGISTRATION_TTL_MS = 60_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
+const SETTLEMENT_RETRY_DELAY_MS = 100;
 const RUNTIME_SESSION_PLACEHOLDER = '{runtimeSessionId}';
 
 function normalizedBaseUrl(value: string): string {
@@ -41,6 +42,16 @@ function normalizedBaseUrl(value: string): string {
 function errorMessage(value: object): string | undefined {
   if ('error' in value && typeof value.error === 'string') return value.error;
   return undefined;
+}
+
+export class BridgeWorkspaceQuarantinedError extends Error {
+  constructor(
+    message: string,
+    public readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = 'BridgeWorkspaceQuarantinedError';
+  }
 }
 
 export class BridgeWorker {
@@ -111,8 +122,11 @@ export class BridgeWorker {
       } catch (error) {
         if (signal?.aborted) return;
         if (
-          error instanceof BridgeProtocolError &&
-          (error.status === 401 || error.status === 403 || error.status === 409)
+          error instanceof BridgeWorkspaceQuarantinedError ||
+          (error instanceof BridgeProtocolError &&
+            (error.status === 401 ||
+              error.status === 403 ||
+              error.status === 409))
         ) {
           throw error;
         }
@@ -156,10 +170,11 @@ export class BridgeWorker {
     );
     let settlement: BridgeSettlement;
     try {
+      const sandboxSessionId = this.sandboxSessionIdFor(assignment);
       const headers = {
         ...assignment.request.headers,
-        ...(assignment.runtimeSessionId
-          ? { 'X-Runtime-Session-Id': assignment.runtimeSessionId }
+        ...(sandboxSessionId
+          ? { 'X-Runtime-Session-Id': sandboxSessionId }
           : {}),
       };
       const response = await this.fetchImpl(
@@ -204,20 +219,39 @@ export class BridgeWorker {
     }
 
     clearTimeout(deadlineTimer);
-    heartbeatController.abort();
-    await heartbeat;
     cancellationController.abort();
     await cancellationWatcher;
-    signal?.removeEventListener('abort', abortExecution);
-    await this.request<BridgeSettlementResponse>(
-      this.assignmentUrl(assignment, 'settle'),
-      settlement,
-      signal,
-    );
+    try {
+      await this.settleWithRetry(assignment, settlement, signal);
+    } finally {
+      heartbeatController.abort();
+      await heartbeat;
+      signal?.removeEventListener('abort', abortExecution);
+    }
+  }
+
+  private sandboxSessionIdFor(
+    assignment: BridgeAssignment,
+  ): string | undefined {
+    if (assignment.runtimeSessionId != null) {
+      return assignment.runtimeSessionId;
+    }
+    if (this.sandboxEndpoint.includes(RUNTIME_SESSION_PLACEHOLDER)) {
+      return `assignment-${assignment.assignmentId}`;
+    }
+    return undefined;
   }
 
   private sandboxEndpointFor(assignment: BridgeAssignment): string {
-    if (assignment.runtimeSessionId == null) return this.sandboxEndpoint;
+    if (assignment.runtimeSessionId == null) {
+      if (!this.sandboxEndpoint.includes(RUNTIME_SESSION_PLACEHOLDER)) {
+        return this.sandboxEndpoint;
+      }
+      return this.sandboxEndpoint.replace(
+        RUNTIME_SESSION_PLACEHOLDER,
+        encodeURIComponent(`assignment-${assignment.assignmentId}`),
+      );
+    }
     if (
       this.options.capabilities.statefulWorkspace !== true ||
       !this.sandboxEndpoint.includes(RUNTIME_SESSION_PLACEHOLDER)
@@ -269,6 +303,63 @@ export class BridgeWorker {
       `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}` +
       `/assignments/${encodeURIComponent(assignment.assignmentId)}/${action}`
     );
+  }
+
+  private async settleWithRetry(
+    assignment: BridgeAssignment,
+    settlement: BridgeSettlement,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const deadlineAtMs = Date.parse(assignment.expiresAt);
+    const settlementController = new AbortController();
+    const abortSettlement = (): void => settlementController.abort();
+    signal?.addEventListener('abort', abortSettlement, { once: true });
+    const deadlineTimer = setTimeout(
+      () => settlementController.abort(),
+      Math.max(0, deadlineAtMs - Date.now()),
+    );
+    let lastError: unknown;
+    try {
+      while (!settlementController.signal.aborted) {
+        try {
+          await this.request<BridgeSettlementResponse>(
+            this.assignmentUrl(assignment, 'settle'),
+            settlement,
+            settlementController.signal,
+          );
+          return;
+        } catch (error) {
+          lastError = error;
+          if (signal?.aborted) break;
+          if (
+            error instanceof BridgeProtocolError &&
+            error.status != null &&
+            error.status < 500 &&
+            error.status !== 408 &&
+            error.status !== 429
+          ) {
+            throw error;
+          }
+          const remainingMs = deadlineAtMs - Date.now();
+          if (remainingMs <= 0) break;
+          await this.delay(
+            Math.min(SETTLEMENT_RETRY_DELAY_MS, remainingMs),
+            settlementController.signal,
+          );
+        }
+      }
+    } finally {
+      clearTimeout(deadlineTimer);
+      signal?.removeEventListener('abort', abortSettlement);
+    }
+    if (assignment.runtimeSessionId != null) {
+      throw new BridgeWorkspaceQuarantinedError(
+        `Stateful workspace ${assignment.runtimeSessionId} was quarantined after ambiguous settlement delivery`,
+        lastError,
+      );
+    }
+    if (lastError instanceof Error) throw lastError;
+    throw new BridgeProtocolError('Bridge settlement deadline expired');
   }
 
   private async watchCancellation(

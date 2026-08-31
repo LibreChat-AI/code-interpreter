@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BridgeWorker } from './worker.js';
+import { BridgeWorker, BridgeWorkspaceQuarantinedError } from './worker.js';
 
 import type { BridgeAssignment } from './protocol.js';
 
@@ -148,7 +148,11 @@ test('worker refreshes its registration during a long assignment', async () => {
       });
     }
     return new Response(
-      JSON.stringify({ protocolVersion: 1, accepted: true, body: init?.body }),
+      JSON.stringify({
+        protocolVersion: 1,
+        accepted: true,
+        body: init?.body,
+      }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
   };
@@ -178,4 +182,194 @@ test('worker refreshes its registration during a long assignment', async () => {
   });
 
   assert.ok(registrations >= 2);
+});
+
+test('worker routes a hintless assignment to an ephemeral template session', async () => {
+  let executeUrl = '';
+  let runtimeSessionHeader = '';
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/execute')) {
+      executeUrl = url;
+      runtimeSessionHeader = (init?.headers as Record<string, string>)[
+        'X-Runtime-Session-Id'
+      ];
+      return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(
+      JSON.stringify({ protocolVersion: 1, accepted: true }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'hintless-assignment',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(
+    executeUrl,
+    'http://127.0.0.1:2000/sessions/assignment-hintless-assignment/api/v2/execute',
+  );
+  assert.equal(runtimeSessionHeader, 'assignment-hintless-assignment');
+});
+
+test('worker surfaces a definite settlement rejection without quarantining', async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    if (String(input).endsWith('/execute')) {
+      return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ error: 'assignment was fenced' }), {
+      status: 409,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'fenced-settlement',
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
+      generation: 1,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 1_000).toISOString(),
+      runtimeSessionId: 'rt-user-1',
+      request: { body: { language: 'bash' }, headers: {} },
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.name === 'BridgeProtocolError' &&
+      error.message === 'assignment was fenced',
+  );
+});
+
+test('worker retries an ambiguous settlement before the deadline', async () => {
+  let settlementAttempts = 0;
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith('/execute')) {
+      return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    settlementAttempts += 1;
+    if (settlementAttempts === 1) throw new TypeError('connection reset');
+    return new Response(
+      JSON.stringify({ protocolVersion: 1, accepted: true }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'retry-settlement',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    runtimeSessionId: 'rt-user-1',
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(settlementAttempts, 2);
+});
+
+test('worker quarantines stateful reuse after settlement stays ambiguous', async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    if (String(input).endsWith('/execute')) {
+      return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw new TypeError('connection reset');
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'ambiguous-settlement',
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
+      generation: 1,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 50).toISOString(),
+      runtimeSessionId: 'rt-user-1',
+      request: { body: { language: 'bash' }, headers: {} },
+    }),
+    BridgeWorkspaceQuarantinedError,
+  );
 });
