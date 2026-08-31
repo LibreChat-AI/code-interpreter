@@ -64,7 +64,10 @@ describe('RedisBridgePairingStore', () => {
     );
     await expect(
       pairings.authorize(requestFor(issued.credential, 'superseded-bound-proof')),
-    ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
+    ).resolves.toMatchObject({
+      workerId: 'vm-bound',
+      identityId: originalAuthorization.identityId,
+    });
   });
 
   test('preserves a legacy unmarked identity across its first rotation', async () => {
@@ -792,7 +795,7 @@ describe('RedisBridgePairingStore', () => {
     ).resolves.toMatchObject({ workerId: 'vm-1' });
   });
 
-  test('rotation replaces rather than duplicates the active credential', async () => {
+  test('rotation retains the prior same-identity credential for recovery', async () => {
     const identity = createBridgeIdentity();
     const pairing = await pairings.issue('vm-1');
     const original = await pairings.redeem({
@@ -824,9 +827,50 @@ describe('RedisBridgePairingStore', () => {
 
     await expect(
       pairings.authorize(proofFor(original.credential, 'old-credential')),
-    ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
+    ).resolves.toMatchObject({ workerId: 'vm-1' });
     await expect(
       pairings.authorize(proofFor(rotated.credential, 'new-credential')),
+    ).resolves.toMatchObject({ workerId: 'vm-1' });
+  });
+
+  test('recovers when a refresh response is lost after the server commits it', async () => {
+    const identity = createBridgeIdentity();
+    const pairing = await pairings.issue('vm-1');
+    const original = await pairings.redeem({
+      workerId: 'vm-1',
+      code: pairing.code,
+      publicKey: identity.publicKey,
+    });
+    const proofFor = (
+      credential: string,
+      nonce: string,
+    ): Parameters<RedisBridgePairingStore['authorize']>[0] => {
+      const proof = {
+        credential,
+        method: 'POST',
+        path: '/v1/bridge/workers/vm-1/credentials/refresh',
+        timestamp: new Date().toISOString(),
+        nonce,
+        body: JSON.stringify({ protocolVersion: 1 }),
+      };
+      return {
+        ...proof,
+        workerId: 'vm-1',
+        signature: signBridgeRequest(identity.privateKey, proof),
+      };
+    };
+
+    await pairings.rotate('vm-1');
+    const retryAuthorization = await pairings.authorize(
+      proofFor(original.credential, 'refresh-response-lost'),
+    );
+    const recovered = await pairings.rotate(
+      'vm-1',
+      retryAuthorization.credentialId,
+    );
+
+    await expect(
+      pairings.authorize(proofFor(recovered.credential, 'refresh-recovered')),
     ).resolves.toMatchObject({ workerId: 'vm-1' });
   });
 
