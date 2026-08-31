@@ -176,6 +176,86 @@ test('paired worker rotates an expiring credential before registration', async (
   );
 });
 
+test('paired worker refreshes before an assignment that outlives its credential', async () => {
+  const key = createBridgeIdentity();
+  const requests: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.endsWith('/credentials/refresh')) {
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: 'assignment-safe-rotated-credential-value',
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      });
+    }
+    if (url.endsWith('/execute')) {
+      return Response.json({ session_id: 'run-long', files: [] });
+    }
+    return Response.json({ protocolVersion: 1, accepted: true });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-too-short-for-assignment',
+      expiresAt: new Date(Date.now() + 90_000).toISOString(),
+    },
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-long',
+    workerId: 'vm-1',
+    generation: 4,
+    leaseToken: 'assignment-long-lease-token-value',
+    expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.match(requests[0], /credentials\/refresh$/);
+  assert.equal(requests[1], 'http://127.0.0.1:2000/api/v2/execute');
+});
+
+test('worker shutdown interrupts reconnect backoff', async () => {
+  const controller = new AbortController();
+  let failed!: () => void;
+  const failure = new Promise<void>((resolve) => {
+    failed = resolve;
+  });
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async () => {
+      throw new Error('offline');
+    },
+    reconnectDelayMs: 30_000,
+    reconnectMaxDelayMs: 30_000,
+    onError: () => failed(),
+  });
+
+  const run = worker.run(controller.signal);
+  await failure;
+  controller.abort();
+  await run;
+});
+
 test('reconnect delay uses bounded exponential jitter', () => {
   assert.equal(reconnectDelayMs(0, 1_000, 30_000, () => 0), 500);
   assert.equal(reconnectDelayMs(0, 1_000, 30_000, () => 1), 1_000);

@@ -150,7 +150,10 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         body: JSON.stringify(req.body ?? {}),
         signature,
       })
-      .then(() => next())
+      .then((authorization) => {
+        res.locals.bridgeWorkerAuthorization = authorization;
+        next();
+      })
       .catch((error: unknown) => {
         if (error instanceof BridgePairingError) {
           res.status(401).json({ error: error.message, code: error.code });
@@ -222,7 +225,10 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     '/workers/:workerId/revoke',
     adminAuth,
     async (req: Request, res: Response) => {
-      if (!validWorkerId(req.params.workerId)) {
+      if (
+        !validWorkerId(req.params.workerId) ||
+        !configuredWorker(req.params.workerId)
+      ) {
         res.status(400).json({ error: 'Invalid bridge worker ID' });
         return;
       }
@@ -236,7 +242,14 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     workerAuth,
     async (req: Request, res: Response) => {
       try {
-        const credential = await options.pairings.rotate(req.params.workerId);
+        const credential = await options.pairings.rotate(
+          req.params.workerId,
+          (
+            res.locals.bridgeWorkerAuthorization as
+              | { credentialId: string }
+              | undefined
+          )?.credentialId,
+        );
         res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ...credential });
       } catch (error) {
         if (error instanceof BridgePairingError) {

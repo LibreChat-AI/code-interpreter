@@ -1,6 +1,7 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 
 import { BRIDGE_PROTOCOL_VERSION, BridgeProtocolError } from './protocol.js';
 
@@ -22,6 +23,14 @@ function isPairedIdentity(value: unknown): value is PairedBridgeWorkerIdentity {
     typeof value.publicKey === 'string' &&
     typeof value.privateKey === 'string'
   );
+}
+
+export function defaultBridgeIdentityPath(workerId: string): string {
+  const readableName = workerId.replace(/[^A-Za-z0-9._-]/g, '_');
+  const fileName = readableName === workerId
+    ? readableName
+    : `${readableName}-${createHash('sha256').update(workerId).digest('hex').slice(0, 16)}`;
+  return join(homedir(), '.config', 'librechat', 'code', `${fileName}.json`);
 }
 
 export async function saveBridgeIdentity(

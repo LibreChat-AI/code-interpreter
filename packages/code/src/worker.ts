@@ -63,6 +63,21 @@ function errorMessage(value: object): string | undefined {
   return undefined;
 }
 
+async function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted === true) return;
+  await new Promise<void>((resolve) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export class BridgeWorker {
   private readonly fetchImpl: typeof fetch;
   private readonly codeApiUrl: string;
@@ -131,17 +146,19 @@ export class BridgeWorker {
           this.options.reconnectRandom,
         );
         reconnectAttempt += 1;
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        await abortableDelay(delay, signal);
       }
     }
   }
 
-  async refreshCredential(signal?: AbortSignal): Promise<void> {
+  async refreshCredential(
+    signal?: AbortSignal,
+    validThroughMs = Date.now() + CREDENTIAL_REFRESH_WINDOW_MS,
+  ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
     if (
-      Date.parse(identity.expiresAt) - Date.now() >
-      CREDENTIAL_REFRESH_WINDOW_MS
+      Date.parse(identity.expiresAt) > validThroughMs
     ) {
       return;
     }
@@ -171,6 +188,10 @@ export class BridgeWorker {
     assignment: BridgeAssignment,
     signal?: AbortSignal,
   ): Promise<void> {
+    await this.refreshCredential(
+      signal,
+      Date.parse(assignment.expiresAt) + CREDENTIAL_REFRESH_WINDOW_MS,
+    );
     const executionController = new AbortController();
     const abortExecution = (): void => executionController.abort();
     signal?.addEventListener('abort', abortExecution, { once: true });

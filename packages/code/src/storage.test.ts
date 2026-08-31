@@ -4,7 +4,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { loadBridgeIdentity, saveBridgeIdentity } from './storage.js';
+import {
+  defaultBridgeIdentityPath,
+  loadBridgeIdentity,
+  saveBridgeIdentity,
+} from './storage.js';
+
+test('default identity paths do not collide after worker ID sanitization', () => {
+  assert.notEqual(
+    defaultBridgeIdentityPath('vm:a'),
+    defaultBridgeIdentityPath('vm_a'),
+  );
+});
 
 test('paired identity is persisted atomically with owner-only permissions', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'librechat-code-'));

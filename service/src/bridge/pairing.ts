@@ -10,9 +10,23 @@ import { verifyBridgeRequest } from '../../../packages/code/src/identity';
 
 const PREFIX = 'codeapi:bridge:v1';
 const DEFAULT_PAIRING_TTL_SECONDS = 10 * 60;
-const DEFAULT_CREDENTIAL_TTL_SECONDS = 5 * 60;
+const DEFAULT_CREDENTIAL_TTL_SECONDS = 15 * 60;
 const PROOF_NONCE_TTL_SECONDS = 2 * 60;
 const PROOF_CLOCK_SKEW_MS = 60_000;
+const ROTATE_CREDENTIAL_SCRIPT = `
+local activeDigest = redis.call('GET', KEYS[1])
+local previous = redis.call('GET', KEYS[2])
+if not activeDigest or not previous then
+  return 0
+end
+if activeDigest ~= ARGV[1] and redis.call('GET', KEYS[4]) ~= ARGV[5] then
+  return 0
+end
+redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])
+redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
+return 1
+`;
 
 interface StoredPairing {
   workerId: string;
@@ -21,6 +35,7 @@ interface StoredPairing {
 
 interface StoredCredential {
   workerId: string;
+  identityId: string;
   publicKey: string;
   expiresAt: string;
 }
@@ -70,6 +85,10 @@ function credentialDigestKey(credentialDigest: string): string {
 
 function workerIdentityKey(workerId: string): string {
   return `${PREFIX}:identity:${workerId}`;
+}
+
+function workerStableIdentityKey(workerId: string): string {
+  return `${PREFIX}:stable-identity:${workerId}`;
 }
 
 function proofNonceKey(credential: string, nonce: string): string {
@@ -144,7 +163,12 @@ export class RedisBridgePairingStore {
     nonce: string;
     body: string;
     signature: string;
-  }): Promise<{ workerId: string }> {
+  }): Promise<{
+    workerId: string;
+    credentialId: string;
+    activeCredentialId: string;
+    identityId: string;
+  }> {
     const proofTime = Date.parse(args.timestamp);
     if (
       !Number.isFinite(proofTime) ||
@@ -160,13 +184,27 @@ export class RedisBridgePairingStore {
       credentialDigestKey(credentialDigest),
       workerIdentityKey(args.workerId),
     );
-    if (raw == null || activeDigest !== credentialDigest) {
+    if (raw == null || activeDigest == null) {
       throw new BridgePairingError(
         'CREDENTIAL_INVALID',
         'Worker credential is invalid or expired',
       );
     }
     const stored = JSON.parse(raw) as StoredCredential;
+    if (activeDigest !== credentialDigest) {
+      const activeRaw = await this.redis.get(
+        credentialDigestKey(activeDigest),
+      );
+      const active = activeRaw == null
+        ? undefined
+        : JSON.parse(activeRaw) as StoredCredential;
+      if (active?.identityId !== stored.identityId) {
+        throw new BridgePairingError(
+          'CREDENTIAL_INVALID',
+          'Worker credential is invalid or expired',
+        );
+      }
+    }
     if (stored.workerId !== args.workerId) {
       throw new BridgePairingError(
         'CREDENTIAL_INVALID',
@@ -192,19 +230,31 @@ export class RedisBridgePairingStore {
         'Worker request proof has already been used',
       );
     }
-    return { workerId: stored.workerId };
+    return {
+      workerId: stored.workerId,
+      credentialId: credentialDigest,
+      activeCredentialId: activeDigest,
+      identityId: stored.identityId,
+    };
   }
 
   async revoke(workerId: string): Promise<void> {
     const identityKey = workerIdentityKey(workerId);
     const credentialDigest = await this.redis.get(identityKey);
     if (credentialDigest == null) return;
-    await this.redis.del(identityKey, credentialDigestKey(credentialDigest));
+    await this.redis.del(
+      identityKey,
+      workerStableIdentityKey(workerId),
+      credentialDigestKey(credentialDigest),
+    );
   }
 
-  async rotate(workerId: string): Promise<BridgeWorkerCredential> {
+  async rotate(
+    workerId: string,
+    expectedCredentialId?: string,
+  ): Promise<BridgeWorkerCredential> {
     const identityKey = workerIdentityKey(workerId);
-    const previousDigest = await this.redis.get(identityKey);
+    const previousDigest = expectedCredentialId ?? await this.redis.get(identityKey);
     const previousRaw =
       previousDigest == null
         ? null
@@ -220,6 +270,7 @@ export class RedisBridgePairingStore {
       workerId,
       previous.publicKey,
       previousDigest,
+      previous.identityId,
     );
   }
 
@@ -227,13 +278,36 @@ export class RedisBridgePairingStore {
     workerId: string,
     publicKey: string,
     previousDigest?: string,
+    identityId = randomBytes(18).toString('base64url'),
   ): Promise<BridgeWorkerCredential> {
     const credential = randomBytes(32).toString('base64url');
     const credentialDigest = digest(credential);
     const expiresAt = new Date(
       Date.now() + this.credentialTtlSeconds * 1000,
     ).toISOString();
-    const stored: StoredCredential = { workerId, publicKey, expiresAt };
+    const stored: StoredCredential = { workerId, identityId, publicKey, expiresAt };
+    if (previousDigest !== undefined) {
+      const rotated = await this.redis.eval(
+        ROTATE_CREDENTIAL_SCRIPT,
+        4,
+        workerIdentityKey(workerId),
+        credentialDigestKey(previousDigest),
+        credentialDigestKey(credentialDigest),
+        workerStableIdentityKey(workerId),
+        previousDigest,
+        credentialDigest,
+        JSON.stringify(stored),
+        String(this.credentialTtlSeconds),
+        identityId,
+      );
+      if (rotated !== 1) {
+        throw new BridgePairingError(
+          'CREDENTIAL_INVALID',
+          'Worker credential is invalid or expired',
+        );
+      }
+      return { workerId, credential, expiresAt };
+    }
     const transaction = this.redis.multi();
     transaction.set(
       credentialDigestKey(credentialDigest),
@@ -247,9 +321,12 @@ export class RedisBridgePairingStore {
       'EX',
       this.credentialTtlSeconds,
     );
-    if (previousDigest !== undefined) {
-      transaction.del(credentialDigestKey(previousDigest));
-    }
+    transaction.set(
+      workerStableIdentityKey(workerId),
+      identityId,
+      'EX',
+      this.credentialTtlSeconds,
+    );
     await transaction.exec();
     return { workerId, credential, expiresAt };
   }

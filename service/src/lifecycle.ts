@@ -7,6 +7,7 @@ import {
   validateApiHardenedConfig,
   validateExecutionProfilePolicy,
   validateSandboxBackendPolicy,
+  validateApiBridgePolicy,
   validateWorkerHardenedConfig,
 } from './secure-startup';
 import logger from './logger';
@@ -90,6 +91,7 @@ export async function startupApiOnly(): Promise<void> {
   logger.info('Starting API service (no workers)...');
   validateApiHardenedConfig();
   validateExecutionProfilePolicy({ requireBackendMatch: false });
+  validateApiBridgePolicy();
   /* No validateSandboxBackendPolicy() here: an API-only pod authenticates and
    * enqueues jobs, it never constructs the Lambda backend or checkpoint store.
    * Validating that policy would force worker-only config (LAMBDA_MICROVM_* and

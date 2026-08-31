@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
-import { loadBridgeIdentity, saveBridgeIdentity } from './storage.js';
+import {
+  defaultBridgeIdentityPath,
+  loadBridgeIdentity,
+  saveBridgeIdentity,
+} from './storage.js';
 import { BridgeWorker } from './worker.js';
 
 function required(name: string, value = process.env[name]): string {
@@ -28,11 +30,6 @@ function option(args: string[], name: string): string | undefined {
   return args.find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1);
 }
 
-function defaultIdentityPath(workerId: string): string {
-  const fileName = workerId.replace(/[^A-Za-z0-9._-]/g, '_');
-  return join(homedir(), '.config', 'librechat', 'code', `${fileName}.json`);
-}
-
 async function pair(args: string[]): Promise<void> {
   const codeApiUrl = required('instance URL', args[1]);
   const code = required('one-time pairing code', args[2]);
@@ -43,7 +40,7 @@ async function pair(args: string[]): Promise<void> {
   const identityPath =
     option(args, '--identity') ??
     process.env.LIBRECHAT_CODE_IDENTITY_FILE ??
-    defaultIdentityPath(workerId);
+    defaultBridgeIdentityPath(workerId);
   const identity = await pairBridgeWorker({ codeApiUrl, workerId, code });
   await saveBridgeIdentity(identityPath, identity);
   process.stdout.write(
@@ -58,7 +55,7 @@ async function run(): Promise<void> {
   const identityPath =
     configuredIdentityPath ??
     (configuredWorkerId && !configuredToken
-      ? defaultIdentityPath(configuredWorkerId)
+      ? defaultBridgeIdentityPath(configuredWorkerId)
       : undefined);
   const pairedIdentity = identityPath
     ? await loadBridgeIdentity(identityPath)

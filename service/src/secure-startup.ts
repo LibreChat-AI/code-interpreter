@@ -226,6 +226,21 @@ export function validateSandboxBackendPolicy(): void {
   }
 }
 
+/** API-only pods expose bridge pairing and worker routes even though they do
+ * not construct the sandbox backend, so enforce the bridge authentication
+ * invariant without requiring worker-only Lambda or checkpoint settings. */
+export function validateApiBridgePolicy(): void {
+  if (
+    env.SANDBOX_BACKEND === 'remote-bridge' &&
+    env.HARDENED_SANDBOX_MODE &&
+    env.BRIDGE_AUTH_MODE !== 'paired'
+  ) {
+    throw new SecureStartupConfigError(
+      'Hardened remote bridge deployments require CODEAPI_BRIDGE_AUTH_MODE=paired',
+    );
+  }
+}
+
 export function validateEgressGatewayHardenedConfig(): void {
   if (!env.HARDENED_SANDBOX_MODE) return;
   rejectValue('CODEAPI_SYNTHETIC_ACCESS_TOKEN', process.env.CODEAPI_SYNTHETIC_ACCESS_TOKEN);

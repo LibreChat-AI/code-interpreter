@@ -112,6 +112,19 @@ describe('paired bridge HTTP API', () => {
       workerId: 'vm-1',
     });
 
+    const crossDeploymentRevoke = await fetch(
+      `${baseUrl}/workers/another-deployments-worker/revoke`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer strong-administrator-bootstrap-token',
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      },
+    );
+    expect(crossDeploymentRevoke.status).toBe(400);
+
     const replayResponse = await fetch(registrationUrl, {
       method: 'POST',
       headers,

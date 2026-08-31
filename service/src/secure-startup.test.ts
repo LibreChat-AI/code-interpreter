@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { env } from './config';
 import {
   validateApiHardenedConfig,
+  validateApiBridgePolicy,
   validateEgressGatewayHardenedConfig,
   validateExecutionProfilePolicy,
   validateSandboxBackendPolicy,
@@ -333,6 +334,18 @@ describe('sandbox backend policy', () => {
 
     env.BRIDGE_AUTH_MODE = 'paired';
     expect(() => validateSandboxBackendPolicy()).not.toThrow();
+  });
+
+  test('API-only hardened bridge validation rejects static worker auth', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.HARDENED_SANDBOX_MODE = true;
+    env.BRIDGE_AUTH_MODE = 'static';
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'CODEAPI_BRIDGE_AUTH_MODE=paired',
+    );
+
+    env.BRIDGE_AUTH_MODE = 'paired';
+    expect(() => validateApiBridgePolicy()).not.toThrow();
   });
 
   test('rejects blocking PTC on the lambda backend', () => {
