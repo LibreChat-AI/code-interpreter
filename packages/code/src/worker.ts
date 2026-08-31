@@ -373,7 +373,12 @@ export class BridgeWorker {
           signal: executionController.signal,
         },
       );
-      const payload = (await response.json()) as object;
+      let payload: object = {};
+      try {
+        payload = (await response.json()) as object;
+      } catch (error) {
+        if (response.ok) throw error;
+      }
       if (!response.ok) {
         sandboxRejectedExecution =
           response.status >= 400 &&

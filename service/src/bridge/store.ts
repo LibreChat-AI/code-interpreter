@@ -48,19 +48,19 @@ interface StoredAssignment extends CodeBridgeAssignment {
 }
 
 function workerKey(workerId: string): string {
-  return `${PREFIX}:worker:${workerId}`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}`;
 }
 
 function workerIncarnationKey(workerId: string): string {
-  return `${PREFIX}:worker:${workerId}:incarnation`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation`;
 }
 
 function incarnationFenceKey(workerId: string, incarnationId: string): string {
-  return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:fenced`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:${incarnationId}:fenced`;
 }
 
 function quarantineKey(workerId: string, incarnationId: string): string {
-  return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:quarantined`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:${incarnationId}:quarantined`;
 }
 
 function workspaceQuarantineKey(
@@ -70,31 +70,31 @@ function workspaceQuarantineKey(
   const sessionHash = createHash('sha256')
     .update(runtimeSessionId)
     .digest('hex');
-  return `${PREFIX}:worker:${workerId}:workspace:${sessionHash}:quarantined`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:workspace:${sessionHash}:quarantined`;
 }
 
 function queueKey(workerId: string, incarnationId: string): string {
-  return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:assignments`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:${incarnationId}:assignments`;
 }
 
 function leaseClaimKey(workerId: string, incarnationId: string): string {
-  return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:lease-claim`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:${incarnationId}:lease-claim`;
 }
 
 function leaseAckKey(workerId: string, incarnationId: string): string {
-  return `${PREFIX}:worker:${workerId}:incarnation:${incarnationId}:lease-ack`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:${incarnationId}:lease-ack`;
 }
 
 function generationKey(workerId: string): string {
-  return `${PREFIX}:worker:${workerId}:generation`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:generation`;
 }
 
 function lockKey(workerId: string): string {
-  return `${PREFIX}:worker:${workerId}:lock`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:lock`;
 }
 
 function lockIncarnationKey(workerId: string): string {
-  return `${PREFIX}:worker:${workerId}:lock:incarnation`;
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:lock:incarnation`;
 }
 
 function assignmentKey(assignmentId: string): string {
@@ -249,7 +249,7 @@ export class RedisBridgeStore {
           registration.incarnationId,
           JSON.stringify(registration),
           String(this.workerTtlSeconds),
-          `${PREFIX}:worker:${registration.workerId}:incarnation:`,
+          `${PREFIX}:worker:${encodeURIComponent(registration.workerId)}:incarnation:`,
         ),
         this.redisCommandTimeoutMs,
         'Bridge worker registration',
@@ -566,9 +566,18 @@ export class RedisBridgeStore {
     assignmentId: string,
     generation: number,
     leaseToken: string,
+    signal?: AbortSignal,
   ): Promise<void> {
-    const assignment = await this.readAssignment(assignmentId);
-    const registration = await this.registration(workerId);
+    const assignment = await this.leaseCommand(
+      this.readAssignment(assignmentId),
+      signal,
+      'Bridge acknowledgement assignment read',
+    );
+    const registration = await this.leaseCommand(
+      this.registration(workerId),
+      signal,
+      'Bridge acknowledgement registration read',
+    );
     if (
       assignment == null ||
       assignment.workerId !== workerId ||
@@ -584,17 +593,21 @@ export class RedisBridgeStore {
     }
     const ttlSeconds = assignmentTtlSeconds(Date.parse(assignment.expiresAt));
     const acknowledged = Number(
-      await this.redis.eval(
-        [
-          "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
-          "redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])",
-          'return 1',
-        ].join('\n'),
-        2,
-        leaseClaimKey(workerId, incarnationId),
-        leaseAckKey(workerId, incarnationId),
-        assignmentId,
-        String(ttlSeconds),
+      await this.leaseCommand(
+        this.redis.eval(
+          [
+            "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
+            "redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])",
+            'return 1',
+          ].join('\n'),
+          2,
+          leaseClaimKey(workerId, incarnationId),
+          leaseAckKey(workerId, incarnationId),
+          assignmentId,
+          String(ttlSeconds),
+        ),
+        signal,
+        'Bridge lease acknowledgement',
       ),
     );
     if (acknowledged !== 1) {
@@ -724,10 +737,13 @@ export class RedisBridgeStore {
     workerId: string,
     assignmentId: string,
     settlement: CodeBridgeSettlement,
+    signal?: AbortSignal,
   ): Promise<void> {
     const serializedSettlement = JSON.stringify(settlement);
-    const existingSettlement = await this.redis.get(
-      settlementKey(assignmentId),
+    const existingSettlement = await this.leaseCommand(
+      this.redis.get(settlementKey(assignmentId)),
+      signal,
+      'Bridge settlement existing read',
     );
     if (existingSettlement === serializedSettlement) return;
     if (existingSettlement != null) {
@@ -736,7 +752,11 @@ export class RedisBridgeStore {
         'Bridge assignment was already settled with a different result',
       );
     }
-    const assignment = await this.readAssignment(assignmentId);
+    const assignment = await this.leaseCommand(
+      this.readAssignment(assignmentId),
+      signal,
+      'Bridge settlement assignment read',
+    );
     if (assignment == null) {
       throw new BridgeStoreError(
         'ASSIGNMENT_NOT_FOUND',
@@ -749,7 +769,11 @@ export class RedisBridgeStore {
         'Bridge assignment belongs to another worker',
       );
     }
-    const registration = await this.registration(workerId);
+    const registration = await this.leaseCommand(
+      this.registration(workerId),
+      signal,
+      'Bridge settlement registration read',
+    );
     if (
       settlement.incarnationId !== assignment.incarnationId ||
       registration?.incarnationId !== settlement.incarnationId ||
@@ -796,14 +820,18 @@ export class RedisBridgeStore {
       'return 1',
     ].join('\n');
     const accepted = Number(
-      await this.redis.eval(
-        script,
-        settlementKeys.length,
-        ...settlementKeys,
-        serializedSettlement,
-        String(ttlSeconds),
-        assignmentId,
-        settlement.status,
+      await this.leaseCommand(
+        this.redis.eval(
+          script,
+          settlementKeys.length,
+          ...settlementKeys,
+          serializedSettlement,
+          String(ttlSeconds),
+          assignmentId,
+          settlement.status,
+        ),
+        signal,
+        'Bridge settlement commit',
       ),
     );
     if (accepted === -1) {

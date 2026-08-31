@@ -277,14 +277,27 @@ router.post(
       return;
     }
     try {
-      await bridgeStore.acknowledgeLease(
-        req.params.workerId,
-        body.incarnationId,
-        req.params.assignmentId,
-        Number(body.generation),
-        body.leaseToken,
-      );
-      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, accepted: true });
+      const acknowledgementController = new AbortController();
+      const abortAcknowledgement = (): void =>
+        acknowledgementController.abort();
+      req.once('aborted', abortAcknowledgement);
+      res.once('close', abortAcknowledgement);
+      try {
+        await bridgeStore.acknowledgeLease(
+          req.params.workerId,
+          body.incarnationId,
+          req.params.assignmentId,
+          Number(body.generation),
+          body.leaseToken,
+          acknowledgementController.signal,
+        );
+        if (!acknowledgementController.signal.aborted) {
+          res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, accepted: true });
+        }
+      } finally {
+        req.off('aborted', abortAcknowledgement);
+        res.off('close', abortAcknowledgement);
+      }
     } catch (error) {
       if (error instanceof BridgeStoreError) {
         sendStoreError(error, res);
@@ -304,15 +317,27 @@ router.post(
       return;
     }
     try {
-      await bridgeStore.settle(
-        req.params.workerId,
-        req.params.assignmentId,
-        settlement,
-      );
-      res.json({
-        protocolVersion: BRIDGE_PROTOCOL_VERSION,
-        accepted: true,
-      });
+      const settlementController = new AbortController();
+      const abortSettlement = (): void => settlementController.abort();
+      req.once('aborted', abortSettlement);
+      res.once('close', abortSettlement);
+      try {
+        await bridgeStore.settle(
+          req.params.workerId,
+          req.params.assignmentId,
+          settlement,
+          settlementController.signal,
+        );
+        if (!settlementController.signal.aborted) {
+          res.json({
+            protocolVersion: BRIDGE_PROTOCOL_VERSION,
+            accepted: true,
+          });
+        }
+      } finally {
+        req.off('aborted', abortSettlement);
+        res.off('close', abortSettlement);
+      }
     } catch (error) {
       if (error instanceof BridgeStoreError) {
         sendStoreError(error, res);

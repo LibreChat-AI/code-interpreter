@@ -201,6 +201,80 @@ describe('RedisBridgeStore', () => {
     ).rejects.toThrow('Bridge cancellation assignment read timed out');
   });
 
+  test('bounds stalled Redis reads during lease acknowledgement', async () => {
+    const timedStore = new RedisBridgeStore(redis, 60, 10);
+    redis.get = (() => new Promise(() => undefined)) as Redis['get'];
+
+    await expect(
+      timedStore.acknowledgeLease(
+        'stalled-ack-worker',
+        incarnationId,
+        'assignment-stalled-ack',
+        1,
+        'lease-token-that-is-long-enough-for-testing',
+      ),
+    ).rejects.toThrow('Bridge acknowledgement assignment read timed out');
+  });
+
+  test('bounds stalled Redis reads during settlement', async () => {
+    const timedStore = new RedisBridgeStore(redis, 60, 10);
+    redis.get = (() => new Promise(() => undefined)) as Redis['get'];
+
+    await expect(
+      timedStore.settle('stalled-settlement-worker', 'assignment-stalled', {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        generation: 1,
+        leaseToken: 'lease-token-that-is-long-enough-for-testing',
+        incarnationId,
+        status: 'rejected',
+        error: 'test',
+      }),
+    ).rejects.toThrow('Bridge settlement existing read timed out');
+  });
+
+  test('encodes worker IDs so Redis key families cannot collide', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'foo',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'foo',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease('foo', incarnationId, 1_000);
+
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'foo:lock',
+      incarnationId: 'incarnation-00000002',
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    expect(
+      await redis.get('codeapi:bridge:v1:worker:foo:lock'),
+    ).toBe(assignment?.assignmentId ?? null);
+    expect(
+      await redis.get('codeapi:bridge:v1:worker:foo%3Alock'),
+    ).not.toBeNull();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
   test('retains cancellation through the assignment lifetime', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
