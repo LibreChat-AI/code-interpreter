@@ -120,13 +120,13 @@ export class BridgeWorker {
         if (!assignment) continue;
         await this.executeAndSettle(assignment, signal);
       } catch (error) {
+        if (error instanceof BridgeWorkspaceQuarantinedError) {
+          throw error;
+        }
         if (signal?.aborted) return;
         if (
-          error instanceof BridgeWorkspaceQuarantinedError ||
-          (error instanceof BridgeProtocolError &&
-            (error.status === 401 ||
-              error.status === 403 ||
-              error.status === 409))
+          error instanceof BridgeProtocolError &&
+          (error.status === 401 || error.status === 403 || error.status === 409)
         ) {
           throw error;
         }

@@ -423,3 +423,75 @@ test('worker quarantines a stateful workspace after the sandbox request aborts',
   );
   assert.equal(settlementAttempted, false);
 });
+
+test('worker surfaces quarantine when shutdown aborts stateful execution', async () => {
+  const controller = new AbortController();
+  let executeStarted = false;
+  const assignment: BridgeAssignment = {
+    protocolVersion: 1,
+    assignmentId: 'shutdown-execution',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    runtimeSessionId: 'rt-user-1',
+    request: { body: { language: 'bash' }, headers: {} },
+  };
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/workers/register')) {
+      return new Response(
+        JSON.stringify({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          incarnationId: 'incarnation-00000001',
+          registeredAt: new Date().toISOString(),
+          leaseTtlMs: 60_000,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (url.endsWith('/lease')) {
+      return new Response(
+        JSON.stringify({ protocolVersion: 1, assignment }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (url.endsWith('/execute')) {
+      executeStarted = true;
+      setTimeout(() => controller.abort(), 10);
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+      });
+    }
+    return new Response(JSON.stringify({ protocolVersion: 1, accepted: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint:
+      'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await assert.rejects(
+    worker.run(controller.signal),
+    BridgeWorkspaceQuarantinedError,
+  );
+  assert.equal(executeStarted, true);
+});
