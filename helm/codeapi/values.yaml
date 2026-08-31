@@ -71,6 +71,7 @@ api:
   # Pairing revocation relies on every serving replica honoring the Redis
   # generation fence. Recreate prevents a pre-fence binary from redeeming an
   # already-revoked code during the first rollout of paired bridge workers.
+  # Roll back to pre-fence revisions only with scripts/safe-pairing-rollback.sh.
   strategy:
     type: Recreate
     rollingUpdate: null

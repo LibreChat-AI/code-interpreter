@@ -53,6 +53,22 @@ platform rather than templated here: external ingress/service mesh, KEDA-style
 queue-depth autoscaling, and cloud-IAM secret delivery (the env hooks below
 cover all of them).
 
+**Pairing-fence rollbacks.** Do not use a direct `helm rollback` from a chart
+revision containing the bridge pairing fence to an older revision. Helm runs
+rollback hooks from the target revision, so a pre-fence target cannot stop its
+own old and new API replicas from overlapping. Use the chart's fail-closed
+helper instead:
+
+```bash
+helm/codeapi/scripts/safe-pairing-rollback.sh RELEASE REVISION NAMESPACE
+```
+
+The helper deletes the API HPA, scales the live fenced API deployment to zero,
+waits until every API pod is gone, and only then invokes `helm rollback`. This
+causes an API outage by design. If rollback fails, it leaves the API scaled to
+zero rather than restarting a potentially mixed-version deployment. The
+operator running it needs permission to read/scale Deployments and delete HPAs.
+
 **Execution profile.** By default this chart leaves
 `CODEAPI_EXECUTION_PROFILE` unset. Its bundled HTTP/stateless configuration is
 inferred as the AWS-free `default` profile and retains the existing
