@@ -100,10 +100,14 @@ function assignmentKey(assignmentId: string): string {
 
 function queuedAssignment(
   assignmentId: string,
+  incarnationId: string,
   workerIdentityId?: string,
 ): string {
   const identity = workerIdentityId ?? '';
-  return `${identity.length}:${identity}${assignmentId}`;
+  return (
+    `${identity.length}:${identity}` +
+    `${incarnationId.length}:${incarnationId}${assignmentId}`
+  );
 }
 
 function settlementKey(assignmentId: string): string {
@@ -154,7 +158,13 @@ export class RedisBridgeStore {
     expectedActiveCredentialId?: string,
   ): Promise<void> {
     const script = [
-      'if ARGV[5] ~= "" and redis.call(\'GET\', KEYS[5]) ~= ARGV[5] then return -3 end',
+      'if ARGV[5] ~= "" then',
+      '  if ARGV[6] ~= "" then',
+      '    if redis.call(\'GET\', KEYS[5]) ~= ARGV[6] then return -3 end',
+      '  elseif redis.call(\'GET\', KEYS[6]) ~= ARGV[5] then',
+      '    return -3',
+      '  end',
+      'end',
       'if redis.call(\'EXISTS\', KEYS[3]) == 1 then return -2 end',
       'if redis.call(\'EXISTS\', KEYS[2]) == 1 then return -1 end',
       'local current = redis.call(\'GET\', KEYS[4])',
@@ -170,17 +180,19 @@ export class RedisBridgeStore {
     const result = Number(
       await this.redis.eval(
         script,
-        5,
+        6,
         workerKey(registration.workerId),
         incarnationFenceKey(registration.workerId, registration.incarnationId),
         quarantineKey(registration.workerId, registration.incarnationId),
         workerIncarnationKey(registration.workerId),
+        `${PREFIX}:stable-identity:${registration.workerId}`,
         `${PREFIX}:identity:${registration.workerId}`,
         registration.incarnationId,
         JSON.stringify(registration),
         String(this.workerTtlSeconds),
         `${PREFIX}:worker:${registration.workerId}:incarnation:`,
         expectedActiveCredentialId ?? '',
+        registration.identityId ?? '',
       ),
     );
     if (result === -2) {
@@ -303,7 +315,11 @@ export class RedisBridgeStore {
       );
       transaction.rpush(
         queueKey(args.workerId),
-        queuedAssignment(assignmentId, assignment.workerIdentityId),
+        queuedAssignment(
+          assignmentId,
+          assignment.incarnationId,
+          assignment.workerIdentityId,
+        ),
       );
       transaction.expire(queueKey(args.workerId), ttlSeconds);
       await transaction.exec();
@@ -351,16 +367,23 @@ export class RedisBridgeStore {
           "  local separator = string.find(entry, ':', 1, true)",
           '  local id = nil',
           "  local identity = ''",
+          "  local incarnation = ''",
           '  if separator then',
           '    local identityLength = tonumber(string.sub(entry, 1, separator - 1))',
           '    if identityLength then',
           '      identity = string.sub(entry, separator + 1, separator + identityLength)',
-          '      id = string.sub(entry, separator + identityLength + 1)',
+          '      local incarnationLengthStart = separator + identityLength + 1',
+          "      local incarnationSeparator = string.find(entry, ':', incarnationLengthStart, true)",
+          '      if incarnationSeparator then',
+          '        local incarnationLength = tonumber(string.sub(entry, incarnationLengthStart, incarnationSeparator - 1))',
+          '        if incarnationLength then',
+          '          incarnation = string.sub(entry, incarnationSeparator + 1, incarnationSeparator + incarnationLength)',
+          '          id = string.sub(entry, incarnationSeparator + incarnationLength + 1)',
+          '        end',
+          '      end',
           '    end',
-          "  elseif ARGV[3] == '' then",
-          '    id = entry',
           '  end',
-          '  if id and identity == ARGV[3] then',
+          '  if id and identity == ARGV[3] and incarnation == ARGV[4] then',
           "  local raw = redis.call('GET', ARGV[1] .. id)",
           '  if not raw then',
           "    redis.call('LREM', KEYS[1], 1, entry)",
@@ -377,6 +400,7 @@ export class RedisBridgeStore {
         `${PREFIX}:assignment:`,
         workerId,
         identityId ?? '',
+        incarnationId,
       );
       if (raw == null) {
         await delay(

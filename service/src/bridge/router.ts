@@ -363,7 +363,7 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         workerId: registration.workerId,
         incarnationId: registration.incarnationId,
         capabilities: {
-          statefulWorkspace: true,
+          statefulWorkspace: capabilities.statefulWorkspace as boolean,
           sandboxProfile: capabilities.sandboxProfile as string,
           runtimes: capabilities.runtimes as string[],
           ...(typeof capabilities.policyDigest === 'string'

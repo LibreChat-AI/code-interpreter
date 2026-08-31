@@ -40,6 +40,32 @@ describe('RedisBridgeStore', () => {
     ).resolves.toBeNull();
   });
 
+  test('accepts registration after a same-identity credential rotation', async () => {
+    await redis.set(
+      'codeapi:bridge:v1:identity:rotating-registration-worker',
+      'new-active-credential-digest',
+    );
+    await redis.set(
+      'codeapi:bridge:v1:stable-identity:rotating-registration-worker',
+      'stable-worker-identity',
+    );
+
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'rotating-registration-worker',
+        incarnationId,
+        credentialId: 'old-authenticated-credential-digest',
+        identityId: 'stable-worker-identity',
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: ['bash'],
+        },
+      }, 'old-authenticated-credential-digest'),
+    ).resolves.toBeUndefined();
+  });
+
   test('rejects a dynamic worker lease outside its bound tenant', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -161,6 +187,50 @@ describe('RedisBridgeStore', () => {
         1_000,
         undefined,
         'replacement-identity',
+      ),
+    ).resolves.toBeDefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
+  test('a stale incarnation poll cannot consume replacement incarnation work', async () => {
+    const replacementIncarnationId = 'incarnation-00000002';
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'restarted-worker',
+      incarnationId: replacementIncarnationId,
+      identityId: 'stable-restarted-identity',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'restarted-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+
+    await expect(
+      store.lease(
+        'restarted-worker',
+        incarnationId,
+        100,
+        undefined,
+        'stable-restarted-identity',
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.lease(
+        'restarted-worker',
+        replacementIncarnationId,
+        1_000,
+        undefined,
+        'stable-restarted-identity',
       ),
     ).resolves.toBeDefined();
     controller.abort();

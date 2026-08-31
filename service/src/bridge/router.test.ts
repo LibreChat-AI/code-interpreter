@@ -129,7 +129,7 @@ describe('paired bridge HTTP API', () => {
       workerId: 'user-vm',
       incarnationId: 'incarnation-00000001',
       capabilities: {
-        statefulWorkspace: true,
+        statefulWorkspace: false,
         sandboxProfile: 'nsjail',
         runtimes: ['bash'],
       },
@@ -164,6 +164,18 @@ describe('paired bridge HTTP API', () => {
       },
     );
     expect(registrationResponse.status).toBe(200);
+    await expect(
+      store.dispatch({
+        workerId: 'user-vm',
+        tenantId: binding.tenantId,
+        requireTenantBinding: true,
+        body: { language: 'bash' } as never,
+        headers: {},
+        runtimeSessionId: 'stateful-session',
+        deadlineAtMs: Date.now() + 1_000,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
 
     await expect(
       store.dispatch({
