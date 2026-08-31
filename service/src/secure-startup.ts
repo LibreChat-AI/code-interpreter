@@ -64,6 +64,11 @@ export function validateApiBridgePolicy(): void {
       'CODEAPI_BRIDGE_WORKER_ID must match the bridge worker ID format',
     );
   }
+  if (env.BRIDGE_TOKEN !== env.BRIDGE_TOKEN.trim()) {
+    throw new SecureStartupConfigError(
+      'CODEAPI_BRIDGE_TOKEN must not contain surrounding whitespace',
+    );
+  }
   if (env.HARDENED_SANDBOX_MODE) {
     requireStrongSecret('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
   } else {

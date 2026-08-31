@@ -353,6 +353,17 @@ describe('sandbox backend policy', () => {
     );
   });
 
+  test('API bridge policy rejects whitespace-padded tokens', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = ' padded-development-bridge-token ';
+    env.PTC_MODE = 'replay';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'must not contain surrounding whitespace',
+    );
+  });
+
   test('remote bridge requires a positive finite job timeout', () => {
     env.SANDBOX_BACKEND = 'remote-bridge';
     env.BRIDGE_WORKER_ID = 'engineering-vm';

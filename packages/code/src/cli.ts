@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { BridgeWorker } from './worker.js';
+import { isValidBridgeWorkerId } from './protocol.js';
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -32,10 +33,16 @@ if (statefulWorkspace && !sandboxEndpoint.includes('{runtimeSessionId}')) {
     'LIBRECHAT_CODE_STATEFUL_WORKSPACE requires LIBRECHAT_CODE_SANDBOX_ENDPOINT to contain {runtimeSessionId}',
   );
 }
+const workerId = required('LIBRECHAT_CODE_WORKER_ID');
+if (!isValidBridgeWorkerId(workerId)) {
+  throw new Error(
+    'LIBRECHAT_CODE_WORKER_ID must match the bridge worker ID format',
+  );
+}
 const worker = new BridgeWorker({
   codeApiUrl: required('LIBRECHAT_CODE_URL'),
   token: required('LIBRECHAT_CODE_WORKER_TOKEN'),
-  workerId: required('LIBRECHAT_CODE_WORKER_ID'),
+  workerId,
   sandboxEndpoint,
   capabilities: {
     statefulWorkspace,
