@@ -236,19 +236,23 @@ export class RedisBridgeStore {
       'return 1',
     ].join('\n');
     const result = Number(
-      await this.redis.eval(
-        script,
-        6,
-        workerKey(registration.workerId),
-        incarnationFenceKey(registration.workerId, registration.incarnationId),
-        quarantineKey(registration.workerId, registration.incarnationId),
-        workerIncarnationKey(registration.workerId),
-        lockKey(registration.workerId),
-        lockIncarnationKey(registration.workerId),
-        registration.incarnationId,
-        JSON.stringify(registration),
-        String(this.workerTtlSeconds),
-        `${PREFIX}:worker:${registration.workerId}:incarnation:`,
+      await boundedCommand(
+        this.redis.eval(
+          script,
+          6,
+          workerKey(registration.workerId),
+          incarnationFenceKey(registration.workerId, registration.incarnationId),
+          quarantineKey(registration.workerId, registration.incarnationId),
+          workerIncarnationKey(registration.workerId),
+          lockKey(registration.workerId),
+          lockIncarnationKey(registration.workerId),
+          registration.incarnationId,
+          JSON.stringify(registration),
+          String(this.workerTtlSeconds),
+          `${PREFIX}:worker:${registration.workerId}:incarnation:`,
+        ),
+        this.redisCommandTimeoutMs,
+        'Bridge worker registration',
       ),
     );
     if (result === -2) {
@@ -990,9 +994,21 @@ export class RedisBridgeStore {
     );
   }
 
-  private async cancel(assignmentId: string): Promise<void> {
+  private async cancel(
+    assignmentId: string,
+    assignment?: StoredAssignment,
+  ): Promise<void> {
+    const ttlSeconds =
+      assignment == null
+        ? 30
+        : assignmentTtlSeconds(Date.parse(assignment.expiresAt));
     await boundedCommand(
-      this.redis.set(cancellationKey(assignmentId), '1', 'EX', 30),
+      this.redis.set(
+        cancellationKey(assignmentId),
+        '1',
+        'EX',
+        ttlSeconds,
+      ),
       this.redisCommandTimeoutMs,
       'Bridge assignment cancellation',
     );
@@ -1075,7 +1091,7 @@ export class RedisBridgeStore {
     assignment: StoredAssignment | undefined,
   ): Promise<void> {
     await Promise.all([
-      this.cancel(assignmentId),
+      this.cancel(assignmentId, assignment),
       assignment == null
         ? boundedCommand(
             this.releaseLock(workerId, assignmentId),

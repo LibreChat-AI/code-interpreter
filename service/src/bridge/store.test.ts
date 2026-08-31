@@ -170,6 +170,60 @@ describe('RedisBridgeStore', () => {
     ).rejects.toThrow('Bridge lease claim timed out');
   });
 
+  test('bounds a stalled Redis worker registration', async () => {
+    const timedStore = new RedisBridgeStore(redis, 60, 10);
+    redis.eval = (() => new Promise(() => undefined)) as Redis['eval'];
+
+    await expect(
+      timedStore.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'stalled-registration-worker',
+        incarnationId,
+        capabilities: {
+          statefulWorkspace: false,
+          sandboxProfile: 'nsjail',
+          runtimes: [],
+        },
+      }),
+    ).rejects.toThrow('Bridge worker registration timed out');
+  });
+
+  test('retains cancellation through the assignment lifetime', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'cancel-ttl-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'cancel-ttl-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 120_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease(
+      'cancel-ttl-worker',
+      incarnationId,
+      1_000,
+    );
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+
+    expect(
+      await redis.ttl(
+        `codeapi:bridge:v1:assignment:${assignment?.assignmentId}:cancelled`,
+      ),
+    ).toBeGreaterThan(30);
+  });
+
   test('bounds a stalled quarantine command', async () => {
     const timedStore = new RedisBridgeStore(redis, 60, 10);
     redis.eval = (() => new Promise(() => undefined)) as Redis['eval'];
