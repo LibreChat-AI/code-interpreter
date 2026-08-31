@@ -76,6 +76,38 @@ test('worker forwards a fenced assignment to the sandbox and settles the result'
   });
 });
 
+test('worker acknowledges a discarded workspace through the reset endpoint', async () => {
+  let requestBody: Record<string, unknown> | undefined;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input, init) => {
+      assert.match(String(input), /workers\/vm-1\/workspaces\/reset$/);
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ protocolVersion: 1, reset: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    },
+  });
+
+  await worker.resetWorkspace('rt-user-1');
+  assert.deepEqual(requestBody, {
+    protocolVersion: 1,
+    incarnationId: 'incarnation-00000001',
+    runtimeSessionId: 'rt-user-1',
+    confirmDiscarded: true,
+  });
+});
+
 test('worker continues after an assignment-scoped settlement conflict', async () => {
   const controller = new AbortController();
   let registrations = 0;
@@ -496,6 +528,48 @@ test('worker quarantines stateful reuse after settlement stays ambiguous', async
       request: { body: { language: 'bash' }, headers: {} },
     }),
     BridgeWorkspaceQuarantinedError,
+  );
+});
+
+test('worker keeps a definite stateful rejection nonfatal when settlement is ambiguous', async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    if (String(input).endsWith('/execute')) {
+      return new Response(JSON.stringify({ error: 'syntax_error' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw new TypeError('connection reset');
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'rejected-ambiguous-settlement',
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
+      generation: 1,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 50).toISOString(),
+      runtimeSessionId: 'rt-user-1',
+      request: { body: { language: 'bash' }, headers: {} },
+    }),
+    (error: unknown) =>
+      error instanceof TypeError &&
+      !(error instanceof BridgeWorkspaceQuarantinedError),
   );
 });
 

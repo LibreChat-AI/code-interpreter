@@ -159,6 +159,48 @@ router.post(
 );
 
 router.post(
+  '/workers/:workerId/workspaces/reset',
+  asyncRoute(async (req, res) => {
+    const workerId = req.params.workerId;
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      !validWorkerId(workerId) ||
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      !validIncarnationId(body.incarnationId) ||
+      typeof body.runtimeSessionId !== 'string' ||
+      body.runtimeSessionId.trim().length === 0 ||
+      body.runtimeSessionId.length > 512 ||
+      body.confirmDiscarded !== true
+    ) {
+      res.status(400).json({
+        error: 'Workspace reset requires confirmation of local discard',
+      });
+      return;
+    }
+    if (env.BRIDGE_WORKER_ID && workerId !== env.BRIDGE_WORKER_ID) {
+      res.status(403).json({
+        error: 'Worker is not authorized for this Code API deployment',
+      });
+      return;
+    }
+    try {
+      await bridgeStore.resetWorkspace(
+        workerId,
+        body.incarnationId,
+        body.runtimeSessionId,
+      );
+      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, reset: true });
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
+      }
+      throw error;
+    }
+  }),
+);
+
+router.post(
   '/workers/:workerId/lease',
   asyncRoute(async (req, res) => {
     const workerId = req.params.workerId;

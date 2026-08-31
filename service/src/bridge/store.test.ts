@@ -82,6 +82,74 @@ describe('RedisBridgeStore', () => {
     ).rejects.toMatchObject({ code: 'WORKER_OFFLINE' });
   });
 
+  test('does not fence a workspace when dispatch is already aborted', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      store.dispatch({
+        workerId: 'vm-1',
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        runtimeSessionId: 'rt-aborted',
+        deadlineAtMs: Date.now() + 5_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+    expect(
+      await redis.keys(
+        'codeapi:bridge:v1:worker:vm-1:workspace:*:quarantined',
+      ),
+    ).toHaveLength(0);
+  });
+
+  test('does not fence a workspace when dispatch aborts during lock acquisition', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-1',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    redis.eval = (async (...args: Parameters<Redis['eval']>) => {
+      const result = await redisEval(...args);
+      if (String(args[0]).includes("EXISTS', KEYS[1]) == 1")) {
+        controller.abort();
+      }
+      return result;
+    }) as Redis['eval'];
+
+    await expect(
+      store.dispatch({
+        workerId: 'vm-1',
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        runtimeSessionId: 'rt-aborted-lock',
+        deadlineAtMs: Date.now() + 5_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+    expect(
+      await redis.keys(
+        'codeapi:bridge:v1:worker:vm-1:workspace:*:quarantined',
+      ),
+    ).toHaveLength(0);
+    expect(await redis.exists('codeapi:bridge:v1:worker:vm-1:lock')).toBe(0);
+  });
+
   test('returns a popped assignment when its lease request is aborted', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -724,6 +792,9 @@ describe('RedisBridgeStore', () => {
       'codeapi:bridge:v1:worker:lost-worker:workspace:*:quarantined',
     );
     expect(await redis.get(marker)).toBe(assignment?.assignmentId ?? null);
+    await expect(
+      store.resetWorkspace('lost-worker', incarnationId, 'rt-lost'),
+    ).rejects.toMatchObject({ code: 'WORKER_BUSY' });
 
     controller.abort();
     await expect(completion).rejects.toMatchObject({
@@ -749,6 +820,31 @@ describe('RedisBridgeStore', () => {
         signal: new AbortController().signal,
       }),
     ).rejects.toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
+
+    await store.resetWorkspace(
+      'lost-worker',
+      'incarnation-00000002',
+      'rt-lost',
+    );
+    const recoveredController = new AbortController();
+    const recoveredCompletion = store.dispatch({
+      workerId: 'lost-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-lost',
+      deadlineAtMs: Date.now() + 5_000,
+      signal: recoveredController.signal,
+    });
+    const recoveredAssignment = await store.lease(
+      'lost-worker',
+      'incarnation-00000002',
+      1_000,
+    );
+    expect(recoveredAssignment).toBeDefined();
+    recoveredController.abort();
+    await expect(recoveredCompletion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
   });
 
   test('clears an in-flight workspace marker after a definite rejection', async () => {

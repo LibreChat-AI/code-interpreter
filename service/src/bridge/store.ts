@@ -199,6 +199,7 @@ export class RedisBridgeStore {
       settlement: CodeBridgeSettlement,
     ) => Promise<CodeBridgeSettlement>;
   }): Promise<CodeBridgeSettlement> {
+    this.assertDispatchActive(args.signal, args.deadlineAtMs);
     let registration = await this.registration(args.workerId);
     if (registration == null) {
       throw new BridgeStoreError(
@@ -246,6 +247,7 @@ export class RedisBridgeStore {
     let assignment: StoredAssignment | undefined;
     let resultCommitted = false;
     try {
+      this.assertDispatchActive(args.signal, args.deadlineAtMs);
       const generation = await this.redis.incr(generationKey(args.workerId));
       assignment = {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -264,6 +266,7 @@ export class RedisBridgeStore {
       };
       let queued = false;
       for (let attempt = 0; attempt < 8 && !queued; attempt += 1) {
+        this.assertDispatchActive(args.signal, args.deadlineAtMs);
         assignment.incarnationId = registration.incarnationId;
         queued = await this.enqueueForActiveIncarnation(assignment, ttlSeconds);
         if (queued) break;
@@ -580,11 +583,57 @@ export class RedisBridgeStore {
     );
   }
 
+  async resetWorkspace(
+    workerId: string,
+    incarnationId: string,
+    runtimeSessionId: string,
+  ): Promise<void> {
+    const result = Number(
+      await this.redis.eval(
+        [
+          "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return -1 end",
+          "if redis.call('EXISTS', KEYS[2]) == 1 then return -2 end",
+          "redis.call('DEL', KEYS[3])",
+          'return 1',
+        ].join('\n'),
+        3,
+        workerIncarnationKey(workerId),
+        lockKey(workerId),
+        workspaceQuarantineKey(workerId, runtimeSessionId),
+        incarnationId,
+      ),
+    );
+    if (result === -1) {
+      throw new BridgeStoreError(
+        'WORKER_FENCED',
+        'Only the active bridge worker incarnation can reset a workspace',
+      );
+    }
+    if (result === -2) {
+      throw new BridgeStoreError(
+        'WORKER_BUSY',
+        'Bridge workspace cannot be reset while worker execution is active',
+      );
+    }
+  }
+
   private async registration(
     workerId: string,
   ): Promise<BridgeWorkerRegistration | undefined> {
     const raw = await this.redis.get(workerKey(workerId));
     return raw == null ? undefined : (JSON.parse(raw) as BridgeWorkerRegistration);
+  }
+
+  private assertDispatchActive(
+    signal: AbortSignal,
+    deadlineAtMs: number,
+  ): void {
+    if (signal.aborted || Date.now() >= deadlineAtMs) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_EXPIRED',
+        'Bridge assignment ended before it could be delivered',
+      );
+    }
   }
 
   private async readAssignment(

@@ -49,7 +49,29 @@ const worker = new BridgeWorker({
   },
 });
 
-worker.run(controller.signal).catch((error: Error) => {
+async function main(): Promise<void> {
+  const command = process.argv[2];
+  if (command === 'reset-workspace') {
+    const runtimeSessionId = process.argv[3]?.trim();
+    if (!runtimeSessionId) {
+      throw new Error(
+        'Usage: librechat-code reset-workspace <runtime-session-id>',
+      );
+    }
+    await worker.register(controller.signal);
+    await worker.resetWorkspace(runtimeSessionId, controller.signal);
+    process.stdout.write(
+      `librechat-code: reset acknowledged for ${runtimeSessionId}\n`,
+    );
+    return;
+  }
+  if (command != null) {
+    throw new Error(`Unknown command: ${command}`);
+  }
+  await worker.run(controller.signal);
+}
+
+main().catch((error: Error) => {
   process.stderr.write(`librechat-code: ${error.message}\n`);
   process.exitCode = 1;
 });

@@ -123,6 +123,25 @@ export class BridgeWorker {
     return registration;
   }
 
+  async resetWorkspace(
+    runtimeSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (runtimeSessionId.trim().length === 0) {
+      throw new BridgeProtocolError('Runtime session ID is required');
+    }
+    await this.request(
+      `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/workspaces/reset`,
+      {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        incarnationId: this.incarnationId,
+        runtimeSessionId,
+        confirmDiscarded: true,
+      },
+      signal,
+    );
+  }
+
   async lease(signal?: AbortSignal): Promise<BridgeAssignment | undefined> {
     const waitMs = Math.min(
       MAX_LEASE_WAIT_MS,
@@ -476,7 +495,10 @@ export class BridgeWorker {
       clearTimeout(deadlineTimer);
       signal?.removeEventListener('abort', abortSettlement);
     }
-    if (assignment.runtimeSessionId != null) {
+    if (
+      assignment.runtimeSessionId != null &&
+      settlement.status === 'fulfilled'
+    ) {
       throw new BridgeWorkspaceQuarantinedError(
         `Stateful workspace ${assignment.runtimeSessionId} was quarantined after ambiguous settlement delivery`,
         lastError,
