@@ -4,6 +4,7 @@ import {
   lambdaMicrovmNumericConfigError,
 } from './config';
 import { INTERNAL_SERVICE_TOKEN_ENV } from './internal-service-auth';
+import { isValidBridgeWorkerId } from '../../packages/code/src/protocol';
 
 export class SecureStartupConfigError extends Error {
   constructor(message: string) {
@@ -58,6 +59,11 @@ export function validateApiBridgePolicy(): void {
   if (env.SANDBOX_BACKEND !== 'remote-bridge') return;
   requireSafeWholeNumber('JOB_TIMEOUT', env.JOB_TIMEOUT, 1);
   requireValue('CODEAPI_BRIDGE_WORKER_ID', env.BRIDGE_WORKER_ID);
+  if (!isValidBridgeWorkerId(env.BRIDGE_WORKER_ID ?? '')) {
+    throw new SecureStartupConfigError(
+      'CODEAPI_BRIDGE_WORKER_ID must match the bridge worker ID format',
+    );
+  }
   if (env.HARDENED_SANDBOX_MODE) {
     requireStrongSecret('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
   } else {

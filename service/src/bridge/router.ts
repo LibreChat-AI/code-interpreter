@@ -5,12 +5,14 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { BridgeWorkerRegistration } from '../../../packages/code/src/protocol';
 import type { CodeBridgeAssignment, CodeBridgeSettlement } from './store';
 
-import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  isValidBridgeWorkerId,
+} from '../../../packages/code/src/protocol';
 import { connection } from '../queue';
 import { env } from '../config';
 import { BridgeStoreError, RedisBridgeStore } from './store';
 
-const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const INCARNATION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const MAX_LEASE_WAIT_MS = 30_000;
 
@@ -43,7 +45,7 @@ function bridgeAuth(req: Request, res: Response, next: NextFunction): void {
 }
 
 function validWorkerId(value: string): boolean {
-  return WORKER_ID_PATTERN.test(value);
+  return isValidBridgeWorkerId(value);
 }
 
 function validIncarnationId(value: unknown): value is string {

@@ -203,6 +203,19 @@ export class RedisBridgeStore {
     }
   }
 
+  private async leaseCommand<T>(
+    command: Promise<T>,
+    signal: AbortSignal | undefined,
+    label: string,
+  ): Promise<T> {
+    return await boundedCommand(
+      command,
+      this.redisCommandTimeoutMs,
+      label,
+      signal,
+    );
+  }
+
   async register(registration: BridgeWorkerRegistration): Promise<void> {
     const script = [
       'if redis.call(\'EXISTS\', KEYS[3]) == 1 then return -2 end',
@@ -446,7 +459,17 @@ export class RedisBridgeStore {
       (firstPoll || Date.now() < deadline)
     ) {
       firstPoll = false;
-      const assignmentId = await this.claimOrPopLease(workerId, incarnationId);
+      let assignmentId: string | null;
+      try {
+        assignmentId = await this.leaseCommand(
+          this.claimOrPopLease(workerId, incarnationId),
+          signal,
+          'Bridge lease claim',
+        );
+      } catch (error) {
+        if (signalAborted(signal)) return undefined;
+        throw error;
+      }
       if (assignmentId == null) {
         await delay(
           Math.min(POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())),
@@ -455,20 +478,32 @@ export class RedisBridgeStore {
         continue;
       }
       try {
-        const assignment = await this.readAssignment(assignmentId);
+        const assignment = await this.leaseCommand(
+          this.readAssignment(assignmentId),
+          signal,
+          'Bridge lease assignment read',
+        );
         if (
           assignment == null ||
           assignment.workerId !== workerId ||
           assignment.incarnationId !== incarnationId
         ) {
-          await this.discardLeaseClaim(workerId, incarnationId, assignmentId);
+          await this.leaseCommand(
+            this.discardLeaseClaim(workerId, incarnationId, assignmentId),
+            signal,
+            'Bridge lease claim discard',
+          );
           continue;
         }
         if (signalAborted(signal)) {
           await this.returnLease(assignment);
           return undefined;
         }
-        const registration = await this.registration(workerId);
+        const registration = await this.leaseCommand(
+          this.registration(workerId),
+          signal,
+          'Bridge lease registration read',
+        );
         if (registration?.incarnationId !== incarnationId) {
           throw new BridgeStoreError(
             'WORKER_FENCED',
@@ -476,8 +511,24 @@ export class RedisBridgeStore {
           );
         }
         if (Date.parse(assignment.expiresAt) <= Date.now()) {
-          await this.clearUndeliveredWorkspaceFence(assignment);
-          await this.discardLeaseClaim(workerId, incarnationId, assignmentId);
+          const acknowledged =
+            (await this.leaseCommand(
+              this.redis.get(leaseAckKey(workerId, incarnationId)),
+              signal,
+              'Bridge lease acknowledgement read',
+            )) === assignmentId;
+          if (!acknowledged) {
+            await this.leaseCommand(
+              this.clearUndeliveredWorkspaceFence(assignment),
+              signal,
+              'Bridge undelivered workspace recovery',
+            );
+          }
+          await this.leaseCommand(
+            this.discardLeaseClaim(workerId, incarnationId, assignmentId),
+            signal,
+            'Bridge expired lease discard',
+          );
           continue;
         }
         if (signalAborted(signal)) {
@@ -498,6 +549,7 @@ export class RedisBridgeStore {
           incarnationId,
           assignmentId,
         );
+        if (signalAborted(signal)) return undefined;
         throw error;
       }
     }
@@ -602,21 +654,27 @@ export class RedisBridgeStore {
     incarnationId: string,
     assignmentId: string,
   ): Promise<void> {
-    await this.redis.eval(
-      [
-        "if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end",
-        "if redis.call('GET', KEYS[3]) ~= ARGV[1] then return 0 end",
-        "redis.call('DEL', KEYS[3], KEYS[4])",
-        "redis.call('LREM', KEYS[2], 0, ARGV[1])",
-        "redis.call('LPUSH', KEYS[2], ARGV[1])",
-        'return 1',
-      ].join('\n'),
-      4,
-      assignmentKey(assignmentId),
-      queueKey(workerId, incarnationId),
-      leaseClaimKey(workerId, incarnationId),
-      leaseAckKey(workerId, incarnationId),
-      assignmentId,
+    await boundedCommand(
+      this.redis.eval(
+        [
+          "if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end",
+          "if redis.call('GET', KEYS[3]) ~= ARGV[1] then return 0 end",
+          "local ttl = redis.call('TTL', KEYS[1])",
+          "redis.call('DEL', KEYS[3], KEYS[4])",
+          "redis.call('LREM', KEYS[2], 0, ARGV[1])",
+          "redis.call('LPUSH', KEYS[2], ARGV[1])",
+          "if ttl > 0 then redis.call('EXPIRE', KEYS[2], ttl) end",
+          'return 1',
+        ].join('\n'),
+        4,
+        assignmentKey(assignmentId),
+        queueKey(workerId, incarnationId),
+        leaseClaimKey(workerId, incarnationId),
+        leaseAckKey(workerId, incarnationId),
+        assignmentId,
+      ),
+      this.redisCommandTimeoutMs,
+      'Bridge lease return',
     );
   }
 

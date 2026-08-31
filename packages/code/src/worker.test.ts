@@ -753,6 +753,7 @@ test('worker retries a known-clean rejection after shutdown until acknowledged',
 test('worker preserves a definite rejection when its heartbeat fails', async () => {
   let registrations = 0;
   let rejectedSettlement = false;
+  let settlementAttempts = 0;
   const worker = new BridgeWorker({
     codeApiUrl: 'https://code.example/v1',
     token: 'worker-secret',
@@ -768,7 +769,9 @@ test('worker preserves a definite rejection when its heartbeat fails', async () 
     fetchImpl: async (input, init) => {
       if (String(input).endsWith('/workers/register')) {
         registrations += 1;
-        if (registrations > 1) throw new TypeError('registration unavailable');
+        if (registrations === 2) {
+          throw new TypeError('registration unavailable');
+        }
         return new Response(
           JSON.stringify({
             protocolVersion: 1,
@@ -787,8 +790,15 @@ test('worker preserves a definite rejection when its heartbeat fails', async () 
           headers: { 'Content-Type': 'application/json' },
         });
       }
+      settlementAttempts += 1;
       rejectedSettlement =
         JSON.parse(String(init?.body) || '{}').status === 'rejected';
+      if (settlementAttempts === 1) {
+        return new Response(JSON.stringify({ error: 'unavailable' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       return new Response(
         JSON.stringify({ protocolVersion: 1, accepted: true }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -810,8 +820,9 @@ test('worker preserves a definite rejection when its heartbeat fails', async () 
     request: { body: { language: 'bash' }, headers: {} },
   });
 
-  assert.ok(registrations > 1);
+  assert.ok(registrations >= 3);
   assert.equal(rejectedSettlement, true);
+  assert.equal(settlementAttempts, 2);
 });
 
 test('worker quarantines a stateful workspace after a sandbox 5xx response', async () => {
@@ -1232,6 +1243,73 @@ test('worker rejects a lease whose acknowledgement exhausts its budget', async (
   } finally {
     Date.now = originalNow;
   }
+});
+
+test('worker rejects an assignment after ambiguous acknowledgement delivery', async () => {
+  let rejectedSettlement = false;
+  let acknowledgementAttempts = 0;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    rejectionAckGraceMs: 500,
+    fetchImpl: async (input, init) => {
+      if (String(input).endsWith('/ack')) {
+        acknowledgementAttempts += 1;
+        throw new TypeError('acknowledgement response lost');
+      }
+      if (String(input).endsWith('/settle')) {
+        rejectedSettlement =
+          JSON.parse(String(init?.body) || '{}').status === 'rejected';
+        return new Response(
+          JSON.stringify({ protocolVersion: 1, accepted: true }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (String(input).endsWith('/workers/register')) {
+        return new Response(
+          JSON.stringify({
+            protocolVersion: 1,
+            workerId: 'vm-1',
+            incarnationId: 'incarnation-00000001',
+            registeredAt: new Date().toISOString(),
+            leaseTtlMs: 60_000,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          protocolVersion: 1,
+          serverElapsedMs: 0,
+          assignment: {
+            protocolVersion: 1,
+            assignmentId: 'ambiguous-ack',
+            workerId: 'vm-1',
+            incarnationId: 'incarnation-00000001',
+            generation: 1,
+            leaseToken: 'lease-token-that-is-long-enough-for-testing',
+            expiresAt: new Date(Date.now() + 1_000).toISOString(),
+            remainingMs: 1_000,
+            runtimeSessionId: 'rt-user-1',
+            request: { body: { language: 'bash' }, headers: {} },
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    },
+  });
+
+  await assert.rejects(worker.lease(), /acknowledgement response lost/);
+  assert.equal(acknowledgementAttempts, 1);
+  assert.equal(rejectedSettlement, true);
 });
 
 test('worker clamps rejected settlement errors to the protocol limit', async () => {

@@ -342,6 +342,17 @@ describe('sandbox backend policy', () => {
     expect(() => validateApiBridgePolicy()).not.toThrow();
   });
 
+  test('API bridge policy rejects worker IDs the router cannot accept', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering/vm';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.PTC_MODE = 'replay';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'must match the bridge worker ID format',
+    );
+  });
+
   test('remote bridge requires a positive finite job timeout', () => {
     env.SANDBOX_BACKEND = 'remote-bridge';
     env.BRIDGE_WORKER_ID = 'engineering-vm';

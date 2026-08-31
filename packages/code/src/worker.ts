@@ -45,6 +45,7 @@ const DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS = 10_000;
 const DEFAULT_CANCELLATION_POLL_INTERVAL_MS = 500;
 const DEFAULT_CANCELLATION_TRANSPORT_TIMEOUT_MS = 2_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
+const REGISTRATION_RETRY_DELAY_MS = 100;
 const SETTLEMENT_RETRY_DELAY_MS = 100;
 const REJECTION_ACK_GRACE_MS = 30_000;
 const MAX_SETTLEMENT_ERROR_LENGTH = 4_096;
@@ -234,52 +235,47 @@ export class BridgeWorker {
       ),
     };
     const acknowledgementStartedAtMs = Date.now();
-    await this.timedRequest(
-      this.assignmentUrl(adjustedAssignment, 'ack'),
-      {
-        protocolVersion: BRIDGE_PROTOCOL_VERSION,
-        incarnationId: this.incarnationId,
-        generation: adjustedAssignment.generation,
-        leaseToken: adjustedAssignment.leaseToken,
-      },
-      Math.max(
-        1,
-        this.options.leaseAckTransportTimeoutMs ??
-          DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
-      ),
-      signal,
-    );
+    try {
+      await this.timedRequest(
+        this.assignmentUrl(adjustedAssignment, 'ack'),
+        {
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          incarnationId: this.incarnationId,
+          generation: adjustedAssignment.generation,
+          leaseToken: adjustedAssignment.leaseToken,
+        },
+        Math.max(
+          1,
+          this.options.leaseAckTransportTimeoutMs ??
+            DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+        ),
+        signal,
+      );
+    } catch (error) {
+      const definiteRejection =
+        error instanceof BridgeProtocolError &&
+        error.status != null &&
+        error.status < 500 &&
+        error.status !== 408 &&
+        error.status !== 429;
+      if (!definiteRejection) {
+        await this.rejectUnexecutedAssignment(
+          adjustedAssignment,
+          'Bridge lease acknowledgement delivery was ambiguous',
+        );
+      }
+      throw error;
+    }
     const remainingMs = Math.max(
       0,
       (adjustedAssignment.remainingMs ?? 0) -
         (Date.now() - acknowledgementStartedAtMs),
     );
     if (remainingMs <= 0) {
-      const heartbeatController = new AbortController();
-      const heartbeat = this.maintainRegistration(
-        heartbeatController.signal,
-      ).catch(() => undefined);
-      try {
-        await this.settleWithRetry(
-          adjustedAssignment,
-          {
-            protocolVersion: BRIDGE_PROTOCOL_VERSION,
-            generation: adjustedAssignment.generation,
-            leaseToken: adjustedAssignment.leaseToken,
-            incarnationId: this.incarnationId,
-            status: 'rejected',
-            error: 'Bridge assignment expired during lease acknowledgement',
-          },
-          Date.now() +
-            Math.max(
-              0,
-              this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
-            ),
-        );
-      } finally {
-        heartbeatController.abort();
-        await heartbeat;
-      }
+      await this.rejectUnexecutedAssignment(
+        adjustedAssignment,
+        'Bridge assignment expired during lease acknowledgement',
+      );
       throw new BridgeProtocolError(
         'Bridge assignment expired during lease acknowledgement',
       );
@@ -435,18 +431,36 @@ export class BridgeWorker {
         assignment.runtimeSessionId != null &&
         settlement.status === 'rejected' &&
         sandboxRejectedExecution;
-      await this.settleWithRetry(
-        assignment,
-        settlement,
-        localDeadlineAtMs +
-          (knownCleanStatefulRejection
-            ? Math.max(
+      if (knownCleanStatefulRejection) {
+        heartbeatController.abort();
+        await heartbeat;
+        const recoveryHeartbeatController = new AbortController();
+        const recoveryHeartbeat = this.maintainRegistration(
+          recoveryHeartbeatController.signal,
+          true,
+        ).catch(() => undefined);
+        try {
+          await this.settleWithRetry(
+            assignment,
+            settlement,
+            localDeadlineAtMs +
+              Math.max(
                 0,
                 this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
-              )
-            : 0),
-        knownCleanStatefulRejection ? undefined : signal,
-      );
+              ),
+          );
+        } finally {
+          recoveryHeartbeatController.abort();
+          await recoveryHeartbeat;
+        }
+      } else {
+        await this.settleWithRetry(
+          assignment,
+          settlement,
+          localDeadlineAtMs,
+          signal,
+        );
+      }
     } finally {
       heartbeatController.abort();
       await heartbeat;
@@ -502,6 +516,7 @@ export class BridgeWorker {
 
   private async maintainRegistration(
     signal: AbortSignal,
+    retryTransient = false,
   ): Promise<void> {
     while (!signal.aborted) {
       const heartbeatIntervalMs = Math.max(
@@ -516,7 +531,50 @@ export class BridgeWorker {
         signal,
       );
       if (signal.aborted) return;
-      await this.register(signal);
+      try {
+        await this.register(signal);
+      } catch (error) {
+        const terminal =
+          error instanceof BridgeProtocolError &&
+          (error.status === 401 ||
+            error.status === 403 ||
+            error.code === 'WORKER_FENCED' ||
+            error.code === 'WORKER_QUARANTINED');
+        if (!retryTransient || terminal || signal.aborted) throw error;
+        await this.delay(REGISTRATION_RETRY_DELAY_MS, signal);
+      }
+    }
+  }
+
+  private async rejectUnexecutedAssignment(
+    assignment: BridgeAssignment,
+    error: string,
+  ): Promise<void> {
+    const heartbeatController = new AbortController();
+    const heartbeat = this.maintainRegistration(
+      heartbeatController.signal,
+      true,
+    ).catch(() => undefined);
+    try {
+      await this.settleWithRetry(
+        assignment,
+        {
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          generation: assignment.generation,
+          leaseToken: assignment.leaseToken,
+          incarnationId: this.incarnationId,
+          status: 'rejected',
+          error,
+        },
+        Date.now() +
+          Math.max(
+            0,
+            this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
+          ),
+      );
+    } finally {
+      heartbeatController.abort();
+      await heartbeat;
     }
   }
 

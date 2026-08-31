@@ -161,6 +161,15 @@ describe('RedisBridgeStore', () => {
     await expect(completion).resolves.toMatchObject({ status: 'rejected' });
   });
 
+  test('bounds a stalled Redis lease claim', async () => {
+    const timedStore = new RedisBridgeStore(redis, 60, 10);
+    redis.eval = (() => new Promise(() => undefined)) as Redis['eval'];
+
+    await expect(
+      timedStore.lease('stalled-worker', incarnationId, 0),
+    ).rejects.toThrow('Bridge lease claim timed out');
+  });
+
   test('bounds a stalled quarantine command', async () => {
     const timedStore = new RedisBridgeStore(redis, 60, 10);
     redis.eval = (() => new Promise(() => undefined)) as Redis['eval'];
@@ -299,6 +308,59 @@ describe('RedisBridgeStore', () => {
     });
   });
 
+  test('preserves a workspace fence when an acknowledged lease expires', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'ack-expired-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'ack-expired-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-ack-expired',
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease(
+      'ack-expired-worker',
+      incarnationId,
+      1_000,
+    );
+    await store.acknowledgeLease(
+      'ack-expired-worker',
+      incarnationId,
+      assignment?.assignmentId ?? '',
+      assignment?.generation ?? 0,
+      assignment?.leaseToken ?? '',
+    );
+    const storedKey = `codeapi:bridge:v1:assignment:${assignment?.assignmentId}`;
+    const stored = JSON.parse(
+      (await redis.get(storedKey)) ?? '{}',
+    ) as Record<string, unknown>;
+    stored.expiresAt = new Date(0).toISOString();
+    await redis.set(storedKey, JSON.stringify(stored), 'EX', 30);
+
+    await expect(
+      store.lease('ack-expired-worker', incarnationId, 0),
+    ).resolves.toBeUndefined();
+    expect(
+      await redis.keys(
+        'codeapi:bridge:v1:worker:ack-expired-worker:workspace:*:quarantined',
+      ),
+    ).toHaveLength(1);
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
   test('clears a workspace fence when dispatch cancels before lease', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -378,6 +440,46 @@ describe('RedisBridgeStore', () => {
     expect(recovered).toBeDefined();
     expect(recovered?.workerId).toBe('vm-1');
     dispatchController.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
+  test('restores queue expiry when returning a lease', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'returned-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'returned-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    const assignment = await store.lease(
+      'returned-worker',
+      incarnationId,
+      1_000,
+    );
+    await store.returnLease(assignment!);
+
+    expect(
+      await redis.ttl(
+        `codeapi:bridge:v1:worker:returned-worker:incarnation:${incarnationId}:assignments`,
+      ),
+    ).toBeGreaterThan(0);
+    expect(
+      await store.lease('returned-worker', incarnationId, 1_000),
+    ).toBeDefined();
+    controller.abort();
     await expect(completion).rejects.toMatchObject({
       code: 'ASSIGNMENT_EXPIRED',
     });

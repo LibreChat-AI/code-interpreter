@@ -1,4 +1,5 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
+export const BRIDGE_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export type BridgeProtocolVersion = typeof BRIDGE_PROTOCOL_VERSION;
 
@@ -94,4 +95,8 @@ export class BridgeProtocolError extends Error {
 
 export function bridgeWorkerPath(workerId: string): string {
   return `/bridge/workers/${encodeURIComponent(workerId)}`;
+}
+
+export function isValidBridgeWorkerId(workerId: string): boolean {
+  return BRIDGE_WORKER_ID_PATTERN.test(workerId);
 }
