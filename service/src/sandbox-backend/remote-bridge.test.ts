@@ -37,6 +37,7 @@ describe('RemoteBridgeSandboxBackend', () => {
           protocolVersion: 1 as const,
           generation: 1,
           leaseToken: 'a'.repeat(32),
+          incarnationId: 'incarnation-00000001',
           status: 'fulfilled' as const,
           result: {
             session_id: 'session-1',
@@ -83,6 +84,7 @@ describe('RemoteBridgeSandboxBackend', () => {
           protocolVersion: 1 as const,
           generation: 1,
           leaseToken: 'a'.repeat(32),
+          incarnationId: 'incarnation-00000001',
           status: 'fulfilled' as const,
           result: {
             session_id: 'session-1',

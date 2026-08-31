@@ -24,6 +24,7 @@ describe('RedisBridgeStore', () => {
       store.register({
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         workerId: 'fenced-worker',
+        incarnationId,
         credentialId: 'stale-credential-digest',
         identityId: 'stale-identity',
         capabilities: {
@@ -43,6 +44,7 @@ describe('RedisBridgeStore', () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'tenant-worker',
+      incarnationId,
       capabilities: {
         statefulWorkspace: true,
         sandboxProfile: 'nsjail',
@@ -71,6 +73,7 @@ describe('RedisBridgeStore', () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'rebound-worker',
+      incarnationId,
       identityId: 'tenant-a-identity',
       capabilities: {
         statefulWorkspace: true,
@@ -94,10 +97,22 @@ describe('RedisBridgeStore', () => {
     });
 
     await expect(
-      store.lease('rebound-worker', 1_000, undefined, 'tenant-b-identity'),
+      store.lease(
+        'rebound-worker',
+        incarnationId,
+        1_000,
+        undefined,
+        'tenant-b-identity',
+      ),
     ).resolves.toBeUndefined();
     await expect(
-      store.lease('rebound-worker', 1_000, undefined, 'tenant-a-identity'),
+      store.lease(
+        'rebound-worker',
+        incarnationId,
+        1_000,
+        undefined,
+        'tenant-a-identity',
+      ),
     ).resolves.toBeDefined();
     controller.abort();
     await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
@@ -107,6 +122,7 @@ describe('RedisBridgeStore', () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'replacement-worker',
+      incarnationId,
       identityId: 'replacement-identity',
       capabilities: {
         statefulWorkspace: true,
@@ -130,10 +146,22 @@ describe('RedisBridgeStore', () => {
     });
 
     await expect(
-      store.lease('replacement-worker', 100, undefined, 'stale-identity'),
+      store.lease(
+        'replacement-worker',
+        incarnationId,
+        100,
+        undefined,
+        'stale-identity',
+      ),
     ).resolves.toBeUndefined();
     await expect(
-      store.lease('replacement-worker', 1_000, undefined, 'replacement-identity'),
+      store.lease(
+        'replacement-worker',
+        incarnationId,
+        1_000,
+        undefined,
+        'replacement-identity',
+      ),
     ).resolves.toBeDefined();
     controller.abort();
     await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
@@ -143,6 +171,7 @@ describe('RedisBridgeStore', () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'rotating-worker',
+      incarnationId,
       identityId: 'stable-paired-identity',
       credentialId: 'credential-before-refresh',
       capabilities: {
@@ -168,6 +197,7 @@ describe('RedisBridgeStore', () => {
 
     const assignment = await store.lease(
       'rotating-worker',
+      incarnationId,
       1_000,
       undefined,
       'stable-paired-identity',

@@ -19,12 +19,18 @@ local previous = redis.call('GET', KEYS[2])
 if not activeDigest or not previous then
   return 0
 end
-if activeDigest ~= ARGV[1] and redis.call('GET', KEYS[4]) ~= ARGV[5] then
-  return 0
+if activeDigest ~= ARGV[1] then
+  if ARGV[5] == '' or redis.call('GET', KEYS[4]) ~= ARGV[5] then
+    return 0
+  end
 end
 redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
 redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])
-redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
+if ARGV[5] ~= '' then
+  redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
+else
+  redis.call('DEL', KEYS[4])
+end
 return 1
 `;
 const ISSUE_PAIRING_SCRIPT = `
@@ -56,7 +62,11 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then
 end
 redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])
 redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[4])
-redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
+if ARGV[5] ~= '' then
+  redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
+else
+  redis.call('DEL', KEYS[4])
+end
 redis.call('DEL', KEYS[1])
 return 1
 `;
@@ -79,7 +89,7 @@ interface StoredPairing {
 
 interface StoredCredential {
   workerId: string;
-  identityId: string;
+  identityId?: string;
   publicKey: string;
   expiresAt: string;
   binding?: BridgeWorkerBinding;
@@ -239,7 +249,7 @@ export class RedisBridgePairingStore {
     workerId: string;
     credentialId: string;
     activeCredentialId: string;
-    identityId: string;
+    identityId?: string;
     binding?: BridgeWorkerBinding;
   }> {
     const proofTime = Date.parse(args.timestamp);
@@ -271,7 +281,11 @@ export class RedisBridgePairingStore {
       const active = activeRaw == null
         ? undefined
         : JSON.parse(activeRaw) as StoredCredential;
-      if (active?.identityId !== stored.identityId) {
+      if (
+        stored.identityId == null ||
+        active?.identityId == null ||
+        stored.identityId !== active.identityId
+      ) {
         throw new BridgePairingError(
           'CREDENTIAL_INVALID',
           'Worker credential is invalid or expired',
@@ -307,7 +321,7 @@ export class RedisBridgePairingStore {
       workerId: stored.workerId,
       credentialId: credentialDigest,
       activeCredentialId: activeDigest,
-      identityId: stored.identityId,
+      ...(stored.identityId != null ? { identityId: stored.identityId } : {}),
       ...(stored.binding ? { binding: stored.binding } : {}),
     };
   }
@@ -345,7 +359,7 @@ export class RedisBridgePairingStore {
       workerId,
       previous.publicKey,
       previousDigest,
-      previous.identityId,
+      previous.identityId ?? null,
       previous.binding,
     );
   }
@@ -354,7 +368,7 @@ export class RedisBridgePairingStore {
     workerId: string,
     publicKey: string,
     previousDigest?: string,
-    identityId = randomBytes(18).toString('base64url'),
+    identityId: string | null | undefined = randomBytes(18).toString('base64url'),
     binding?: BridgeWorkerBinding,
     redemptionId?: string,
   ): Promise<BridgeWorkerCredential> {
@@ -363,9 +377,10 @@ export class RedisBridgePairingStore {
     const expiresAt = new Date(
       Date.now() + this.credentialTtlSeconds * 1000,
     ).toISOString();
+    const stableIdentityId = identityId ?? undefined;
     const stored: StoredCredential = {
       workerId,
-      identityId,
+      ...(stableIdentityId != null ? { identityId: stableIdentityId } : {}),
       publicKey,
       expiresAt,
       binding,
@@ -382,7 +397,7 @@ export class RedisBridgePairingStore {
         credentialDigest,
         JSON.stringify(stored),
         String(this.credentialTtlSeconds),
-        identityId,
+        stableIdentityId ?? '',
       );
       if (rotated !== 1) {
         throw new BridgePairingError(
@@ -409,7 +424,7 @@ export class RedisBridgePairingStore {
       credentialDigest,
       JSON.stringify(stored),
       String(this.credentialTtlSeconds),
-      identityId,
+      stableIdentityId ?? '',
     );
     if (installed !== 1) {
       throw new BridgePairingError(

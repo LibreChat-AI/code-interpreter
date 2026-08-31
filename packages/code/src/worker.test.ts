@@ -413,7 +413,7 @@ test('paired worker refreshes before an assignment that outlives its credential'
     identity: {
       privateKey: key.privateKey,
       credential: 'credential-too-short-for-assignment',
-      expiresAt: new Date(Date.now() + 90_000).toISOString(),
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
     },
     capabilities: {
       statefulWorkspace: true,
@@ -520,6 +520,7 @@ test('sandbox completion does not cancel an in-flight credential rotation', asyn
   const worker = new BridgeWorker({
     codeApiUrl: 'https://code.example/v1',
     workerId: 'vm-1',
+    incarnationId,
     sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
     identity,
     capabilities: {
@@ -535,6 +536,7 @@ test('sandbox completion does not cancel an in-flight credential rotation', asyn
     protocolVersion: 1,
     assignmentId: 'assignment-rotation-race',
     workerId: 'vm-1',
+    incarnationId,
     generation: 5,
     leaseToken: 'assignment-rotation-race-lease-token',
     expiresAt: new Date(Date.now() + 600_000).toISOString(),

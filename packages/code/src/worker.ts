@@ -262,10 +262,7 @@ export class BridgeWorker {
     assignment: BridgeAssignment,
     signal?: AbortSignal,
   ): Promise<void> {
-    await this.refreshCredential(
-      signal,
-      Date.parse(assignment.expiresAt) + CREDENTIAL_REFRESH_WINDOW_MS,
-    );
+    await this.refreshCredential(signal);
     const executionController = new AbortController();
     const credentialController = new AbortController();
     const abortExecution = (): void => {
@@ -300,7 +297,6 @@ export class BridgeWorker {
     let credentialMaintenance: Promise<void> | undefined;
     let settlement: BridgeSettlement;
     try {
-      await this.refreshCredential(signal);
       credentialMaintenance = this.maintainCredential(
         assignment,
         credentialController.signal,

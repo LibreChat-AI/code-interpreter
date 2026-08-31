@@ -127,6 +127,7 @@ describe('paired bridge HTTP API', () => {
     const body = JSON.stringify({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       workerId: 'user-vm',
+      incarnationId: 'incarnation-00000001',
       capabilities: {
         statefulWorkspace: true,
         sandboxProfile: 'nsjail',
