@@ -340,12 +340,16 @@ describe('sandbox backend policy', () => {
     env.SANDBOX_BACKEND = 'http';
     env.HARDENED_SANDBOX_MODE = true;
     env.BRIDGE_AUTH_MODE = 'static';
+    env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
     expect(() => validateApiBridgePolicy()).toThrow(
       'CODEAPI_BRIDGE_AUTH_MODE=paired',
     );
 
     env.BRIDGE_AUTH_MODE = 'paired';
     expect(() => validateApiBridgePolicy()).not.toThrow();
+
+    env.BRIDGE_TOKEN = 'guessable';
+    expect(() => validateApiBridgePolicy()).toThrow('at least 32 bytes');
   });
 
   test('rejects blocking PTC on the lambda backend', () => {

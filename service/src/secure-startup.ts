@@ -230,10 +230,9 @@ export function validateSandboxBackendPolicy(): void {
  * not construct the sandbox backend, so enforce the bridge authentication
  * invariant without requiring worker-only Lambda or checkpoint settings. */
 export function validateApiBridgePolicy(): void {
-  if (
-    env.HARDENED_SANDBOX_MODE &&
-    env.BRIDGE_AUTH_MODE !== 'paired'
-  ) {
+  if (!env.HARDENED_SANDBOX_MODE) return;
+  requireStrongSecret('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
+  if (env.BRIDGE_AUTH_MODE !== 'paired') {
     throw new SecureStartupConfigError(
       'Hardened API deployments require CODEAPI_BRIDGE_AUTH_MODE=paired because bridge routes are always exposed',
     );

@@ -27,7 +27,7 @@ Hardened workers enroll through a one-time pairing code:
 1. An administrator creates a code scoped to the configured worker ID.
 2. The CLI generates an Ed25519 keypair locally and redeems the code with only
    its public key.
-3. Code API returns a five-minute credential bound to that public key.
+3. Code API returns a fifteen-minute credential bound to that public key.
 4. Every worker request signs the method, path, body digest, timestamp, nonce,
    and credential.
 5. Code API rejects stale timestamps and replayed nonces and supports rotation

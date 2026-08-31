@@ -74,7 +74,7 @@ execution.
 - Registration is ephemeral in Redis and must be refreshed by the worker.
 - Pairing codes are stored hashed, expire after ten minutes, and are consumed
   atomically on their first redemption attempt.
-- Worker credentials expire after five minutes and are bound to an Ed25519
+- Worker credentials expire after fifteen minutes and are bound to an Ed25519
   public key. Exact-request signatures include the HTTP method, path, body
   digest, timestamp, nonce, and credential.
 - Accepted proof nonces cannot be replayed, credentials rotate before expiry,
