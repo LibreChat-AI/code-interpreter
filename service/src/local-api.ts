@@ -10,6 +10,7 @@
 import express, { json, Router } from 'express';
 import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
+import bridgeRouter from './bridge';
 import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-error-logger';
 import { executionProfileMiddleware } from './middleware/execution-profile';
 import { localAuth } from './auth/local';
@@ -20,7 +21,11 @@ import './workers';
 import { env } from './config';
 import logger from './logger';
 import { shutdownTelemetry, traceHttpRequest } from './telemetry';
-import { validateExecutionProfilePolicy } from './secure-startup';
+import {
+  validateApiBridgePolicy,
+  validateExecutionProfilePolicy,
+  validateSandboxBackendPolicy,
+} from './secure-startup';
 import { configureExecutionProfileMetrics } from './metrics';
 
 const app = express();
@@ -45,6 +50,7 @@ app.get('/v1/health', async (_, res) => {
   }
 });
 
+v1.use('/bridge', bridgeRouter);
 v1.use(localAuth);
 v1.use(serviceRouter);
 v1.use(programmaticRouter);
@@ -56,7 +62,9 @@ app.use(requestErrorLogger);
 async function localStartup(): Promise<void> {
   logger.info('Starting local development server...');
   logger.info('⚠️  LOCAL MODE - No authentication required');
+  validateApiBridgePolicy();
   validateExecutionProfilePolicy();
+  validateSandboxBackendPolicy();
   configureExecutionProfileMetrics({
     profile: env.EXECUTION_PROFILE,
     sandboxBackend: env.SANDBOX_BACKEND,

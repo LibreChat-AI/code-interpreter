@@ -1,16 +1,18 @@
 import { timingSafeEqual } from 'crypto';
 
 import { Router } from 'express';
-
-import type { NextFunction, Request, Response } from 'express';
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { BridgeWorkerRegistration } from '../../../packages/code/src/protocol';
-import type { CodeBridgeSettlement } from './store';
+import type { CodeBridgeAssignment, CodeBridgeSettlement } from './store';
 
-import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  isValidBridgeWorkerCapabilities,
+  isValidBridgeWorkerId,
+} from '../../../packages/code/src/protocol';
 import { BridgePairingError, RedisBridgePairingStore } from './pairing';
 import { BridgeStoreError, RedisBridgeStore } from './store';
 
-const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const INCARNATION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const MAX_LEASE_WAIT_MS = 30_000;
 
@@ -34,7 +36,7 @@ function sameToken(left: string, right: string): boolean {
 }
 
 function validWorkerId(value: string): boolean {
-  return WORKER_ID_PATTERN.test(value);
+  return isValidBridgeWorkerId(value);
 }
 
 function validIncarnationId(value: unknown): value is string {
@@ -45,8 +47,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function asyncRoute(
+  handler: (req: Request, res: Response) => Promise<void>,
+): RequestHandler {
+  return (req, res, next) => {
+    void handler(req, res).catch(next);
+  };
+}
+
 function sendStoreError(error: BridgeStoreError, res: Response): void {
-  const status = error.code === 'ASSIGNMENT_NOT_FOUND' ? 404 : 409;
+  const status =
+    error.code === 'ASSIGNMENT_NOT_FOUND'
+      ? 404
+      : error.code === 'WORKER_BUSY'
+        ? 503
+        : 409;
   res.status(status).json({ error: error.message, code: error.code });
 }
 
@@ -243,6 +258,289 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     },
   );
 
+
+router.post(
+  '/workers/register',
+  workerAuth,
+  asyncRoute(async (req, res) => {
+    const registration = req.body as unknown;
+    if (
+      !isRecord(registration) ||
+      registration.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      typeof registration.workerId !== 'string' ||
+      !validWorkerId(registration.workerId) ||
+      !validIncarnationId(registration.incarnationId) ||
+      !isValidBridgeWorkerCapabilities(registration.capabilities)
+    ) {
+      res.status(400).json({ error: 'Invalid bridge worker registration' });
+      return;
+    }
+    if (
+      !configuredWorker(registration.workerId)
+    ) {
+      res.status(403).json({
+        error: 'Worker is not authorized for this Code API deployment',
+      });
+      return;
+    }
+    try {
+      await options.store.register(
+        registration as unknown as BridgeWorkerRegistration,
+      );
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
+      }
+      throw error;
+    }
+    res.json({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: registration.workerId,
+      incarnationId: registration.incarnationId,
+      registeredAt: new Date().toISOString(),
+      leaseTtlMs: 60_000,
+    });
+  }),
+);
+
+router.post(
+  '/workers/:workerId/workspaces/reset',
+  workerAuth,
+  asyncRoute(async (req, res) => {
+    const workerId = req.params.workerId;
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      !validWorkerId(workerId) ||
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      !validIncarnationId(body.incarnationId) ||
+      typeof body.runtimeSessionId !== 'string' ||
+      body.runtimeSessionId.trim().length === 0 ||
+      body.runtimeSessionId.length > 512 ||
+      body.confirmDiscarded !== true
+    ) {
+      res.status(400).json({
+        error: 'Workspace reset requires confirmation of local discard',
+      });
+      return;
+    }
+    if (!configuredWorker(workerId)) {
+      res.status(403).json({
+        error: 'Worker is not authorized for this Code API deployment',
+      });
+      return;
+    }
+    try {
+      const resetController = new AbortController();
+      const abortReset = (): void => resetController.abort();
+      req.once('aborted', abortReset);
+      res.once('close', abortReset);
+      try {
+        await options.store.resetWorkspace(
+          workerId,
+          body.incarnationId,
+          body.runtimeSessionId,
+          resetController.signal,
+        );
+        if (!resetController.signal.aborted) {
+          res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, reset: true });
+        }
+      } finally {
+        req.off('aborted', abortReset);
+        res.off('close', abortReset);
+      }
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
+      }
+      throw error;
+    }
+  }),
+);
+
+router.post(
+  '/workers/:workerId/lease',
+  workerAuth,
+  asyncRoute(async (req, res) => {
+    const requestStartedAtMs = Date.now();
+    const workerId = req.params.workerId;
+    const body = isRecord(req.body) ? req.body : {};
+    const requestedWait = Number(body.waitMs ?? 25_000);
+    if (
+      !validWorkerId(workerId) ||
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      !validIncarnationId(body.incarnationId) ||
+      !Number.isFinite(requestedWait) ||
+      requestedWait < 0
+    ) {
+      res.status(400).json({ error: 'Invalid bridge lease request' });
+      return;
+    }
+    if (!configuredWorker(workerId)) {
+      res.status(403).json({
+        error: 'Worker is not authorized for this Code API deployment',
+      });
+      return;
+    }
+    try {
+      const leaseController = new AbortController();
+      const abortLease = (): void => leaseController.abort();
+      req.once('aborted', abortLease);
+      res.once('close', abortLease);
+      let assignment: CodeBridgeAssignment | undefined;
+      try {
+        assignment = await options.store.lease(
+          workerId,
+          body.incarnationId,
+          Math.min(requestedWait, MAX_LEASE_WAIT_MS),
+          leaseController.signal,
+        );
+        if (leaseController.signal.aborted) {
+          if (assignment != null) await options.store.returnLease(assignment);
+          return;
+        }
+        res.json({
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          serverElapsedMs: Math.max(0, Date.now() - requestStartedAtMs),
+          assignment,
+        });
+      } finally {
+        req.off('aborted', abortLease);
+        res.off('close', abortLease);
+      }
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
+      }
+      throw error;
+    }
+  }),
+);
+
+router.post(
+  '/workers/:workerId/assignments/:assignmentId/ack',
+  workerAuth,
+  asyncRoute(async (req, res) => {
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      !validIncarnationId(body.incarnationId) ||
+      !Number.isSafeInteger(body.generation) ||
+      Number(body.generation) < 1 ||
+      typeof body.leaseToken !== 'string' ||
+      body.leaseToken.length < 32
+    ) {
+      res.status(400).json({ error: 'Invalid bridge lease acknowledgement' });
+      return;
+    }
+    try {
+      const acknowledgementController = new AbortController();
+      const abortAcknowledgement = (): void =>
+        acknowledgementController.abort();
+      req.once('aborted', abortAcknowledgement);
+      res.once('close', abortAcknowledgement);
+      try {
+        await options.store.acknowledgeLease(
+          req.params.workerId,
+          body.incarnationId,
+          req.params.assignmentId,
+          Number(body.generation),
+          body.leaseToken,
+          acknowledgementController.signal,
+        );
+        if (!acknowledgementController.signal.aborted) {
+          res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, accepted: true });
+        }
+      } finally {
+        req.off('aborted', abortAcknowledgement);
+        res.off('close', abortAcknowledgement);
+      }
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
+      }
+      throw error;
+    }
+  }),
+);
+
+router.post(
+  '/workers/:workerId/assignments/:assignmentId/settle',
+  workerAuth,
+  asyncRoute(async (req, res) => {
+    const settlement = req.body as unknown;
+    if (!isSettlement(settlement)) {
+      res.status(400).json({ error: 'Invalid bridge settlement' });
+      return;
+    }
+    try {
+      const settlementController = new AbortController();
+      const abortSettlement = (): void => settlementController.abort();
+      req.once('aborted', abortSettlement);
+      res.once('close', abortSettlement);
+      try {
+        await options.store.settle(
+          req.params.workerId,
+          req.params.assignmentId,
+          settlement,
+          settlementController.signal,
+        );
+        if (!settlementController.signal.aborted) {
+          res.json({
+            protocolVersion: BRIDGE_PROTOCOL_VERSION,
+            accepted: true,
+          });
+        }
+      } finally {
+        req.off('aborted', abortSettlement);
+        res.off('close', abortSettlement);
+      }
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
+      }
+      throw error;
+    }
+  }),
+);
+
+router.post(
+  '/workers/:workerId/assignments/:assignmentId/cancellation',
+  workerAuth,
+  asyncRoute(async (req, res) => {
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      !validIncarnationId(body.incarnationId)
+    ) {
+      res.status(400).json({ error: 'Invalid bridge cancellation request' });
+      return;
+    }
+    const cancellationController = new AbortController();
+    const abortCancellation = (): void => cancellationController.abort();
+    req.once('aborted', abortCancellation);
+    res.once('close', abortCancellation);
+    try {
+      const cancelled = await options.store.cancelled(
+        req.params.workerId,
+        body.incarnationId,
+        req.params.assignmentId,
+        cancellationController.signal,
+      );
+      if (!cancellationController.signal.aborted) {
+        res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, cancelled });
+      }
+    } finally {
+      req.off('aborted', abortCancellation);
+      res.off('close', abortCancellation);
+    }
+  }),
+);
+
   router.post(
     '/workers/:workerId/credentials/refresh',
     workerAuth,
@@ -267,153 +565,7 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     },
   );
 
-  router.post(
-    '/workers/register',
-    workerAuth,
-    async (req: Request, res: Response) => {
-      const registration = req.body as unknown;
-      if (
-        !isRecord(registration) ||
-        registration.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
-        typeof registration.workerId !== 'string' ||
-        !validWorkerId(registration.workerId) ||
-        !validIncarnationId(registration.incarnationId) ||
-        !isRecord(registration.capabilities) ||
-        typeof registration.capabilities.statefulWorkspace !== 'boolean' ||
-        typeof registration.capabilities.sandboxProfile !== 'string' ||
-        registration.capabilities.sandboxProfile.trim().length === 0 ||
-        registration.capabilities.sandboxProfile.length > 128 ||
-        !Array.isArray(registration.capabilities.runtimes) ||
-        registration.capabilities.runtimes.length > 32 ||
-        !registration.capabilities.runtimes.every(
-          (runtime) =>
-            typeof runtime === 'string' &&
-            runtime.length > 0 &&
-            runtime.length <= 64,
-        ) ||
-        (registration.capabilities.policyDigest !== undefined &&
-          (typeof registration.capabilities.policyDigest !== 'string' ||
-            !/^[a-f0-9]{64}$/.test(registration.capabilities.policyDigest)))
-      ) {
-        res.status(400).json({ error: 'Invalid bridge worker registration' });
-        return;
-      }
-      if (!configuredWorker(registration.workerId)) {
-        res.status(403).json({
-          error: 'Worker is not authorized for this Code API deployment',
-        });
-        return;
-      }
-      try {
-        await options.store.register(
-          registration as unknown as BridgeWorkerRegistration,
-        );
-      } catch (error) {
-        if (error instanceof BridgeStoreError) {
-          sendStoreError(error, res);
-          return;
-        }
-        throw error;
-      }
-      res.json({
-        protocolVersion: BRIDGE_PROTOCOL_VERSION,
-        workerId: registration.workerId,
-        incarnationId: registration.incarnationId,
-        registeredAt: new Date().toISOString(),
-        leaseTtlMs: 60_000,
-      });
-    },
-  );
-
-  router.post(
-    '/workers/:workerId/lease',
-    workerAuth,
-    async (req: Request, res: Response) => {
-      const workerId = req.params.workerId;
-      const body = isRecord(req.body) ? req.body : {};
-      const requestedWait = Number(body.waitMs ?? 25_000);
-      if (
-        !validWorkerId(workerId) ||
-        body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
-        !validIncarnationId(body.incarnationId) ||
-        !Number.isFinite(requestedWait) ||
-        requestedWait < 0
-      ) {
-        res.status(400).json({ error: 'Invalid bridge lease request' });
-        return;
-      }
-      if (!configuredWorker(workerId)) {
-        res.status(403).json({
-          error: 'Worker is not authorized for this Code API deployment',
-        });
-        return;
-      }
-      try {
-        const assignment = await options.store.lease(
-          workerId,
-          body.incarnationId,
-          Math.min(requestedWait, MAX_LEASE_WAIT_MS),
-        );
-        res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, assignment });
-      } catch (error) {
-        if (error instanceof BridgeStoreError) {
-          sendStoreError(error, res);
-          return;
-        }
-        throw error;
-      }
-    },
-  );
-
-  router.post(
-    '/workers/:workerId/assignments/:assignmentId/settle',
-    workerAuth,
-    async (req: Request, res: Response) => {
-      const settlement = req.body as unknown;
-      if (!isSettlement(settlement)) {
-        res.status(400).json({ error: 'Invalid bridge settlement' });
-        return;
-      }
-      try {
-        await options.store.settle(
-          req.params.workerId,
-          req.params.assignmentId,
-          settlement,
-        );
-        res.json({
-          protocolVersion: BRIDGE_PROTOCOL_VERSION,
-          accepted: true,
-        });
-      } catch (error) {
-        if (error instanceof BridgeStoreError) {
-          sendStoreError(error, res);
-          return;
-        }
-        throw error;
-      }
-    },
-  );
-
-  router.post(
-    '/workers/:workerId/assignments/:assignmentId/cancellation',
-    workerAuth,
-    async (req: Request, res: Response) => {
-      const body = isRecord(req.body) ? req.body : {};
-      if (
-        body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
-        !validIncarnationId(body.incarnationId)
-      ) {
-        res.status(400).json({ error: 'Invalid bridge cancellation request' });
-        return;
-      }
-      const cancelled = await options.store.cancelled(
-        req.params.workerId,
-        body.incarnationId,
-        req.params.assignmentId,
-      );
-      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, cancelled });
-    },
-  );
 
   return router;
 }
+

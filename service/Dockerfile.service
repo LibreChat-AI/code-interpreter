@@ -17,6 +17,7 @@ FROM base AS builder
 COPY --from=install /temp/dev/node_modules node_modules
 COPY service/src ./src
 COPY shared /usr/src/shared
+COPY packages/code/src /usr/src/packages/code/src
 COPY service/tsconfig.json ./
 RUN bun build ./src/service-api.ts --outdir .build --target bun --external '@opentelemetry/*'
 

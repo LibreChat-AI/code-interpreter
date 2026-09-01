@@ -169,6 +169,20 @@ describe('sandbox error formatting', () => {
     }
   });
 
+  test('maps multiline remote bridge failures without exposing details', () => {
+    const failure = publicExecutionFailure(
+      new Error('BRIDGE_EXECUTION_FAILED: first line\nprivate second line'),
+    );
+    expect(failure).toEqual({
+      status: 502,
+      body: {
+        error: 'bridge_execution_failed',
+        message: 'Remote code execution failed',
+      },
+    });
+    expect(JSON.stringify(failure)).not.toContain('private second line');
+  });
+
   test('maps a recycled dirty session to a retryable public failure', () => {
     const failure = publicExecutionFailure(
       new Error('MICROVM_UNHEALTHY: Runtime session rt_private workspace was dirty and has been recycled'),

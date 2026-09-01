@@ -62,7 +62,9 @@ Optional environment variables:
   for every runtime session. In that mode the endpoint must contain a
   `{runtimeSessionId}` placeholder, for example
   `http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2`. The worker URL-
-  encodes and substitutes the assigned session ID before execution.
+  encodes and substitutes the assigned session ID before execution. Hintless
+  assignments use an ephemeral `assignment-<id>` session so affinity-mode
+  stateless work never reaches a literal placeholder route.
 
 A single built-in sandbox runner binds itself to one runtime session and must
 not be advertised as stateful. Use the default stateless capability until a
@@ -71,3 +73,15 @@ session-routing supervisor is configured.
 Static worker authentication is rejected when Code API hardened mode is
 enabled. Expose only the sandbox loopback endpoint to the CLI, and enforce
 VM/container egress policy independently of the bridge transport.
+
+The worker retries result settlement through the assignment deadline. If a
+stateful result remains ambiguous, it exits with a quarantine error instead of
+accepting another assignment. Reset or discard that session's local runner
+before restarting the worker; its workspace may contain mutations that Code
+API did not commit.
+
+After discarding or resetting that session's local runner, acknowledge recovery
+with `librechat-code reset-workspace <runtime-session-id>`. The command uses the
+configured worker credentials, registers a fresh incarnation, and only clears
+the server fence when no assignment is active. Run it while the normal worker
+process is stopped, then restart the normal worker after the command exits.
