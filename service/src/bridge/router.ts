@@ -254,7 +254,6 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         return;
       }
       await options.pairings.revoke(req.params.workerId);
-      await options.store.revokeWorker(req.params.workerId);
       res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, revoked: true });
     }),
   );

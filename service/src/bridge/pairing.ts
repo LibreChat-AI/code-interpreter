@@ -39,10 +39,14 @@ return 1
 `;
 const REVOKE_WORKER_SCRIPT = `
 local activeDigest = redis.call('GET', KEYS[1])
+local activeIncarnation = redis.call('GET', KEYS[6])
 redis.call('INCR', KEYS[4])
-redis.call('DEL', KEYS[1], KEYS[2])
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[5], KEYS[6])
 if activeDigest then
   redis.call('DEL', KEYS[3] .. activeDigest)
+end
+if activeIncarnation then
+  redis.call('SET', ARGV[1] .. activeIncarnation .. ':fenced', '1')
 end
 return 1
 `;
@@ -274,11 +278,14 @@ export class RedisBridgePairingStore {
   async revoke(workerId: string): Promise<void> {
     await this.redis.eval(
       REVOKE_WORKER_SCRIPT,
-      4,
+      6,
       workerIdentityKey(workerId),
       workerStableIdentityKey(workerId),
       `${PREFIX}:credential:`,
       workerPairingGenerationKey(workerId),
+      `${PREFIX}:worker:${encodeURIComponent(workerId)}`,
+      `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation`,
+      `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:`,
     );
   }
 

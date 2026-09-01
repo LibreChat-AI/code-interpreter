@@ -346,43 +346,6 @@ describe('RedisBridgeStore', () => {
     ).rejects.toMatchObject({ code: 'WORKER_OFFLINE' });
   });
 
-  test('revocation removes registration and fences its incarnation', async () => {
-    await store.register({
-      protocolVersion: BRIDGE_PROTOCOL_VERSION,
-      workerId: 'revoked-worker',
-      incarnationId,
-      capabilities: {
-        statefulWorkspace: false,
-        sandboxProfile: 'nsjail',
-        runtimes: [],
-      },
-    });
-
-    await store.revokeWorker('revoked-worker');
-
-    await expect(
-      store.dispatch({
-        workerId: 'revoked-worker',
-        body: { language: 'bash' } as t.PayloadBody,
-        headers: {},
-        deadlineAtMs: Date.now() + 1_000,
-        signal: new AbortController().signal,
-      }),
-    ).rejects.toMatchObject({ code: 'WORKER_OFFLINE' });
-    await expect(
-      store.register({
-        protocolVersion: BRIDGE_PROTOCOL_VERSION,
-        workerId: 'revoked-worker',
-        incarnationId,
-        capabilities: {
-          statefulWorkspace: false,
-          sandboxProfile: 'nsjail',
-          runtimes: [],
-        },
-      }),
-    ).rejects.toMatchObject({ code: 'WORKER_FENCED' });
-  });
-
   test('does not fence a workspace when dispatch is already aborted', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,

@@ -8,9 +8,11 @@ import {
   signBridgeRequest,
 } from '../../../packages/code/src/identity';
 import { RedisBridgePairingStore } from './pairing';
+import { RedisBridgeStore } from './store';
 
 const redis = new RedisMock() as unknown as Redis;
 const pairings = new RedisBridgePairingStore(redis);
+const store = new RedisBridgeStore(redis);
 
 afterEach(async () => {
   await redis.flushall();
@@ -135,6 +137,16 @@ describe('RedisBridgePairingStore', () => {
       nonce: 'post-revocation-request',
       body: JSON.stringify({ protocolVersion: 1, workerId: 'vm-1' }),
     };
+    await store.register({
+      protocolVersion: 1,
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+    });
 
     await pairings.revoke('vm-1');
 
@@ -145,6 +157,22 @@ describe('RedisBridgePairingStore', () => {
         signature: signBridgeRequest(identity.privateKey, proof),
       }),
     ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
+    expect(await redis.get('codeapi:bridge:v1:worker:vm-1')).toBeNull();
+    expect(
+      await redis.get('codeapi:bridge:v1:worker:vm-1:incarnation'),
+    ).toBeNull();
+    await expect(
+      store.register({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId: 'incarnation-00000001',
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: ['bash'],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_FENCED' });
   });
 
   test('revocation invalidates pairing codes issued before the revoke', async () => {
