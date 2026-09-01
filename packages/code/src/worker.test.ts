@@ -337,6 +337,74 @@ test('worker refreshes its registration during a long assignment', async () => {
   assert.ok(registrations >= 2);
 });
 
+test('worker schedules registration freshness from request start', async () => {
+  let registrations = 0;
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith('/workers/register')) {
+      registrations += 1;
+      if (registrations === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      }
+      return new Response(
+        JSON.stringify({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          incarnationId: 'incarnation-00000001',
+          registeredAt: new Date().toISOString(),
+          leaseTtlMs: 50,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (url.endsWith('/execute')) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url.endsWith('/cancelled')) {
+      return new Response(
+        JSON.stringify({ protocolVersion: 1, cancelled: false }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    return new Response(
+      JSON.stringify({ protocolVersion: 1, accepted: true }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    registrationTransportTimeoutMs: 100,
+    cancellationPollIntervalMs: 100,
+    fetchImpl,
+  });
+  await worker.register();
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-registration-transit',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.ok(registrations >= 2);
+});
+
 test('worker continues cancellation polling after a stalled response', async () => {
   let cancellationAttempts = 0;
   let settlementAttempted = false;

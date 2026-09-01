@@ -1085,7 +1085,7 @@ export class RedisBridgeStore {
       'redis.call(\'RPUSH\', KEYS[3], ARGV[4])',
       'redis.call(\'EXPIRE\', KEYS[3], ARGV[3])',
       'redis.call(\'SET\', KEYS[4], ARGV[1], \"PX\", ARGV[5])',
-      'redis.call(\'SET\', KEYS[5], "1", \"PX\", ARGV[6])',
+      'redis.call(\'SET\', KEYS[5], "1", \"PXAT\", ARGV[6])',
       'if #KEYS == 6 then redis.call(\'SET\', KEYS[6], ARGV[4]) end',
       'return 1',
     ].join('\n');
@@ -1113,7 +1113,7 @@ export class RedisBridgeStore {
       String(ttlSeconds),
       assignment.assignmentId,
       String(ttlSeconds * 1000),
-      String(Math.max(1, Date.parse(assignment.expiresAt) - Date.now())),
+      String(Date.parse(assignment.expiresAt)),
     );
     if (Number(result) === -1) {
       throw new BridgeStoreError(

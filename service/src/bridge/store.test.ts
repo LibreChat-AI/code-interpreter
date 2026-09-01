@@ -1572,6 +1572,18 @@ describe('RedisBridgeStore', () => {
       },
     });
     const deadlineAtMs = Date.now() + 250;
+    redis.eval = (async (...args: Parameters<Redis['eval']>) => {
+      const script = String(args[0]);
+      if (script.includes("redis.call('RPUSH', KEYS[3], ARGV[4])")) {
+        await new Promise((resolve) => setTimeout(resolve, 75));
+      }
+      if (script.includes("local existing = redis.call('GET', KEYS[2])")) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.max(0, deadlineAtMs - Date.now() + 25)),
+        );
+      }
+      return redisEval(...args);
+    }) as Redis['eval'];
     const completion = store.dispatch({
       workerId: 'late-fulfillment-worker',
       body: { language: 'bash' } as t.PayloadBody,
@@ -1592,17 +1604,6 @@ describe('RedisBridgeStore', () => {
       assignment?.generation ?? 0,
       assignment?.leaseToken ?? '',
     );
-    redis.eval = (async (...args: Parameters<Redis['eval']>) => {
-      if (
-        String(args[0]).includes("local existing = redis.call('GET', KEYS[2])")
-      ) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.max(0, deadlineAtMs - Date.now() + 25)),
-        );
-      }
-      return redisEval(...args);
-    }) as Redis['eval'];
-
     await expect(
       store.settle('late-fulfillment-worker', assignment?.assignmentId ?? '', {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,

@@ -110,6 +110,7 @@ export class BridgeWorker {
       ),
     );
     const timeout = setTimeout(abortRegistration, timeoutMs);
+    const registrationStartedAtMs = Date.now();
     let registration: BridgeWorkerRegistrationResponse;
     try {
       registration = await this.request<BridgeWorkerRegistrationResponse>(
@@ -132,7 +133,7 @@ export class BridgeWorker {
       );
     }
     this.registrationTtlMs = registration.leaseTtlMs;
-    this.lastRegisteredAtMs = Date.now();
+    this.lastRegisteredAtMs = registrationStartedAtMs;
     return registration;
   }
 
