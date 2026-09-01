@@ -18,7 +18,7 @@ import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-
 import { localAuth } from './auth/local';
 import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
-import bridgeRouter from './bridge/router';
+import bridgeRouter from './bridge';
 import { connection } from './queue';
 import { metricsHandler } from './metrics';
 import { httpMetricsMiddleware } from './middleware/httpMetrics';

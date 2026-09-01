@@ -7,7 +7,7 @@ import type {
 import type { RedisBridgeStore } from '../bridge/store';
 
 import { env } from '../config';
-import { bridgeStore } from '../bridge/router';
+import { bridgeStore } from '../bridge';
 import { BridgeStoreError } from '../bridge/store';
 import { SandboxBackendError } from './types';
 

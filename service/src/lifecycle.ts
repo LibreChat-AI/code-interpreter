@@ -155,6 +155,7 @@ async function gracefulStartup(): Promise<void> {
   validateWorkerHardenedConfig();
   validateExecutionProfilePolicy();
   validateSandboxBackendPolicy();
+  validateApiBridgePolicy();
   await validateLifecycleAuthConfig();
   configureProfileMetrics();
 

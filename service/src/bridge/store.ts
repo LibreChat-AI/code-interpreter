@@ -220,8 +220,16 @@ export class RedisBridgeStore {
     );
   }
 
-  async register(registration: BridgeWorkerRegistration): Promise<void> {
+  async register(
+    registration: BridgeWorkerRegistration,
+    authorization?: { identityId: string; pairingGeneration: number },
+  ): Promise<void> {
     const script = [
+      'if ARGV[5] ~= "" then',
+      '  local pairingGeneration = redis.call(\'GET\', KEYS[7]) or "0"',
+      '  if pairingGeneration ~= ARGV[5] then return -4 end',
+      '  if redis.call(\'GET\', KEYS[8]) ~= ARGV[6] then return -4 end',
+      'end',
       'if redis.call(\'EXISTS\', KEYS[3]) == 1 then return -2 end',
       'if redis.call(\'EXISTS\', KEYS[2]) == 1 then return -1 end',
       'local current = redis.call(\'GET\', KEYS[4])',
@@ -243,17 +251,21 @@ export class RedisBridgeStore {
       await boundedCommand(
         this.redis.eval(
           script,
-          6,
+          8,
           workerKey(registration.workerId),
           incarnationFenceKey(registration.workerId, registration.incarnationId),
           quarantineKey(registration.workerId, registration.incarnationId),
           workerIncarnationKey(registration.workerId),
           lockKey(registration.workerId),
           lockIncarnationKey(registration.workerId),
+          `${PREFIX}:pairing-generation:${registration.workerId}`,
+          `${PREFIX}:stable-identity:${registration.workerId}`,
           registration.incarnationId,
           JSON.stringify(registration),
           String(this.workerTtlSeconds),
           `${PREFIX}:worker:${encodeURIComponent(registration.workerId)}:incarnation:`,
+          authorization == null ? '' : String(authorization.pairingGeneration),
+          authorization?.identityId ?? '',
         ),
         this.redisCommandTimeoutMs,
         'Bridge worker registration',
@@ -275,6 +287,12 @@ export class RedisBridgeStore {
       throw new BridgeStoreError(
         'WORKER_BUSY',
         'Bridge worker cannot be replaced during an active assignment',
+      );
+    }
+    if (result === -4) {
+      throw new BridgeStoreError(
+        'WORKER_FENCED',
+        'Bridge worker authorization was revoked before registration completed',
       );
     }
   }

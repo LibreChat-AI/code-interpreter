@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BridgeWorker, BridgeWorkspaceQuarantinedError } from './worker.js';
+import { createBridgeIdentity, verifyBridgeRequest } from './identity.js';
+import {
+  BridgeWorker,
+  BridgeWorkspaceQuarantinedError,
+  reconnectDelayMs,
+} from './worker.js';
 
 import type { BridgeAssignment } from './protocol.js';
+
+const incarnationId = 'incarnation-00000001';
 
 test('worker forwards a fenced assignment to the sandbox and settles the result', async () => {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
@@ -1662,4 +1669,841 @@ test('worker uses the server-relative lease budget despite VM clock skew', async
     request: { body: { language: 'bash' }, headers: {} },
   });
   assert.equal(settlementAttempted, true);
+});
+
+
+test('worker continues after an expired assignment settlement conflict', async () => {
+  const controller = new AbortController();
+  let registrations = 0;
+  let leases = 0;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    reconnectDelayMs: 0,
+    reconnectMaxDelayMs: 0,
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/workers/register')) {
+        registrations += 1;
+        if (registrations === 2) controller.abort();
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          incarnationId,
+          registeredAt: new Date().toISOString(),
+          leaseTtlMs: 60_000,
+        });
+      }
+      if (url.endsWith('/lease')) {
+        leases += 1;
+        return Response.json({
+          protocolVersion: 1,
+          assignment: leases === 1
+            ? {
+                protocolVersion: 1,
+                assignmentId: 'assignment-expired',
+                workerId: 'vm-1',
+                incarnationId,
+                generation: 1,
+                leaseToken: 'lease-token-that-is-long-enough-for-testing',
+                expiresAt: new Date(Date.now() + 10_000).toISOString(),
+                request: { body: { language: 'bash' }, headers: {} },
+              }
+            : undefined,
+        });
+      }
+      if (url.endsWith('/execute')) {
+        return Response.json({ session_id: 'run-1', files: [] });
+      }
+      if (url.endsWith('/settle')) {
+        return Response.json(
+          { error: 'Bridge assignment has expired', code: 'ASSIGNMENT_EXPIRED' },
+          { status: 409 },
+        );
+      }
+      return Response.json({ cancelled: false });
+    },
+  });
+
+  await worker.run(controller.signal);
+
+  assert.equal(registrations, 2);
+});
+
+test('paired worker proves possession on bridge requests', async () => {
+  const key = createBridgeIdentity();
+  let bridgeRequest: { url: string; init?: RequestInit } | undefined;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    bridgeRequest = { url: String(input), init };
+    return Response.json({
+      protocolVersion: 1,
+      workerId: 'vm-1',
+      incarnationId,
+      registeredAt: new Date().toISOString(),
+      leaseTtlMs: 60_000,
+    });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'issued-short-lived-credential-value',
+      expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    },
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await worker.register();
+
+  assert.ok(bridgeRequest);
+  const headers = bridgeRequest.init?.headers as Record<string, string>;
+  const body = String(bridgeRequest.init?.body);
+  assert.equal(
+    verifyBridgeRequest(
+      key.publicKey,
+      {
+        credential: 'issued-short-lived-credential-value',
+        method: 'POST',
+        path: '/v1/bridge/workers/register',
+        timestamp: headers['X-LibreChat-Code-Timestamp'],
+        nonce: headers['X-LibreChat-Code-Nonce'],
+        body,
+      },
+      headers['X-LibreChat-Code-Signature'],
+    ),
+    true,
+  );
+});
+
+test('paired worker rotates an expiring credential before registration', async () => {
+  const key = createBridgeIdentity();
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  let persistedCredential = '';
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    requests.push({ url, init });
+    if (url.endsWith('/credentials/refresh')) {
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: 'rotated-short-lived-credential-value',
+        expiresAt: new Date(Date.now() + 300_000).toISOString(),
+      });
+    }
+    return Response.json({
+      protocolVersion: 1,
+      workerId: 'vm-1',
+      incarnationId,
+      registeredAt: new Date().toISOString(),
+      leaseTtlMs: 60_000,
+    });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'original-short-lived-credential-value',
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
+    },
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+    onIdentityChange: (identity) => {
+      persistedCredential = identity.credential;
+    },
+  });
+
+  await worker.refreshCredential();
+  await worker.register();
+
+  assert.equal(persistedCredential, 'rotated-short-lived-credential-value');
+  assert.equal(
+    (requests[1].init?.headers as Record<string, string>).Authorization,
+    'Bridge rotated-short-lived-credential-value',
+  );
+});
+
+test('paired worker retries persistence before adopting a rotated credential', async () => {
+  const key = createBridgeIdentity();
+  const identity = {
+    privateKey: key.privateKey,
+    credential: 'original-short-lived-credential-value',
+    expiresAt: new Date(Date.now() + 30_000).toISOString(),
+  };
+  let persistenceAttempts = 0;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async () =>
+      Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: 'rotated-short-lived-credential-value',
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      }),
+    onIdentityChange: () => {
+      persistenceAttempts += 1;
+      if (persistenceAttempts === 1) throw new Error('disk unavailable');
+    },
+  });
+
+  await assert.rejects(worker.refreshCredential(), /disk unavailable/);
+  assert.equal(identity.credential, 'original-short-lived-credential-value');
+  await worker.refreshCredential();
+  assert.equal(identity.credential, 'rotated-short-lived-credential-value');
+  assert.equal(persistenceAttempts, 2);
+});
+
+test('paired worker refreshes before an assignment that outlives its credential', async () => {
+  const key = createBridgeIdentity();
+  const requests: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.endsWith('/credentials/refresh')) {
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: 'assignment-safe-rotated-credential-value',
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      });
+    }
+    if (url.endsWith('/execute')) {
+      return Response.json({ session_id: 'run-long', files: [] });
+    }
+    return Response.json({ protocolVersion: 1, accepted: true });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-too-short-for-assignment',
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
+    },
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-long',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'assignment-long-lease-token-value',
+    expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.match(requests[0], /credentials\/refresh$/);
+  assert.equal(requests[1], 'http://127.0.0.1:2000/api/v2/execute');
+});
+
+test('paired worker rotates credentials throughout a long assignment', async () => {
+  const key = createBridgeIdentity();
+  let refreshCount = 0;
+  const identity = {
+    privateKey: key.privateKey,
+    credential: 'credential-before-long-running-assignment',
+    expiresAt: new Date(Date.now() + 5).toISOString(),
+  };
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith('/credentials/refresh')) {
+      refreshCount += 1;
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: `rotated-long-assignment-credential-${refreshCount}`,
+        expiresAt: new Date(Date.now() + 30).toISOString(),
+      });
+    }
+    if (url.endsWith('/execute')) {
+      await new Promise((resolve) => setTimeout(resolve, 55));
+      return Response.json({ session_id: 'run-long-rotation', files: [] });
+    }
+    return Response.json({ protocolVersion: 1, accepted: true });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity,
+    credentialRefreshWindowMs: 10,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-credential-maintenance',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 5,
+    leaseToken: 'assignment-credential-maintenance-token',
+    expiresAt: new Date(Date.now() + 500).toISOString(),
+    remainingMs: 500,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.ok(refreshCount >= 2);
+  assert.match(identity.credential, /^rotated-long-assignment-credential-/);
+});
+
+test('paired worker cancels a stalled credential refresh after execution', async () => {
+  const key = createBridgeIdentity();
+  let refreshStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    refreshStarted = resolve;
+  });
+  let refreshAborted = false;
+  const identity = {
+    privateKey: key.privateKey,
+    credential: 'credential-before-stalled-refresh',
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity,
+    credentialRefreshWindowMs: 100,
+    credentialRefreshTransportTimeoutMs: 10_000,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/credentials/refresh')) {
+        refreshStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              refreshAborted = true;
+              reject(new DOMException('aborted', 'AbortError'));
+            },
+            { once: true },
+          );
+        });
+      }
+      if (url.endsWith('/execute')) {
+        await started;
+        return Response.json({
+          session_id: 'run-stalled-refresh',
+          files: [],
+        });
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  queueMicrotask(() => {
+    identity.expiresAt = new Date(Date.now() + 50).toISOString();
+  });
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-stalled-refresh',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 6,
+    leaseToken: 'assignment-stalled-refresh-token',
+    expiresAt: new Date(Date.now() + 2_000).toISOString(),
+    remainingMs: 2_000,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(refreshAborted, true);
+});
+
+test('paired worker refreshes conservatively before server clock calibration', async () => {
+  const key = createBridgeIdentity();
+  let refreshCount = 0;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-before-idle-clock-skew-refresh',
+      expiresAt: new Date(Date.now() + 65_000).toISOString(),
+    },
+    credentialRefreshWindowMs: 10_000,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async () => {
+      refreshCount += 1;
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: 'credential-after-idle-clock-skew-refresh',
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      });
+    },
+  });
+
+  await worker.refreshCredential();
+
+  assert.equal(refreshCount, 1);
+});
+
+test('paired worker charges initial credential refresh against the assignment deadline', async () => {
+  const key = createBridgeIdentity();
+  let sandboxStarted = false;
+  let rejected = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-before-deadline-refresh',
+      expiresAt: new Date(Date.now() + 5).toISOString(),
+    },
+    credentialRefreshWindowMs: 10,
+    credentialRefreshTransportTimeoutMs: 10_000,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/credentials/refresh')) {
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true },
+          );
+        });
+      }
+      if (url.endsWith('/execute')) {
+        sandboxStarted = true;
+      }
+      if (url.endsWith('/settle')) {
+        rejected =
+          JSON.parse(String(init?.body)).status === 'rejected';
+      }
+      return Response.json({
+        protocolVersion: 1,
+        accepted: true,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+      });
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'assignment-deadline-refresh',
+      workerId: 'vm-1',
+      incarnationId,
+      generation: 7,
+      leaseToken: 'assignment-deadline-refresh-token',
+      expiresAt: new Date(Date.now() + 30).toISOString(),
+      remainingMs: 30,
+      runtimeSessionId: 'rt-deadline-refresh',
+      request: { body: { language: 'bash' }, headers: {} },
+    }),
+    { name: 'AbortError' },
+  );
+
+  assert.equal(sandboxStarted, false);
+  assert.equal(rejected, true);
+});
+
+test('paired worker rechecks the deadline after request serialization', async () => {
+  const key = createBridgeIdentity();
+  let sandboxStarted = false;
+  let rejected = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint:
+      'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-valid-during-serialization',
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    },
+    credentialRefreshWindowMs: 10,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/execute')) {
+        sandboxStarted = true;
+      }
+      if (url.endsWith('/settle')) {
+        rejected =
+          JSON.parse(String(init?.body)).status === 'rejected';
+      }
+      return Response.json({
+        protocolVersion: 1,
+        accepted: true,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+      });
+    },
+  });
+  const slowBody = {
+    get language(): string {
+      const blockedUntilMs = Date.now() + 25;
+      while (Date.now() < blockedUntilMs) {
+        // Deliberately consume the remaining synchronous request budget.
+      }
+      return 'bash';
+    },
+  };
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-serialization-deadline',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 8,
+    leaseToken: 'assignment-serialization-deadline-token',
+    expiresAt: new Date(Date.now() + 10).toISOString(),
+    remainingMs: 10,
+    runtimeSessionId: 'rt-serialization-deadline',
+    request: { body: slowBody, headers: {} },
+  });
+
+  assert.equal(sandboxStarted, false);
+  assert.equal(rejected, true);
+});
+
+test('paired worker keeps endpoint validation failures known-clean', async () => {
+  const key = createBridgeIdentity();
+  let sandboxStarted = false;
+  let rejected = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-for-invalid-endpoint',
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    },
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/execute')) sandboxStarted = true;
+      if (url.endsWith('/settle')) {
+        rejected =
+          JSON.parse(String(init?.body)).status === 'rejected';
+      }
+      return Response.json({
+        protocolVersion: 1,
+        accepted: true,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+      });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-invalid-endpoint',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 9,
+    leaseToken: 'assignment-invalid-endpoint-token',
+    expiresAt: new Date(Date.now() + 500).toISOString(),
+    remainingMs: 500,
+    runtimeSessionId: 'rt-invalid-endpoint',
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(sandboxStarted, false);
+  assert.equal(rejected, true);
+});
+
+test('paired worker rechecks shutdown after persisting a refreshed identity', async () => {
+  const key = createBridgeIdentity();
+  const controller = new AbortController();
+  let sandboxStarted = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-before-shutdown-refresh',
+      expiresAt: new Date(Date.now() + 5).toISOString(),
+    },
+    credentialRefreshWindowMs: 10,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('/execute')) sandboxStarted = true;
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: 'credential-persisted-during-shutdown',
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      });
+    },
+    onIdentityChange: () => {
+      controller.abort();
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle(
+      {
+        protocolVersion: 1,
+        assignmentId: 'assignment-shutdown-refresh',
+        workerId: 'vm-1',
+        incarnationId,
+        generation: 10,
+        leaseToken: 'assignment-shutdown-refresh-token',
+        expiresAt: new Date(Date.now() + 500).toISOString(),
+        remainingMs: 500,
+        runtimeSessionId: 'rt-shutdown-refresh',
+        request: { body: { language: 'bash' }, headers: {} },
+      },
+      controller.signal,
+    ),
+    { name: 'AbortError' },
+  );
+
+  assert.equal(sandboxStarted, false);
+});
+
+test('paired worker retries transient refresh failures before credential expiry', async () => {
+  const key = createBridgeIdentity();
+  let refreshCount = 0;
+  const identity = {
+    privateKey: key.privateKey,
+    credential: 'credential-before-transient-refresh',
+    expiresAt: new Date(Date.now() + 40).toISOString(),
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity,
+    credentialRefreshWindowMs: 15,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/credentials/refresh')) {
+        refreshCount += 1;
+        if (refreshCount === 1) {
+          return Response.json(
+            { error: 'temporarily unavailable' },
+            { status: 503 },
+          );
+        }
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          credential: 'credential-after-transient-refresh',
+          expiresAt: new Date(Date.now() + 500).toISOString(),
+        });
+      }
+      if (url.endsWith('/execute')) {
+        await new Promise((resolve) => setTimeout(resolve, 70));
+        return Response.json({
+          session_id: 'run-transient-refresh',
+          files: [],
+        });
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-transient-refresh',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 7,
+    leaseToken: 'assignment-transient-refresh-token',
+    expiresAt: new Date(Date.now() + 500).toISOString(),
+    remainingMs: 500,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(refreshCount, 2);
+  assert.equal(identity.credential, 'credential-after-transient-refresh');
+});
+
+test('paired worker preserves its refresh margin when the server clock is ahead', async () => {
+  const key = createBridgeIdentity();
+  const serverClockOffsetMs = 55;
+  let refreshCount = 0;
+  const identity = {
+    privateKey: key.privateKey,
+    credential: 'credential-before-clock-skew-refresh',
+    expiresAt: new Date(Date.now() + serverClockOffsetMs + 20).toISOString(),
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity,
+    credentialRefreshWindowMs: 10,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/credentials/refresh')) {
+        refreshCount += 1;
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          credential: 'credential-after-clock-skew-refresh',
+          expiresAt: new Date(
+            Date.now() + serverClockOffsetMs + 500,
+          ).toISOString(),
+        });
+      }
+      if (url.endsWith('/execute')) {
+        await new Promise((resolve) => setTimeout(resolve, 35));
+        return Response.json({
+          session_id: 'run-clock-skew-refresh',
+          files: [],
+        });
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+  const remainingMs = 500;
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-clock-skew-refresh',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 8,
+    leaseToken: 'assignment-clock-skew-refresh-token',
+    expiresAt: new Date(
+      Date.now() + serverClockOffsetMs + remainingMs,
+    ).toISOString(),
+    remainingMs,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(refreshCount, 1);
+  assert.equal(identity.credential, 'credential-after-clock-skew-refresh');
+});
+
+test('worker shutdown interrupts reconnect backoff', async () => {
+  const controller = new AbortController();
+  let failed!: () => void;
+  const failure = new Promise<void>((resolve) => {
+    failed = resolve;
+  });
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async () => {
+      throw new Error('offline');
+    },
+    reconnectDelayMs: 30_000,
+    reconnectMaxDelayMs: 30_000,
+    onError: () => failed(),
+  });
+
+  const run = worker.run(controller.signal);
+  await failure;
+  controller.abort();
+  await run;
+});
+
+test('reconnect delay uses bounded exponential jitter', () => {
+  assert.equal(reconnectDelayMs(0, 1_000, 30_000, () => 0), 500);
+  assert.equal(reconnectDelayMs(0, 1_000, 30_000, () => 1), 1_000);
+  assert.equal(reconnectDelayMs(10, 1_000, 30_000, () => 1), 30_000);
 });

@@ -10,7 +10,7 @@
 import express, { json, Router } from 'express';
 import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
-import bridgeRouter from './bridge/router';
+import bridgeRouter from './bridge';
 import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-error-logger';
 import { executionProfileMiddleware } from './middleware/execution-profile';
 import { localAuth } from './auth/local';

@@ -5,6 +5,7 @@ import {
   BridgeProtocolError,
   bridgeWorkerPath,
 } from './protocol.js';
+import { signBridgeRequest } from './identity.js';
 
 import type {
   BridgeAssignment,
@@ -12,12 +13,14 @@ import type {
   BridgeSettlement,
   BridgeSettlementResponse,
   BridgeWorkerCapabilities,
+  BridgeWorkerCredentialResponse,
   BridgeWorkerRegistrationResponse,
 } from './protocol.js';
 
 export interface BridgeWorkerOptions {
   codeApiUrl: string;
-  token: string;
+  token?: string;
+  identity?: BridgeWorkerIdentity;
   workerId: string;
   sandboxEndpoint: string;
   capabilities: BridgeWorkerCapabilities;
@@ -30,15 +33,29 @@ export interface BridgeWorkerOptions {
   cancellationTransportTimeoutMs?: number;
   rejectionAckGraceMs?: number;
   reconnectDelayMs?: number;
+  reconnectMaxDelayMs?: number;
+  reconnectRandom?: () => number;
+  credentialRefreshWindowMs?: number;
+  credentialRefreshTransportTimeoutMs?: number;
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
+  onIdentityChange?: (identity: BridgeWorkerIdentity) => void | Promise<void>;
   incarnationId?: string;
+}
+
+export interface BridgeWorkerIdentity {
+  privateKey: string;
+  credential: string;
+  expiresAt: string;
 }
 
 const DEFAULT_LEASE_WAIT_MS = 25_000;
 const MAX_LEASE_WAIT_MS = 30_000;
 const DEFAULT_LEASE_TRANSPORT_GRACE_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
+const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
+const CREDENTIAL_REFRESH_WINDOW_MS = 60_000;
+const MAX_PROOF_CLOCK_SKEW_MS = 60_000;
 const DEFAULT_REGISTRATION_TTL_MS = 60_000;
 const DEFAULT_REGISTRATION_TRANSPORT_TIMEOUT_MS = 10_000;
 const DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS = 10_000;
@@ -46,10 +63,21 @@ const DEFAULT_CANCELLATION_POLL_INTERVAL_MS = 500;
 const DEFAULT_CANCELLATION_TRANSPORT_TIMEOUT_MS = 2_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
 const REGISTRATION_RETRY_DELAY_MS = 100;
+const CREDENTIAL_REFRESH_RETRY_DELAY_MS = 100;
 const SETTLEMENT_RETRY_DELAY_MS = 100;
 const REJECTION_ACK_GRACE_MS = 30_000;
 const MAX_SETTLEMENT_ERROR_LENGTH = 4_096;
 const RUNTIME_SESSION_PLACEHOLDER = '{runtimeSessionId}';
+
+export function reconnectDelayMs(
+  attempt: number,
+  baseDelayMs = DEFAULT_RECONNECT_DELAY_MS,
+  maxDelayMs = DEFAULT_RECONNECT_MAX_DELAY_MS,
+  random: () => number = Math.random,
+): number {
+  const cap = Math.min(maxDelayMs, baseDelayMs * 2 ** Math.max(0, attempt));
+  return Math.floor(cap * (0.5 + Math.min(1, Math.max(0, random())) * 0.5));
+}
 
 function normalizedBaseUrl(value: string): string {
   return value.replace(/\/+$/, '');
@@ -58,6 +86,21 @@ function normalizedBaseUrl(value: string): string {
 function errorMessage(value: object): string | undefined {
   if ('error' in value && typeof value.error === 'string') return value.error;
   return undefined;
+}
+
+async function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted === true) return;
+  await new Promise<void>((resolve) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function errorCode(value: object): string | undefined {
@@ -82,8 +125,14 @@ export class BridgeWorker {
   private readonly incarnationId: string;
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
+  private serverClockOffsetMs = MAX_PROOF_CLOCK_SKEW_MS;
 
   constructor(private readonly options: BridgeWorkerOptions) {
+    if (!options.token && !options.identity) {
+      throw new BridgeProtocolError(
+        'Bridge worker requires a static token or paired identity',
+      );
+    }
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.codeApiUrl = normalizedBaseUrl(options.codeApiUrl);
     this.sandboxEndpoint = normalizedBaseUrl(options.sandboxEndpoint);
@@ -131,6 +180,10 @@ export class BridgeWorker {
       throw new BridgeProtocolError(
         'Code API registered a different worker incarnation',
       );
+    }
+    const registeredAtMs = Date.parse(registration.registeredAt);
+    if (Number.isFinite(registeredAtMs)) {
+      this.serverClockOffsetMs = registeredAtMs - registrationStartedAtMs;
     }
     this.registrationTtlMs = registration.leaseTtlMs;
     this.lastRegisteredAtMs = registrationStartedAtMs;
@@ -288,10 +341,13 @@ export class BridgeWorker {
   }
 
   async run(signal?: AbortSignal): Promise<void> {
+    let reconnectAttempt = 0;
     while (!signal?.aborted) {
       try {
+        await this.refreshCredential(signal);
         await this.register(signal);
         const assignment = await this.lease(signal);
+        reconnectAttempt = 0;
         if (!assignment) continue;
         await this.executeAndSettle(assignment, signal);
       } catch (error) {
@@ -309,9 +365,110 @@ export class BridgeWorker {
           throw error;
         }
         this.options.onError?.(error);
-        const delay =
-          this.options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        const delay = reconnectDelayMs(
+          reconnectAttempt,
+          this.options.reconnectDelayMs,
+          this.options.reconnectMaxDelayMs,
+          this.options.reconnectRandom,
+        );
+        reconnectAttempt += 1;
+        await abortableDelay(delay, signal);
+      }
+    }
+  }
+
+  async refreshCredential(
+    signal?: AbortSignal,
+    validThroughMs =
+      Date.now() +
+      this.serverClockOffsetMs +
+      (this.options.credentialRefreshWindowMs ?? CREDENTIAL_REFRESH_WINDOW_MS),
+    transportTimeoutMs = Number.POSITIVE_INFINITY,
+  ): Promise<void> {
+    const identity = this.options.identity;
+    if (identity == null) return;
+    if (
+      Date.parse(identity.expiresAt) > validThroughMs
+    ) {
+      return;
+    }
+    const credential = await this.timedRequest<BridgeWorkerCredentialResponse>(
+      `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}` +
+        '/credentials/refresh',
+      { protocolVersion: BRIDGE_PROTOCOL_VERSION },
+      Math.max(
+        1,
+        Math.min(
+          transportTimeoutMs,
+          this.options.credentialRefreshTransportTimeoutMs ??
+            DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+        ),
+      ),
+      signal,
+    );
+    if (
+      credential.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      credential.workerId !== this.options.workerId ||
+      typeof credential.credential !== 'string' ||
+      credential.credential.length < 32 ||
+      !Number.isFinite(Date.parse(credential.expiresAt)) ||
+      Date.parse(credential.expiresAt) <= validThroughMs
+    ) {
+      throw new BridgeProtocolError(
+        'Code API returned an invalid rotated worker credential',
+      );
+    }
+    const rotatedIdentity: BridgeWorkerIdentity = {
+      ...identity,
+      credential: credential.credential,
+      expiresAt: credential.expiresAt,
+    };
+    await this.options.onIdentityChange?.(rotatedIdentity);
+    identity.credential = rotatedIdentity.credential;
+    identity.expiresAt = rotatedIdentity.expiresAt;
+  }
+
+  private async maintainCredential(
+    assignment: BridgeAssignment,
+    stopSignal: AbortSignal,
+    serverClockOffsetMs: number,
+  ): Promise<void> {
+    const identity = this.options.identity;
+    if (identity == null) return;
+    const refreshWindowMs =
+      this.options.credentialRefreshWindowMs ?? CREDENTIAL_REFRESH_WINDOW_MS;
+    const assignmentDeadlineMs =
+      Date.parse(assignment.expiresAt) - serverClockOffsetMs;
+    while (!stopSignal.aborted && Date.now() < assignmentDeadlineMs) {
+      const refreshAtMs =
+        Date.parse(identity.expiresAt) - serverClockOffsetMs - refreshWindowMs;
+      const waitMs = Math.max(
+        0,
+        Math.min(refreshAtMs - Date.now(), assignmentDeadlineMs - Date.now()),
+      );
+      await abortableDelay(waitMs, stopSignal);
+      if (stopSignal.aborted || Date.now() >= assignmentDeadlineMs) return;
+      try {
+        await this.refreshCredential(
+          stopSignal,
+          Date.now() + serverClockOffsetMs + refreshWindowMs,
+        );
+      } catch (error) {
+        if (stopSignal.aborted) return;
+        const terminal =
+          error instanceof BridgeProtocolError &&
+          (error.status === 401 || error.status === 403);
+        const credentialRemainingMs =
+          Date.parse(identity.expiresAt) -
+          (Date.now() + serverClockOffsetMs);
+        if (terminal || credentialRemainingMs <= 0) throw error;
+        await abortableDelay(
+          Math.min(
+            CREDENTIAL_REFRESH_RETRY_DELAY_MS,
+            Math.max(1, Math.floor(credentialRemainingMs / 2)),
+          ),
+          stopSignal,
+        );
       }
     }
   }
@@ -325,11 +482,56 @@ export class BridgeWorker {
         ? signal.reason
         : new DOMException('aborted', 'AbortError');
     }
+    const serverClockOffsetMs =
+      Number.isSafeInteger(assignment.remainingMs) &&
+      (assignment.remainingMs ?? -1) >= 0
+        ? Date.parse(assignment.expiresAt) -
+          (Date.now() + (assignment.remainingMs ?? 0))
+        : 0;
+    this.serverClockOffsetMs = serverClockOffsetMs;
+    const localDeadlineAtMs =
+      Date.now() + this.assignmentRemainingMs(assignment);
+    try {
+      await this.refreshCredential(
+        signal,
+        Date.now() +
+          serverClockOffsetMs +
+          (this.options.credentialRefreshWindowMs ??
+            CREDENTIAL_REFRESH_WINDOW_MS),
+        Math.max(1, localDeadlineAtMs - Date.now()),
+      );
+    } catch (error) {
+      if (!signal?.aborted) {
+        await this.rejectUnexecutedAssignment(
+          assignment,
+          'Bridge credential refresh failed before sandbox execution',
+        );
+      }
+      throw error;
+    }
+    const remainingAfterRefreshMs = localDeadlineAtMs - Date.now();
+    if (remainingAfterRefreshMs <= 0) {
+      await this.rejectUnexecutedAssignment(
+        assignment,
+        'Bridge assignment expired during credential refresh',
+      );
+      throw new BridgeProtocolError(
+        'Bridge assignment expired during credential refresh',
+      );
+    }
+    if (signal != null && Boolean(signal.aborted)) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException('aborted', 'AbortError');
+    }
     const executionController = new AbortController();
-    const abortExecution = (): void => executionController.abort();
+    const credentialController = new AbortController();
+    const abortExecution = (): void => {
+      executionController.abort();
+      credentialController.abort();
+    };
     signal?.addEventListener('abort', abortExecution, { once: true });
-    const deadlineDelay = this.assignmentRemainingMs(assignment);
-    const localDeadlineAtMs = Date.now() + deadlineDelay;
+    const deadlineDelay = remainingAfterRefreshMs;
     const deadlineTimer = setTimeout(
       () => executionController.abort(),
       deadlineDelay,
@@ -351,10 +553,23 @@ export class BridgeWorker {
       executionController,
       cancellationController.signal,
     );
+    let credentialMaintenanceError: unknown;
+    let credentialMaintenance: Promise<void> | undefined;
     let settlement: BridgeSettlement;
     let ambiguousSandboxError: unknown;
     let sandboxRejectedExecution = false;
+    let sandboxStarted = false;
     try {
+      credentialMaintenance = this.maintainCredential(
+        assignment,
+        credentialController.signal,
+        serverClockOffsetMs,
+      ).catch((error) => {
+        credentialMaintenanceError = error;
+        executionController.abort();
+      });
+      const sandboxExecuteUrl =
+        `${this.sandboxEndpointFor(assignment)}/execute`;
       const sandboxSessionId = this.sandboxSessionIdFor(assignment);
       const headers = {
         ...assignment.request.headers,
@@ -362,15 +577,22 @@ export class BridgeWorker {
           ? { 'X-Runtime-Session-Id': sandboxSessionId }
           : {}),
       };
+      const sandboxRequestBody = JSON.stringify(assignment.request.body);
+      if (Date.now() >= localDeadlineAtMs) {
+        throw new BridgeProtocolError(
+          'Bridge assignment expired before sandbox execution',
+        );
+      }
+      sandboxStarted = true;
       const response = await this.fetchImpl(
-        `${this.sandboxEndpointFor(assignment)}/execute`,
+        sandboxExecuteUrl,
         {
           method: 'POST',
           headers: {
             ...headers,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(assignment.request.body),
+          body: sandboxRequestBody,
           signal: executionController.signal,
         },
       );
@@ -379,6 +601,9 @@ export class BridgeWorker {
         payload = (await response.json()) as object;
       } catch (error) {
         if (response.ok) throw error;
+      }
+      if (credentialMaintenanceError != null) {
+        throw credentialMaintenanceError;
       }
       if (!response.ok) {
         sandboxRejectedExecution =
@@ -405,6 +630,7 @@ export class BridgeWorker {
     } catch (error) {
       if (
         assignment.runtimeSessionId != null &&
+        sandboxStarted &&
         !sandboxRejectedExecution
       ) {
         ambiguousSandboxError = error;
@@ -436,7 +662,7 @@ export class BridgeWorker {
       const knownCleanStatefulRejection =
         assignment.runtimeSessionId != null &&
         settlement.status === 'rejected' &&
-        sandboxRejectedExecution;
+        (!sandboxStarted || sandboxRejectedExecution);
       if (knownCleanStatefulRejection) {
         heartbeatController.abort();
         await heartbeat;
@@ -470,6 +696,8 @@ export class BridgeWorker {
     } finally {
       heartbeatController.abort();
       await heartbeat;
+      credentialController.abort();
+      await credentialMaintenance;
       signal?.removeEventListener('abort', abortExecution);
     }
   }
@@ -518,6 +746,10 @@ export class BridgeWorker {
       RUNTIME_SESSION_PLACEHOLDER,
       encodeURIComponent(assignment.runtimeSessionId),
     );
+  }
+
+  private async delay(ms: number, signal: AbortSignal): Promise<void> {
+    await abortableDelay(ms, signal);
   }
 
   private async maintainRegistration(
@@ -582,21 +814,6 @@ export class BridgeWorker {
       heartbeatController.abort();
       await heartbeat;
     }
-  }
-
-  private async delay(ms: number, signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return;
-    await new Promise<void>((resolve) => {
-      const onAbort = (): void => {
-        clearTimeout(timer);
-        resolve();
-      };
-      const timer = setTimeout(() => {
-        signal.removeEventListener('abort', onAbort);
-        resolve();
-      }, ms);
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
   }
 
   private assignmentUrl(assignment: BridgeAssignment, action: string): string {
@@ -743,13 +960,14 @@ export class BridgeWorker {
     body: object,
     signal?: AbortSignal,
   ): Promise<T> {
+    const requestBody = JSON.stringify(body);
     const response = await this.fetchImpl(url, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.options.token}`,
+        ...this.authorizationHeaders(url, requestBody),
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: requestBody,
       signal,
     });
     let payload: unknown;
@@ -770,6 +988,35 @@ export class BridgeWorker {
       );
     }
     return payload as T;
+  }
+
+  private authorizationHeaders(
+    url: string,
+    body: string,
+  ): Record<string, string> {
+    const identity = this.options.identity;
+    if (identity == null) {
+      return { Authorization: `Bearer ${this.options.token}` };
+    }
+    const timestamp = new Date().toISOString();
+    const nonce = randomBytes(18).toString('base64url');
+    const proof = {
+      credential: identity.credential,
+      method: 'POST',
+      path: new URL(url).pathname,
+      timestamp,
+      nonce,
+      body,
+    };
+    return {
+      Authorization: `Bridge ${identity.credential}`,
+      'X-LibreChat-Code-Timestamp': timestamp,
+      'X-LibreChat-Code-Nonce': nonce,
+      'X-LibreChat-Code-Signature': signBridgeRequest(
+        identity.privateKey,
+        proof,
+      ),
+    };
   }
 
   private async timedRequest<T>(

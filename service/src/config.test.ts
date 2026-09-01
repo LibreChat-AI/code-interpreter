@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   parsePlanLimits,
+  resolveBridgeAuthMode,
   resolveRuntimeSessionMode,
   resolveSandboxBackend,
 } from './config';
@@ -9,6 +10,7 @@ describe('sandbox execution configuration', () => {
   test('defaults only unset backend and session mode values', () => {
     expect(resolveSandboxBackend(undefined)).toBe('http');
     expect(resolveRuntimeSessionMode(undefined)).toBe('stateless');
+    expect(resolveBridgeAuthMode(undefined)).toBe('static');
   });
 
   test('accepts every supported backend and session mode', () => {
@@ -18,6 +20,8 @@ describe('sandbox execution configuration', () => {
     expect(resolveRuntimeSessionMode('stateless')).toBe('stateless');
     expect(resolveRuntimeSessionMode('affinity')).toBe('affinity');
     expect(resolveRuntimeSessionMode('strict')).toBe('strict');
+    expect(resolveBridgeAuthMode('static')).toBe('static');
+    expect(resolveBridgeAuthMode('paired')).toBe('paired');
   });
 
   test('rejects unknown values instead of silently changing execution semantics', () => {
@@ -31,6 +35,9 @@ describe('sandbox execution configuration', () => {
     );
     expect(() => resolveRuntimeSessionMode('')).toThrow('CODEAPI_RUNTIME_SESSION_MODE');
     expect(() => resolveRuntimeSessionMode(' ')).toThrow('CODEAPI_RUNTIME_SESSION_MODE');
+    expect(() => resolveBridgeAuthMode('token')).toThrow(
+      'CODEAPI_BRIDGE_AUTH_MODE must be one of: static, paired',
+    );
   });
 });
 

@@ -42,6 +42,7 @@ export default {
         'src/**/*.ts',
         '../shared/telemetry-core.ts',
         '../packages/code/src/protocol.ts',
+        '../packages/code/src/identity.ts',
       ],
       sourceMap: true,
       declaration: false,
