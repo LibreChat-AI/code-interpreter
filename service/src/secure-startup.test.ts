@@ -41,6 +41,8 @@ const saved = {
   ledgerRequired: env.EGRESS_LEDGER_REQUIRED,
   fileServerUrl: env.EGRESS_GATEWAY_FILE_SERVER_URL,
   toolCallUrl: env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL,
+  npmUnitEnabled: env.NPM_UNIT_ENABLED,
+  npmUnitDispatchUrl: env.NPM_UNIT_DISPATCH_URL,
 };
 
 function restore(): void {
@@ -79,6 +81,8 @@ function restore(): void {
   env.EGRESS_LEDGER_REQUIRED = saved.ledgerRequired;
   env.EGRESS_GATEWAY_FILE_SERVER_URL = saved.fileServerUrl;
   env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL = saved.toolCallUrl;
+  env.NPM_UNIT_ENABLED = saved.npmUnitEnabled;
+  env.NPM_UNIT_DISPATCH_URL = saved.npmUnitDispatchUrl;
 }
 
 afterEach(restore);
@@ -206,6 +210,19 @@ describe('hardened CodeAPI startup config', () => {
     process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'internal-token';
     env.EXECUTION_MANIFEST_PRIVATE_KEY = '';
     expect(() => validateWorkerHardenedConfig()).toThrow('CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY');
+  });
+
+  test('requires direct npm-unit dispatch when the route is enabled on an API pod', () => {
+    env.HARDENED_SANDBOX_MODE = true;
+    env.EGRESS_GATEWAY_URL = 'http://egress-gateway:3190';
+    process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = 'internal-token';
+    env.NPM_UNIT_ENABLED = true;
+    env.NPM_UNIT_DISPATCH_URL = '';
+
+    expect(() => validateApiHardenedConfig()).toThrow('CODEAPI_NPM_UNIT_DISPATCH_URL');
+
+    env.NPM_UNIT_DISPATCH_URL = 'http://service-worker:3113/internal/npm-unit';
+    expect(() => validateApiHardenedConfig()).not.toThrow();
   });
 
   test('requires strong gateway secret, Redis ledger, and upstream URLs', () => {

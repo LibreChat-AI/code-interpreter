@@ -5,6 +5,7 @@ import { CODEAPI_SYNTHETIC_INTERNAL_REQUEST_HEADER } from './internal-synthetic'
 import { internalServiceHeaders } from './internal-service-auth';
 import { injectTraceHeaders, normalizeTracePath, withSpan } from './telemetry';
 import type * as t from './types';
+import type { NpmUnitRequest } from './npm-unit-contract';
 
 type GatewayRequestOptions = {
   signal?: AbortSignal;
@@ -131,4 +132,25 @@ export async function createGatewayPtcCallbackToken(args: {
     },
   ), 'CLIENT');
   return response.data.callbackToken;
+}
+
+export async function createGatewayNpmTarballToken(args: {
+  executionId: string;
+  request: NpmUnitRequest;
+  isSynthetic?: boolean;
+  signal?: AbortSignal;
+}): Promise<{ fetchToken: string; expiresAt: number }> {
+  const response = await withSpan('codeapi.npm_tarball_token.create', {
+    'http.request.method': 'POST',
+    'url.path': '/internal/npm-tarball-tokens',
+  }, () => axios.post<{ fetchToken: string; expiresAt: number }>(
+    gatewayUrl('/internal/npm-tarball-tokens'),
+    { executionId: args.executionId, request: args.request },
+    {
+      headers: injectTraceHeaders(gatewayHeaders({ 'Content-Type': 'application/json' }, args.isSynthetic)),
+      signal: args.signal,
+      timeout: env.EGRESS_GATEWAY_REQUEST_TIMEOUT_MS,
+    },
+  ), 'CLIENT');
+  return response.data;
 }

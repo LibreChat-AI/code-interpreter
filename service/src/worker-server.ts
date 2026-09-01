@@ -3,9 +3,10 @@
  *
  * This is a worker process that:
  * - Processes jobs from the global queue
+ * - Directly dispatches stateless npm-unit requests without queueing them
  * - Sends code to co-located sandbox for execution
  * - Returns results via Redis pub/sub
- * - Does NOT handle HTTP requests (API runs in separate pods)
+ * - Exposes only health/metrics and the authenticated internal npm dispatcher
  *
  * For horizontal scaling:
  * - Deploy this as a pod WITH a sandbox sidecar
@@ -26,6 +27,15 @@ import { startWorkerServer, gracefulShutdown } from './lifecycle';
 import { httpLatencyElapsedSeconds, httpLatencyStartMs, metricsResponse, recordHttpRequest } from './metrics';
 import { env } from './config';
 import logger from './logger';
+import {
+  internalServiceAuthEnabled,
+  isAuthorizedInternalServiceRequest,
+} from './internal-service-auth';
+import {
+  processNpmUnitDispatch,
+  validateNpmUnitDispatchRequest,
+} from './npm-unit-dispatch';
+import { NpmUnitValidationError } from './npm-unit-contract';
 
 // Health check endpoint (optional, for K8s liveness probes)
 import http from 'http';
@@ -49,6 +59,34 @@ import { connection } from './queue';
 import { pyWorker, otherWorker } from './workers';
 
 const HEALTH_PORT = Number(process.env.WORKER_HEALTH_PORT) || 3113;
+const INTERNAL_BODY_LIMIT = 64 * 1024;
+const activeDirectDispatches = new Set<AbortController>();
+
+function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+  if (res.writableEnded) return;
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > INTERNAL_BODY_LIMIT) {
+    throw new NpmUnitValidationError('dispatch body is too large');
+  }
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > INTERNAL_BODY_LIMIT) throw new NpmUnitValidationError('dispatch body is too large');
+    chunks.push(buffer);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw new NpmUnitValidationError('dispatch body must be valid JSON');
+  }
+}
 
 function workerRouteLabel(url: string | undefined, method: string | undefined): string {
   if (url === '/health' && method === 'GET') {
@@ -59,6 +97,9 @@ function workerRouteLabel(url: string | undefined, method: string | undefined): 
   }
   if (url === '/metrics' && method === 'GET') {
     return '/metrics';
+  }
+  if (url === '/internal/npm-unit' && method === 'POST') {
+    return '/internal/npm-unit';
   }
   return 'unmatched';
 }
@@ -93,7 +134,43 @@ const healthServer = http.createServer(async (req, res) => {
     }
   });
 
-  if (pathname === '/health' && method === 'GET') {
+  if (pathname === '/internal/npm-unit' && method === 'POST') {
+    if (!internalServiceAuthEnabled()) {
+      sendJson(res, 503, { error: 'sandbox_unavailable', message: 'internal service auth is not configured', retryable: true });
+      return;
+    }
+    if (!isAuthorizedInternalServiceRequest(req.headers)) {
+      sendJson(res, 401, { error: 'sandbox_unavailable', message: 'unauthorized', retryable: false });
+      return;
+    }
+    if (!env.NPM_UNIT_ENABLED) {
+      sendJson(res, 503, { error: 'disabled', message: 'npm unit indexing is disabled', retryable: false });
+      return;
+    }
+    const controller = new AbortController();
+    activeDirectDispatches.add(controller);
+    const abort = () => controller.abort();
+    req.once('aborted', abort);
+    res.once('close', abort);
+    try {
+      const input = validateNpmUnitDispatchRequest(await readJsonBody(req));
+      const result = await processNpmUnitDispatch(input, controller.signal);
+      sendJson(res, 200, result);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        if (error instanceof NpmUnitValidationError) {
+          sendJson(res, 400, { error: 'invalid_request', message: error.message, retryable: false });
+        } else {
+          logger.error('Direct npm unit dispatch failed', { error });
+          sendJson(res, 500, { error: 'sandbox_unavailable', message: 'npm unit dispatcher failed', retryable: true });
+        }
+      }
+    } finally {
+      activeDirectDispatches.delete(controller);
+      req.off('aborted', abort);
+      res.off('close', abort);
+    }
+  } else if (pathname === '/health' && method === 'GET') {
     try {
       // Check Redis connection
       await connection.ping();
@@ -108,11 +185,12 @@ const healthServer = http.createServer(async (req, res) => {
           status: 'healthy',
           workers: {
             python: pyRunning,
-            other: otherRunning
+            other: otherRunning,
           },
           config: {
             pythonConcurrency: env.PYTHON_CONCURRENCY,
             otherConcurrency: env.OTHER_CONCURRENCY,
+            npmUnitDirectConcurrency: env.NPM_UNIT_CONCURRENCY,
             sandboxEndpoint: env.SANDBOX_ENDPOINT
           }
         }));
@@ -166,28 +244,33 @@ startWorkerServer(async () => {
   });
 });
 
+async function closeWorkerHttpServer(): Promise<void> {
+  for (const controller of activeDirectDispatches) controller.abort();
+  await new Promise<void>(resolve => healthServer.close(() => resolve()));
+}
+
 // Graceful shutdown handlers
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, initiating graceful shutdown...');
-  healthServer.close();
+  await closeWorkerHttpServer();
   await gracefulShutdown();
 });
 
 process.on('SIGINT', async () => {
   logger.info('SIGINT received, initiating graceful shutdown...');
-  healthServer.close();
+  await closeWorkerHttpServer();
   await gracefulShutdown();
 });
 
 process.on('SIGUSR2', async () => {
   logger.info('SIGUSR2 received, initiating graceful shutdown...');
-  healthServer.close();
+  await closeWorkerHttpServer();
   await gracefulShutdown();
 });
 
 process.on('uncaughtException', async (error) => {
   logger.error('Uncaught Exception', error);
-  healthServer.close();
+  await closeWorkerHttpServer();
   await gracefulShutdown();
 });
 

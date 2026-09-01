@@ -1,10 +1,14 @@
 {{/*
 API Deployment
 This creates the API pods that handle HTTP requests.
-It doesn't run workers - just submits jobs to the queue.
+It submits execution jobs to the queue and forwards npm-unit synchronously to
+the authenticated direct dispatcher.
 */}}
 {{- if and .Values.api.enabled (not .Values.egressGateway.enabled) }}
 {{- fail "api.enabled requires egressGateway.enabled=true because sandbox-originated file and PTC traffic must not bypass the egress gateway" }}
+{{- end }}
+{{- if and .Values.npmUnit.enabled (or (not .Values.api.enabled) (not .Values.workerSandbox.enabled)) }}
+{{- fail "npmUnit.enabled requires both api.enabled=true and workerSandbox.enabled=true for direct stateless dispatch" }}
 {{- end }}
 {{- if .Values.api.enabled }}
 apiVersion: apps/v1
@@ -69,6 +73,10 @@ spec:
                   key: codeapi-internal-service-token
             - name: EGRESS_GRANT_TTL_SECONDS
               value: {{ .Values.egressGrant.ttlSeconds | quote }}
+            - name: CODEAPI_NPM_UNIT_ENABLED
+              value: {{ .Values.npmUnit.enabled | quote }}
+            - name: CODEAPI_NPM_UNIT_DISPATCH_URL
+              value: "http://{{ include "codeapi.fullname" . }}-service-worker:{{ .Values.workerSandbox.healthPort }}/internal/npm-unit"
             # Server config
             - name: SERVICE_PORT
               value: {{ .Values.api.service.port | quote }}

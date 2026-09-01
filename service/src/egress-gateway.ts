@@ -3,6 +3,8 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import { nanoid } from 'nanoid';
 import path from 'path';
 import { Readable } from 'stream';
+import { Transform } from 'stream';
+import { pipeline } from 'stream/promises';
 import { env } from './config';
 import {
   EGRESS_GRANT_HEADER,
@@ -10,12 +12,19 @@ import {
   egressGrantFromExecutionClaims,
   openEgressGrant,
   openPtcCallbackToken,
+  openNpmTarballToken,
   prepareSandboxEgress,
   restoreSandboxExecuteResult,
   sealEgressHandle,
   sealPtcCallbackToken,
+  sealNpmTarballToken,
   type EgressGrantClaims,
 } from './egress-grant';
+import {
+  NPM_FETCH_TOKEN_HEADER,
+  NpmUnitValidationError,
+  validateNpmUnitRequest,
+} from './npm-unit-contract';
 import type { ExecutionManifestClaims } from './execution-manifest';
 import { openEgressRouteHandle } from './egress-route-params';
 import { internalServiceHeaders, requireConfiguredInternalServiceAuth } from './internal-service-auth';
@@ -85,6 +94,7 @@ function routeFamily(req: Request): string {
   if (req.path === '/live' || req.path === '/health' || req.path === '/ready' || req.path === '/metrics') return req.path.slice(1);
   if (req.path.startsWith('/internal/')) return 'internal';
   if (req.path === '/tool-call') return 'ptc-tool-call';
+  if (req.path === '/npm/tarball') return 'npm-tarball';
   if (req.path.startsWith('/sessions/')) {
     if (req.method === 'PUT') return 'file-upload';
     if (req.method === 'GET' && req.path.includes('/objects/')) return 'file-download';
@@ -548,6 +558,174 @@ app.post('/internal/ptc-callback-token', express.json({ limit: '128kb' }), requi
     return res.status(201).json({ grant_id: grantId, callbackToken: token });
   } catch (error) {
     return sendEgressError(req, res, error);
+  }
+});
+
+app.post('/internal/npm-tarball-tokens', express.json({ limit: '32kb' }), requireConfiguredInternalServiceAuth, async (req, res) => {
+  try {
+    if (!env.NPM_UNIT_ENABLED) {
+      return res.status(503).json({ error: 'disabled', message: 'npm unit indexing is disabled', retryable: false });
+    }
+    const executionId = typeof req.body?.executionId === 'string' ? req.body.executionId : '';
+    if (!executionId || executionId.length > 256) {
+      return res.status(400).json({ error: 'invalid_request', message: 'executionId is required', retryable: false });
+    }
+    const request = validateNpmUnitRequest(req.body?.request);
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const expiresAt = issuedAt + env.NPM_FETCH_TOKEN_TTL_SECONDS;
+    const fetchToken = sealNpmTarballToken({
+      executionId,
+      name: request.name,
+      version: request.version,
+      integrity: request.integrity,
+      resolved: request.resolved,
+      maxBytes: env.NPM_TARBALL_MAX_BYTES,
+      issuedAt,
+      expiresAt,
+      secret: env.EGRESS_GRANT_SECRET,
+    });
+    return res.status(201).json({ fetchToken, expiresAt });
+  } catch (error) {
+    if (error instanceof NpmUnitValidationError) {
+      return res.status(400).json({ error: error.code, message: error.message, retryable: false });
+    }
+    return sendEgressError(req, res, error);
+  }
+});
+
+class NpmTarballLimitTransform extends Transform {
+  private seen = 0;
+
+  constructor(private readonly maxBytes: number) {
+    super();
+  }
+
+  override _transform(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null, data?: Buffer) => void): void {
+    this.seen += chunk.length;
+    if (this.seen > this.maxBytes) {
+      callback(new Error('npm_tarball_too_large'));
+      return;
+    }
+    callback(null, chunk);
+  }
+}
+
+async function fetchRegistryTarball(
+  url: string,
+  signal: AbortSignal,
+): Promise<globalThis.Response> {
+  const upstream = await fetch(url, {
+    method: 'GET',
+    /* Deliberately omit Authorization, Cookie, npm tokens, and caller
+     * headers. Anonymous readability from the one fixed public registry is
+     * the proof that a tarball is eligible for this globally reusable parse. */
+    headers: { Accept: 'application/octet-stream' },
+    redirect: 'manual',
+    signal,
+  });
+  if (upstream.status >= 300 && upstream.status < 400) {
+    await upstream.body?.cancel().catch(() => {});
+    throw new Error('npm_registry_redirect_refused');
+  }
+  return upstream;
+}
+
+app.get('/npm/tarball', async (req, res) => {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    if (!env.NPM_UNIT_ENABLED) {
+      return res.status(503).json({ error: 'disabled', message: 'npm unit indexing is disabled', retryable: false });
+    }
+    const token = req.header(NPM_FETCH_TOKEN_HEADER);
+    if (!token) {
+      return res.status(401).json({ error: 'invalid_request', message: `${NPM_FETCH_TOKEN_HEADER} is required`, retryable: false });
+    }
+    const capability = openNpmTarballToken(token, env.EGRESS_GRANT_SECRET);
+    const request = validateNpmUnitRequest({
+      name: capability.name,
+      version: capability.version,
+      integrity: capability.integrity,
+      resolved: capability.resolved,
+      keep: ['**/*.d.ts', 'package.json'],
+    });
+    const maxBytes = Math.min(capability.max_bytes, env.NPM_TARBALL_MAX_BYTES);
+    const controller = new AbortController();
+    timeout = setTimeout(() => controller.abort(), env.NPM_FETCH_TIMEOUT_MS);
+    req.once('aborted', () => controller.abort());
+    const upstream = await fetchRegistryTarball(request.resolved, controller.signal);
+
+    if (upstream.status === 401 || upstream.status === 403 || upstream.status === 404) {
+      await upstream.body?.cancel().catch(() => {});
+      return res.status(404).json({
+        error: 'not_publicly_fetchable',
+        message: 'Package tarball is not anonymously fetchable from the public npm registry',
+        retryable: false,
+      });
+    }
+    if (!upstream.ok) {
+      await upstream.body?.cancel().catch(() => {});
+      const retryable = upstream.status >= 500 || upstream.status === 408 || upstream.status === 429;
+      return res.status(retryable ? 503 : 502).json({
+        error: 'registry_unavailable',
+        message: `Registry returned HTTP ${upstream.status}`,
+        retryable,
+      });
+    }
+
+    const contentLength = upstream.headers.get('content-length');
+    if (contentLength !== null) {
+      const parsed = Number(contentLength);
+      if (!Number.isSafeInteger(parsed) || parsed < 0) {
+        await upstream.body?.cancel().catch(() => {});
+        return res.status(502).json({ error: 'registry_unavailable', message: 'Registry returned an invalid Content-Length', retryable: true });
+      }
+      if (parsed > maxBytes) {
+        await upstream.body?.cancel().catch(() => {});
+        return res.status(413).json({ error: 'too_large', message: 'Package tarball exceeds the configured byte limit', retryable: false });
+      }
+      res.setHeader('Content-Length', String(parsed));
+    }
+    if (!upstream.body) {
+      return res.status(502).json({ error: 'registry_unavailable', message: 'Registry response had no body', retryable: true });
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-CodeAPI-Npm-Max-Bytes', String(maxBytes));
+    await pipeline(
+      Readable.fromWeb(upstream.body as unknown as import('stream/web').ReadableStream),
+      new NpmTarballLimitTransform(maxBytes),
+      res,
+    );
+    return;
+  } catch (error) {
+    if (!res.headersSent && error instanceof NpmUnitValidationError) {
+      return res.status(400).json({ error: error.code, message: error.message, retryable: false });
+    }
+    if ((error as Error)?.name === 'AbortError') {
+      if (!res.headersSent) {
+        return res.status(503).json({ error: 'registry_unavailable', message: 'Registry request timed out', retryable: true });
+      }
+      res.destroy(error as Error);
+      return;
+    }
+    if (!res.headersSent && !(error instanceof EgressGrantError)) {
+      const message = (error as Error)?.message ?? '';
+      const policyRefusal = message === 'npm_registry_redirect_refused';
+      return res.status(policyRefusal ? 502 : 503).json({
+        error: 'registry_unavailable',
+        message: policyRefusal
+          ? 'Public npm registry redirects are not permitted'
+          : 'Registry request failed',
+        retryable: !policyRefusal,
+      });
+    }
+    if (!res.headersSent) return sendEgressError(req, res, error);
+    res.destroy(error as Error);
+    return;
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 });
 

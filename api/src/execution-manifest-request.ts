@@ -162,6 +162,9 @@ export function verifyExecuteRequestManifest(args: {
   }, {
     nowSeconds: args.nowSeconds,
   });
+  if (manifest.operation !== undefined && manifest.operation !== 'execute') {
+    throw new ExecutionManifestError('scope_mismatch', 'Execution manifest operation does not authorize execute');
+  }
   assertManifestMatchesExecuteRequest(manifest, args.body, {
     nowSeconds: args.nowSeconds,
     bodyHashRequiredAfterSeconds: args.bodyHashRequiredAfterSeconds,

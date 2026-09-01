@@ -21,6 +21,8 @@ import {
   sealEgressHandle,
   sealPtcCallbackToken,
   openPtcCallbackToken,
+  sealNpmTarballToken,
+  openNpmTarballToken,
 } from './egress-grant';
 import { openEgressRouteHandle } from './egress-route-params';
 import type * as t from './types';
@@ -461,6 +463,35 @@ describe('egress encrypted grants and handles', () => {
       exec_id: 'exec_123',
       callback_token: 'raw-callback-token',
     });
+  });
+
+  test('seals a short-lived npm capability to one exact tarball and byte limit', () => {
+    const token = sealNpmTarballToken({
+      executionId: 'exec_npm',
+      name: '@scope/pkg',
+      version: '1.2.3',
+      integrity: 'sha512-deadbeef',
+      resolved: 'https://registry.npmjs.org/@scope/pkg/-/pkg-1.2.3.tgz',
+      maxBytes: 1024,
+      issuedAt: 100,
+      expiresAt: 200,
+      secret: SECRET,
+    });
+
+    expect(token).not.toContain('@scope/pkg');
+    expect(openNpmTarballToken(token, SECRET, 150)).toEqual({
+      v: 1,
+      typ: 'npm-tarball',
+      exec_id: 'exec_npm',
+      name: '@scope/pkg',
+      version: '1.2.3',
+      integrity: 'sha512-deadbeef',
+      resolved: 'https://registry.npmjs.org/@scope/pkg/-/pkg-1.2.3.tgz',
+      max_bytes: 1024,
+      iat: 100,
+      exp: 200,
+    });
+    expectEgressError(() => openNpmTarballToken(token, SECRET, 231), 'expired');
   });
 
   test('converts PTC callback timeout milliseconds to grant seconds', () => {

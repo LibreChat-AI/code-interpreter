@@ -112,3 +112,14 @@ session-management routes stay unauthenticated for backwards compatibility.
 - Worker: `GET /health` and `GET /ready`
 - File Server: `GET /health` and `GET /ready`
 - Tool Call Server: `GET /health`
+
+## Stateless npm declaration indexing
+
+An opt-in `POST /v1/sandbox/npm-unit` route indexes the `.d.ts` surface of one
+exact registry package without executing package code. It verifies the
+lockfile-provided SHA-512 digest before decompression, retains only declaration
+files plus the root `package.json`, and returns deterministic symbols/imports
+with rejection and resource-usage telemetry. Enable it with
+`npmUnit.enabled=true` in Helm or `CODEAPI_NPM_UNIT_ENABLED=true` in the main
+Compose stack; it is disabled by default. This route uses direct synchronous
+HTTP dispatch and does not create a Redis/BullMQ job or persist package state.

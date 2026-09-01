@@ -88,6 +88,19 @@ export type EgressHandleClaims =
       allowed_tool_names?: string[];
       iat: number;
       exp: number;
+    }
+  | {
+      v: typeof EGRESS_GRANT_VERSION;
+      typ: 'npm-tarball';
+      grant_id?: never;
+      exec_id: string;
+      name: string;
+      version: string;
+      integrity: string;
+      resolved: string;
+      max_bytes: number;
+      iat: number;
+      exp: number;
     };
 
 type WithoutVersion<T> = T extends unknown ? Omit<T, 'v'> : never;
@@ -277,6 +290,20 @@ function validateHandle(value: unknown): EgressHandleClaims {
     assertString(claims.callback_token, 'callback_token');
     if (claims.allowed_tool_names !== undefined) {
       assertStringArray(claims.allowed_tool_names, 'allowed_tool_names');
+    }
+    return claims as EgressHandleClaims;
+  }
+  if (claims.typ === 'npm-tarball') {
+    assertString(claims.name, 'name');
+    assertString(claims.version, 'version');
+    assertString(claims.integrity, 'integrity');
+    assertString(claims.resolved, 'resolved');
+    if (
+      typeof claims.max_bytes !== 'number' ||
+      !Number.isSafeInteger(claims.max_bytes) ||
+      claims.max_bytes <= 0
+    ) {
+      throw new EgressGrantError('malformed', 'Egress npm max_bytes is invalid');
     }
     return claims as EgressHandleClaims;
   }
@@ -619,6 +646,42 @@ export function openPtcCallbackToken(token: string, secret: string, nowSeconds?:
   const handle = openEgressHandle(token, secret, nowSeconds);
   if (handle.typ !== 'ptc-callback') {
     throw new EgressGrantError('wrong_type', 'Expected a PTC callback token');
+  }
+  return handle;
+}
+
+export function sealNpmTarballToken(args: {
+  executionId: string;
+  name: string;
+  version: string;
+  integrity: string;
+  resolved: string;
+  maxBytes: number;
+  issuedAt: number;
+  expiresAt: number;
+  secret: string;
+}): string {
+  return sealEgressHandle({
+    typ: 'npm-tarball',
+    exec_id: args.executionId,
+    name: args.name,
+    version: args.version,
+    integrity: args.integrity,
+    resolved: args.resolved,
+    max_bytes: args.maxBytes,
+    iat: args.issuedAt,
+    exp: args.expiresAt,
+  }, args.secret);
+}
+
+export function openNpmTarballToken(
+  token: string,
+  secret: string,
+  nowSeconds?: number,
+): Extract<EgressHandleClaims, { typ: 'npm-tarball' }> {
+  const handle = openEgressHandle(token, secret, nowSeconds);
+  if (handle.typ !== 'npm-tarball') {
+    throw new EgressGrantError('wrong_type', 'Egress token is not an npm tarball capability');
   }
   return handle;
 }

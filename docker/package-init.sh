@@ -25,6 +25,7 @@ BUN_VERSION="${BUN_VERSION:-1.3.14}"
 BASH_PACKAGE_VERSION="${BASH_PACKAGE_VERSION:-5.2.0}"
 INSTALL_FAILED=false
 JS_PACKAGE_MANIFEST="${JS_PACKAGE_MANIFEST:-${SCRIPT_DIR}/javascript-packages.txt}"
+NPM_UNIT_PACKAGES=("web-tree-sitter@0.24.7" "tree-sitter-wasms@0.1.13")
 
 load_js_packages() {
     if [ ! -f "$JS_PACKAGE_MANIFEST" ]; then
@@ -79,6 +80,23 @@ js_packages_ready() {
     done
 }
 
+npm_unit_packages_ready() {
+    local pkg_root="$1"
+    [ -f "${pkg_root}/node_modules/web-tree-sitter/package.json" ] &&
+    [ -f "${pkg_root}/node_modules/tree-sitter-wasms/out/tree-sitter-typescript.wasm" ] &&
+    [ -f "${pkg_root}/node_modules/tree-sitter-wasms/out/tree-sitter-tsx.wasm" ] &&
+    [ -f "${pkg_root}/node_modules/tree-sitter-wasms/out/tree-sitter-javascript.wasm" ]
+}
+
+prune_tree_sitter_wasms() {
+    local root="$1/node_modules/tree-sitter-wasms/out"
+    [ -d "$root" ] || return 0
+    find "$root" -type f -name '*.wasm' \
+        ! -name 'tree-sitter-typescript.wasm' \
+        ! -name 'tree-sitter-tsx.wasm' \
+        ! -name 'tree-sitter-javascript.wasm' -delete
+}
+
 load_js_packages
 
 echo "=============================================="
@@ -95,6 +113,7 @@ packages_ready() {
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/rasterio" ] &&
     [ -f "/pkgs/node/${NODE_VERSION}/.package-installed" ] &&
     js_packages_ready "/pkgs/node/${NODE_VERSION}" &&
+    npm_unit_packages_ready "/pkgs/node/${NODE_VERSION}" &&
     [ -f "/pkgs/bun/${BUN_VERSION}/.package-installed" ] &&
     js_packages_ready "/pkgs/bun/${BUN_VERSION}" &&
     [ -f "/pkgs/bash/${BASH_PACKAGE_VERSION}/.package-installed" ]
@@ -346,10 +365,12 @@ if [ "$NODE_INSTALLED" = true ] && [ "${#JS_PACKAGES[@]}" -gt 0 ] && [ -f "$NODE
         --no-fund \
         --save-exact \
         --package-lock=false \
-        "${JS_PACKAGES[@]}"; then
+        "${JS_PACKAGES[@]}" \
+        "${NPM_UNIT_PACKAGES[@]}"; then
         echo "ERROR: Node.js package installation failed"
         INSTALL_FAILED=true
     else
+        prune_tree_sitter_wasms "$NODE_DEST"
         echo "$(date +%s)000" > "$NODE_DEST/.package-installed"
     fi
 

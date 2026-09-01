@@ -32,9 +32,12 @@ import {
   pruneInputCache,
   storeCachedInputs,
 } from '../session-inputs';
+import npmUnitRouter from './npm-unit';
 
 const router = express.Router();
 const SYNTHETIC_PRINCIPAL_SOURCE = 'synthetic_test';
+
+router.use(npmUnitRouter);
 
 function existingDestinationConflictMessage(existing: string, destination: string): string {
   return existing === destination

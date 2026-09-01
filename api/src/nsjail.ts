@@ -21,6 +21,43 @@ export interface NsJailResult {
   wall_time: number | null;
 }
 
+const TRACKED_CGROUP_CHILD_RE = /^NSJAIL(?:_SELF)?\.\d+$/;
+
+function trackedCgroupPath(logId: string): string | undefined {
+  if (!config.use_cgroupv2) return undefined;
+  const cgroupPath = path.join(config.cgroupv2_mount, `CODEAPI.${logId}`);
+  try {
+    fs.mkdirSync(cgroupPath, { mode: 0o700 });
+    return cgroupPath;
+  } catch (error) {
+    logger.warn({ err: error, cgroupPath }, 'Could not create per-job memory telemetry cgroup');
+    return undefined;
+  }
+}
+
+export function readCgroupPeakBytes(cgroupPath: string): number | null {
+  try {
+    const value = Number(fs.readFileSync(path.join(cgroupPath, 'memory.peak'), 'utf8').trim());
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function cleanupTrackedCgroup(cgroupPath: string | undefined): void {
+  if (!cgroupPath) return;
+  try {
+    for (const entry of fs.readdirSync(cgroupPath, { withFileTypes: true })) {
+      if (entry.isDirectory() && TRACKED_CGROUP_CHILD_RE.test(entry.name)) {
+        fs.rmdirSync(path.join(cgroupPath, entry.name));
+      }
+    }
+    fs.rmdirSync(cgroupPath);
+  } catch (error) {
+    logger.warn({ err: error, cgroupPath }, 'Could not remove per-job memory telemetry cgroup');
+  }
+}
+
 const SIGNALS: Record<number, string> = {
   1: 'SIGHUP', 2: 'SIGINT', 3: 'SIGQUIT', 4: 'SIGILL',
   5: 'SIGTRAP', 6: 'SIGABRT', 7: 'SIGBUS', 8: 'SIGFPE',
@@ -227,6 +264,7 @@ interface ExecuteOptions {
   identity: SandboxJobIdentity;
   enableToolCallSocket?: boolean;
   suppressSuccessLogs?: boolean;
+  trackMemoryPeak?: boolean;
 }
 
 export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate = defaultNsJailSetupGate): Promise<NsJailResult> {
@@ -243,11 +281,16 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     identity,
     enableToolCallSocket,
     suppressSuccessLogs,
+    trackMemoryPeak,
   } = opts;
   const logId = nanoid();
   const logPath = `/tmp/nsjail-${logId}.log`;
   const cfgPath = `/tmp/nsjail-${logId}.cfg`;
+  const memoryCgroupPath = trackMemoryPeak === true
+    ? trackedCgroupPath(logId)
+    : undefined;
 
+  try {
   fs.writeFileSync(cfgPath, readBaseConfig() + renderJobConfigOverlay(submissionDir), { mode: 0o600 });
 
   const nsjailArgs = buildArgs({
@@ -261,6 +304,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     extraPkgdirs,
     identity,
     enableToolCallSocket,
+    cgroupv2Mount: memoryCgroupPath,
   });
 
   const startTime = Date.now();
@@ -615,12 +659,15 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     code,
     signal,
     output,
-    memory: null,
+    memory: memoryCgroupPath ? readCgroupPeakBytes(memoryCgroupPath) : null,
     message: finalMessage,
     status: finalStatus,
     cpu_time: null,
     wall_time: wallTime,
   };
+  } finally {
+    cleanupTrackedCgroup(memoryCgroupPath);
+  }
 }
 
 interface BuildArgsOptions {
@@ -638,6 +685,7 @@ interface BuildArgsOptions {
   extraPkgdirs?: string[];
   identity: SandboxJobIdentity;
   enableToolCallSocket?: boolean;
+  cgroupv2Mount?: string;
 }
 
 export function buildArgs(opts: BuildArgsOptions): string[] {
@@ -652,6 +700,7 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
     extraPkgdirs,
     identity,
     enableToolCallSocket,
+    cgroupv2Mount,
   } = opts;
 
   const timeoutSecs = Math.max(1, Math.ceil(timeout / 1000));
@@ -670,6 +719,9 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
 
   if (config.use_cgroupv2) {
     args.push('--use_cgroupv2');
+    if (cgroupv2Mount) {
+      args.push('--cgroupv2_mount', cgroupv2Mount);
+    }
   }
 
   if (extraPkgdirs) {

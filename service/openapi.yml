@@ -227,7 +227,204 @@ components:
           type: string
           enum: [default, stateful]
 
+    NpmUnitRequest:
+      type: object
+      additionalProperties: false
+      required: [name, version, integrity, resolved, keep]
+      properties:
+        name:
+          type: string
+          description: Lowercase unscoped name or one @scope/package pair.
+        version:
+          type: string
+          description: Exact semantic version; ranges and tags are refused.
+        integrity:
+          type: string
+          pattern: '^sha512-'
+          description: One canonical SHA-512 SRI digest verified before decompression.
+        resolved:
+          type: string
+          format: uri
+          description: Exact name@version tarball URL on the configured registry origin.
+        keep:
+          type: array
+          minItems: 2
+          maxItems: 2
+          uniqueItems: true
+          description: Must contain exactly **/*.d.ts and package.json.
+          items:
+            type: string
+            enum: ['**/*.d.ts', 'package.json']
+
+    NpmUnitRejected:
+      type: object
+      required: [link, device, unsafePath, oversize, other]
+      properties:
+        link: { type: integer, minimum: 0 }
+        device: { type: integer, minimum: 0 }
+        unsafePath: { type: integer, minimum: 0 }
+        oversize: { type: integer, minimum: 0 }
+        other: { type: integer, minimum: 0 }
+
+    NpmUnitUsage:
+      type: object
+      required: [tarballBytes, unpackedBytes, peakRssBytes, wallMs]
+      properties:
+        tarballBytes: { type: integer, minimum: 0 }
+        unpackedBytes: { type: integer, minimum: 0 }
+        peakRssBytes: { type: integer, minimum: 0 }
+        cgroupPeakBytes:
+          type: integer
+          minimum: 0
+          description: Peak memory charged to the fresh per-request cgroup, including descendants.
+        wallMs: { type: integer, minimum: 0 }
+
+    NpmUnitFailureUsage:
+      type: object
+      description: Parent-observed usage may be partial when the jailed process is terminated.
+      properties:
+        tarballBytes: { type: integer, minimum: 0 }
+        unpackedBytes: { type: integer, minimum: 0 }
+        peakRssBytes: { type: integer, minimum: 0 }
+        cgroupPeakBytes: { type: integer, minimum: 0 }
+        wallMs: { type: integer, minimum: 0 }
+
+    NpmUnitSuccess:
+      type: object
+      required: [status, name, version, integrityVerified, files, symbols, imports, rejected, usage]
+      properties:
+        status:
+          type: string
+          enum: [complete, partial]
+        name: { type: string }
+        version: { type: string }
+        integrityVerified: { type: boolean, enum: [true] }
+        files:
+          type: array
+          items:
+            type: object
+            required: [path, sha1, bytes]
+            properties:
+              path: { type: string }
+              sha1: { type: string, pattern: '^[0-9a-f]{40}$' }
+              bytes: { type: integer, minimum: 0 }
+        symbols:
+          type: array
+          description: Deterministically ordered by file, then declaration order.
+          items:
+            type: object
+            required: [file, ordinal, label, name, startLine, endLine, isExported, signature, tokens]
+            properties:
+              file: { type: string }
+              ordinal: { type: integer, minimum: 0 }
+              label: { type: string }
+              name: { type: string }
+              startLine: { type: integer, minimum: 1 }
+              endLine: { type: integer, minimum: 1 }
+              isExported: { type: boolean }
+              signature: { type: string }
+              tokens: { type: string }
+        imports:
+          type: array
+          items:
+            type: object
+            required: [file, spec]
+            properties:
+              file: { type: string }
+              spec: { type: string }
+        rejected:
+          $ref: '#/components/schemas/NpmUnitRejected'
+        usage:
+          $ref: '#/components/schemas/NpmUnitUsage'
+        errors:
+          type: array
+          items:
+            type: object
+            required: [code, message]
+            properties:
+              file: { type: string }
+              code: { type: string, enum: [parse_failed] }
+              message: { type: string }
+
+    NpmUnitFailure:
+      type: object
+      required: [error, message, retryable]
+      properties:
+        error:
+          type: string
+          enum: [integrity_mismatch, not_publicly_fetchable, registry_unavailable, too_large, decompression_limit, timeout, unsafe_entry, parse_failed, invalid_request, unsupported_registry, disabled, sandbox_unavailable]
+        message: { type: string }
+        retryable: { type: boolean }
+        rejected:
+          $ref: '#/components/schemas/NpmUnitRejected'
+        usage:
+          $ref: '#/components/schemas/NpmUnitFailureUsage'
+
 paths:
+  /sandbox/npm-unit:
+    post:
+      summary: Index an exact npm package declaration surface
+      description: >-
+        Fetches one anonymously readable tarball from registry.npmjs.org through a short-lived exact-package
+        capability, verifies SHA-512 before decompression, and parses only
+        TypeScript declarations in a fresh network-disabled sandbox. The
+        request carries no tenant context and is dispatched synchronously
+        without a persisted job or result; the feature is disabled by default.
+      operationId: indexNpmUnit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NpmUnitRequest'
+      responses:
+        '200':
+          description: Complete or explicitly partial deterministic surface.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NpmUnitSuccess'
+        '400':
+          description: Invalid or non-canonical request.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NpmUnitFailure' }
+        '404':
+          description: Exact package tarball not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NpmUnitFailure' }
+        '413':
+          description: Tarball, decompressed archive, file, entry, or output limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NpmUnitFailure' }
+        '422':
+          description: Integrity, archive-safety, or parse failure.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NpmUnitFailure' }
+        '501':
+          description: The configured sandbox backend does not support this stateless route.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NpmUnitFailure' }
+        '502':
+          description: Terminal registry policy refusal or internal dispatch misconfiguration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NpmUnitFailure' }
+        '503':
+          description: Feature disabled or retryable registry/sandbox outage.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NpmUnitFailure' }
+        '504':
+          description: Fetch or parse wall-clock limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NpmUnitFailure' }
+
   /exec:
     post:
       summary: Execute code

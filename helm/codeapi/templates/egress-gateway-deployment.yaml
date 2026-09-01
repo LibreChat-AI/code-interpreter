@@ -50,6 +50,14 @@ spec:
               value: "http://{{ include "codeapi.fullname" . }}-tool-call-server:{{ .Values.toolCallServer.service.port }}"
             - name: EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES
               value: {{ printf "%.0f" (.Values.egressGateway.config.maxToolCallBytes | float64) | quote }}
+            - name: CODEAPI_NPM_UNIT_ENABLED
+              value: {{ .Values.npmUnit.enabled | quote }}
+            - name: CODEAPI_NPM_TARBALL_MAX_BYTES
+              value: {{ .Values.npmUnit.tarballMaxBytes | quote }}
+            - name: CODEAPI_NPM_FETCH_TIMEOUT_MS
+              value: {{ .Values.npmUnit.fetchTimeoutMs | quote }}
+            - name: CODEAPI_NPM_FETCH_TOKEN_TTL_SECONDS
+              value: {{ .Values.npmUnit.fetchTokenTtlSeconds | quote }}
             - name: CODEAPI_EGRESS_GRANT_SECRET
               valueFrom:
                 secretKeyRef:

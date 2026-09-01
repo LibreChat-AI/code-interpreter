@@ -31,6 +31,7 @@ NODE_VERSION="${NODE_VERSION:-24.15.0}"
 BUN_VERSION="${BUN_VERSION:-1.3.14}"
 PACKAGES_DIR="./data/pkgs"
 JS_PACKAGE_MANIFEST="${JS_PACKAGE_MANIFEST:-${SCRIPT_DIR}/javascript-packages.txt}"
+NPM_UNIT_PACKAGES=("web-tree-sitter@0.24.7" "tree-sitter-wasms@0.1.13")
 
 load_js_packages() {
     if [ ! -f "$JS_PACKAGE_MANIFEST" ]; then
@@ -307,7 +308,18 @@ install_node_packages() {
         --no-fund \
         --save-exact \
         --package-lock=false \
-        "${JS_PACKAGES[@]}"
+        "${JS_PACKAGES[@]}" \
+        "${NPM_UNIT_PACKAGES[@]}"
+
+    docker exec "$CONTAINER_NAME" bash -c "
+        root=${pkg_dest}/node_modules/tree-sitter-wasms/out
+        if [ -d \"\$root\" ]; then
+            find \"\$root\" -type f -name '*.wasm' \\
+                ! -name 'tree-sitter-typescript.wasm' \\
+                ! -name 'tree-sitter-tsx.wasm' \\
+                ! -name 'tree-sitter-javascript.wasm' -delete
+        fi
+    "
 
     # Mirror the manifest into npm's global tree (${pkg_dest}/lib/node_modules
     # + bin shims on PATH) so `npm list -g`, `npm root -g`, and CLI shims work

@@ -178,6 +178,12 @@ spec:
               value: {{ .Values.executionManifest.ttlSeconds | quote }}
             - name: EGRESS_GRANT_TTL_SECONDS
               value: {{ .Values.egressGrant.ttlSeconds | quote }}
+            - name: CODEAPI_NPM_UNIT_ENABLED
+              value: {{ .Values.npmUnit.enabled | quote }}
+            - name: NPM_UNIT_CONCURRENCY
+              value: {{ .Values.npmUnit.concurrency | quote }}
+            - name: NPM_UNIT_REQUEST_TIMEOUT
+              value: {{ .Values.npmUnit.requestTimeoutMs | quote }}
             - name: PYTHON_CONCURRENCY
               value: {{ .Values.workerSandbox.config.pythonConcurrency | quote }}
             - name: OTHER_CONCURRENCY
@@ -326,6 +332,28 @@ spec:
               value: "true"
             - name: SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY
               value: {{ .Values.executionManifest.publicKey | quote }}
+            - name: CODEAPI_NPM_UNIT_ENABLED
+              value: {{ .Values.npmUnit.enabled | quote }}
+            - name: CODEAPI_NPM_TARBALL_MAX_BYTES
+              value: {{ .Values.npmUnit.tarballMaxBytes | quote }}
+            - name: SANDBOX_NPM_UNIT_MAX_UNPACKED_BYTES
+              value: {{ .Values.npmUnit.sandbox.maxUnpackedBytes | quote }}
+            - name: SANDBOX_NPM_UNIT_MAX_KEPT_BYTES
+              value: {{ .Values.npmUnit.sandbox.maxKeptBytes | quote }}
+            - name: SANDBOX_NPM_UNIT_MAX_FILE_BYTES
+              value: {{ .Values.npmUnit.sandbox.maxFileBytes | quote }}
+            - name: SANDBOX_NPM_UNIT_MAX_ENTRIES
+              value: {{ .Values.npmUnit.sandbox.maxEntries | quote }}
+            - name: SANDBOX_NPM_UNIT_MAX_RESPONSE_BYTES
+              value: {{ .Values.npmUnit.sandbox.maxResponseBytes | quote }}
+            - name: SANDBOX_NPM_UNIT_RUN_TIMEOUT
+              value: {{ .Values.npmUnit.sandbox.runTimeoutMs | quote }}
+            - name: SANDBOX_NPM_UNIT_CPU_TIME
+              value: {{ .Values.npmUnit.sandbox.cpuTimeMs | quote }}
+            - name: SANDBOX_NPM_UNIT_MEMORY_LIMIT
+              value: {{ .Values.npmUnit.sandbox.memoryLimitBytes | quote }}
+            - name: SANDBOX_NPM_UNIT_FETCH_TIMEOUT
+              value: {{ .Values.npmUnit.sandbox.fetchTimeoutMs | quote }}
             {{- with .Values.workerSandbox.sandboxExtraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -443,6 +471,22 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "codeapi.fullname" . }}-service-worker
+  labels:
+    {{- include "codeapi.serviceWorker.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.workerSandbox.healthPort }}
+      targetPort: health
+      protocol: TCP
+      name: internal
+  selector:
+    {{- include "codeapi.serviceWorker.selectorLabels" . | nindent 4 }}
 ---
 apiVersion: v1
 kind: Service

@@ -5,7 +5,7 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
-    "build": "bun build ./src/index.ts --minify --outdir .build --target bun --external '@opentelemetry/*' && bun build ./src/tool-call-socket-proxy.ts --target=node --format=cjs --outfile=.build/tool-call-socket-proxy.cjs",
+    "build": "bun build ./src/index.ts --minify --outdir .build --target bun --external '@opentelemetry/*' && bun build ./src/tool-call-socket-proxy.ts --target=node --format=cjs --outfile=.build/tool-call-socket-proxy.cjs && bun build ./src/npm-unit-worker.ts --target=node --format=cjs --outfile=.build/npm-unit-worker.cjs --external web-tree-sitter",
     "start": "bun run .build/index.js",
     "test": "bun test"
   },

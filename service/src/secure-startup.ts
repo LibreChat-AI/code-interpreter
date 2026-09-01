@@ -51,6 +51,9 @@ export function validateApiHardenedConfig(): void {
   rejectValue('CODEAPI_EGRESS_GRANT_SECRET', process.env.CODEAPI_EGRESS_GRANT_SECRET);
   requireValue('EGRESS_GATEWAY_URL', env.EGRESS_GATEWAY_URL);
   requireValue(INTERNAL_SERVICE_TOKEN_ENV, process.env[INTERNAL_SERVICE_TOKEN_ENV]);
+  if (env.NPM_UNIT_ENABLED) {
+    requireValue('CODEAPI_NPM_UNIT_DISPATCH_URL', env.NPM_UNIT_DISPATCH_URL);
+  }
 }
 
 export function validateWorkerHardenedConfig(): void {

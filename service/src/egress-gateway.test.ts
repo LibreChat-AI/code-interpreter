@@ -21,6 +21,7 @@ import {
   type EgressGrantClaims,
 } from './egress-grant';
 import { INTERNAL_SERVICE_TOKEN_HEADER } from './internal-service-auth';
+import { NPM_FETCH_TOKEN_HEADER, NPM_UNIT_KEEP } from './npm-unit-contract';
 import type * as t from './types';
 
 const { app } = await import('./egress-gateway');
@@ -179,8 +180,11 @@ async function gatewayFetch(path: string, init: RequestInit = {}): Promise<globa
   return originalFetch(`${baseUrl}${path}`, init);
 }
 
-beforeAll(() => {
-  server = app.listen(0);
+beforeAll(async () => {
+  await new Promise<void>((resolve, reject) => {
+    server = app.listen(0, resolve);
+    server.once('error', reject);
+  });
   const address = server.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${address.port}`;
 });
@@ -194,6 +198,10 @@ beforeEach(() => {
   env.EGRESS_GATEWAY_MAX_PATH_LENGTH = 256;
   env.EGRESS_GATEWAY_MAX_NESTING_DEPTH = 10;
   env.EGRESS_LEDGER_REQUIRED = false;
+  env.NPM_UNIT_ENABLED = true;
+  env.NPM_TARBALL_MAX_BYTES = 1024;
+  env.NPM_FETCH_TIMEOUT_MS = 1000;
+  env.NPM_FETCH_TOKEN_TTL_SECONDS = 60;
   process.env.CODEAPI_INTERNAL_SERVICE_TOKEN = INTERNAL_TOKEN;
   upstreamCalls = [];
   upstreamResponse = new Response('ok', { status: 200 });
@@ -210,6 +218,136 @@ afterAll(() => {
 });
 
 describe('egress gateway routes', () => {
+  test('mints an exact npm capability and streams only its registry tarball', async () => {
+    const tarball = Buffer.from('package tarball');
+    upstreamResponse = new Response(tarball, {
+      status: 200,
+      headers: { 'Content-Length': String(tarball.length) },
+    });
+    const integrity = `sha512-${crypto.createHash('sha512').update(tarball).digest('base64')}`;
+    const request = {
+      name: '@scope/pkg',
+      version: '1.2.3',
+      integrity,
+      resolved: 'https://registry.npmjs.org/@scope/pkg/-/pkg-1.2.3.tgz',
+      keep: [...NPM_UNIT_KEEP],
+    };
+    const mint = await gatewayFetch('/internal/npm-tarball-tokens', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [INTERNAL_SERVICE_TOKEN_HEADER]: INTERNAL_TOKEN,
+      },
+      body: JSON.stringify({ executionId: 'exec_npm', request }),
+    });
+    expect(mint.status).toBe(201);
+    const { fetchToken } = await mint.json() as { fetchToken: string };
+
+    const fetched = await gatewayFetch('/npm/tarball', {
+      headers: { [NPM_FETCH_TOKEN_HEADER]: fetchToken },
+    });
+    expect(fetched.status).toBe(200);
+    expect(Buffer.from(await fetched.arrayBuffer())).toEqual(tarball);
+    expect(upstreamCalls.map(call => call.url)).toEqual([request.resolved]);
+    expect(upstreamCalls[0].init.redirect).toBe('manual');
+    expect(upstreamCalls[0].init.headers).toEqual({ Accept: 'application/octet-stream' });
+  });
+
+  test('refuses off-registry npm URLs before minting or fetching', async () => {
+    const integrity = `sha512-${crypto.createHash('sha512').update('x').digest('base64')}`;
+    const response = await gatewayFetch('/internal/npm-tarball-tokens', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [INTERNAL_SERVICE_TOKEN_HEADER]: INTERNAL_TOKEN,
+      },
+      body: JSON.stringify({
+        executionId: 'exec_npm',
+        request: {
+          name: 'pkg',
+          version: '1.2.3',
+          integrity,
+          resolved: 'https://attacker.example/pkg-1.2.3.tgz',
+          keep: [...NPM_UNIT_KEEP],
+        },
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: 'unsupported_registry', retryable: false });
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('refuses every npm redirect and oversized tarballs', async () => {
+    const tarball = Buffer.from('x');
+    const integrity = `sha512-${crypto.createHash('sha512').update(tarball).digest('base64')}`;
+    const request = {
+      name: 'pkg',
+      version: '1.2.3',
+      integrity,
+      resolved: 'https://registry.npmjs.org/pkg/-/pkg-1.2.3.tgz',
+      keep: [...NPM_UNIT_KEEP],
+    };
+    const mint = await gatewayFetch('/internal/npm-tarball-tokens', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [INTERNAL_SERVICE_TOKEN_HEADER]: INTERNAL_TOKEN,
+      },
+      body: JSON.stringify({ executionId: 'exec_npm', request }),
+    });
+    const { fetchToken } = await mint.json() as { fetchToken: string };
+
+    upstreamResponse = new Response(null, {
+      status: 302,
+      headers: { Location: 'https://attacker.example/pkg.tgz' },
+    });
+    const redirected = await gatewayFetch('/npm/tarball', {
+      headers: { [NPM_FETCH_TOKEN_HEADER]: fetchToken },
+    });
+    expect(redirected.status).toBe(502);
+    expect(await redirected.json()).toMatchObject({ error: 'registry_unavailable', retryable: false });
+
+    upstreamCalls = [];
+    upstreamResponse = new Response('x', {
+      status: 200,
+      headers: { 'Content-Length': '1025' },
+    });
+    const oversized = await gatewayFetch('/npm/tarball', {
+      headers: { [NPM_FETCH_TOKEN_HEADER]: fetchToken },
+    });
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toMatchObject({ error: 'too_large', retryable: false });
+  });
+
+  test.each([401, 403, 404])('reports anonymous registry HTTP %d without claiming whether a package exists', async status => {
+    const tarball = Buffer.from('x');
+    const request = {
+      name: 'pkg',
+      version: '1.2.3',
+      integrity: `sha512-${crypto.createHash('sha512').update(tarball).digest('base64')}`,
+      resolved: 'https://registry.npmjs.org/pkg/-/pkg-1.2.3.tgz',
+      keep: [...NPM_UNIT_KEEP],
+    };
+    const mint = await gatewayFetch('/internal/npm-tarball-tokens', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [INTERNAL_SERVICE_TOKEN_HEADER]: INTERNAL_TOKEN,
+      },
+      body: JSON.stringify({ executionId: 'exec_npm', request }),
+    });
+    const { fetchToken } = await mint.json() as { fetchToken: string };
+
+    upstreamResponse = new Response(null, { status });
+    const fetched = await gatewayFetch('/npm/tarball', {
+      headers: { [NPM_FETCH_TOKEN_HEADER]: fetchToken },
+    });
+
+    expect(fetched.status).toBe(404);
+    expect(await fetched.json()).toMatchObject({ error: 'not_publicly_fetchable', retryable: false });
+  });
+
   test('protects internal grant create, restore, and revoke routes', async () => {
     const createBody = JSON.stringify({ payload: payload(), claims: executionClaims() });
     const unauthorized = await gatewayFetch('/internal/egress-grants', {

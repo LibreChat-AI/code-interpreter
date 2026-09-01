@@ -4,6 +4,7 @@
  * This is a stateless API server that:
  * - Handles HTTP requests
  * - Submits jobs to the global queue
+ * - Forwards npm-unit requests synchronously to the direct worker dispatcher
  * - Waits for results via Redis pub/sub
  * - Does NOT run workers (workers run in separate pods)
  *
@@ -18,6 +19,7 @@ import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-
 import { localAuth } from './auth/local';
 import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
+import npmUnitRouter from './service/npm-unit-router';
 import { connection } from './queue';
 import { metricsHandler } from './metrics';
 import { httpMetricsMiddleware } from './middleware/httpMetrics';
@@ -55,6 +57,7 @@ v1.use(isLocalMode ? localAuth : apiKeyAuth);
 
 v1.use(serviceRouter);
 v1.use(programmaticRouter);
+v1.use(npmUnitRouter);
 
 app.use('/v1', v1);
 app.use(requestNotFoundLogger);

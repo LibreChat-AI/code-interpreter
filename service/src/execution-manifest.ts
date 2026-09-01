@@ -73,6 +73,7 @@ export interface ExecutionManifestClaims {
   exp: number;
   execute_body_sha256?: string;
   tool_call_socket?: boolean;
+  operation?: 'execute' | 'npm-unit';
   external_user_id?: string;
   org_id?: string;
   service_id?: string;
@@ -217,6 +218,9 @@ function validateClaimsShape(value: unknown): asserts value is ExecutionManifest
   }
   if (claims.tool_call_socket !== undefined && typeof claims.tool_call_socket !== 'boolean') {
     throw new ExecutionManifestError('malformed', 'Execution manifest tool_call_socket is invalid');
+  }
+  if (claims.operation !== undefined && claims.operation !== 'execute' && claims.operation !== 'npm-unit') {
+    throw new ExecutionManifestError('malformed', 'Execution manifest operation is invalid');
   }
   for (const file of claims.input_files) {
     if (

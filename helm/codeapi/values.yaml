@@ -61,6 +61,29 @@ executionManifest:
   publicKey: ""
   ttlSeconds: 300
 
+# Opt-in stateless indexing of an exact npm package tarball. The egress gateway
+# alone receives public HTTPS access, and it accepts only short-lived,
+# body-bound capabilities for the fixed anonymous public npm registry.
+npmUnit:
+  enabled: false
+  tarballMaxBytes: 33554432
+  fetchTimeoutMs: 15000
+  fetchTokenTtlSeconds: 120
+  # Fail fast above this per-service-worker cap; npm-unit requests are never
+  # written to the Redis job queue.
+  concurrency: 8
+  requestTimeoutMs: 45000
+  sandbox:
+    maxUnpackedBytes: 67108864
+    maxKeptBytes: 33554432
+    maxFileBytes: 8388608
+    maxEntries: 50000
+    maxResponseBytes: 33554432
+    runTimeoutMs: 15000
+    cpuTimeMs: 15000
+    memoryLimitBytes: 402653184
+    fetchTimeoutMs: 20000
+
 # =============================================================================
 # API SERVICE (HTTP handlers, scales based on traffic)
 # =============================================================================

@@ -230,6 +230,11 @@ function configuredNumber(raw: string | undefined, fallback: number): number {
   return raw == null || raw.trim() === '' ? fallback : Number(raw);
 }
 
+function positiveWholeNumber(raw: string | undefined, fallback: number): number {
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
 function configuredChoice<T extends string>(
   raw: string | undefined,
   name: string,
@@ -285,6 +290,16 @@ export const env = {
   EGRESS_GATEWAY_MAX_NESTING_DEPTH: Number(process.env.EGRESS_GATEWAY_MAX_NESTING_DEPTH ?? process.env.SANDBOX_MAX_NESTING_DEPTH) || 10,
   EGRESS_GATEWAY_REQUEST_TIMEOUT_MS: Number(process.env.EGRESS_GATEWAY_REQUEST_TIMEOUT_MS) || 30_000,
   EGRESS_GATEWAY_REVOKE_TIMEOUT_MS: Number(process.env.EGRESS_GATEWAY_REVOKE_TIMEOUT_MS) || 5_000,
+  NPM_UNIT_ENABLED: process.env.CODEAPI_NPM_UNIT_ENABLED === 'true',
+  NPM_TARBALL_MAX_BYTES: positiveWholeNumber(process.env.CODEAPI_NPM_TARBALL_MAX_BYTES, 32 * 1024 * 1024),
+  NPM_FETCH_TIMEOUT_MS: positiveWholeNumber(process.env.CODEAPI_NPM_FETCH_TIMEOUT_MS, 15_000),
+  NPM_FETCH_TOKEN_TTL_SECONDS: Math.min(
+    positiveWholeNumber(process.env.CODEAPI_NPM_FETCH_TOKEN_TTL_SECONDS, 120),
+    600,
+  ),
+  NPM_UNIT_DISPATCH_URL: process.env.CODEAPI_NPM_UNIT_DISPATCH_URL ?? '',
+  NPM_UNIT_CONCURRENCY: positiveWholeNumber(process.env.NPM_UNIT_CONCURRENCY, 8),
+  NPM_UNIT_REQUEST_TIMEOUT: positiveWholeNumber(process.env.NPM_UNIT_REQUEST_TIMEOUT, 45_000),
   EGRESS_LEDGER_REQUIRED: process.env.CODEAPI_EGRESS_LEDGER_REQUIRED === 'true' || process.env.CODEAPI_HARDENED_SANDBOX_MODE === 'true',
   EGRESS_LEDGER_TTL_GRACE_SECONDS: Number(process.env.CODEAPI_EGRESS_LEDGER_TTL_GRACE_SECONDS) || 300,
   EGRESS_GRANT_SECRET: process.env.CODEAPI_EGRESS_GRANT_SECRET ?? '',

@@ -3,7 +3,7 @@ import * as fsp from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import { config } from './config';
-import { buildArgs, execute, renderJobConfigOverlay } from './nsjail';
+import { buildArgs, execute, readCgroupPeakBytes, renderJobConfigOverlay } from './nsjail';
 
 function valueAfter(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
@@ -33,6 +33,36 @@ function seccompPolicy(): string {
 }
 
 describe('NsJail args', () => {
+  test('scopes tracked jobs to a dedicated cgroup-v2 parent', () => {
+    const originalUseCgroup = config.use_cgroupv2;
+    config.use_cgroupv2 = true;
+    try {
+      const args = buildArgs({
+        logPath: '/tmp/nsjail-test.log',
+        pkgdir: '/pkgs/node/24.15.0',
+        timeout: 1000,
+        memoryLimit: 1024,
+        envVars: {},
+        command: ['/bin/bash', '/pkgs/node/24.15.0/run', 'worker.cjs'],
+        identity: { slot: 0, uid: 65534, gid: 65534, perJobUid: false },
+        cgroupv2Mount: '/sys/fs/cgroup/CODEAPI.test',
+      });
+      expect(valueAfter(args, '--cgroupv2_mount')).toBe('/sys/fs/cgroup/CODEAPI.test');
+    } finally {
+      config.use_cgroupv2 = originalUseCgroup;
+    }
+  });
+
+  test('reads a kernel cgroup memory peak without rounding', async () => {
+    const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'cgroup-peak-'));
+    try {
+      await fsp.writeFile(path.join(tmp, 'memory.peak'), '419430401\n');
+      expect(readCgroupPeakBytes(tmp)).toBe(419430401);
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   test('passes dynamic per-job UID/GID mappings', () => {
     const args = buildArgs({
       logPath: '/tmp/nsjail-test.log',
