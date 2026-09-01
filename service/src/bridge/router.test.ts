@@ -27,11 +27,12 @@ afterEach(async () => {
 describe('paired bridge HTTP API', () => {
   test('pairs a worker and accepts its proof-of-possession registration', async () => {
     const app = express();
+    const store = new RedisBridgeStore(redis);
     app.use(json());
     app.use(
       '/v1/bridge',
       createBridgeRouter({
-        store: new RedisBridgeStore(redis),
+        store,
         pairings: new RedisBridgePairingStore(redis),
         authMode: 'paired',
         adminToken: 'strong-administrator-bootstrap-token',
@@ -136,6 +137,28 @@ describe('paired bridge HTTP API', () => {
     await expect(replayResponse.json()).resolves.toMatchObject({
       code: 'PROOF_REPLAYED',
     });
+
+    const revokeResponse = await fetch(`${baseUrl}/workers/vm-1/revoke`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer strong-administrator-bootstrap-token',
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    });
+    expect(revokeResponse.status).toBe(200);
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'vm-1',
+        incarnationId: 'incarnation-00000001',
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: ['bash'],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_FENCED' });
   });
 
   test('forwards pairing store failures to Express error middleware', async () => {

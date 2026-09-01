@@ -519,6 +519,11 @@ export class BridgeWorker {
         'Bridge assignment expired during credential refresh',
       );
     }
+    if (signal != null && Boolean(signal.aborted)) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException('aborted', 'AbortError');
+    }
     const executionController = new AbortController();
     const credentialController = new AbortController();
     const abortExecution = (): void => {
@@ -563,6 +568,8 @@ export class BridgeWorker {
         credentialMaintenanceError = error;
         executionController.abort();
       });
+      const sandboxExecuteUrl =
+        `${this.sandboxEndpointFor(assignment)}/execute`;
       const sandboxSessionId = this.sandboxSessionIdFor(assignment);
       const headers = {
         ...assignment.request.headers,
@@ -578,7 +585,7 @@ export class BridgeWorker {
       }
       sandboxStarted = true;
       const response = await this.fetchImpl(
-        `${this.sandboxEndpointFor(assignment)}/execute`,
+        sandboxExecuteUrl,
         {
           method: 'POST',
           headers: {

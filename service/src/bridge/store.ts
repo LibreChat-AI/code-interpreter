@@ -279,6 +279,29 @@ export class RedisBridgeStore {
     }
   }
 
+  async revokeWorker(workerId: string): Promise<void> {
+    const incarnationPrefix =
+      `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:`;
+    await boundedCommand(
+      this.redis.eval(
+        [
+          "local current = redis.call('GET', KEYS[2])",
+          'if current then',
+          "  redis.call('SET', ARGV[1] .. current .. ':fenced', '1')",
+          'end',
+          "redis.call('DEL', KEYS[1], KEYS[2])",
+          'return current or ""',
+        ].join('\n'),
+        2,
+        workerKey(workerId),
+        workerIncarnationKey(workerId),
+        incarnationPrefix,
+      ),
+      this.redisCommandTimeoutMs,
+      'Bridge worker revocation',
+    );
+  }
+
   async dispatch(args: {
     workerId: string;
     body: t.PayloadBody;

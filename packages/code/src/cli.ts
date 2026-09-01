@@ -138,6 +138,7 @@ async function run(runtimeSessionId?: string): Promise<void> {
     },
   });
   if (runtimeSessionId !== undefined) {
+    await worker.refreshCredential(controller.signal);
     await worker.register(controller.signal);
     await worker.resetWorkspace(runtimeSessionId, controller.signal);
     process.stdout.write(

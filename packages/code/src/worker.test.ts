@@ -2174,7 +2174,8 @@ test('paired worker rechecks the deadline after request serialization', async ()
     codeApiUrl: 'https://code.example/v1',
     workerId: 'vm-1',
     incarnationId,
-    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    sandboxEndpoint:
+      'http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2',
     identity: {
       privateKey: key.privateKey,
       credential: 'credential-valid-during-serialization',
@@ -2230,6 +2231,116 @@ test('paired worker rechecks the deadline after request serialization', async ()
 
   assert.equal(sandboxStarted, false);
   assert.equal(rejected, true);
+});
+
+test('paired worker keeps endpoint validation failures known-clean', async () => {
+  const key = createBridgeIdentity();
+  let sandboxStarted = false;
+  let rejected = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-for-invalid-endpoint',
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    },
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/execute')) sandboxStarted = true;
+      if (url.endsWith('/settle')) {
+        rejected =
+          JSON.parse(String(init?.body)).status === 'rejected';
+      }
+      return Response.json({
+        protocolVersion: 1,
+        accepted: true,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+      });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-invalid-endpoint',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 9,
+    leaseToken: 'assignment-invalid-endpoint-token',
+    expiresAt: new Date(Date.now() + 500).toISOString(),
+    remainingMs: 500,
+    runtimeSessionId: 'rt-invalid-endpoint',
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(sandboxStarted, false);
+  assert.equal(rejected, true);
+});
+
+test('paired worker rechecks shutdown after persisting a refreshed identity', async () => {
+  const key = createBridgeIdentity();
+  const controller = new AbortController();
+  let sandboxStarted = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-before-shutdown-refresh',
+      expiresAt: new Date(Date.now() + 5).toISOString(),
+    },
+    credentialRefreshWindowMs: 10,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('/execute')) sandboxStarted = true;
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: 'credential-persisted-during-shutdown',
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      });
+    },
+    onIdentityChange: () => {
+      controller.abort();
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle(
+      {
+        protocolVersion: 1,
+        assignmentId: 'assignment-shutdown-refresh',
+        workerId: 'vm-1',
+        incarnationId,
+        generation: 10,
+        leaseToken: 'assignment-shutdown-refresh-token',
+        expiresAt: new Date(Date.now() + 500).toISOString(),
+        remainingMs: 500,
+        runtimeSessionId: 'rt-shutdown-refresh',
+        request: { body: { language: 'bash' }, headers: {} },
+      },
+      controller.signal,
+    ),
+    { name: 'AbortError' },
+  );
+
+  assert.equal(sandboxStarted, false);
 });
 
 test('paired worker retries transient refresh failures before credential expiry', async () => {
