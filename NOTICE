@@ -1,2 +1,5 @@
 Code Interpreter
 Copyright 2026 ClickHouse, Inc.
+
+This product includes RTK v0.45.0 (https://github.com/rtk-ai/rtk),
+Copyright 2024 Patrick Szymkowiak, licensed under the Apache License 2.0.

@@ -10,7 +10,13 @@ export function createPayload({
   isPyPlot,
   session_id,
 }: t.CreatePayload): t.PayloadBody {
-  const { lang: rawLang, code: userCode, args, files } = req.body as t.RequestBody;
+  const {
+    lang: rawLang,
+    code: userCode,
+    args,
+    files,
+    shell_output_filter,
+  } = req.body as t.RequestBody;
   const language = resolveLanguage(rawLang);
   if (language === undefined) {
     throw new Error(`Unsupported language: ${rawLang}`);
@@ -50,6 +56,10 @@ export function createPayload({
 
   if (args) {
     payload.args = args;
+  }
+
+  if (shell_output_filter) {
+    payload.shell_output_filter = shell_output_filter;
   }
 
   if (files && files.length > 0) {

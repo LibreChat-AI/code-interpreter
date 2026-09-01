@@ -109,3 +109,7 @@ curl -s http://localhost:2000/api/v2/execute \
   -H 'Content-Type: application/json' \
   -d '{"language":"python","version":"3.14.4","files":[{"content":"print(42)"}]}' | jq
 ```
+
+For Bash, add `"shell_output_filter":"rtk"` to opt into compact RTK command
+rewrites for that request. Omit the field or use `"raw"` to preserve the
+unfiltered path. Other runtimes reject the field.

@@ -24,6 +24,7 @@ RUN apt-install \
 RUN mkdir -p /pkgs
 
 COPY docker/package-init.sh /package-init.sh
+COPY docker/bash-run.sh /bash-run.sh
 COPY javascript-packages.txt /javascript-packages.txt
 RUN chmod +x /package-init.sh
 

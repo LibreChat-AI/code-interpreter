@@ -101,6 +101,28 @@ descriptors in the launcher.
 Setting `KVM_ENABLED=false` still selects the directory-root target and the
 host package mount automatically for direct NsJail development.
 
+## Optional Bash output filtering
+
+Bash executions can opt into [RTK](https://github.com/rtk-ai/rtk) command
+rewriting per request by setting `shell_output_filter` to `rtk`:
+
+```json
+{
+  "lang": "bash",
+  "code": "ls -la",
+  "shell_output_filter": "rtk"
+}
+```
+
+Omitting the field (or setting it to `raw`) preserves the original execution
+path, which makes side-by-side evaluation straightforward. RTK `v0.45.0` is
+source-pinned to its immutable release commit and preinstalled in the sandbox
+image; it can also be invoked directly from Bash. Rewriting happens inside
+NsJail and fails open to the original script when RTK does not support a
+command or cannot run. Prometheus
+metrics expose Bash execution counts, outcomes, and stdout/stderr byte sizes by
+the `raw` or `rtk` filter without adding request-specific labels.
+
 Local Docker Compose files set `CODEAPI_INTERNAL_SERVICE_TOKEN` to a shared
 development value by default. Production deployments must override it with a
 strong secret; when it is unset, file object routes and Tool Call Server

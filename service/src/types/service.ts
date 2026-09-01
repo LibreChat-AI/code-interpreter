@@ -5,6 +5,7 @@ import type { ExecutionIdentity } from '../execution-identity';
 import type { CodeApiPrincipal } from '../auth/principal';
 import type { ExecutionProfile } from '../execution-profile';
 import { Jobs } from '@/enum/service';
+import type { ShellOutputFilter } from '../../../shared/shell-output-filter';
 
 /**
  * Per-file vs. top-level session distinction
@@ -127,6 +128,8 @@ export interface RequestBody {
   code: string;
   lang: string;
   args?: string[];
+  /** Optional per-request Bash output filtering. Omitted requests stay raw. */
+  shell_output_filter?: ShellOutputFilter;
   user_id?: string;
   files?: RequestFile[];
   /**
@@ -173,6 +176,8 @@ export type PayloadFileRef = {
 export interface PayloadBody {
   language: string;
   version: string;
+  /** Intra-monorepo request-scoped Bash output filter. */
+  shell_output_filter?: ShellOutputFilter;
   run_memory_limit?: number;
   run_timeout?: number;
   run_cpu_time?: number;

@@ -13,7 +13,7 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*.ts", "../shared/telemetry-core.ts"],
+  "include": ["src/**/*.ts", "../shared/telemetry-core.ts", "../shared/shell-output-filter.ts"],
   "exclude": [
     "node_modules",
     "**/*.spec.ts",

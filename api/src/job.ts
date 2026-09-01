@@ -42,6 +42,7 @@ import {
   isValidFilePath,
 } from './validation';
 import { cachedInputResponse, inputCacheKey, openCachedInput } from './session-inputs';
+import type { ShellOutputFilter } from '../../shared/shell-output-filter';
 
 export {
   DIRKEEP,
@@ -492,6 +493,9 @@ export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
   'HOME',
   'PATH',
   'TOOL_CALL_SOCKET',
+  'CODEAPI_SHELL_OUTPUT_FILTER',
+  'RTK_DB_PATH',
+  'RTK_TEE',
   'PYTHONPATH',
   'PYTHONSTARTUP',
   'PYTHONHOME',
@@ -691,6 +695,7 @@ export class Job {
   cpu_times: { run: number; compile: number };
   memory_limits: { run: number; compile: number };
   extra_env_vars?: Record<string, string>;
+  shellOutputFilter: ShellOutputFilter;
   egressGrantToken?: string;
   toolCallSocketEnabled: boolean;
   isSynthetic: boolean;
@@ -730,6 +735,7 @@ export class Job {
     cpu_times: { run: number; compile: number };
     memory_limits: { run: number; compile: number };
     extra_env_vars?: Record<string, string>;
+    shell_output_filter?: ShellOutputFilter;
     output_session_id?: string;
     egress_grant?: string;
     tool_call_socket_enabled?: boolean;
@@ -768,6 +774,7 @@ export class Job {
     this.cpu_times = opts.cpu_times;
     this.memory_limits = opts.memory_limits;
     this.extra_env_vars = opts.extra_env_vars;
+    this.shellOutputFilter = opts.shell_output_filter ?? 'raw';
     this.egressGrantToken = opts.egress_grant;
     this.toolCallSocketEnabled = opts.tool_call_socket_enabled === true;
     this.isSynthetic = opts.is_synthetic === true;
@@ -1503,6 +1510,18 @@ export class Job {
       SANDBOX_LANGUAGE: this.runtime.language,
       HOME: '/mnt/data',
     };
+
+    if (
+      script === 'run'
+      && this.runtime.language === 'bash'
+      && this.shellOutputFilter === 'rtk'
+    ) {
+      envVars.CODEAPI_SHELL_OUTPUT_FILTER = 'rtk';
+      /* Keep RTK bookkeeping ephemeral so a stateless run cannot create
+       * recoverable artifacts or pollute generated-file discovery. */
+      envVars.RTK_DB_PATH = '/tmp/rtk-history.db';
+      envVars.RTK_TEE = '0';
+    }
 
     let extraPkgdirs: string[] | undefined;
     if (this.runtime.language === 'bash') {

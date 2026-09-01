@@ -60,8 +60,23 @@ RUN apt-install \
 RUN mkdir -p /pkgs
 
 COPY docker/package-init.sh /package-init.sh
+COPY docker/bash-run.sh /bash-run.sh
 COPY javascript-packages.txt /javascript-packages.txt
 RUN chmod +x /package-init.sh && FORCE_REBUILD=true /package-init.sh
+
+# ============================================================================
+# Stage 1c: Build the RTK binary against the sandbox's glibc baseline. The
+# upstream arm64 release requires a newer glibc than Debian bookworm provides.
+# ============================================================================
+FROM rust:1.91-bookworm AS rtk-builder
+
+ARG RTK_COMMIT=b34be37caf3796b69a50952a28e60e32b5daad43
+RUN git clone --depth 1 --branch v0.45.0 https://github.com/rtk-ai/rtk.git /rtk \
+    && cd /rtk \
+    && git checkout "$RTK_COMMIT" \
+    && test "$(git rev-parse HEAD)" = "$RTK_COMMIT" \
+    && cargo build --locked --release \
+    && ./target/release/rtk --version
 
 # ============================================================================
 # Stage 2: Build sandbox rootfs
@@ -108,6 +123,7 @@ RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/sbin/nsjail
 COPY --from=nsjail-builder /usr/local/bin/spec-guard /usr/local/bin/spec-guard
+COPY --from=rtk-builder /rtk/target/release/rtk /usr/local/bin/rtk
 RUN chmod +x /usr/sbin/nsjail
 
 # The tool-call socket proxy must run under Node, not Bun. Bun's node:http

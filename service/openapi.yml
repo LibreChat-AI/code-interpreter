@@ -146,6 +146,12 @@ components:
           type: array
           items:
             type: string
+        shell_output_filter:
+          type: string
+          enum: [raw, rtk]
+          description: >-
+            Optional Bash-only output filter. Omit or use raw for unchanged
+            execution; use rtk to rewrite supported commands for compact output.
         user_id:
           type: string
         entity_id:

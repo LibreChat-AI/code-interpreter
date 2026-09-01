@@ -38,7 +38,7 @@ export default {
     commonjs(),
     typescript({
       tsconfig: './tsconfig.esm.json',
-      include: ['src/**/*.ts', '../shared/telemetry-core.ts'],
+      include: ['src/**/*.ts', '../shared/telemetry-core.ts', '../shared/shell-output-filter.ts'],
       sourceMap: true,
       declaration: false,
       declarationMap: false,

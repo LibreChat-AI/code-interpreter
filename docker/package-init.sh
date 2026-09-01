@@ -23,8 +23,10 @@ UV_VERSION="${UV_VERSION:-0.11.26}"
 NODE_VERSION="${NODE_VERSION:-24.15.0}"
 BUN_VERSION="${BUN_VERSION:-1.3.14}"
 BASH_PACKAGE_VERSION="${BASH_PACKAGE_VERSION:-5.2.0}"
+BASH_DEST="/pkgs/bash/${BASH_PACKAGE_VERSION}"
 INSTALL_FAILED=false
 JS_PACKAGE_MANIFEST="${JS_PACKAGE_MANIFEST:-${SCRIPT_DIR}/javascript-packages.txt}"
+BASH_RUN_SCRIPT="${BASH_RUN_SCRIPT:-${SCRIPT_DIR}/bash-run.sh}"
 
 load_js_packages() {
     if [ ! -f "$JS_PACKAGE_MANIFEST" ]; then
@@ -100,8 +102,23 @@ packages_ready() {
     [ -f "/pkgs/bash/${BASH_PACKAGE_VERSION}/.package-installed" ]
 }
 
+sync_bash_run_wrapper() {
+    if [ ! -f "$BASH_RUN_SCRIPT" ]; then
+        echo "ERROR: Missing Bash run wrapper: $BASH_RUN_SCRIPT" >&2
+        return 1
+    fi
+    if ! cmp -s "$BASH_RUN_SCRIPT" "$BASH_DEST/run"; then
+        echo "Updating Bash run wrapper"
+        if ! install -m 0755 "$BASH_RUN_SCRIPT" "$BASH_DEST/run"; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
 if [ -f "$MARKER_FILE" ] && [ "$FORCE_REBUILD" != "true" ]; then
     if packages_ready; then
+        sync_bash_run_wrapper
         echo "Packages already initialized (marker file exists)"
         echo "Set FORCE_REBUILD=true to force reinstall"
         echo ""
@@ -498,7 +515,6 @@ echo "=============================================="
 echo ""
 
 SYSTEM_BASH_VERSION=$(bash --version | sed -nE '1s/.* ([0-9]+[.][0-9]+[.][0-9]+).*/\1/p')
-BASH_DEST="/pkgs/bash/${BASH_PACKAGE_VERSION}"
 mkdir -p "$BASH_DEST"
 
 cat > "$BASH_DEST/pkg-info.json" << EOF
@@ -511,11 +527,9 @@ cat > "$BASH_DEST/pkg-info.json" << EOF
 }
 EOF
 
-cat > "$BASH_DEST/run" << 'EOF'
-#!/bin/bash
-bash "$@"
-EOF
-chmod +x "$BASH_DEST/run"
+if ! sync_bash_run_wrapper; then
+    INSTALL_FAILED=true
+fi
 
 echo "PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:." > "$BASH_DEST/.env"
 echo "$(date +%s)000" > "$BASH_DEST/.package-installed"
