@@ -8,6 +8,7 @@ RUN npm ci
 FROM base AS builder
 COPY service/src ./src
 COPY shared /shared
+COPY packages/code/src /packages/code/src
 COPY service/tsconfig.json ./
 RUN npx tsc -p tsconfig.json
 
@@ -26,6 +27,7 @@ FROM base AS development
 ENV NODE_ENV=development
 COPY service/src ./src
 COPY shared /shared
+COPY packages/code/src /packages/code/src
 COPY service/tsconfig.json ./
 RUN npm install -g ts-node typescript
 EXPOSE 3000 9230

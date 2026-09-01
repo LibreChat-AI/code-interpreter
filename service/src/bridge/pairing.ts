@@ -22,9 +22,8 @@ local previous = redis.call('GET', KEYS[1])
 if previous then
   redis.call('DEL', previous)
 end
-redis.call('SET', KEYS[1], KEYS[3], 'EX', ARGV[3])
-redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[3])
-redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[3])
+redis.call('SET', KEYS[1], KEYS[2], 'EX', ARGV[2])
+redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
 return 1
 `;
 const REDEEM_PAIRING_SCRIPT = `
@@ -38,7 +37,7 @@ if ARGV[2] == '' then
     redis.call('DEL', KEYS[1])
     return 0
   end
-elseif generation ~= ARGV[2] then
+elseif (generation or '0') ~= ARGV[2] then
   redis.call('DEL', KEYS[1])
   return 0
 end
@@ -74,16 +73,19 @@ return 1
 const REVOKE_PAIRING_SCRIPT = `
 local indexed = redis.call('GET', KEYS[1])
 local credential = redis.call('GET', KEYS[3])
-redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+local activeIncarnation = redis.call('GET', KEYS[6])
+redis.call('INCR', KEYS[2])
 if indexed then
   redis.call('DEL', indexed)
 end
-redis.call('DEL', KEYS[1])
 if credential then
   redis.call('DEL', KEYS[3])
-  redis.call('DEL', ARGV[3] .. credential)
+  redis.call('DEL', ARGV[1] .. credential)
 end
-redis.call('DEL', KEYS[4])
+redis.call('DEL', KEYS[1], KEYS[3], KEYS[4], KEYS[5], KEYS[6])
+if activeIncarnation then
+  redis.call('SET', ARGV[2] .. activeIncarnation .. ':fenced', '1')
+end
 return 1
 `;
 const RELEASE_LEGACY_SCAN_CLAIM_SCRIPT = `
@@ -134,7 +136,7 @@ export interface BridgeWorkerBinding {
 interface StoredPairing {
   workerId: string;
   expiresAt: string;
-  generation?: string;
+  generation?: number;
   binding?: BridgeWorkerBinding;
 }
 
@@ -194,12 +196,12 @@ function workerStableIdentityKey(workerId: string): string {
   return `${PREFIX}:stable-identity:${workerId}`;
 }
 
-function workerPairingIndexKey(workerId: string): string {
-  return `${PREFIX}:pairing-index:${workerId}`;
-}
-
 function workerPairingGenerationKey(workerId: string): string {
   return `${PREFIX}:pairing-generation:${workerId}`;
+}
+
+function workerPairingIndexKey(workerId: string): string {
+  return `${PREFIX}:pairing-index:${workerId}`;
 }
 
 function legacyPairingScanDeadlineKey(): string {
@@ -246,24 +248,19 @@ export class RedisBridgePairingStore {
     // rolling back cannot make a replaced code valid again.
     await this.removeLegacyPairings(workerId);
     const code = randomBytes(24).toString('base64url');
-    const generation = randomBytes(24).toString('base64url');
     const expiresAt = new Date(
       Date.now() + this.pairingTtlSeconds * 1000,
     ).toISOString();
-    const pairing: StoredPairing = {
-      workerId,
-      expiresAt,
-      generation,
-      binding,
-    };
+    const generation = Number(
+      (await this.redis.get(workerPairingGenerationKey(workerId))) ?? '0',
+    );
+    const pairing: StoredPairing = { workerId, expiresAt, generation, binding };
     const codeKey = pairingKey(code);
     await this.redis.eval(
       ISSUE_PAIRING_SCRIPT,
-      3,
+      2,
       workerPairingIndexKey(workerId),
-      workerPairingGenerationKey(workerId),
       codeKey,
-      generation,
       JSON.stringify(pairing),
       String(this.pairingTtlSeconds),
     );
@@ -334,7 +331,7 @@ export class RedisBridgePairingStore {
       workerPairingIndexKey(args.workerId),
       workerStableIdentityKey(args.workerId),
       raw,
-      pairing.generation ?? '',
+      pairing.generation == null ? '' : String(pairing.generation),
       JSON.stringify(stored),
       String(this.credentialTtlSeconds),
       credentialDigest,
@@ -363,6 +360,7 @@ export class RedisBridgePairingStore {
     credentialId: string;
     activeCredentialId: string;
     identityId?: string;
+    pairingGeneration: number;
     binding?: BridgeWorkerBinding;
   }> {
     const proofTime = Date.parse(args.timestamp);
@@ -376,9 +374,10 @@ export class RedisBridgePairingStore {
       );
     }
     const credentialDigest = digest(args.credential);
-    const [raw, activeDigest] = await this.redis.mget(
+    const [raw, activeDigest, pairingGeneration] = await this.redis.mget(
       credentialDigestKey(credentialDigest),
       workerIdentityKey(args.workerId),
+      workerPairingGenerationKey(args.workerId),
     );
     if (raw == null || activeDigest == null) {
       throw new BridgePairingError(
@@ -435,6 +434,7 @@ export class RedisBridgePairingStore {
       credentialId: credentialDigest,
       activeCredentialId: activeDigest,
       ...(stored.identityId != null ? { identityId: stored.identityId } : {}),
+      pairingGeneration: Number(pairingGeneration ?? '0'),
       ...(stored.binding ? { binding: stored.binding } : {}),
     };
   }
@@ -446,14 +446,15 @@ export class RedisBridgePairingStore {
     // that linearizes afterward installs a distinct generation and code.
     await this.redis.eval(
       REVOKE_PAIRING_SCRIPT,
-      4,
+      6,
       workerPairingIndexKey(workerId),
       workerPairingGenerationKey(workerId),
       workerIdentityKey(workerId),
       workerStableIdentityKey(workerId),
-      randomBytes(24).toString('base64url'),
-      String(this.pairingTtlSeconds),
+      `${PREFIX}:worker:${encodeURIComponent(workerId)}`,
+      `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation`,
       `${PREFIX}:credential:`,
+      `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:`,
     );
   }
 

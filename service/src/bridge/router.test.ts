@@ -192,11 +192,12 @@ describe('paired bridge HTTP API', () => {
 
   test('pairs a worker and accepts its proof-of-possession registration', async () => {
     const app = express();
+    const store = new RedisBridgeStore(redis);
     app.use(json());
     app.use(
       '/v1/bridge',
       createBridgeRouter({
-        store: new RedisBridgeStore(redis),
+        store,
         pairings: new RedisBridgePairingStore(redis),
         authMode: 'paired',
         adminToken: 'strong-administrator-bootstrap-token',
@@ -301,5 +302,113 @@ describe('paired bridge HTTP API', () => {
     await expect(replayResponse.json()).resolves.toMatchObject({
       code: 'PROOF_REPLAYED',
     });
+
+    const revokeResponse = await fetch(`${baseUrl}/workers/vm-1/revoke`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer strong-administrator-bootstrap-token',
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    });
+    expect(revokeResponse.status).toBe(200);
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'vm-1',
+        incarnationId: 'incarnation-00000001',
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: ['bash'],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_FENCED' });
+  });
+
+  test('forwards pairing store failures to Express error middleware', async () => {
+    const app = express();
+    const pairings = new RedisBridgePairingStore(redis);
+    pairings.issue = async () => {
+      throw new Error('pairing store unavailable');
+    };
+    app.use(json());
+    app.use(
+      '/v1/bridge',
+      createBridgeRouter({
+        store: new RedisBridgeStore(redis),
+        pairings,
+        authMode: 'paired',
+        adminToken: 'strong-administrator-bootstrap-token',
+        configuredWorkerId: 'vm-1',
+      }),
+    );
+    app.use(
+      (
+        error: Error,
+        _req: express.Request,
+        res: express.Response,
+        _next: express.NextFunction,
+      ) => {
+        res.status(503).json({ error: error.message });
+      },
+    );
+    server = createServer(app);
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') {
+      throw new Error('Expected TCP listener');
+    }
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/v1/bridge/pairings`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer strong-administrator-bootstrap-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ workerId: 'vm-1' }),
+      },
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: 'pairing store unavailable',
+    });
+  });
+
+  test('does not treat a missing configured worker ID as a wildcard', async () => {
+    const app = express();
+    app.use(json());
+    app.use(
+      '/v1/bridge',
+      createBridgeRouter({
+        store: new RedisBridgeStore(redis),
+        pairings: new RedisBridgePairingStore(redis),
+        authMode: 'paired',
+        adminToken: 'strong-administrator-bootstrap-token',
+      }),
+    );
+    server = createServer(app);
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') {
+      throw new Error('Expected TCP listener');
+    }
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/v1/bridge/pairings`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer strong-administrator-bootstrap-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ workerId: 'vm-1' }),
+      },
+    );
+
+    expect(response.status).toBe(400);
   });
 });

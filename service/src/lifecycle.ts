@@ -9,11 +9,11 @@ import {
 import { validateStartupAuthConfig } from './auth/startup';
 import { env } from './config';
 import {
+  validateApiBridgePolicy,
   validateApiHardenedConfig,
   validateApiSandboxBackendPolicy,
   validateExecutionProfilePolicy,
   validateSandboxBackendPolicy,
-  validateApiBridgePolicy,
   validateWorkerHardenedConfig,
 } from './secure-startup';
 import logger from './logger';
@@ -96,11 +96,13 @@ function setupQueueListeners(queue: Queue, name: string): void {
 export async function startupApiOnly(): Promise<void> {
   logger.info('Starting API service (no workers)...');
   validateApiHardenedConfig();
+  validateApiBridgePolicy();
   validateExecutionProfilePolicy({ requireBackendMatch: false });
   validateApiSandboxBackendPolicy();
-  validateApiBridgePolicy();
   /* No full validateSandboxBackendPolicy() here: an API-only pod authenticates and
    * enqueues jobs, it never constructs the Lambda backend or checkpoint store.
+   * Bridge credentials are validated separately above because this process
+   * exposes the public registration, lease, and settlement routes.
    * Validating that policy would force worker-only config (LAMBDA_MICROVM_* and
    * the MINIO_* checkpoint creds) into API pods just to boot. The worker and
    * combined startups own that validation. */
