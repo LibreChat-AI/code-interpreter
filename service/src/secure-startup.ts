@@ -4,6 +4,7 @@ import {
   lambdaMicrovmNumericConfigError,
 } from './config';
 import { INTERNAL_SERVICE_TOKEN_ENV } from './internal-service-auth';
+import { isValidBridgeWorkerId } from '../../packages/code/src/protocol';
 
 export class SecureStartupConfigError extends Error {
   constructor(message: string) {
@@ -53,6 +54,33 @@ export function validateApiHardenedConfig(): void {
   requireValue(INTERNAL_SERVICE_TOKEN_ENV, process.env[INTERNAL_SERVICE_TOKEN_ENV]);
 }
 
+/** Validate bridge credentials in every process that exposes bridge routes. */
+export function validateApiBridgePolicy(): void {
+  if (env.SANDBOX_BACKEND !== 'remote-bridge') return;
+  requireSafeWholeNumber('JOB_TIMEOUT', env.JOB_TIMEOUT, 1);
+  requireValue('CODEAPI_BRIDGE_WORKER_ID', env.BRIDGE_WORKER_ID);
+  if (!isValidBridgeWorkerId(env.BRIDGE_WORKER_ID ?? '')) {
+    throw new SecureStartupConfigError(
+      'CODEAPI_BRIDGE_WORKER_ID must match the bridge worker ID format',
+    );
+  }
+  if (env.BRIDGE_TOKEN !== env.BRIDGE_TOKEN.trim()) {
+    throw new SecureStartupConfigError(
+      'CODEAPI_BRIDGE_TOKEN must not contain surrounding whitespace',
+    );
+  }
+  if (env.HARDENED_SANDBOX_MODE) {
+    requireStrongSecret('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
+  } else {
+    requireValue('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
+  }
+  if (env.PTC_MODE === 'blocking') {
+    throw new SecureStartupConfigError(
+      'PTC replay is the only supported PTC mode for the remote-bridge backend (unset PTC_MODE=blocking)',
+    );
+  }
+}
+
 export function validateWorkerHardenedConfig(): void {
   if (!env.HARDENED_SANDBOX_MODE) return;
   rejectValue('CODEAPI_EGRESS_GRANT_SECRET', process.env.CODEAPI_EGRESS_GRANT_SECRET);
@@ -93,11 +121,15 @@ export function validateExecutionProfilePolicy(options: {
 
   if (
     env.RUNTIME_SESSION_MODE === 'stateless'
-    || (requireBackendMatch && env.SANDBOX_BACKEND !== 'lambda-microvm')
+    || (
+      requireBackendMatch
+      && env.SANDBOX_BACKEND !== 'lambda-microvm'
+      && env.SANDBOX_BACKEND !== 'remote-bridge'
+    )
   ) {
     throw new SecureStartupConfigError(
       'CODEAPI_EXECUTION_PROFILE=stateful requires '
-        + (requireBackendMatch ? 'CODEAPI_SANDBOX_BACKEND=lambda-microvm and ' : '')
+        + (requireBackendMatch ? 'CODEAPI_SANDBOX_BACKEND=lambda-microvm or remote-bridge and ' : '')
         + 'CODEAPI_RUNTIME_SESSION_MODE=affinity or strict',
     );
   }
@@ -111,8 +143,12 @@ export function validateSandboxBackendPolicy(): void {
   if (env.RUNTIME_SESSION_MODE !== 'stateless' && env.SANDBOX_BACKEND === 'http') {
     throw new SecureStartupConfigError(
       `CODEAPI_RUNTIME_SESSION_MODE=${env.RUNTIME_SESSION_MODE} requires `
-        + 'the lambda-microvm backend; use stateless mode with the http backend',
+        + 'the lambda-microvm or remote-bridge backend; use stateless mode with the http backend',
     );
+  }
+  if (env.SANDBOX_BACKEND === 'remote-bridge') {
+    validateApiBridgePolicy();
+    return;
   }
   if (env.SANDBOX_BACKEND !== 'lambda-microvm') return;
 

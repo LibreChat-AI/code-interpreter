@@ -243,12 +243,12 @@ function configuredChoice<T extends string>(
 
 export function resolveSandboxBackend(
   raw: string | undefined,
-): 'http' | 'lambda-microvm' {
+): 'http' | 'lambda-microvm' | 'remote-bridge' {
   return configuredChoice(
     raw,
     'CODEAPI_SANDBOX_BACKEND',
     'http',
-    ['http', 'lambda-microvm'],
+    ['http', 'lambda-microvm', 'remote-bridge'],
   );
 }
 
@@ -350,8 +350,13 @@ export const env = {
    * - `http` (default): POST signed execute requests to SANDBOX_ENDPOINT
    *   (current Kubernetes/libkrun sandbox-runner).
    * - `lambda-microvm`: AWS Lambda MicroVM backend.
+   * - `remote-bridge`: dispatch to an outbound-connected @librechat/code worker.
    */
   SANDBOX_BACKEND: sandboxBackend,
+  /** Outbound worker selected by the remote-bridge backend. */
+  BRIDGE_WORKER_ID: process.env.CODEAPI_BRIDGE_WORKER_ID ?? '',
+  /** Enrollment and lease credential shared only with the configured worker. */
+  BRIDGE_TOKEN: process.env.CODEAPI_BRIDGE_TOKEN ?? '',
   /**
    * Runtime session affinity for stateful sandbox backends.
    * - `stateless` (default): no runtime sessions; `runtime_session_hint` ignored.

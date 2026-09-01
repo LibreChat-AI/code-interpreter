@@ -56,13 +56,17 @@ export type SandboxRawResponse = t.ExecuteResponse & {
 };
 
 export interface SandboxBackend {
-  readonly name: 'http' | 'lambda-microvm';
+  readonly name: 'http' | 'lambda-microvm' | 'remote-bridge';
   execute(req: SandboxTransportRequest, ctx: SandboxExecuteContext): Promise<SandboxRawResponse>;
   shutdown?(): Promise<void>;
 }
 
 export type SandboxBackendErrorCode =
   | 'RUNTIME_SESSION_BUSY'
+  | 'BRIDGE_WORKER_OFFLINE'
+  | 'BRIDGE_WORKER_BUSY'
+  | 'BRIDGE_EXECUTION_FAILED'
+  | 'BRIDGE_DEADLINE_EXCEEDED'
   | 'MICROVM_LAUNCH_FAILED'
   | 'MICROVM_LAUNCH_THROTTLED'
   | 'MICROVM_UNHEALTHY'
