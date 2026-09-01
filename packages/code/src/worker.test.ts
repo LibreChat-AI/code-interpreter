@@ -2166,6 +2166,72 @@ test('paired worker charges initial credential refresh against the assignment de
   assert.equal(rejected, true);
 });
 
+test('paired worker rechecks the deadline after request serialization', async () => {
+  const key = createBridgeIdentity();
+  let sandboxStarted = false;
+  let rejected = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-valid-during-serialization',
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    },
+    credentialRefreshWindowMs: 10,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/execute')) {
+        sandboxStarted = true;
+      }
+      if (url.endsWith('/settle')) {
+        rejected =
+          JSON.parse(String(init?.body)).status === 'rejected';
+      }
+      return Response.json({
+        protocolVersion: 1,
+        accepted: true,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+      });
+    },
+  });
+  const slowBody = {
+    get language(): string {
+      const blockedUntilMs = Date.now() + 25;
+      while (Date.now() < blockedUntilMs) {
+        // Deliberately consume the remaining synchronous request budget.
+      }
+      return 'bash';
+    },
+  };
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-serialization-deadline',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 8,
+    leaseToken: 'assignment-serialization-deadline-token',
+    expiresAt: new Date(Date.now() + 10).toISOString(),
+    remainingMs: 10,
+    runtimeSessionId: 'rt-serialization-deadline',
+    request: { body: slowBody, headers: {} },
+  });
+
+  assert.equal(sandboxStarted, false);
+  assert.equal(rejected, true);
+});
+
 test('paired worker retries transient refresh failures before credential expiry', async () => {
   const key = createBridgeIdentity();
   let refreshCount = 0;

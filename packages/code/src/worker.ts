@@ -553,6 +553,7 @@ export class BridgeWorker {
     let settlement: BridgeSettlement;
     let ambiguousSandboxError: unknown;
     let sandboxRejectedExecution = false;
+    let sandboxStarted = false;
     try {
       credentialMaintenance = this.maintainCredential(
         assignment,
@@ -569,6 +570,13 @@ export class BridgeWorker {
           ? { 'X-Runtime-Session-Id': sandboxSessionId }
           : {}),
       };
+      const sandboxRequestBody = JSON.stringify(assignment.request.body);
+      if (Date.now() >= localDeadlineAtMs) {
+        throw new BridgeProtocolError(
+          'Bridge assignment expired before sandbox execution',
+        );
+      }
+      sandboxStarted = true;
       const response = await this.fetchImpl(
         `${this.sandboxEndpointFor(assignment)}/execute`,
         {
@@ -577,7 +585,7 @@ export class BridgeWorker {
             ...headers,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(assignment.request.body),
+          body: sandboxRequestBody,
           signal: executionController.signal,
         },
       );
@@ -615,6 +623,7 @@ export class BridgeWorker {
     } catch (error) {
       if (
         assignment.runtimeSessionId != null &&
+        sandboxStarted &&
         !sandboxRejectedExecution
       ) {
         ambiguousSandboxError = error;
@@ -646,7 +655,7 @@ export class BridgeWorker {
       const knownCleanStatefulRejection =
         assignment.runtimeSessionId != null &&
         settlement.status === 'rejected' &&
-        sandboxRejectedExecution;
+        (!sandboxStarted || sandboxRejectedExecution);
       if (knownCleanStatefulRejection) {
         heartbeatController.abort();
         await heartbeat;
