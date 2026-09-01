@@ -36,6 +36,7 @@ export interface BridgeWorkerOptions {
   reconnectMaxDelayMs?: number;
   reconnectRandom?: () => number;
   credentialRefreshWindowMs?: number;
+  credentialRefreshTransportTimeoutMs?: number;
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
   onIdentityChange?: (identity: BridgeWorkerIdentity) => void | Promise<void>;
@@ -61,6 +62,7 @@ const DEFAULT_CANCELLATION_POLL_INTERVAL_MS = 500;
 const DEFAULT_CANCELLATION_TRANSPORT_TIMEOUT_MS = 2_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
 const REGISTRATION_RETRY_DELAY_MS = 100;
+const CREDENTIAL_REFRESH_RETRY_DELAY_MS = 100;
 const SETTLEMENT_RETRY_DELAY_MS = 100;
 const REJECTION_ACK_GRACE_MS = 30_000;
 const MAX_SETTLEMENT_ERROR_LENGTH = 4_096;
@@ -382,10 +384,15 @@ export class BridgeWorker {
     ) {
       return;
     }
-    const credential = await this.request<BridgeWorkerCredentialResponse>(
+    const credential = await this.timedRequest<BridgeWorkerCredentialResponse>(
       `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}` +
         '/credentials/refresh',
       { protocolVersion: BRIDGE_PROTOCOL_VERSION },
+      Math.max(
+        1,
+        this.options.credentialRefreshTransportTimeoutMs ??
+          DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+      ),
       signal,
     );
     if (
@@ -413,22 +420,45 @@ export class BridgeWorker {
   private async maintainCredential(
     assignment: BridgeAssignment,
     stopSignal: AbortSignal,
-    requestSignal?: AbortSignal,
+    serverClockOffsetMs: number,
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
     const refreshWindowMs =
       this.options.credentialRefreshWindowMs ?? CREDENTIAL_REFRESH_WINDOW_MS;
-    const assignmentDeadlineMs = Date.parse(assignment.expiresAt);
+    const assignmentDeadlineMs =
+      Date.parse(assignment.expiresAt) - serverClockOffsetMs;
     while (!stopSignal.aborted && Date.now() < assignmentDeadlineMs) {
-      const refreshAtMs = Date.parse(identity.expiresAt) - refreshWindowMs;
+      const refreshAtMs =
+        Date.parse(identity.expiresAt) - serverClockOffsetMs - refreshWindowMs;
       const waitMs = Math.max(
         0,
         Math.min(refreshAtMs - Date.now(), assignmentDeadlineMs - Date.now()),
       );
       await abortableDelay(waitMs, stopSignal);
       if (stopSignal.aborted || Date.now() >= assignmentDeadlineMs) return;
-      await this.refreshCredential(requestSignal);
+      try {
+        await this.refreshCredential(
+          stopSignal,
+          Date.now() + serverClockOffsetMs + refreshWindowMs,
+        );
+      } catch (error) {
+        if (stopSignal.aborted) return;
+        const terminal =
+          error instanceof BridgeProtocolError &&
+          (error.status === 401 || error.status === 403);
+        const credentialRemainingMs =
+          Date.parse(identity.expiresAt) -
+          (Date.now() + serverClockOffsetMs);
+        if (terminal || credentialRemainingMs <= 0) throw error;
+        await abortableDelay(
+          Math.min(
+            CREDENTIAL_REFRESH_RETRY_DELAY_MS,
+            Math.max(1, Math.floor(credentialRemainingMs / 2)),
+          ),
+          stopSignal,
+        );
+      }
     }
   }
 
@@ -441,7 +471,19 @@ export class BridgeWorker {
         ? signal.reason
         : new DOMException('aborted', 'AbortError');
     }
-    await this.refreshCredential(signal);
+    const serverClockOffsetMs =
+      Number.isSafeInteger(assignment.remainingMs) &&
+      (assignment.remainingMs ?? -1) >= 0
+        ? Date.parse(assignment.expiresAt) -
+          (Date.now() + (assignment.remainingMs ?? 0))
+        : 0;
+    await this.refreshCredential(
+      signal,
+      Date.now() +
+        serverClockOffsetMs +
+        (this.options.credentialRefreshWindowMs ??
+          CREDENTIAL_REFRESH_WINDOW_MS),
+    );
     const executionController = new AbortController();
     const credentialController = new AbortController();
     const abortExecution = (): void => {
@@ -481,7 +523,7 @@ export class BridgeWorker {
       credentialMaintenance = this.maintainCredential(
         assignment,
         credentialController.signal,
-        signal,
+        serverClockOffsetMs,
       ).catch((error) => {
         credentialMaintenanceError = error;
         executionController.abort();

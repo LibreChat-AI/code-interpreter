@@ -1992,6 +1992,199 @@ test('paired worker rotates credentials throughout a long assignment', async () 
   assert.match(identity.credential, /^rotated-long-assignment-credential-/);
 });
 
+test('paired worker cancels a stalled credential refresh after execution', async () => {
+  const key = createBridgeIdentity();
+  let refreshStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    refreshStarted = resolve;
+  });
+  let refreshAborted = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity: {
+      privateKey: key.privateKey,
+      credential: 'credential-before-stalled-refresh',
+      expiresAt: new Date(Date.now() + 30).toISOString(),
+    },
+    credentialRefreshWindowMs: 10,
+    credentialRefreshTransportTimeoutMs: 10_000,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/credentials/refresh')) {
+        refreshStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              refreshAborted = true;
+              reject(new DOMException('aborted', 'AbortError'));
+            },
+            { once: true },
+          );
+        });
+      }
+      if (url.endsWith('/execute')) {
+        await started;
+        return Response.json({
+          session_id: 'run-stalled-refresh',
+          files: [],
+        });
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-stalled-refresh',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 6,
+    leaseToken: 'assignment-stalled-refresh-token',
+    expiresAt: new Date(Date.now() + 500).toISOString(),
+    remainingMs: 500,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(refreshAborted, true);
+});
+
+test('paired worker retries transient refresh failures before credential expiry', async () => {
+  const key = createBridgeIdentity();
+  let refreshCount = 0;
+  const identity = {
+    privateKey: key.privateKey,
+    credential: 'credential-before-transient-refresh',
+    expiresAt: new Date(Date.now() + 40).toISOString(),
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity,
+    credentialRefreshWindowMs: 15,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/credentials/refresh')) {
+        refreshCount += 1;
+        if (refreshCount === 1) {
+          return Response.json(
+            { error: 'temporarily unavailable' },
+            { status: 503 },
+          );
+        }
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          credential: 'credential-after-transient-refresh',
+          expiresAt: new Date(Date.now() + 500).toISOString(),
+        });
+      }
+      if (url.endsWith('/execute')) {
+        await new Promise((resolve) => setTimeout(resolve, 70));
+        return Response.json({
+          session_id: 'run-transient-refresh',
+          files: [],
+        });
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-transient-refresh',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 7,
+    leaseToken: 'assignment-transient-refresh-token',
+    expiresAt: new Date(Date.now() + 500).toISOString(),
+    remainingMs: 500,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(refreshCount, 2);
+  assert.equal(identity.credential, 'credential-after-transient-refresh');
+});
+
+test('paired worker preserves its refresh margin when the server clock is ahead', async () => {
+  const key = createBridgeIdentity();
+  const serverClockOffsetMs = 55;
+  let refreshCount = 0;
+  const identity = {
+    privateKey: key.privateKey,
+    credential: 'credential-before-clock-skew-refresh',
+    expiresAt: new Date(Date.now() + serverClockOffsetMs + 20).toISOString(),
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity,
+    credentialRefreshWindowMs: 10,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/credentials/refresh')) {
+        refreshCount += 1;
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          credential: 'credential-after-clock-skew-refresh',
+          expiresAt: new Date(
+            Date.now() + serverClockOffsetMs + 500,
+          ).toISOString(),
+        });
+      }
+      if (url.endsWith('/execute')) {
+        await new Promise((resolve) => setTimeout(resolve, 35));
+        return Response.json({
+          session_id: 'run-clock-skew-refresh',
+          files: [],
+        });
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+  const remainingMs = 500;
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-clock-skew-refresh',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 8,
+    leaseToken: 'assignment-clock-skew-refresh-token',
+    expiresAt: new Date(
+      Date.now() + serverClockOffsetMs + remainingMs,
+    ).toISOString(),
+    remainingMs,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(refreshCount, 1);
+  assert.equal(identity.credential, 'credential-after-clock-skew-refresh');
+});
+
 test('worker shutdown interrupts reconnect backoff', async () => {
   const controller = new AbortController();
   let failed!: () => void;
