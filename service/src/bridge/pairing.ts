@@ -27,10 +27,30 @@ redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])
 redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
 return 1
 `;
+const ISSUE_CREDENTIAL_SCRIPT = `
+local generation = redis.call('GET', KEYS[4]) or '0'
+if generation ~= ARGV[5] then
+  return 0
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[4])
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[4])
+redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
+return 1
+`;
+const REVOKE_WORKER_SCRIPT = `
+local activeDigest = redis.call('GET', KEYS[1])
+redis.call('INCR', KEYS[4])
+redis.call('DEL', KEYS[1], KEYS[2])
+if activeDigest then
+  redis.call('DEL', KEYS[3] .. activeDigest)
+end
+return 1
+`;
 
 interface StoredPairing {
   workerId: string;
   expiresAt: string;
+  generation: number;
 }
 
 interface StoredCredential {
@@ -91,6 +111,10 @@ function workerStableIdentityKey(workerId: string): string {
   return `${PREFIX}:stable-identity:${workerId}`;
 }
 
+function workerPairingGenerationKey(workerId: string): string {
+  return `${PREFIX}:pairing-generation:${workerId}`;
+}
+
 function proofNonceKey(credential: string, nonce: string): string {
   return `${PREFIX}:proof:${digest(credential)}:${digest(nonce)}`;
 }
@@ -115,7 +139,10 @@ export class RedisBridgePairingStore {
     const expiresAt = new Date(
       Date.now() + this.pairingTtlSeconds * 1000,
     ).toISOString();
-    const pairing: StoredPairing = { workerId, expiresAt };
+    const generation = Number(
+      (await this.redis.get(workerPairingGenerationKey(workerId))) ?? '0',
+    );
+    const pairing: StoredPairing = { workerId, expiresAt, generation };
     await this.redis.set(
       pairingKey(code),
       JSON.stringify(pairing),
@@ -151,7 +178,13 @@ export class RedisBridgePairingStore {
       );
     }
 
-    return await this.issueCredential(args.workerId, args.publicKey);
+    return await this.issueCredential(
+      args.workerId,
+      args.publicKey,
+      undefined,
+      undefined,
+      pairing.generation,
+    );
   }
 
   async authorize(args: {
@@ -239,13 +272,13 @@ export class RedisBridgePairingStore {
   }
 
   async revoke(workerId: string): Promise<void> {
-    const identityKey = workerIdentityKey(workerId);
-    const credentialDigest = await this.redis.get(identityKey);
-    if (credentialDigest == null) return;
-    await this.redis.del(
-      identityKey,
+    await this.redis.eval(
+      REVOKE_WORKER_SCRIPT,
+      4,
+      workerIdentityKey(workerId),
       workerStableIdentityKey(workerId),
-      credentialDigestKey(credentialDigest),
+      `${PREFIX}:credential:`,
+      workerPairingGenerationKey(workerId),
     );
   }
 
@@ -279,6 +312,7 @@ export class RedisBridgePairingStore {
     publicKey: string,
     previousDigest?: string,
     identityId = randomBytes(18).toString('base64url'),
+    pairingGeneration?: number,
   ): Promise<BridgeWorkerCredential> {
     const credential = randomBytes(32).toString('base64url');
     const credentialDigest = digest(credential);
@@ -308,26 +342,25 @@ export class RedisBridgePairingStore {
       }
       return { workerId, credential, expiresAt };
     }
-    const transaction = this.redis.multi();
-    transaction.set(
+    const issued = await this.redis.eval(
+      ISSUE_CREDENTIAL_SCRIPT,
+      4,
       credentialDigestKey(credentialDigest),
-      JSON.stringify(stored),
-      'EX',
-      this.credentialTtlSeconds,
-    );
-    transaction.set(
       workerIdentityKey(workerId),
-      credentialDigest,
-      'EX',
-      this.credentialTtlSeconds,
-    );
-    transaction.set(
       workerStableIdentityKey(workerId),
+      workerPairingGenerationKey(workerId),
+      JSON.stringify(stored),
+      credentialDigest,
       identityId,
-      'EX',
-      this.credentialTtlSeconds,
+      String(this.credentialTtlSeconds),
+      String(pairingGeneration ?? 0),
     );
-    await transaction.exec();
+    if (issued !== 1) {
+      throw new BridgePairingError(
+        'PAIRING_INVALID',
+        'Pairing code was revoked before redemption completed',
+      );
+    }
     return { workerId, credential, expiresAt };
   }
 }

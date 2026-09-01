@@ -92,8 +92,8 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
   const router = Router();
 
   const configuredWorker = (workerId: string): boolean =>
-    options.configuredWorkerId == null ||
-    options.configuredWorkerId === '' ||
+    options.configuredWorkerId != null &&
+    options.configuredWorkerId !== '' &&
     workerId === options.configuredWorkerId;
 
   const bearerToken = (req: Request): string =>
@@ -187,7 +187,7 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
   const workerAuth =
     options.authMode === 'paired' ? pairedWorkerAuth : staticWorkerAuth;
 
-  router.post('/pairings', adminAuth, async (req: Request, res: Response) => {
+  router.post('/pairings', adminAuth, asyncRoute(async (req, res) => {
     if (options.authMode !== 'paired') {
       res.status(409).json({ error: 'Paired worker authentication is disabled' });
       return;
@@ -203,9 +203,9 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     }
     const pairing = await options.pairings.issue(workerId);
     res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ...pairing });
-  });
+  }));
 
-  router.post('/pairings/redeem', async (req: Request, res: Response) => {
+  router.post('/pairings/redeem', asyncRoute(async (req, res) => {
     if (options.authMode !== 'paired') {
       res.status(409).json({ error: 'Paired worker authentication is disabled' });
       return;
@@ -240,12 +240,12 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
       }
       throw error;
     }
-  });
+  }));
 
   router.post(
     '/workers/:workerId/revoke',
     adminAuth,
-    async (req: Request, res: Response) => {
+    asyncRoute(async (req, res) => {
       if (
         !validWorkerId(req.params.workerId) ||
         !configuredWorker(req.params.workerId)
@@ -255,7 +255,7 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
       }
       await options.pairings.revoke(req.params.workerId);
       res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, revoked: true });
-    },
+    }),
   );
 
 
@@ -544,7 +544,7 @@ router.post(
   router.post(
     '/workers/:workerId/credentials/refresh',
     workerAuth,
-    async (req: Request, res: Response) => {
+    asyncRoute(async (req, res) => {
       try {
         const credential = await options.pairings.rotate(
           req.params.workerId,
@@ -562,10 +562,9 @@ router.post(
         }
         throw error;
       }
-    },
+    }),
   );
 
 
   return router;
 }
-

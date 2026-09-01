@@ -147,6 +147,21 @@ describe('RedisBridgePairingStore', () => {
     ).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
   });
 
+  test('revocation invalidates pairing codes issued before the revoke', async () => {
+    const identity = createBridgeIdentity();
+    const pairing = await pairings.issue('vm-1');
+
+    await pairings.revoke('vm-1');
+
+    await expect(
+      pairings.redeem({
+        workerId: 'vm-1',
+        code: pairing.code,
+        publicKey: identity.publicKey,
+      }),
+    ).rejects.toMatchObject({ code: 'PAIRING_INVALID' });
+  });
+
   test('rotation keeps the prior same-identity credential usable for recovery', async () => {
     const identity = createBridgeIdentity();
     const pairing = await pairings.issue('vm-1');

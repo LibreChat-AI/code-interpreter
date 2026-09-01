@@ -340,6 +340,7 @@ describe('sandbox backend policy', () => {
     env.SANDBOX_BACKEND = 'http';
     env.HARDENED_SANDBOX_MODE = true;
     env.BRIDGE_AUTH_MODE = 'static';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
     env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
     expect(() => validateApiBridgePolicy()).toThrow(
       'CODEAPI_BRIDGE_AUTH_MODE=paired',
@@ -382,6 +383,29 @@ describe('sandbox backend policy', () => {
     env.BRIDGE_WORKER_ID = 'engineering-vm';
     env.BRIDGE_TOKEN = ' padded-development-bridge-token ';
     env.PTC_MODE = 'replay';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'must not contain surrounding whitespace',
+    );
+  });
+
+  test('paired API routes require a configured worker on every backend', () => {
+    env.SANDBOX_BACKEND = 'http';
+    env.BRIDGE_AUTH_MODE = 'paired';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.BRIDGE_WORKER_ID = '';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'CODEAPI_BRIDGE_WORKER_ID',
+    );
+  });
+
+  test('hardened API routes reject padded bridge tokens on HTTP backends', () => {
+    env.SANDBOX_BACKEND = 'http';
+    env.HARDENED_SANDBOX_MODE = true;
+    env.BRIDGE_AUTH_MODE = 'paired';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = ' strong-remote-bridge-token-32-bytes ';
 
     expect(() => validateApiBridgePolicy()).toThrow(
       'must not contain surrounding whitespace',

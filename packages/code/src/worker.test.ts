@@ -1911,7 +1911,7 @@ test('paired worker refreshes before an assignment that outlives its credential'
     identity: {
       privateKey: key.privateKey,
       credential: 'credential-too-short-for-assignment',
-      expiresAt: new Date(Date.now() + 90_000).toISOString(),
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
     },
     capabilities: {
       statefulWorkspace: true,
@@ -1934,6 +1934,62 @@ test('paired worker refreshes before an assignment that outlives its credential'
 
   assert.match(requests[0], /credentials\/refresh$/);
   assert.equal(requests[1], 'http://127.0.0.1:2000/api/v2/execute');
+});
+
+test('paired worker rotates credentials throughout a long assignment', async () => {
+  const key = createBridgeIdentity();
+  let refreshCount = 0;
+  const identity = {
+    privateKey: key.privateKey,
+    credential: 'credential-before-long-running-assignment',
+    expiresAt: new Date(Date.now() + 5).toISOString(),
+  };
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith('/credentials/refresh')) {
+      refreshCount += 1;
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        credential: `rotated-long-assignment-credential-${refreshCount}`,
+        expiresAt: new Date(Date.now() + 30).toISOString(),
+      });
+    }
+    if (url.endsWith('/execute')) {
+      await new Promise((resolve) => setTimeout(resolve, 55));
+      return Response.json({ session_id: 'run-long-rotation', files: [] });
+    }
+    return Response.json({ protocolVersion: 1, accepted: true });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    identity,
+    credentialRefreshWindowMs: 10,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl,
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-credential-maintenance',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 5,
+    leaseToken: 'assignment-credential-maintenance-token',
+    expiresAt: new Date(Date.now() + 500).toISOString(),
+    remainingMs: 500,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.ok(refreshCount >= 2);
+  assert.match(identity.credential, /^rotated-long-assignment-credential-/);
 });
 
 test('worker shutdown interrupts reconnect backoff', async () => {

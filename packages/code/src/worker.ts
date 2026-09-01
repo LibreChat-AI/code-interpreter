@@ -35,6 +35,7 @@ export interface BridgeWorkerOptions {
   reconnectDelayMs?: number;
   reconnectMaxDelayMs?: number;
   reconnectRandom?: () => number;
+  credentialRefreshWindowMs?: number;
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
   onIdentityChange?: (identity: BridgeWorkerIdentity) => void | Promise<void>;
@@ -370,7 +371,9 @@ export class BridgeWorker {
 
   async refreshCredential(
     signal?: AbortSignal,
-    validThroughMs = Date.now() + CREDENTIAL_REFRESH_WINDOW_MS,
+    validThroughMs =
+      Date.now() +
+      (this.options.credentialRefreshWindowMs ?? CREDENTIAL_REFRESH_WINDOW_MS),
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
@@ -390,7 +393,8 @@ export class BridgeWorker {
       credential.workerId !== this.options.workerId ||
       typeof credential.credential !== 'string' ||
       credential.credential.length < 32 ||
-      !Number.isFinite(Date.parse(credential.expiresAt))
+      !Number.isFinite(Date.parse(credential.expiresAt)) ||
+      Date.parse(credential.expiresAt) <= validThroughMs
     ) {
       throw new BridgeProtocolError(
         'Code API returned an invalid rotated worker credential',
@@ -406,6 +410,28 @@ export class BridgeWorker {
     identity.expiresAt = rotatedIdentity.expiresAt;
   }
 
+  private async maintainCredential(
+    assignment: BridgeAssignment,
+    stopSignal: AbortSignal,
+    requestSignal?: AbortSignal,
+  ): Promise<void> {
+    const identity = this.options.identity;
+    if (identity == null) return;
+    const refreshWindowMs =
+      this.options.credentialRefreshWindowMs ?? CREDENTIAL_REFRESH_WINDOW_MS;
+    const assignmentDeadlineMs = Date.parse(assignment.expiresAt);
+    while (!stopSignal.aborted && Date.now() < assignmentDeadlineMs) {
+      const refreshAtMs = Date.parse(identity.expiresAt) - refreshWindowMs;
+      const waitMs = Math.max(
+        0,
+        Math.min(refreshAtMs - Date.now(), assignmentDeadlineMs - Date.now()),
+      );
+      await abortableDelay(waitMs, stopSignal);
+      if (stopSignal.aborted || Date.now() >= assignmentDeadlineMs) return;
+      await this.refreshCredential(requestSignal);
+    }
+  }
+
   async executeAndSettle(
     assignment: BridgeAssignment,
     signal?: AbortSignal,
@@ -415,12 +441,13 @@ export class BridgeWorker {
         ? signal.reason
         : new DOMException('aborted', 'AbortError');
     }
-    await this.refreshCredential(
-      signal,
-      Date.parse(assignment.expiresAt) + CREDENTIAL_REFRESH_WINDOW_MS,
-    );
+    await this.refreshCredential(signal);
     const executionController = new AbortController();
-    const abortExecution = (): void => executionController.abort();
+    const credentialController = new AbortController();
+    const abortExecution = (): void => {
+      executionController.abort();
+      credentialController.abort();
+    };
     signal?.addEventListener('abort', abortExecution, { once: true });
     const deadlineDelay = this.assignmentRemainingMs(assignment);
     const localDeadlineAtMs = Date.now() + deadlineDelay;
@@ -445,10 +472,20 @@ export class BridgeWorker {
       executionController,
       cancellationController.signal,
     );
+    let credentialMaintenanceError: unknown;
+    let credentialMaintenance: Promise<void> | undefined;
     let settlement: BridgeSettlement;
     let ambiguousSandboxError: unknown;
     let sandboxRejectedExecution = false;
     try {
+      credentialMaintenance = this.maintainCredential(
+        assignment,
+        credentialController.signal,
+        signal,
+      ).catch((error) => {
+        credentialMaintenanceError = error;
+        executionController.abort();
+      });
       const sandboxSessionId = this.sandboxSessionIdFor(assignment);
       const headers = {
         ...assignment.request.headers,
@@ -473,6 +510,9 @@ export class BridgeWorker {
         payload = (await response.json()) as object;
       } catch (error) {
         if (response.ok) throw error;
+      }
+      if (credentialMaintenanceError != null) {
+        throw credentialMaintenanceError;
       }
       if (!response.ok) {
         sandboxRejectedExecution =
@@ -564,6 +604,8 @@ export class BridgeWorker {
     } finally {
       heartbeatController.abort();
       await heartbeat;
+      credentialController.abort();
+      await credentialMaintenance;
       signal?.removeEventListener('abort', abortExecution);
     }
   }

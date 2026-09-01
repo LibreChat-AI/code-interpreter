@@ -56,22 +56,25 @@ export function validateApiHardenedConfig(): void {
 
 /** Validate bridge credentials in every process that exposes bridge routes. */
 export function validateApiBridgePolicy(): void {
-  if (env.SANDBOX_BACKEND === 'remote-bridge') {
-    requireSafeWholeNumber('JOB_TIMEOUT', env.JOB_TIMEOUT, 1);
+  if (env.BRIDGE_TOKEN !== env.BRIDGE_TOKEN.trim()) {
+    throw new SecureStartupConfigError(
+      'CODEAPI_BRIDGE_TOKEN must not contain surrounding whitespace',
+    );
+  }
+  const bridgeEnabled =
+    env.SANDBOX_BACKEND === 'remote-bridge' ||
+    env.BRIDGE_AUTH_MODE === 'paired';
+  if (bridgeEnabled) {
     requireValue('CODEAPI_BRIDGE_WORKER_ID', env.BRIDGE_WORKER_ID);
     if (!isValidBridgeWorkerId(env.BRIDGE_WORKER_ID ?? '')) {
       throw new SecureStartupConfigError(
         'CODEAPI_BRIDGE_WORKER_ID must match the bridge worker ID format',
       );
     }
-    if (env.BRIDGE_TOKEN !== env.BRIDGE_TOKEN.trim()) {
-      throw new SecureStartupConfigError(
-        'CODEAPI_BRIDGE_TOKEN must not contain surrounding whitespace',
-      );
-    }
-    if (!env.HARDENED_SANDBOX_MODE) {
-      requireValue('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
-    }
+    requireValue('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
+  }
+  if (env.SANDBOX_BACKEND === 'remote-bridge') {
+    requireSafeWholeNumber('JOB_TIMEOUT', env.JOB_TIMEOUT, 1);
     if (env.PTC_MODE === 'blocking') {
       throw new SecureStartupConfigError(
         'PTC replay is the only supported PTC mode for the remote-bridge backend (unset PTC_MODE=blocking)',
