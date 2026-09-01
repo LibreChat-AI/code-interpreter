@@ -55,6 +55,7 @@ const DEFAULT_LEASE_TRANSPORT_GRACE_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
 const CREDENTIAL_REFRESH_WINDOW_MS = 60_000;
+const MAX_PROOF_CLOCK_SKEW_MS = 60_000;
 const DEFAULT_REGISTRATION_TTL_MS = 60_000;
 const DEFAULT_REGISTRATION_TRANSPORT_TIMEOUT_MS = 10_000;
 const DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS = 10_000;
@@ -124,6 +125,7 @@ export class BridgeWorker {
   private readonly incarnationId: string;
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
+  private serverClockOffsetMs = MAX_PROOF_CLOCK_SKEW_MS;
 
   constructor(private readonly options: BridgeWorkerOptions) {
     if (!options.token && !options.identity) {
@@ -178,6 +180,10 @@ export class BridgeWorker {
       throw new BridgeProtocolError(
         'Code API registered a different worker incarnation',
       );
+    }
+    const registeredAtMs = Date.parse(registration.registeredAt);
+    if (Number.isFinite(registeredAtMs)) {
+      this.serverClockOffsetMs = registeredAtMs - registrationStartedAtMs;
     }
     this.registrationTtlMs = registration.leaseTtlMs;
     this.lastRegisteredAtMs = registrationStartedAtMs;
@@ -375,7 +381,9 @@ export class BridgeWorker {
     signal?: AbortSignal,
     validThroughMs =
       Date.now() +
+      this.serverClockOffsetMs +
       (this.options.credentialRefreshWindowMs ?? CREDENTIAL_REFRESH_WINDOW_MS),
+    transportTimeoutMs = Number.POSITIVE_INFINITY,
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
@@ -390,8 +398,11 @@ export class BridgeWorker {
       { protocolVersion: BRIDGE_PROTOCOL_VERSION },
       Math.max(
         1,
-        this.options.credentialRefreshTransportTimeoutMs ??
-          DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+        Math.min(
+          transportTimeoutMs,
+          this.options.credentialRefreshTransportTimeoutMs ??
+            DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+        ),
       ),
       signal,
     );
@@ -477,13 +488,37 @@ export class BridgeWorker {
         ? Date.parse(assignment.expiresAt) -
           (Date.now() + (assignment.remainingMs ?? 0))
         : 0;
-    await this.refreshCredential(
-      signal,
-      Date.now() +
-        serverClockOffsetMs +
-        (this.options.credentialRefreshWindowMs ??
-          CREDENTIAL_REFRESH_WINDOW_MS),
-    );
+    this.serverClockOffsetMs = serverClockOffsetMs;
+    const localDeadlineAtMs =
+      Date.now() + this.assignmentRemainingMs(assignment);
+    try {
+      await this.refreshCredential(
+        signal,
+        Date.now() +
+          serverClockOffsetMs +
+          (this.options.credentialRefreshWindowMs ??
+            CREDENTIAL_REFRESH_WINDOW_MS),
+        Math.max(1, localDeadlineAtMs - Date.now()),
+      );
+    } catch (error) {
+      if (!signal?.aborted) {
+        await this.rejectUnexecutedAssignment(
+          assignment,
+          'Bridge credential refresh failed before sandbox execution',
+        );
+      }
+      throw error;
+    }
+    const remainingAfterRefreshMs = localDeadlineAtMs - Date.now();
+    if (remainingAfterRefreshMs <= 0) {
+      await this.rejectUnexecutedAssignment(
+        assignment,
+        'Bridge assignment expired during credential refresh',
+      );
+      throw new BridgeProtocolError(
+        'Bridge assignment expired during credential refresh',
+      );
+    }
     const executionController = new AbortController();
     const credentialController = new AbortController();
     const abortExecution = (): void => {
@@ -491,8 +526,7 @@ export class BridgeWorker {
       credentialController.abort();
     };
     signal?.addEventListener('abort', abortExecution, { once: true });
-    const deadlineDelay = this.assignmentRemainingMs(assignment);
-    const localDeadlineAtMs = Date.now() + deadlineDelay;
+    const deadlineDelay = remainingAfterRefreshMs;
     const deadlineTimer = setTimeout(
       () => executionController.abort(),
       deadlineDelay,
