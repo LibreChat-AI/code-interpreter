@@ -286,6 +286,14 @@ router.post(
     try {
       await options.store.register(
         registration as unknown as BridgeWorkerRegistration,
+        options.authMode === 'paired'
+          ? (
+              res.locals.bridgeWorkerAuthorization as {
+                identityId: string;
+                pairingGeneration: number;
+              }
+            )
+          : undefined,
       );
     } catch (error) {
       if (error instanceof BridgeStoreError) {

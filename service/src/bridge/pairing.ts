@@ -205,6 +205,7 @@ export class RedisBridgePairingStore {
     credentialId: string;
     activeCredentialId: string;
     identityId: string;
+    pairingGeneration: number;
   }> {
     const proofTime = Date.parse(args.timestamp);
     if (
@@ -217,9 +218,10 @@ export class RedisBridgePairingStore {
       );
     }
     const credentialDigest = digest(args.credential);
-    const [raw, activeDigest] = await this.redis.mget(
+    const [raw, activeDigest, pairingGeneration] = await this.redis.mget(
       credentialDigestKey(credentialDigest),
       workerIdentityKey(args.workerId),
+      workerPairingGenerationKey(args.workerId),
     );
     if (raw == null || activeDigest == null) {
       throw new BridgePairingError(
@@ -272,6 +274,7 @@ export class RedisBridgePairingStore {
       credentialId: credentialDigest,
       activeCredentialId: activeDigest,
       identityId: stored.identityId,
+      pairingGeneration: Number(pairingGeneration ?? '0'),
     };
   }
 

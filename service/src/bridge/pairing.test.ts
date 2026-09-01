@@ -175,6 +175,51 @@ describe('RedisBridgePairingStore', () => {
     ).rejects.toMatchObject({ code: 'WORKER_FENCED' });
   });
 
+  test('revocation fences a registration authorized before the revoke', async () => {
+    const identity = createBridgeIdentity();
+    const pairing = await pairings.issue('vm-1');
+    const issued = await pairings.redeem({
+      workerId: 'vm-1',
+      code: pairing.code,
+      publicKey: identity.publicKey,
+    });
+    const proof = {
+      credential: issued.credential,
+      method: 'POST',
+      path: '/v1/bridge/workers/register',
+      timestamp: new Date().toISOString(),
+      nonce: 'registration-revoke-race',
+      body: JSON.stringify({ protocolVersion: 1, workerId: 'vm-1' }),
+    };
+    const authorization = await pairings.authorize({
+      ...proof,
+      workerId: 'vm-1',
+      signature: signBridgeRequest(identity.privateKey, proof),
+    });
+
+    await pairings.revoke('vm-1');
+
+    await expect(
+      store.register(
+        {
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          incarnationId: 'incarnation-00000002',
+          capabilities: {
+            statefulWorkspace: true,
+            sandboxProfile: 'nsjail',
+            runtimes: ['bash'],
+          },
+        },
+        authorization,
+      ),
+    ).rejects.toMatchObject({ code: 'WORKER_FENCED' });
+    expect(await redis.get('codeapi:bridge:v1:worker:vm-1')).toBeNull();
+    expect(
+      await redis.get('codeapi:bridge:v1:worker:vm-1:incarnation'),
+    ).toBeNull();
+  });
+
   test('revocation invalidates pairing codes issued before the revoke', async () => {
     const identity = createBridgeIdentity();
     const pairing = await pairings.issue('vm-1');
