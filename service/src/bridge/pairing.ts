@@ -13,6 +13,43 @@ const DEFAULT_PAIRING_TTL_SECONDS = 10 * 60;
 const DEFAULT_CREDENTIAL_TTL_SECONDS = 15 * 60;
 const PROOF_NONCE_TTL_SECONDS = 2 * 60;
 const PROOF_CLOCK_SKEW_MS = 60_000;
+const LEGACY_SCAN_CLAIM_TTL_MS = 5_000;
+const LEGACY_SCAN_POLL_INTERVAL_MS = 25;
+const LEGACY_SCAN_PENDING = 'pending';
+const LEGACY_SCAN_COMPLETE = 'done';
+const ISSUE_PAIRING_SCRIPT = `
+local previous = redis.call('GET', KEYS[1])
+if previous then
+  redis.call('DEL', previous)
+end
+redis.call('SET', KEYS[1], KEYS[2], 'EX', ARGV[2])
+redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+return 1
+`;
+const REDEEM_PAIRING_SCRIPT = `
+local pairing = redis.call('GET', KEYS[1])
+if pairing ~= ARGV[1] then
+  return 0
+end
+local generation = redis.call('GET', KEYS[2])
+if ARGV[2] == '' then
+  if generation and redis.call('GET', KEYS[5]) ~= KEYS[1] then
+    redis.call('DEL', KEYS[1])
+    return 0
+  end
+elseif (generation or '0') ~= ARGV[2] then
+  redis.call('DEL', KEYS[1])
+  return 0
+end
+redis.call('DEL', KEYS[1])
+if redis.call('GET', KEYS[5]) == KEYS[1] then
+  redis.call('DEL', KEYS[5])
+end
+redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
+redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
+redis.call('SET', KEYS[6], ARGV[6], 'EX', ARGV[4])
+return 1
+`;
 const ROTATE_CREDENTIAL_SCRIPT = `
 local activeDigest = redis.call('GET', KEYS[1])
 local previous = redis.call('GET', KEYS[2])
@@ -33,59 +70,57 @@ else
 end
 return 1
 `;
-const REVOKE_WORKER_SCRIPT = `
-local activeDigest = redis.call('GET', KEYS[1])
+const REVOKE_PAIRING_SCRIPT = `
+local indexed = redis.call('GET', KEYS[1])
+local credential = redis.call('GET', KEYS[3])
 local activeIncarnation = redis.call('GET', KEYS[6])
-redis.call('INCR', KEYS[4])
-redis.call('DEL', KEYS[1], KEYS[2], KEYS[5], KEYS[6])
-if activeDigest then
-  redis.call('DEL', KEYS[3] .. activeDigest)
+redis.call('INCR', KEYS[2])
+if indexed then
+  redis.call('DEL', indexed)
 end
+if credential then
+  redis.call('DEL', KEYS[3])
+  redis.call('DEL', ARGV[1] .. credential)
+end
+redis.call('DEL', KEYS[1], KEYS[3], KEYS[4], KEYS[5], KEYS[6])
 if activeIncarnation then
-  redis.call('SET', ARGV[1] .. activeIncarnation .. ':fenced', '1')
+  redis.call('SET', ARGV[2] .. activeIncarnation .. ':fenced', '1')
 end
 return 1
 `;
-const ISSUE_PAIRING_SCRIPT = `
-local previous = redis.call('GET', KEYS[1])
-if previous then
-  redis.call('DEL', previous)
+const RELEASE_LEGACY_SCAN_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
 end
-redis.call('DEL', KEYS[3])
-redis.call('SET', KEYS[1], KEYS[2], 'EX', ARGV[2])
-redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
-return 1
+return 0
 `;
-const REDEEM_PAIRING_SCRIPT = `
-local pairing = redis.call('GET', KEYS[1])
-if not pairing then
-  return nil
+const NORMALIZE_LEGACY_SCAN_STATE_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[2])
+  return 1
 end
-if redis.call('GET', KEYS[2]) ~= KEYS[1] then
-  redis.call('DEL', KEYS[1])
-  return nil
-end
-redis.call('DEL', KEYS[1], KEYS[2])
-redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[2])
-return pairing
+return 0
 `;
-const INSTALL_REDEEMED_CREDENTIAL_SCRIPT = `
-if redis.call('GET', KEYS[1]) ~= ARGV[1] then
-  return 0
+const RENEW_LEGACY_SCAN_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
 end
-local generation = redis.call('GET', KEYS[5]) or '0'
-if generation ~= ARGV[6] then
-  return 0
+return 0
+`;
+const COMPLETE_LEGACY_SCAN_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[2]) == ARGV[1] then
+  local remaining = tonumber(ARGV[3])
+  if ARGV[4] == '1' then
+    redis.call('SET', KEYS[1], ARGV[2])
+  elseif remaining > 0 then
+    redis.call('SET', KEYS[1], ARGV[2], 'PX', remaining)
+  else
+    redis.call('DEL', KEYS[1])
+  end
+  redis.call('DEL', KEYS[2])
+  return 1
 end
-redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])
-redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[4])
-if ARGV[5] ~= '' then
-  redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
-else
-  redis.call('DEL', KEYS[4])
-end
-redis.call('DEL', KEYS[1])
-return 1
+return 0
 `;
 
 export type BridgePrincipalType = 'deployment' | 'tenant' | 'user' | 'role' | 'group';
@@ -101,12 +136,13 @@ export interface BridgeWorkerBinding {
 interface StoredPairing {
   workerId: string;
   expiresAt: string;
-  generation: number;
+  generation?: number;
   binding?: BridgeWorkerBinding;
 }
 
 interface StoredCredential {
   workerId: string;
+  /** Stable across refreshes; replaced only when the worker is paired again. */
   identityId?: string;
   publicKey: string;
   expiresAt: string;
@@ -168,8 +204,17 @@ function workerPairingIndexKey(workerId: string): string {
   return `${PREFIX}:pairing-index:${workerId}`;
 }
 
-function workerRedemptionKey(workerId: string): string {
-  return `${PREFIX}:redemption:${workerId}`;
+function legacyPairingScanDeadlineKey(): string {
+  return `${PREFIX}:migration:legacy-pairing-scan-until`;
+}
+
+function legacyPairingWorkerScanKey(
+  workerId: string,
+  rollbackEpoch?: string,
+): string {
+  const epoch = rollbackEpoch?.trim();
+  const epochSuffix = epoch ? `:${digest(epoch)}` : '';
+  return `${PREFIX}:migration:legacy-pairing-scanned:${workerId}${epochSuffix}`;
 }
 
 function proofNonceKey(credential: string, nonce: string): string {
@@ -189,12 +234,19 @@ export class RedisBridgePairingStore {
     private readonly redis: Redis,
     private readonly pairingTtlSeconds = DEFAULT_PAIRING_TTL_SECONDS,
     private readonly credentialTtlSeconds = DEFAULT_CREDENTIAL_TTL_SECONDS,
+    private readonly legacyScanClaimTtlMs = LEGACY_SCAN_CLAIM_TTL_MS,
+    private readonly rollbackEpoch =
+      process.env.CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH?.trim() ?? '',
   ) {}
 
   async issue(
     workerId: string,
     binding?: BridgeWorkerBinding,
   ): Promise<BridgePairing> {
+    // Pre-index binaries cannot remove a superseded code themselves. During
+    // the one pairing-TTL migration window, find and delete those records so
+    // rolling back cannot make a replaced code valid again.
+    await this.removeLegacyPairings(workerId);
     const code = randomBytes(24).toString('base64url');
     const expiresAt = new Date(
       Date.now() + this.pairingTtlSeconds * 1000,
@@ -206,10 +258,9 @@ export class RedisBridgePairingStore {
     const codeKey = pairingKey(code);
     await this.redis.eval(
       ISSUE_PAIRING_SCRIPT,
-      3,
+      2,
       workerPairingIndexKey(workerId),
       codeKey,
-      workerRedemptionKey(workerId),
       JSON.stringify(pairing),
       String(this.pairingTtlSeconds),
     );
@@ -221,24 +272,9 @@ export class RedisBridgePairingStore {
     code: string;
     publicKey: string;
   }): Promise<BridgeWorkerCredential> {
-    if (!validEd25519PublicKey(args.publicKey)) {
-      throw new BridgePairingError(
-        'PUBLIC_KEY_INVALID',
-        'Worker public key must be an Ed25519 key',
-      );
-    }
     const codeKey = pairingKey(args.code);
-    const redemptionId = randomBytes(18).toString('base64url');
-    const raw = await this.redis.eval(
-      REDEEM_PAIRING_SCRIPT,
-      3,
-      codeKey,
-      workerPairingIndexKey(args.workerId),
-      workerRedemptionKey(args.workerId),
-      redemptionId,
-      String(this.pairingTtlSeconds),
-    );
-    if (typeof raw !== 'string') {
+    const raw = await this.redis.get(codeKey);
+    if (raw == null) {
       throw new BridgePairingError(
         'PAIRING_INVALID',
         'Pairing code is invalid or expired',
@@ -246,20 +282,68 @@ export class RedisBridgePairingStore {
     }
     const pairing = JSON.parse(raw) as StoredPairing;
     if (pairing.workerId !== args.workerId) {
+      await this.redis.del(codeKey);
       throw new BridgePairingError(
         'PAIRING_INVALID',
         'Pairing code does not authorize this worker',
       );
     }
-    return await this.issueCredential(
-      args.workerId,
-      args.publicKey,
-      undefined,
-      undefined,
-      pairing.binding,
-      pairing.generation,
-      redemptionId,
+    if (!validEd25519PublicKey(args.publicKey)) {
+      throw new BridgePairingError(
+        'PUBLIC_KEY_INVALID',
+        'Worker public key must be an Ed25519 key',
+      );
+    }
+    // Validate the supplied code before it can trigger a shared-keyspace scan.
+    // A rollback epoch means any generation-less code may have survived a
+    // legacy revoke, so clean the authenticated worker and reject that code.
+    if (
+      pairing.generation == null &&
+      this.rollbackEpoch.trim().length > 0
+    ) {
+      await this.removeLegacyPairings(args.workerId);
+      throw new BridgePairingError(
+        'PAIRING_INVALID',
+        'Pairing code is invalid or expired',
+      );
+    }
+
+    const credential = randomBytes(32).toString('base64url');
+    const credentialDigest = digest(credential);
+    const expiresAt = new Date(
+      Date.now() + this.credentialTtlSeconds * 1000,
+    ).toISOString();
+    const identityId = randomBytes(18).toString('base64url');
+    const stored: StoredCredential = {
+      workerId: args.workerId,
+      identityId,
+      publicKey: args.publicKey,
+      expiresAt,
+      binding: pairing.binding,
+    };
+    const accepted = await this.redis.eval(
+      REDEEM_PAIRING_SCRIPT,
+      6,
+      codeKey,
+      workerPairingGenerationKey(pairing.workerId),
+      credentialDigestKey(credentialDigest),
+      workerIdentityKey(args.workerId),
+      workerPairingIndexKey(args.workerId),
+      workerStableIdentityKey(args.workerId),
+      raw,
+      pairing.generation == null ? '' : String(pairing.generation),
+      JSON.stringify(stored),
+      String(this.credentialTtlSeconds),
+      credentialDigest,
+      identityId,
     );
+    if (accepted !== 1) {
+      throw new BridgePairingError(
+        'PAIRING_INVALID',
+        'Pairing code is invalid or expired',
+      );
+    }
+    return { workerId: args.workerId, credential, expiresAt };
   }
 
   async authorize(args: {
@@ -356,17 +440,197 @@ export class RedisBridgePairingStore {
   }
 
   async revoke(workerId: string): Promise<void> {
+    await this.removeLegacyPairings(workerId);
+    // Fence redemption and consume the currently indexed code atomically. An
+    // issue that linearized before this script is always removed; an issue
+    // that linearizes afterward installs a distinct generation and code.
     await this.redis.eval(
-      REVOKE_WORKER_SCRIPT,
+      REVOKE_PAIRING_SCRIPT,
       6,
+      workerPairingIndexKey(workerId),
+      workerPairingGenerationKey(workerId),
       workerIdentityKey(workerId),
       workerStableIdentityKey(workerId),
-      `${PREFIX}:credential:`,
-      workerPairingGenerationKey(workerId),
       `${PREFIX}:worker:${encodeURIComponent(workerId)}`,
       `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation`,
+      `${PREFIX}:credential:`,
       `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:`,
     );
+  }
+
+  private async removeLegacyPairings(workerId: string): Promise<void> {
+    const deadlineKey = legacyPairingScanDeadlineKey();
+    const now = Date.now();
+    const migrationWindowMs = this.pairingTtlSeconds * 1000;
+    const proposedDeadline = now + migrationWindowMs;
+    let rawDeadline = await this.redis.get(deadlineKey);
+    if (rawDeadline == null) {
+      const initialized = await this.redis.set(
+        deadlineKey,
+        String(proposedDeadline),
+        'NX',
+      );
+      rawDeadline = initialized === 'OK'
+        ? String(proposedDeadline)
+        : await this.redis.get(deadlineKey);
+    } else if ((await this.redis.pttl(deadlineKey)) > 0) {
+      // Markers from the preceding build expired and reopened forever. Keep
+      // their original deadline, but make it durable so normal idle periods
+      // cannot start another migration window.
+      await this.redis.persist(deadlineKey);
+    }
+
+    const indexedKey = await this.redis.get(workerPairingIndexKey(workerId));
+    const indexedRaw = indexedKey == null ? null : await this.redis.get(indexedKey);
+    let rollbackDetected = false;
+    if (indexedRaw != null) {
+      try {
+        rollbackDetected = (JSON.parse(indexedRaw) as StoredPairing).generation == null;
+      } catch {
+        rollbackDetected = false;
+      }
+    }
+
+    const deadline = Number(rawDeadline);
+    const stateKey = legacyPairingWorkerScanKey(workerId, this.rollbackEpoch);
+    const rollbackEpochDetected = this.rollbackEpoch.trim().length > 0;
+    while (true) {
+      const state = await this.redis.get(stateKey);
+      if (state === LEGACY_SCAN_COMPLETE && !rollbackDetected) return;
+      if (state === LEGACY_SCAN_PENDING) break;
+      if (state == null) {
+        if (
+          !rollbackDetected &&
+          !rollbackEpochDetected &&
+          (!Number.isFinite(deadline) || Date.now() > deadline)
+        ) {
+          return;
+        }
+        const initialized = await this.redis.set(
+          stateKey,
+          LEGACY_SCAN_PENDING,
+          'NX',
+        );
+        if (initialized === 'OK') break;
+        continue;
+      }
+      // Predecessor builds stored an unqualified random token before scanning.
+      // It cannot prove whether that scan completed, so normalize it to a
+      // durable retry requirement instead of treating it as success.
+      const normalized = await this.redis.eval(
+        NORMALIZE_LEGACY_SCAN_STATE_SCRIPT,
+        1,
+        stateKey,
+        state,
+        LEGACY_SCAN_PENDING,
+      );
+      if (normalized === 1) break;
+    }
+
+    const claimKey = `${stateKey}:claim`;
+    let scanClaim: { key: string; token: string } | undefined;
+    while (scanClaim == null) {
+      const state = await this.redis.get(stateKey);
+      if (state === LEGACY_SCAN_COMPLETE || state == null) return;
+      const token = `claim:${randomBytes(24).toString('base64url')}`;
+      const claimed = await this.redis.set(
+        claimKey,
+        token,
+        'PX',
+        Math.max(1, this.legacyScanClaimTtlMs),
+        'NX',
+      );
+      if (claimed === 'OK') {
+        scanClaim = { key: claimKey, token };
+        break;
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, LEGACY_SCAN_POLL_INTERVAL_MS),
+      );
+    }
+
+    let renewalError: unknown;
+    let renewal = Promise.resolve();
+    let renewalInFlight = false;
+    const renewClaim = async (): Promise<void> => {
+      const renewed = await this.redis.eval(
+        RENEW_LEGACY_SCAN_CLAIM_SCRIPT,
+        1,
+        scanClaim.key,
+        scanClaim.token,
+        String(Math.max(1, this.legacyScanClaimTtlMs)),
+      );
+      if (renewed !== 1) {
+        throw new Error('Legacy pairing cleanup claim was lost');
+      }
+    };
+    const renewalTimer = setInterval(() => {
+      if (renewalInFlight || renewalError != null) return;
+      renewalInFlight = true;
+      renewal = renewClaim()
+        .catch((error: unknown) => {
+          renewalError = error;
+        })
+        .finally(() => {
+          renewalInFlight = false;
+        });
+    }, Math.max(1, Math.floor(this.legacyScanClaimTtlMs / 3)));
+    renewalTimer.unref?.();
+
+    try {
+      let cursor = '0';
+      do {
+        const [nextCursor, keys] = await this.redis.scan(
+          cursor,
+          'MATCH',
+          `${PREFIX}:pairing:*`,
+          'COUNT',
+          100,
+        );
+        if (renewalError != null) throw renewalError;
+        cursor = nextCursor;
+        if (keys.length === 0) continue;
+        const values = await this.redis.mget(...keys);
+        const matching = keys.filter((_key, index) => {
+          const raw = values[index];
+          if (raw == null) return false;
+          try {
+            const pairing = JSON.parse(raw) as Partial<StoredPairing>;
+            return pairing.workerId === workerId && pairing.generation == null;
+          } catch {
+            return false;
+          }
+        });
+        if (matching.length > 0) await this.redis.del(...matching);
+      } while (cursor !== '0');
+      clearInterval(renewalTimer);
+      await renewal;
+      if (renewalError != null) throw renewalError;
+      await renewClaim();
+      const completed = await this.redis.eval(
+        COMPLETE_LEGACY_SCAN_CLAIM_SCRIPT,
+        2,
+        stateKey,
+        scanClaim.key,
+        scanClaim.token,
+        LEGACY_SCAN_COMPLETE,
+        String(deadline - Date.now()),
+        rollbackEpochDetected ? '1' : '0',
+      );
+      if (completed !== 1) {
+        await this.removeLegacyPairings(workerId);
+      }
+    } catch (error) {
+      clearInterval(renewalTimer);
+      await renewal;
+      await this.redis.eval(
+        RELEASE_LEGACY_SCAN_CLAIM_SCRIPT,
+        1,
+        scanClaim.key,
+        scanClaim.token,
+      );
+      throw error;
+    }
   }
 
   async rotate(
@@ -391,8 +655,8 @@ export class RedisBridgePairingStore {
       workerId,
       previous.publicKey,
       previousDigest,
-      previous.identityId ?? null,
       previous.binding,
+      previous.identityId ?? null,
     );
   }
 
@@ -400,17 +664,18 @@ export class RedisBridgePairingStore {
     workerId: string,
     publicKey: string,
     previousDigest?: string,
-    identityId: string | null | undefined = randomBytes(18).toString('base64url'),
     binding?: BridgeWorkerBinding,
-    pairingGeneration?: number,
-    redemptionId?: string,
+    identityId?: string | null,
   ): Promise<BridgeWorkerCredential> {
     const credential = randomBytes(32).toString('base64url');
     const credentialDigest = digest(credential);
     const expiresAt = new Date(
       Date.now() + this.credentialTtlSeconds * 1000,
     ).toISOString();
-    const stableIdentityId = identityId ?? undefined;
+    const stableIdentityId =
+      identityId === undefined
+        ? randomBytes(18).toString('base64url')
+        : identityId ?? undefined;
     const stored: StoredCredential = {
       workerId,
       ...(stableIdentityId != null ? { identityId: stableIdentityId } : {}),
@@ -438,34 +703,31 @@ export class RedisBridgePairingStore {
           'Worker credential is invalid or expired',
         );
       }
-      return { workerId, credential, expiresAt };
-    }
-    if (redemptionId == null) {
-      throw new BridgePairingError(
-        'PAIRING_INVALID',
-        'Pairing redemption was not fenced',
+    } else {
+      const transaction = this.redis.multi();
+      transaction.set(
+        credentialDigestKey(credentialDigest),
+        JSON.stringify(stored),
+        'EX',
+        this.credentialTtlSeconds,
       );
-    }
-    const installed = await this.redis.eval(
-      INSTALL_REDEEMED_CREDENTIAL_SCRIPT,
-      5,
-      workerRedemptionKey(workerId),
-      credentialDigestKey(credentialDigest),
-      workerIdentityKey(workerId),
-      workerStableIdentityKey(workerId),
-      workerPairingGenerationKey(workerId),
-      redemptionId,
-      credentialDigest,
-      JSON.stringify(stored),
-      String(this.credentialTtlSeconds),
-      stableIdentityId ?? '',
-      String(pairingGeneration ?? 0),
-    );
-    if (installed !== 1) {
-      throw new BridgePairingError(
-        'PAIRING_INVALID',
-        'Pairing code was superseded before credential installation',
+      transaction.set(
+        workerIdentityKey(workerId),
+        credentialDigest,
+        'EX',
+        this.credentialTtlSeconds,
       );
+      if (stableIdentityId != null) {
+        transaction.set(
+          workerStableIdentityKey(workerId),
+          stableIdentityId,
+          'EX',
+          this.credentialTtlSeconds,
+        );
+      } else {
+        transaction.del(workerStableIdentityKey(workerId));
+      }
+      await transaction.exec();
     }
     return { workerId, credential, expiresAt };
   }

@@ -34,6 +34,9 @@ jobs:
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
 
+      - name: Bridge pairing rollout safety
+        run: tests/bridge_pairing_rollout.sh
+
       - name: Validate sandbox Dockerfiles
         run: |
           docker buildx build --check -f api/Dockerfile .

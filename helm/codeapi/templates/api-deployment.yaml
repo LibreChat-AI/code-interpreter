@@ -17,11 +17,15 @@ spec:
   {{- if not .Values.api.autoscaling.enabled }}
   replicas: {{ .Values.api.replicaCount }}
   {{- end }}
+  strategy:
+    {{- toYaml .Values.api.strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "codeapi.api.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        codeapi.librechat.ai/pairing-fence-version: "1"
       labels:
         {{- include "codeapi.api.selectorLabels" . | nindent 8 }}
     spec:
@@ -55,6 +59,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "codeapi.fullname" . }}-secrets
                   key: redis-password
+            - name: CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codeapi.fullname" . }}-pairing-rollback
+                  key: epoch
+                  optional: true
             # Service URLs
             - name: FILE_SERVER_URL
               value: "http://{{ include "codeapi.fullname" . }}-file-server:{{ .Values.fileServer.service.port }}"

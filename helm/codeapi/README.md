@@ -53,6 +53,32 @@ platform rather than templated here: external ingress/service mesh, KEDA-style
 queue-depth autoscaling, and cloud-IAM secret delivery (the env hooks below
 cover all of them).
 
+**Pairing-fence rollbacks.** Do not use a direct `helm rollback` from a chart
+revision containing the bridge pairing fence to an older revision. Helm runs
+rollback hooks from the target revision, so a pre-fence target cannot stop its
+own old and new API replicas from overlapping. Use the chart's fail-closed
+helper instead:
+
+```bash
+helm/codeapi/scripts/safe-pairing-rollback.sh RELEASE REVISION NAMESPACE
+```
+
+The helper records an out-of-band rollback epoch, deletes the API HPA, scales
+the live fenced API deployment to zero, verifies that the Deployment and every
+matching pod have converged to zero, and only then invokes `helm rollback`.
+When a fenced revision is deployed again, the epoch forces one fresh cleanup of
+legacy pairing codes even if the original migration window has expired. This
+causes an API outage by design. If rollback fails, the helper repeats the drain
+after re-discovering every API Deployment and explicitly deletes any remaining
+API pods, so a partially applied rollback cannot leave a mixed-version API
+running. The operator running it needs permission to read/scale Deployments,
+delete HPAs and pods, and create or update the rollback ConfigMap.
+Pass the intended cluster context to both `kubectl` and `helm` before invoking
+the helper; it rejects forwarded kubeconfig, context, identity, API-server, and
+namespace flags and Helm-specific target environment overrides so the drain and
+rollback cannot target different clusters. Termination signals during Helm
+also trigger a final recovery drain before the helper exits.
+
 **Execution profile.** By default this chart leaves
 `CODEAPI_EXECUTION_PROFILE` unset. Its bundled HTTP/stateless configuration is
 inferred as the AWS-free `default` profile and retains the existing
