@@ -193,6 +193,10 @@ that mode the chart includes a **package-init Job** that runs as a Helm
 package sets, and registers Bash into the packages PVC before the worker pods
 start.
 
+For IPv6-only or dual-stack clusters, set `workerSandbox.sandbox.bindHost` to
+`"::"`. The sandbox API keeps the bind host and port separate so IPv6 addresses
+are not incorrectly split on their colons.
+
 This happens automatically on `helm install`. To force a rebuild:
 
 ```bash

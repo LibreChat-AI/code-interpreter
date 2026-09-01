@@ -43,10 +43,19 @@ export function legacyPackagesDirectory(raw: string | undefined): string | undef
     : trimmed === '/' ? '/packages' : `${trimmed}/packages`;
 }
 
+export function formatBindAddress(host: string, port: number): string {
+  return host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
+}
+
+const bindHost = process.env.SANDBOX_BIND_HOST?.trim() || '0.0.0.0';
+const bindPort = safeInt(process.env.PORT, 2000);
+
 export const config = {
   hardened_sandbox_mode: process.env.CODEAPI_HARDENED_SANDBOX_MODE === 'true',
   log_level: process.env.SANDBOX_LOG_LEVEL ?? 'DEBUG',
-  bind_address: `0.0.0.0:${process.env.PORT ?? 2000}`,
+  bind_host: bindHost,
+  bind_port: bindPort,
+  bind_address: formatBindAddress(bindHost, bindPort),
   packages_directory: cleanDirectory(process.env.SANDBOX_PACKAGES_DIRECTORY)
     ?? legacyPackagesDirectory(process.env.SANDBOX_DATA_DIRECTORY)
     ?? '/pkgs',

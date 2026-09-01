@@ -48,24 +48,22 @@ export SANDBOX_ROOTFS="$ROOTFS"
 exec unshare --mount bash -c '
     ROOTFS="${SANDBOX_ROOTFS:-/sandbox-rootfs}"
 
-    mount -o bind,ro "$ROOTFS/usr/sbin"     /usr/sbin    || { echo "FATAL: cannot bind /usr/sbin"; exit 1; }
-    mount -o bind,ro "$ROOTFS/usr/lib"      /usr/lib     || { echo "FATAL: cannot bind /usr/lib"; exit 1; }
-
-    if [ -d "$ROOTFS/usr/lib64" ] && ! [ -L "$ROOTFS/usr/lib64" ]; then
-        mount -o bind,ro "$ROOTFS/usr/lib64" /usr/lib64 2>/dev/null || \
-            echo "[sandbox] WARNING: could not bind /usr/lib64 - sandboxed binaries may fail to exec"
-    fi
-
-    mount -o bind,ro "$ROOTFS/usr/local"    /usr/local   || { echo "FATAL: cannot bind /usr/local"; exit 1; }
     mount -o bind,ro "$ROOTFS/sandbox_api"  /sandbox_api || { echo "FATAL: cannot bind /sandbox_api"; exit 1; }
-    mount -o bind,ro "$ROOTFS/pkgs"       /pkgs      || { echo "FATAL: cannot bind /pkgs"; exit 1; }
+    mount -o bind,ro "$ROOTFS/pkgs"          /pkgs      || { echo "FATAL: cannot bind /pkgs"; exit 1; }
 
-    if [ -d /host-packages ]; then
+    # Prefer a populated host/PVC package mount. A baked image keeps its own
+    # ROOTFS/pkgs as the fallback when the mount is absent or empty.
+    if [ -d /host-packages ] && [ "$(ls -A /host-packages 2>/dev/null)" ]; then
         mount --bind /host-packages /pkgs 2>/dev/null || \
-            echo "WARNING: could not bind /host-packages - sandbox will run without packages"
+            echo "WARNING: could not bind /host-packages - using packages from $ROOTFS/pkgs"
+    else
+        echo "INFO: /host-packages is empty or missing - using packages from $ROOTFS/pkgs"
     fi
 
-    mount -o bind,ro "$ROOTFS/usr/bin" /usr/bin || { echo "FATAL: cannot bind /usr/bin"; exit 1; }
+    # Bind the complete /usr tree once. Fedora-style merged-/usr images can
+    # make /usr/bin and /usr/sbin the same tree; mounting those subdirectories
+    # separately can hide mount(8) before startup has finished.
+    mount -o bind,ro "$ROOTFS/usr" /usr || { echo "FATAL: cannot bind /usr"; exit 1; }
 
     multiarch_libdir=$(find /usr/lib -maxdepth 1 -type d -name "*-linux-gnu" -print -quit)
     if [ -n "$multiarch_libdir" ]; then

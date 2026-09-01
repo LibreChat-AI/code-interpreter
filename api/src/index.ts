@@ -70,9 +70,8 @@ async function main(): Promise<void> {
   await initializeSandboxWorkspaceIsolation();
   await startWarmupCommand();
 
-  const [address, port] = config.bind_address.split(':');
   const stopWorkspaceReaper = startWorkspaceReaper();
-  const server = app.listen(Number(port), address, () => {
+  const server = app.listen(config.bind_port, config.bind_host, () => {
     logger.info({ address: config.bind_address }, 'Sandbox API started');
   });
   let shuttingDown = false;

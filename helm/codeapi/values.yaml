@@ -242,6 +242,8 @@ workerSandbox:
   # Sandbox configuration (NsJail-based, uses SANDBOX_* env vars)
   sandbox:
     port: 2000
+    # Use :: for IPv6-only/dual-stack clusters; keep 0.0.0.0 for IPv4-only.
+    bindHost: "0.0.0.0"
     maxProcessCount: 100
     runCpuTime: 15000
     runTimeout: 15000

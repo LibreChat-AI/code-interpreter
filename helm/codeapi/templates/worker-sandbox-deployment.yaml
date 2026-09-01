@@ -288,6 +288,8 @@ spec:
               value: "INFO"
             - name: SANDBOX_PACKAGES_DIRECTORY
               value: "/pkgs"
+            - name: SANDBOX_BIND_HOST
+              value: {{ .Values.workerSandbox.sandbox.bindHost | default "0.0.0.0" | quote }}
             - name: SANDBOX_MAX_PROCESS_COUNT
               value: {{ .Values.workerSandbox.sandbox.maxProcessCount | quote }}
             - name: SANDBOX_RUN_CPU_TIME
