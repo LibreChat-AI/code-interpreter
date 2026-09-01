@@ -1560,6 +1560,69 @@ describe('RedisBridgeStore', () => {
     ).toHaveLength(0);
   });
 
+  test('atomically rejects a fulfillment committed after its deadline', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'late-fulfillment-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: [],
+      },
+    });
+    const deadlineAtMs = Date.now() + 250;
+    const completion = store.dispatch({
+      workerId: 'late-fulfillment-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      runtimeSessionId: 'rt-late-fulfillment',
+      deadlineAtMs,
+      signal: new AbortController().signal,
+    });
+    const assignment = await store.lease(
+      'late-fulfillment-worker',
+      incarnationId,
+      1_000,
+    );
+    await store.acknowledgeLease(
+      'late-fulfillment-worker',
+      incarnationId,
+      assignment?.assignmentId ?? '',
+      assignment?.generation ?? 0,
+      assignment?.leaseToken ?? '',
+    );
+    redis.eval = (async (...args: Parameters<Redis['eval']>) => {
+      if (
+        String(args[0]).includes("local existing = redis.call('GET', KEYS[2])")
+      ) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.max(0, deadlineAtMs - Date.now() + 25)),
+        );
+      }
+      return redisEval(...args);
+    }) as Redis['eval'];
+
+    await expect(
+      store.settle('late-fulfillment-worker', assignment?.assignmentId ?? '', {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        generation: assignment?.generation ?? 0,
+        leaseToken: assignment?.leaseToken ?? '',
+        incarnationId,
+        status: 'fulfilled',
+        result: {
+          language: 'bash',
+          version: '5.2.0',
+          session_id: 'run-late-fulfillment',
+          files: [],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+    await expect(completion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
   test('releases the worker lock when generation allocation fails', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,

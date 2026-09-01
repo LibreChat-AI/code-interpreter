@@ -7,6 +7,7 @@ import type { CodeBridgeAssignment, CodeBridgeSettlement } from './store';
 
 import {
   BRIDGE_PROTOCOL_VERSION,
+  isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
 } from '../../../packages/code/src/protocol';
 import { connection } from '../queue';
@@ -110,22 +111,7 @@ router.post(
       typeof registration.workerId !== 'string' ||
       !validWorkerId(registration.workerId) ||
       !validIncarnationId(registration.incarnationId) ||
-      !isRecord(registration.capabilities) ||
-      typeof registration.capabilities.statefulWorkspace !== 'boolean' ||
-      typeof registration.capabilities.sandboxProfile !== 'string' ||
-      registration.capabilities.sandboxProfile.trim().length === 0 ||
-      registration.capabilities.sandboxProfile.length > 128 ||
-      !Array.isArray(registration.capabilities.runtimes) ||
-      registration.capabilities.runtimes.length > 32 ||
-      !registration.capabilities.runtimes.every(
-        (runtime) =>
-          typeof runtime === 'string' &&
-          runtime.length > 0 &&
-          runtime.length <= 64,
-      ) ||
-      (registration.capabilities.policyDigest !== undefined &&
-        (typeof registration.capabilities.policyDigest !== 'string' ||
-          !/^[a-f0-9]{64}$/.test(registration.capabilities.policyDigest)))
+      !isValidBridgeWorkerCapabilities(registration.capabilities)
     ) {
       res.status(400).json({ error: 'Invalid bridge worker registration' });
       return;

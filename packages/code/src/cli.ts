@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { BridgeWorker } from './worker.js';
-import { isValidBridgeWorkerId } from './protocol.js';
+import {
+  isValidBridgeWorkerCapabilities,
+  isValidBridgeWorkerId,
+} from './protocol.js';
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -39,17 +42,23 @@ if (!isValidBridgeWorkerId(workerId)) {
     'LIBRECHAT_CODE_WORKER_ID must match the bridge worker ID format',
   );
 }
+const capabilities = {
+  statefulWorkspace,
+  sandboxProfile: process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ?? 'nsjail',
+  runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
+  policyDigest: createHash('sha256').update(policy).digest('hex'),
+};
+if (!isValidBridgeWorkerCapabilities(capabilities)) {
+  throw new Error(
+    'LIBRECHAT_CODE_SANDBOX_PROFILE or LIBRECHAT_CODE_RUNTIMES is invalid',
+  );
+}
 const worker = new BridgeWorker({
   codeApiUrl: required('LIBRECHAT_CODE_URL'),
   token: required('LIBRECHAT_CODE_WORKER_TOKEN'),
   workerId,
   sandboxEndpoint,
-  capabilities: {
-    statefulWorkspace,
-    sandboxProfile: process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ?? 'nsjail',
-    runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
-    policyDigest: createHash('sha256').update(policy).digest('hex'),
-  },
+  capabilities,
   onError: (error) => {
     const message = error instanceof Error ? error.message : 'unknown bridge error';
     process.stderr.write(`librechat-code: reconnecting after ${message}\n`);

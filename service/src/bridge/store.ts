@@ -105,6 +105,10 @@ function settlementKey(assignmentId: string): string {
   return `${PREFIX}:assignment:${assignmentId}:settlement`;
 }
 
+function assignmentDeadlineKey(assignmentId: string): string {
+  return `${PREFIX}:assignment:${assignmentId}:deadline`;
+}
+
 function cancellationKey(assignmentId: string): string {
   return `${PREFIX}:assignment:${assignmentId}:cancelled`;
 }
@@ -800,6 +804,7 @@ export class RedisBridgeStore {
       settlementKey(assignmentId),
       leaseClaimKey(workerId, assignment.incarnationId),
       leaseAckKey(workerId, assignment.incarnationId),
+      assignmentDeadlineKey(assignmentId),
     ];
     if (assignment.runtimeSessionId !== undefined) {
       settlementKeys.push(
@@ -813,10 +818,11 @@ export class RedisBridgeStore {
       '  return -1',
       'end',
       'if redis.call(\'EXISTS\', KEYS[1]) == 0 then return 0 end',
-      'if #KEYS == 5 and redis.call(\'GET\', KEYS[5]) ~= ARGV[3] then return -2 end',
+      'if #KEYS == 6 and redis.call(\'GET\', KEYS[6]) ~= ARGV[3] then return -2 end',
+      'if ARGV[4] ~= "rejected" and redis.call(\'EXISTS\', KEYS[5]) == 0 then return -3 end',
       'redis.call(\'SET\', KEYS[2], ARGV[1], \"EX\", ARGV[2])',
       'if redis.call(\'GET\', KEYS[3]) == ARGV[3] then redis.call(\'DEL\', KEYS[3], KEYS[4]) end',
-      'if #KEYS == 5 and ARGV[4] == \"rejected\" then redis.call(\'DEL\', KEYS[5]) end',
+      'if #KEYS == 6 and ARGV[4] == \"rejected\" then redis.call(\'DEL\', KEYS[6]) end',
       'return 1',
     ].join('\n');
     const accepted = Number(
@@ -844,6 +850,12 @@ export class RedisBridgeStore {
       throw new BridgeStoreError(
         'WORKSPACE_QUARANTINED',
         'Bridge workspace in-flight marker was lost before settlement',
+      );
+    }
+    if (accepted === -3) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_EXPIRED',
+        'Bridge assignment expired before settlement was committed',
       );
     }
     if (accepted !== 1 && accepted !== 2) {
@@ -1068,12 +1080,13 @@ export class RedisBridgeStore {
   ): Promise<boolean> {
     const script = [
       'if redis.call(\'GET\', KEYS[1]) ~= ARGV[1] then return 0 end',
-      'if #KEYS == 5 and redis.call(\'EXISTS\', KEYS[5]) == 1 then return -1 end',
+      'if #KEYS == 6 and redis.call(\'EXISTS\', KEYS[6]) == 1 then return -1 end',
       'redis.call(\'SET\', KEYS[2], ARGV[2], \"EX\", ARGV[3])',
       'redis.call(\'RPUSH\', KEYS[3], ARGV[4])',
       'redis.call(\'EXPIRE\', KEYS[3], ARGV[3])',
       'redis.call(\'SET\', KEYS[4], ARGV[1], \"PX\", ARGV[5])',
-      'if #KEYS == 5 then redis.call(\'SET\', KEYS[5], ARGV[4]) end',
+      'redis.call(\'SET\', KEYS[5], "1", \"PX\", ARGV[6])',
+      'if #KEYS == 6 then redis.call(\'SET\', KEYS[6], ARGV[4]) end',
       'return 1',
     ].join('\n');
     const keys = [
@@ -1081,6 +1094,7 @@ export class RedisBridgeStore {
       assignmentKey(assignment.assignmentId),
       queueKey(assignment.workerId, assignment.incarnationId),
       lockIncarnationKey(assignment.workerId),
+      assignmentDeadlineKey(assignment.assignmentId),
     ];
     if (assignment.runtimeSessionId !== undefined) {
       keys.push(
@@ -1099,6 +1113,7 @@ export class RedisBridgeStore {
       String(ttlSeconds),
       assignment.assignmentId,
       String(ttlSeconds * 1000),
+      String(Math.max(1, Date.parse(assignment.expiresAt) - Date.now())),
     );
     if (Number(result) === -1) {
       throw new BridgeStoreError(
