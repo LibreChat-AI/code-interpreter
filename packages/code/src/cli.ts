@@ -8,6 +8,10 @@ import {
   saveBridgeIdentity,
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
+import {
+  isValidBridgeWorkerCapabilities,
+  isValidBridgeWorkerId,
+} from './protocol.js';
 
 function required(name: string, value = process.env[name]): string {
   const normalized = value?.trim();
@@ -47,8 +51,7 @@ async function pair(args: string[]): Promise<void> {
     `Paired worker ${workerId}. Identity saved to ${identityPath}\n`,
   );
 }
-
-async function run(): Promise<void> {
+async function run(runtimeSessionId?: string): Promise<void> {
   const configuredWorkerId = process.env.LIBRECHAT_CODE_WORKER_ID?.trim();
   const configuredIdentityPath = process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
   const configuredToken = process.env.LIBRECHAT_CODE_WORKER_TOKEN?.trim();
@@ -64,6 +67,11 @@ async function run(): Promise<void> {
     'LIBRECHAT_CODE_WORKER_ID',
     configuredWorkerId ?? pairedIdentity?.workerId,
   );
+  if (!isValidBridgeWorkerId(workerId)) {
+    throw new Error(
+      'LIBRECHAT_CODE_WORKER_ID must match the bridge worker ID format',
+    );
+  }
   if (pairedIdentity && pairedIdentity.workerId !== workerId) {
     throw new Error(
       `Identity belongs to ${pairedIdentity.workerId}, not configured worker ${workerId}`,
@@ -92,6 +100,17 @@ async function run(): Promise<void> {
         expiresAt: pairedIdentity.expiresAt,
       }
     : undefined;
+  const capabilities = {
+    statefulWorkspace,
+    sandboxProfile: process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ?? 'nsjail',
+    runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
+    policyDigest: createHash('sha256').update(policy).digest('hex'),
+  };
+  if (!isValidBridgeWorkerCapabilities(capabilities)) {
+    throw new Error(
+      'LIBRECHAT_CODE_SANDBOX_PROFILE or LIBRECHAT_CODE_RUNTIMES is invalid',
+    );
+  }
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
   process.once('SIGTERM', () => controller.abort());
@@ -101,12 +120,7 @@ async function run(): Promise<void> {
     identity: workerIdentity,
     workerId,
     sandboxEndpoint,
-    capabilities: {
-      statefulWorkspace,
-      sandboxProfile: process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ?? 'nsjail',
-      runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
-      policyDigest: createHash('sha256').update(policy).digest('hex'),
-    },
+    capabilities,
     onIdentityChange:
       pairedIdentity && identityPath
         ? async (identity) => {
@@ -123,6 +137,15 @@ async function run(): Promise<void> {
       process.stderr.write(`librechat-code: reconnecting after ${message}\n`);
     },
   });
+  if (runtimeSessionId !== undefined) {
+    await worker.refreshCredential(controller.signal);
+    await worker.register(controller.signal);
+    await worker.resetWorkspace(runtimeSessionId, controller.signal);
+    process.stdout.write(
+      `librechat-code: reset acknowledged for ${runtimeSessionId}\n`,
+    );
+    return;
+  }
   await worker.run(controller.signal);
 }
 
@@ -132,12 +155,21 @@ async function main(): Promise<void> {
     await pair(args);
     return;
   }
+  if (args[0] === 'reset-workspace') {
+    const runtimeSessionId = args[1]?.trim();
+    if (!runtimeSessionId) {
+      throw new Error(
+        'Usage: librechat-code reset-workspace <runtime-session-id>',
+      );
+    }
+    await run(runtimeSessionId);
+    return;
+  }
   if (args[0] && args[0] !== 'run') {
     throw new Error(`Unknown command: ${args[0]}`);
   }
   await run();
 }
-
 main().catch((error: Error) => {
   process.stderr.write(`librechat-code: ${error.message}\n`);
   process.exitCode = 1;

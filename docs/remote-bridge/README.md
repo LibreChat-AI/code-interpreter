@@ -134,8 +134,30 @@ execution.
 - Each assignment has an absolute deadline, generation, and random lease token.
 - Settlements with the wrong worker, generation, token, or expired deadline are
   rejected.
+- Assignments are queued for the exact registered worker incarnation, so an
+  outstanding poll from a replaced process cannot consume replacement work.
+- Assignment records and the worker lock live through the full configured job
+  deadline plus cleanup grace.
+- Ambiguous settlement delivery is retried through the assignment deadline. If
+  a stateful settlement remains ambiguous, the CLI exits and the affected local
+  session runner must be reset or discarded before restart.
+- Enqueueing stateful work atomically creates a durable in-flight workspace
+  marker. A definite rejection or successful result finalization clears it;
+  worker or VM loss leaves it in place so later reuse fails closed. Settlement
+  receipts outlive assignment cleanup briefly so retries are idempotent and
+  cannot recreate a cleared marker.
+- To recover a fenced session, stop the normal worker process and discard/reset
+  that session's local sandbox workspace. While it remains stopped, run
+  `librechat-code reset-workspace <runtime-session-id>` with the same worker
+  configuration; the command temporarily registers its own incarnation and
+  exits. Start the normal worker only after the reset command succeeds. Code API
+  refuses the acknowledgement while work is active or when it is not made by
+  the currently registered incarnation.
 - Request cancellation is polled by the worker and aborts the local sandbox
   request.
+- A leased assignment remains in a Redis-backed delivery claim until the worker
+  explicitly acknowledges it; reconnecting before acknowledgement redelivers
+  the same fenced assignment instead of losing it after an HTTP disconnect.
 - The sandbox receives the stable runtime session ID separately from the lease;
   workspace state belongs to that session, not to a transient assignment.
 

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { env } from './config';
 import {
-  validateApiHardenedConfig,
   validateApiBridgePolicy,
+  validateApiHardenedConfig,
   validateApiSandboxBackendPolicy,
   validateEgressGatewayHardenedConfig,
   validateExecutionProfilePolicy,
@@ -373,6 +373,7 @@ describe('sandbox backend policy', () => {
     env.SANDBOX_BACKEND = 'http';
     env.HARDENED_SANDBOX_MODE = true;
     env.BRIDGE_AUTH_MODE = 'static';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
     env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
     expect(() => validateApiBridgePolicy()).toThrow(
       'CODEAPI_BRIDGE_AUTH_MODE=paired',
@@ -383,6 +384,79 @@ describe('sandbox backend policy', () => {
 
     env.BRIDGE_TOKEN = 'guessable';
     expect(() => validateApiBridgePolicy()).toThrow('at least 32 bytes');
+  });
+
+  test('API bridge policy requires a strong token in hardened mode', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = 'short-token';
+    env.PTC_MODE = 'replay';
+    env.HARDENED_SANDBOX_MODE = true;
+    env.BRIDGE_AUTH_MODE = 'paired';
+
+    expect(() => validateApiBridgePolicy()).toThrow('at least 32 bytes');
+
+    env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
+    expect(() => validateApiBridgePolicy()).not.toThrow();
+  });
+
+  test('API bridge policy rejects worker IDs the router cannot accept', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering/vm';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.PTC_MODE = 'replay';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'must match the bridge worker ID format',
+    );
+  });
+
+  test('API bridge policy rejects whitespace-padded tokens', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = ' padded-development-bridge-token ';
+    env.PTC_MODE = 'replay';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'must not contain surrounding whitespace',
+    );
+  });
+
+  test('paired API routes require a configured worker on every backend', () => {
+    env.SANDBOX_BACKEND = 'http';
+    env.BRIDGE_AUTH_MODE = 'paired';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.BRIDGE_WORKER_ID = '';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'CODEAPI_BRIDGE_WORKER_ID',
+    );
+  });
+
+  test('hardened API routes reject padded bridge tokens on HTTP backends', () => {
+    env.SANDBOX_BACKEND = 'http';
+    env.HARDENED_SANDBOX_MODE = true;
+    env.BRIDGE_AUTH_MODE = 'paired';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = ' strong-remote-bridge-token-32-bytes ';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'must not contain surrounding whitespace',
+    );
+  });
+
+  test('remote bridge requires a positive finite job timeout', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.PTC_MODE = 'replay';
+
+    env.JOB_TIMEOUT = -1;
+    expect(() => validateApiBridgePolicy()).toThrow('JOB_TIMEOUT');
+    env.JOB_TIMEOUT = Number.POSITIVE_INFINITY;
+    expect(() => validateApiBridgePolicy()).toThrow('JOB_TIMEOUT');
+    env.JOB_TIMEOUT = 300_000;
+    expect(() => validateApiBridgePolicy()).not.toThrow();
   });
 
   test('rejects blocking PTC on the lambda backend', () => {

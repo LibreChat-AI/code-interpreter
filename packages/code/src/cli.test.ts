@@ -1,0 +1,49 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import test from 'node:test';
+
+test('CLI rejects an invalid worker ID before entering the run loop', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering/vm',
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /LIBRECHAT_CODE_WORKER_ID must match the bridge worker ID format/,
+  );
+});
+
+test('CLI rejects invalid advertised capabilities before registration', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_SANDBOX_PROFILE: '',
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /LIBRECHAT_CODE_SANDBOX_PROFILE or LIBRECHAT_CODE_RUNTIMES is invalid/,
+  );
+});
