@@ -9,6 +9,7 @@ import type {
 } from '../../../packages/code/src/protocol';
 
 import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import type { BridgeWorkerBinding } from './pairing';
 
 const PREFIX = 'codeapi:bridge:v1';
 const POLL_INTERVAL_MS = 100;
@@ -28,6 +29,7 @@ export class BridgeStoreError extends Error {
   constructor(
     public readonly code:
       | 'WORKER_OFFLINE'
+      | 'WORKER_UNAUTHORIZED'
       | 'WORKER_BUSY'
       | 'ASSIGNMENT_EXPIRED'
       | 'ASSIGNMENT_FENCED'
@@ -45,10 +47,21 @@ export class BridgeStoreError extends Error {
 
 interface StoredAssignment extends CodeBridgeAssignment {
   leaseTokenHash: string;
+  workerIdentityId?: string;
+}
+
+export interface RegisteredBridgeWorker extends BridgeWorkerRegistration {
+  binding?: BridgeWorkerBinding;
+  credentialId?: string;
+  identityId?: string;
 }
 
 function workerKey(workerId: string): string {
   return `${PREFIX}:worker:${encodeURIComponent(workerId)}`;
+}
+
+function workerStableIdentityKey(workerId: string): string {
+  return `${PREFIX}:stable-identity:${workerId}`;
 }
 
 function workerIncarnationKey(workerId: string): string {
@@ -221,14 +234,36 @@ export class RedisBridgeStore {
   }
 
   async register(
-    registration: BridgeWorkerRegistration,
-    authorization?: { identityId: string; pairingGeneration: number },
+    registration: RegisteredBridgeWorker,
+    authorization?: string | {
+      identityId?: string;
+      pairingGeneration?: number;
+      activeCredentialId?: string;
+    },
   ): Promise<void> {
+    const authorizationObject =
+      typeof authorization === 'object' ? authorization : undefined;
+    const expectedActiveCredentialId =
+      typeof authorization === 'string'
+        ? authorization
+        : authorizationObject?.activeCredentialId;
     const script = [
       'if ARGV[5] ~= "" then',
       '  local pairingGeneration = redis.call(\'GET\', KEYS[7]) or "0"',
-      '  if pairingGeneration ~= ARGV[5] then return -4 end',
-      '  if redis.call(\'GET\', KEYS[8]) ~= ARGV[6] then return -4 end',
+      '  if pairingGeneration ~= ARGV[5] then return -5 end',
+      '  if ARGV[6] ~= "" then',
+      '    if redis.call(\'GET\', KEYS[8]) ~= ARGV[6] then return -5 end',
+      '  elseif ARGV[7] ~= "" and redis.call(\'GET\', KEYS[9]) ~= ARGV[7] then return -5',
+      '  end',
+      'end',
+      'if ARGV[8] ~= "" then',
+      '  local stableIdentity = redis.call(\'GET\', KEYS[8])',
+      '  if stableIdentity and stableIdentity ~= ARGV[8] then return -4 end',
+      '  if not stableIdentity then',
+      '    if ARGV[7] ~= "" and redis.call(\'GET\', KEYS[9]) ~= ARGV[7] then return -4 end',
+      '    redis.call(\'SET\', KEYS[8], ARGV[8], "EX", ARGV[3])',
+      '  end',
+      'elseif ARGV[7] ~= "" and redis.call(\'GET\', KEYS[9]) ~= ARGV[7] then return -4',
       'end',
       'if redis.call(\'EXISTS\', KEYS[3]) == 1 then return -2 end',
       'if redis.call(\'EXISTS\', KEYS[2]) == 1 then return -1 end',
@@ -251,7 +286,7 @@ export class RedisBridgeStore {
       await boundedCommand(
         this.redis.eval(
           script,
-          8,
+          9,
           workerKey(registration.workerId),
           incarnationFenceKey(registration.workerId, registration.incarnationId),
           quarantineKey(registration.workerId, registration.incarnationId),
@@ -260,12 +295,17 @@ export class RedisBridgeStore {
           lockIncarnationKey(registration.workerId),
           `${PREFIX}:pairing-generation:${registration.workerId}`,
           `${PREFIX}:stable-identity:${registration.workerId}`,
+          `${PREFIX}:identity:${registration.workerId}`,
           registration.incarnationId,
           JSON.stringify(registration),
           String(this.workerTtlSeconds),
           `${PREFIX}:worker:${encodeURIComponent(registration.workerId)}:incarnation:`,
-          authorization == null ? '' : String(authorization.pairingGeneration),
-          authorization?.identityId ?? '',
+          authorizationObject?.pairingGeneration == null
+            ? ''
+            : String(authorizationObject.pairingGeneration),
+          authorizationObject?.identityId ?? '',
+          expectedActiveCredentialId ?? '',
+          registration.identityId ?? '',
         ),
         this.redisCommandTimeoutMs,
         'Bridge worker registration',
@@ -291,6 +331,12 @@ export class RedisBridgeStore {
     }
     if (result === -4) {
       throw new BridgeStoreError(
+        'WORKER_UNAUTHORIZED',
+        'Bridge worker authorization was revoked before registration completed',
+      );
+    }
+    if (result === -5) {
+      throw new BridgeStoreError(
         'WORKER_FENCED',
         'Bridge worker authorization was revoked before registration completed',
       );
@@ -299,6 +345,8 @@ export class RedisBridgeStore {
 
   async dispatch(args: {
     workerId: string;
+    tenantId?: string;
+    requireTenantBinding?: boolean;
     body: t.PayloadBody;
     headers: Record<string, string>;
     runtimeSessionId?: string;
@@ -318,6 +366,18 @@ export class RedisBridgeStore {
       throw new BridgeStoreError(
         'WORKER_OFFLINE',
         `Bridge worker ${args.workerId} is offline`,
+      );
+    }
+    if (
+      (args.requireTenantBinding === true && registration.binding == null) ||
+      (registration.binding != null &&
+        (args.tenantId == null ||
+          args.tenantId.length === 0 ||
+          registration.binding.tenantId !== args.tenantId))
+    ) {
+      throw new BridgeStoreError(
+        'WORKER_UNAUTHORIZED',
+        `Bridge worker ${args.workerId} is not authorized for this tenant`,
       );
     }
     if (
@@ -384,6 +444,9 @@ export class RedisBridgeStore {
         generation,
         leaseToken,
         leaseTokenHash: tokenHash(leaseToken),
+        ...(registration.identityId != null
+          ? { workerIdentityId: registration.identityId }
+          : {}),
         expiresAt: new Date(args.deadlineAtMs).toISOString(),
         runtimeSessionId: args.runtimeSessionId,
         request: {
@@ -477,6 +540,7 @@ export class RedisBridgeStore {
     incarnationId: string,
     waitMs: number,
     signal?: AbortSignal,
+    identityId?: string,
   ): Promise<CodeBridgeAssignment | undefined> {
     const deadline = Date.now() + waitMs;
     let firstPoll = true;
@@ -488,7 +552,7 @@ export class RedisBridgeStore {
       let assignmentId: string | null;
       try {
         assignmentId = await this.leaseCommand(
-          this.claimOrPopLease(workerId, incarnationId),
+          this.claimOrPopLease(workerId, incarnationId, identityId),
           signal,
           'Bridge lease claim',
         );
@@ -536,6 +600,14 @@ export class RedisBridgeStore {
             'Bridge worker incarnation was replaced',
           );
         }
+        if (assignment.workerIdentityId !== identityId) {
+          await this.leaseCommand(
+            this.discardLeaseClaim(workerId, incarnationId, assignmentId),
+            signal,
+            'Bridge unauthorized lease discard',
+          );
+          continue;
+        }
         if (Date.parse(assignment.expiresAt) <= Date.now()) {
           const acknowledged =
             (await this.leaseCommand(
@@ -561,7 +633,11 @@ export class RedisBridgeStore {
           await this.returnLease(assignment);
           return undefined;
         }
-        const { leaseTokenHash: _leaseTokenHash, ...wireAssignment } = assignment;
+        const {
+          leaseTokenHash: _leaseTokenHash,
+          workerIdentityId: _workerIdentityId,
+          ...wireAssignment
+        } = assignment;
         return {
           ...wireAssignment,
           remainingMs: Math.max(
@@ -643,9 +719,15 @@ export class RedisBridgeStore {
   private async claimOrPopLease(
     workerId: string,
     incarnationId: string,
+    identityId?: string,
   ): Promise<string | null> {
     const result = await this.redis.eval(
       [
+        "if ARGV[1] ~= '' then",
+        "  if redis.call('GET', KEYS[3]) ~= ARGV[1] then return nil end",
+        "elseif redis.call('EXISTS', KEYS[3]) == 1 then",
+        '  return nil',
+        'end',
         "local claimed = redis.call('GET', KEYS[2])",
         'if claimed then return claimed end',
         "local ttl = redis.call('TTL', KEYS[1])",
@@ -654,9 +736,11 @@ export class RedisBridgeStore {
         "redis.call('SET', KEYS[2], assignment, 'EX', math.max(1, ttl))",
         'return assignment',
       ].join('\n'),
-      2,
+      3,
       queueKey(workerId, incarnationId),
       leaseClaimKey(workerId, incarnationId),
+      workerStableIdentityKey(workerId),
+      identityId ?? '',
     );
     return result == null ? null : String(result);
   }
@@ -760,6 +844,7 @@ export class RedisBridgeStore {
     assignmentId: string,
     settlement: CodeBridgeSettlement,
     signal?: AbortSignal,
+    identityId?: string,
   ): Promise<void> {
     const serializedSettlement = JSON.stringify(settlement);
     const existingSettlement = await this.leaseCommand(
@@ -800,7 +885,8 @@ export class RedisBridgeStore {
       settlement.incarnationId !== assignment.incarnationId ||
       registration?.incarnationId !== settlement.incarnationId ||
       settlement.generation !== assignment.generation ||
-      tokenHash(settlement.leaseToken) !== assignment.leaseTokenHash
+      tokenHash(settlement.leaseToken) !== assignment.leaseTokenHash ||
+      assignment.workerIdentityId !== identityId
     ) {
       throw new BridgeStoreError(
         'ASSIGNMENT_FENCED',
@@ -829,6 +915,11 @@ export class RedisBridgeStore {
         workspaceQuarantineKey(workerId, assignment.runtimeSessionId),
       );
     }
+    const hasWorkspace = assignment.runtimeSessionId !== undefined;
+    settlementKeys.push(
+      `${PREFIX}:stable-identity:${workerId}`,
+      workerIncarnationKey(workerId),
+    );
     const script = [
       'local existing = redis.call(\'GET\', KEYS[2])',
       'if existing then',
@@ -836,11 +927,17 @@ export class RedisBridgeStore {
       '  return -1',
       'end',
       'if redis.call(\'EXISTS\', KEYS[1]) == 0 then return 0 end',
-      'if #KEYS == 6 and redis.call(\'GET\', KEYS[6]) ~= ARGV[3] then return -2 end',
+      'if ARGV[6] == "1" and redis.call(\'GET\', KEYS[6]) ~= ARGV[3] then return -2 end',
       'if ARGV[4] ~= "rejected" and redis.call(\'EXISTS\', KEYS[5]) == 0 then return -3 end',
+      'local stableIdentityKey = KEYS[#KEYS - 1]',
+      'if ARGV[5] ~= "" then',
+      '  if redis.call(\'GET\', stableIdentityKey) ~= ARGV[5] then return -4 end',
+      'elseif redis.call(\'EXISTS\', stableIdentityKey) == 1 then return -4',
+      'end',
+      'if redis.call(\'GET\', KEYS[#KEYS]) ~= ARGV[7] then return -4 end',
       'redis.call(\'SET\', KEYS[2], ARGV[1], \"EX\", ARGV[2])',
       'if redis.call(\'GET\', KEYS[3]) == ARGV[3] then redis.call(\'DEL\', KEYS[3], KEYS[4]) end',
-      'if #KEYS == 6 and ARGV[4] == \"rejected\" then redis.call(\'DEL\', KEYS[6]) end',
+      'if ARGV[6] == "1" and ARGV[4] == "rejected" then redis.call(\'DEL\', KEYS[6]) end',
       'return 1',
     ].join('\n');
     const accepted = Number(
@@ -853,6 +950,9 @@ export class RedisBridgeStore {
           String(ttlSeconds),
           assignmentId,
           settlement.status,
+          identityId ?? '',
+          hasWorkspace ? '1' : '0',
+          settlement.incarnationId,
         ),
         signal,
         'Bridge settlement commit',
@@ -874,6 +974,12 @@ export class RedisBridgeStore {
       throw new BridgeStoreError(
         'ASSIGNMENT_EXPIRED',
         'Bridge assignment expired before settlement was committed',
+      );
+    }
+    if (accepted === -4) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_FENCED',
+        'Bridge assignment owner changed before settlement was committed',
       );
     }
     if (accepted !== 1 && accepted !== 2) {
@@ -992,9 +1098,9 @@ export class RedisBridgeStore {
 
   private async registration(
     workerId: string,
-  ): Promise<BridgeWorkerRegistration | undefined> {
+  ): Promise<RegisteredBridgeWorker | undefined> {
     const raw = await this.redis.get(workerKey(workerId));
-    return raw == null ? undefined : (JSON.parse(raw) as BridgeWorkerRegistration);
+    return raw == null ? undefined : (JSON.parse(raw) as RegisteredBridgeWorker);
   }
 
   private assertDispatchActive(

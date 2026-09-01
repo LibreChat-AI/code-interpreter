@@ -2,8 +2,11 @@ import { describe, expect, test } from 'bun:test';
 import {
   checkExecutionProfileExpectation,
   queueNamesForExecutionProfile,
+  queueNameForExecution,
   resolveExecutionProfile,
   resolveExecutionProfileSource,
+  resolveQueuedSandboxBackend,
+  validateQueuedSandboxBackend,
   validateQueuedExecutionProfile,
 } from './execution-profile';
 
@@ -55,6 +58,42 @@ describe('execution profile queue isolation', () => {
       other: 'stateful-other-queue',
     });
   });
+
+  test('routes a persisted remote bridge replay to the bridge queue on a lambda API', () => {
+    expect(
+      queueNameForExecution(
+        'python',
+        'stateful',
+        'explicit',
+        'remote-bridge',
+      ),
+    ).toBe('remote-bridge-python-queue');
+  });
+
+  test('isolates outbound bridge jobs from Lambda consumers', () => {
+    expect(
+      queueNamesForExecutionProfile('stateful', 'explicit', 'remote-bridge'),
+    ).toEqual({
+      python: 'remote-bridge-python-queue',
+      other: 'remote-bridge-other-queue',
+    });
+    expect(
+      queueNamesForExecutionProfile('stateful', 'explicit', 'lambda-microvm'),
+    ).toEqual({
+      python: 'stateful-python-queue',
+      other: 'stateful-other-queue',
+    });
+  });
+
+  test('labels API-only stateful jobs with their Lambda worker backend', () => {
+    expect(resolveQueuedSandboxBackend('stateful', 'http')).toBe('lambda-microvm');
+    expect(resolveQueuedSandboxBackend('default', 'http', 'explicit')).toBe('http');
+    expect(resolveQueuedSandboxBackend('stateful', 'remote-bridge')).toBe('remote-bridge');
+  });
+
+  test('leaves the backend unfenced for inferred stateless legacy queues', () => {
+    expect(resolveQueuedSandboxBackend('default', 'http', 'inferred')).toBeUndefined();
+  });
 });
 
 describe('execution profile request assertion', () => {
@@ -105,5 +144,31 @@ describe('queued execution profile validation', () => {
     expect(() => validateQueuedExecutionProfile('stateful', 'default')).toThrow(
       'Queued job targets the stateful execution profile, but worker serves default',
     );
+  });
+});
+
+describe('queued sandbox backend validation', () => {
+  test('accepts matching and legacy jobs', () => {
+    expect(() =>
+      validateQueuedSandboxBackend('remote-bridge', 'remote-bridge'),
+    ).not.toThrow();
+    expect(() => validateQueuedSandboxBackend(undefined, 'http')).not.toThrow();
+    expect(() =>
+      validateQueuedSandboxBackend(undefined, 'remote-bridge', 'legacy-bridge-worker'),
+    ).not.toThrow();
+  });
+
+  test('rejects invalid and cross-backend jobs', () => {
+    expect(() => validateQueuedSandboxBackend('invalid', 'http')).toThrow(
+      'Queued job has invalid sandbox backend',
+    );
+    expect(() =>
+      validateQueuedSandboxBackend('remote-bridge', 'lambda-microvm'),
+    ).toThrow(
+      'Queued job targets the remote-bridge sandbox backend, but worker serves lambda-microvm',
+    );
+    expect(() =>
+      validateQueuedSandboxBackend(undefined, 'lambda-microvm', 'legacy-bridge-worker'),
+    ).toThrow('Legacy queued bridge job cannot run on the lambda-microvm sandbox backend');
   });
 });

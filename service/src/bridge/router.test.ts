@@ -25,6 +25,171 @@ afterEach(async () => {
 });
 
 describe('paired bridge HTTP API', () => {
+  test('rejects a malformed optional binding for a configured worker', async () => {
+    const app = express();
+    app.use(json());
+    app.use(
+      '/v1/bridge',
+      createBridgeRouter({
+        store: new RedisBridgeStore(redis),
+        pairings: new RedisBridgePairingStore(redis),
+        authMode: 'paired',
+        adminToken: 'strong-administrator-bootstrap-token',
+        configuredWorkerId: 'vm-1',
+      }),
+    );
+    server = createServer(app);
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') {
+      throw new Error('Expected TCP listener');
+    }
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/v1/bridge/pairings`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer strong-administrator-bootstrap-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          workerId: 'vm-1',
+          binding: { tenantId: 'tenant-1', principal: { type: 'user' } },
+        }),
+      },
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  test('requires and persists a trusted principal binding for dynamic workers', async () => {
+    const store = new RedisBridgeStore(redis);
+    const app = express();
+    app.use(json());
+    app.use(
+      '/v1/bridge',
+      createBridgeRouter({
+        store,
+        pairings: new RedisBridgePairingStore(redis),
+        authMode: 'paired',
+        adminToken: 'strong-administrator-bootstrap-token',
+        allowDynamicWorkers: true,
+      }),
+    );
+    server = createServer(app);
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') {
+      throw new Error('Expected TCP listener');
+    }
+    const baseUrl = `http://127.0.0.1:${address.port}/v1/bridge`;
+    const unboundResponse = await fetch(`${baseUrl}/pairings`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer strong-administrator-bootstrap-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ workerId: 'user-vm' }),
+    });
+    expect(unboundResponse.status).toBe(400);
+
+    const binding = {
+      tenantId: 'tenant-1',
+      principal: { type: 'user' as const, id: 'user-1' },
+    };
+    const pairingResponse = await fetch(`${baseUrl}/pairings`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer strong-administrator-bootstrap-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ workerId: 'user-vm', binding }),
+    });
+    const pairing = (await pairingResponse.json()) as { code: string };
+    expect(pairingResponse.status).toBe(200);
+
+    const identity = createBridgeIdentity();
+    const redemptionResponse = await fetch(`${baseUrl}/pairings/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'user-vm',
+        code: pairing.code,
+        publicKey: identity.publicKey,
+      }),
+    });
+    const issued = (await redemptionResponse.json()) as { credential: string };
+    expect(redemptionResponse.status).toBe(200);
+
+    const path = '/v1/bridge/workers/register';
+    const body = JSON.stringify({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'user-vm',
+      incarnationId: 'incarnation-00000001',
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      binding: {
+        tenantId: 'tenant-2',
+        principal: { type: 'user', id: 'attacker-selected-user' },
+      },
+    });
+    const proof = {
+      credential: issued.credential,
+      method: 'POST',
+      path,
+      timestamp: new Date().toISOString(),
+      nonce: 'dynamic-registration-nonce',
+      body,
+    };
+    const registrationResponse = await fetch(
+      `http://127.0.0.1:${address.port}${path}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bridge ${issued.credential}`,
+          'Content-Type': 'application/json',
+          'X-LibreChat-Code-Timestamp': proof.timestamp,
+          'X-LibreChat-Code-Nonce': proof.nonce,
+          'X-LibreChat-Code-Signature': signBridgeRequest(
+            identity.privateKey,
+            proof,
+          ),
+        },
+        body,
+      },
+    );
+    expect(registrationResponse.status).toBe(200);
+    await expect(
+      store.dispatch({
+        workerId: 'user-vm',
+        tenantId: binding.tenantId,
+        requireTenantBinding: true,
+        body: { language: 'bash' } as never,
+        headers: {},
+        runtimeSessionId: 'stateful-session',
+        deadlineAtMs: Date.now() + 1_000,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+
+    await expect(
+      store.dispatch({
+        workerId: 'user-vm',
+        tenantId: 'tenant-2',
+        requireTenantBinding: true,
+        body: { language: 'bash' } as never,
+        headers: {},
+        deadlineAtMs: Date.now() + 1_000,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_UNAUTHORIZED' });
+  });
+
   test('pairs a worker and accepts its proof-of-possession registration', async () => {
     const app = express();
     const store = new RedisBridgeStore(redis);

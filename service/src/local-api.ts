@@ -14,7 +14,7 @@ import bridgeRouter from './bridge';
 import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-error-logger';
 import { executionProfileMiddleware } from './middleware/execution-profile';
 import { localAuth } from './auth/local';
-import { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, connection } from './queue';
+import { pyQueue, otherQueue, connection, closeQueueConnections } from './queue';
 import { setStartupComplete } from './lifecycle';
 // Workers are imported to ensure they're started with the process
 import './workers';
@@ -98,12 +98,7 @@ async function localShutdown(): Promise<void> {
   localShuttingDown = true;
   logger.info('Shutting down local server...');
   try {
-    await Promise.all([
-      pyQueue.close(),
-      otherQueue.close(),
-      pyQueueEvents.close(),
-      otherQueueEvents.close()
-    ]);
+    await closeQueueConnections();
     try {
       await shutdownTelemetry();
     } catch (telemetryError) {

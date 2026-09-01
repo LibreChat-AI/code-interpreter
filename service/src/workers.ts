@@ -17,7 +17,10 @@ import { isSyntheticPrincipalSource } from './auth/synthetic';
 import { withSpan, withTraceContext } from './telemetry';
 import { workerDeadlineFailure } from './worker-error';
 import logger from './logger';
-import { validateQueuedExecutionProfile } from './execution-profile';
+import {
+  validateQueuedExecutionProfile,
+  validateQueuedSandboxBackend,
+} from './execution-profile';
 
 const { INSTANCE_ID } = env;
 const WORKER_ID = `${INSTANCE_ID}-${process.pid}`;
@@ -38,7 +41,7 @@ async function processJob(job: t.ExecuteJob): Promise<t.ExecuteResult> {
 }
 
 async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
-  const { code, payload, isPyPlot } = job.data;
+  const { payload, isPyPlot } = job.data;
   const isSyntheticJob = job.data.isSynthetic === true || isSyntheticPrincipalSource(job.data.principalSource);
   const language = payload?.language ?? 'unknown';
   const endTimer = jobProcessingDuration.startTimer({ language });
@@ -60,6 +63,11 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       throw new Error(`Job timed out after ${env.JOB_TIMEOUT}ms`);
     }
     validateQueuedExecutionProfile(job.data.executionProfile, env.EXECUTION_PROFILE);
+    validateQueuedSandboxBackend(
+      job.data.sandboxBackend,
+      env.SANDBOX_BACKEND,
+      job.data.bridgeWorkerId,
+    );
     let sandboxPayload = payload;
     let executionManifestClaims = job.data.executionManifestClaims;
     let egressGrantToken = job.data.egressGrantToken;
@@ -139,6 +147,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
         deadlineAtMs,
         tenantId: job.data.tenantId,
         canonicalUserId: job.data.canonicalUserId,
+        bridgeWorkerId: job.data.bridgeWorkerId,
         runtimeSessionId: runtimeSession.runtimeSessionId,
         runtimeSessionMode: runtimeSession.runtimeSessionMode,
         /* Stateful backends run this as a commit barrier after user code but

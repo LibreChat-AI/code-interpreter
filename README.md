@@ -37,7 +37,9 @@ Set `CODEAPI_EXECUTION_PROFILE` consistently on an API deployment and its
 workers. The default profile keeps the existing `python-queue` and
 `other-queue`; the stateful profile uses `stateful-python-queue` and
 `stateful-other-queue`. This allows both deployments to share Redis without
-cross-consuming jobs.
+cross-consuming jobs. The `remote-bridge` backend additionally uses
+`remote-bridge-python-queue` and `remote-bridge-other-queue`, fencing attached
+worker jobs from Lambda consumers during rolling deployments.
 
 An existing Lambda MicroVM deployment upgraded from a pre-profile release may
 leave `CODEAPI_EXECUTION_PROFILE` unset for its first binary rollout. An

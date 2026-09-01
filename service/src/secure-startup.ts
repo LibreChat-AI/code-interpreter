@@ -65,11 +65,13 @@ export function validateApiBridgePolicy(): void {
     env.SANDBOX_BACKEND === 'remote-bridge' ||
     env.BRIDGE_AUTH_MODE === 'paired';
   if (bridgeEnabled) {
-    requireValue('CODEAPI_BRIDGE_WORKER_ID', env.BRIDGE_WORKER_ID);
-    if (!isValidBridgeWorkerId(env.BRIDGE_WORKER_ID ?? '')) {
-      throw new SecureStartupConfigError(
-        'CODEAPI_BRIDGE_WORKER_ID must match the bridge worker ID format',
-      );
+    if (!env.BRIDGE_DYNAMIC_WORKERS) {
+      requireValue('CODEAPI_BRIDGE_WORKER_ID', env.BRIDGE_WORKER_ID);
+      if (!isValidBridgeWorkerId(env.BRIDGE_WORKER_ID ?? '')) {
+        throw new SecureStartupConfigError(
+          'CODEAPI_BRIDGE_WORKER_ID must match the bridge worker ID format',
+        );
+      }
     }
     requireValue('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
   }
@@ -144,11 +146,20 @@ export function validateExecutionProfilePolicy(options: {
   }
 }
 
+export function validateApiSandboxBackendPolicy(): void {
+  if (env.BRIDGE_DYNAMIC_WORKERS && env.BRIDGE_AUTH_MODE !== 'paired') {
+    throw new SecureStartupConfigError(
+      'Dynamic remote bridge workers require CODEAPI_BRIDGE_AUTH_MODE=paired',
+    );
+  }
+}
+
 /**
  * Backend-selection policy. Unlike the hardened-mode validators, this runs
  * unconditionally: a misconfigured backend must never half-start.
  */
 export function validateSandboxBackendPolicy(): void {
+  validateApiSandboxBackendPolicy();
   if (env.RUNTIME_SESSION_MODE !== 'stateless' && env.SANDBOX_BACKEND === 'http') {
     throw new SecureStartupConfigError(
       `CODEAPI_RUNTIME_SESSION_MODE=${env.RUNTIME_SESSION_MODE} requires `

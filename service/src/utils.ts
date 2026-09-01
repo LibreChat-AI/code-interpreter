@@ -137,6 +137,7 @@ export function publicExecutionFailure(error: unknown): { status: number; body: 
     const code = backendMatch[1];
     const statuses: Record<string, number> = {
       RUNTIME_SESSION_BUSY: 409,
+      BRIDGE_WORKER_UNAUTHORIZED: 403,
       BRIDGE_WORKER_OFFLINE: 503,
       BRIDGE_WORKER_BUSY: 409,
       BRIDGE_EXECUTION_FAILED: 502,
@@ -151,10 +152,11 @@ export function publicExecutionFailure(error: unknown): { status: number; body: 
     const status = statuses[code] ?? (sessionInputFailure ? 500 : 503);
     const publicMessages: Record<string, string> = {
       RUNTIME_SESSION_BUSY: 'Runtime session is busy',
-      BRIDGE_WORKER_OFFLINE: 'Remote code worker is unavailable',
-      BRIDGE_WORKER_BUSY: 'Remote code worker is busy',
-      BRIDGE_EXECUTION_FAILED: 'Remote code execution failed',
-      BRIDGE_DEADLINE_EXCEEDED: 'Remote code execution deadline exceeded',
+      BRIDGE_WORKER_UNAUTHORIZED: 'Code environment is not authorized for this tenant',
+      BRIDGE_WORKER_OFFLINE: 'Code environment is offline',
+      BRIDGE_WORKER_BUSY: 'Code environment is busy',
+      BRIDGE_EXECUTION_FAILED: 'Code environment execution failed',
+      BRIDGE_DEADLINE_EXCEEDED: 'Code environment execution timed out',
       MICROVM_LAUNCH_FAILED: 'Sandbox launch failed',
       MICROVM_LAUNCH_THROTTLED: 'Sandbox capacity is temporarily unavailable',
       MICROVM_UNHEALTHY: 'Sandbox runtime is unavailable',

@@ -23,6 +23,270 @@ afterEach(async () => {
 });
 
 describe('RedisBridgeStore', () => {
+  test('rejects a registration whose authenticated identity was replaced', async () => {
+    await redis.set(
+      'codeapi:bridge:v1:identity:fenced-worker',
+      'replacement-credential-digest',
+    );
+
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'fenced-worker',
+        incarnationId,
+        credentialId: 'stale-credential-digest',
+        identityId: 'stale-identity',
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: ['bash'],
+        },
+      }, 'stale-credential-digest'),
+    ).rejects.toMatchObject({ code: 'WORKER_UNAUTHORIZED' });
+
+    await expect(
+      redis.get('codeapi:bridge:v1:worker:fenced-worker'),
+    ).resolves.toBeNull();
+  });
+
+  test('accepts registration after a same-identity credential rotation', async () => {
+    await redis.set(
+      'codeapi:bridge:v1:identity:rotating-registration-worker',
+      'new-active-credential-digest',
+    );
+    await redis.set(
+      'codeapi:bridge:v1:stable-identity:rotating-registration-worker',
+      'stable-worker-identity',
+    );
+
+    await expect(
+      store.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'rotating-registration-worker',
+        incarnationId,
+        credentialId: 'old-authenticated-credential-digest',
+        identityId: 'stable-worker-identity',
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: ['bash'],
+        },
+      }, 'old-authenticated-credential-digest'),
+    ).resolves.toBeUndefined();
+  });
+
+  test('rejects a dynamic worker lease outside its bound tenant', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'tenant-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      binding: {
+        tenantId: 'tenant-1',
+        principal: { type: 'user', id: 'user-1' },
+      },
+    });
+
+    await expect(
+      store.dispatch({
+        workerId: 'tenant-worker',
+        tenantId: 'tenant-2',
+        requireTenantBinding: true,
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        deadlineAtMs: Date.now() + 1_000,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_UNAUTHORIZED' });
+  });
+
+  test('does not lease an assignment to a newly rebound worker identity', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'rebound-worker',
+      incarnationId,
+      identityId: 'tenant-a-identity',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      binding: {
+        tenantId: 'tenant-a',
+        principal: { type: 'user', id: 'user-a' },
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'rebound-worker',
+      tenantId: 'tenant-a',
+      requireTenantBinding: true,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+
+    await expect(
+      store.lease(
+        'rebound-worker',
+        incarnationId,
+        1_000,
+        undefined,
+        'tenant-b-identity',
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.lease(
+        'rebound-worker',
+        incarnationId,
+        1_000,
+        undefined,
+        'tenant-a-identity',
+      ),
+    ).resolves.toBeDefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
+  test('a stale identity poll cannot consume work queued for the replacement identity', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'replacement-worker',
+      incarnationId,
+      identityId: 'replacement-identity',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      binding: {
+        tenantId: 'tenant-a',
+        principal: { type: 'user', id: 'user-a' },
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'replacement-worker',
+      tenantId: 'tenant-a',
+      requireTenantBinding: true,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+
+    await expect(
+      store.lease(
+        'replacement-worker',
+        incarnationId,
+        100,
+        undefined,
+        'stale-identity',
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.lease(
+        'replacement-worker',
+        incarnationId,
+        1_000,
+        undefined,
+        'replacement-identity',
+      ),
+    ).resolves.toBeDefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
+  test('a stale incarnation poll cannot consume replacement incarnation work', async () => {
+    const replacementIncarnationId = 'incarnation-00000002';
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'restarted-worker',
+      incarnationId: replacementIncarnationId,
+      identityId: 'stable-restarted-identity',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'restarted-worker',
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+
+    await expect(
+      store.lease(
+        'restarted-worker',
+        incarnationId,
+        100,
+        undefined,
+        'stable-restarted-identity',
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.lease(
+        'restarted-worker',
+        replacementIncarnationId,
+        1_000,
+        undefined,
+        'stable-restarted-identity',
+      ),
+    ).resolves.toBeDefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
+  test('leases queued work after credential refresh preserves the paired identity', async () => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'rotating-worker',
+      incarnationId,
+      identityId: 'stable-paired-identity',
+      credentialId: 'credential-before-refresh',
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+      binding: {
+        tenantId: 'tenant-a',
+        principal: { type: 'user', id: 'user-a' },
+      },
+    });
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId: 'rotating-worker',
+      tenantId: 'tenant-a',
+      requireTenantBinding: true,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+
+    const assignment = await store.lease(
+      'rotating-worker',
+      incarnationId,
+      1_000,
+      undefined,
+      'stable-paired-identity',
+    );
+
+    expect(assignment).toBeDefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  });
+
   test('delivers and settles one fenced stateful assignment', async () => {
     await store.register({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,

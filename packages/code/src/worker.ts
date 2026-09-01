@@ -387,9 +387,7 @@ export class BridgeWorker {
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
-    if (
-      Date.parse(identity.expiresAt) > validThroughMs
-    ) {
+    if (Date.parse(identity.expiresAt) > validThroughMs) {
       return;
     }
     const credential = await this.timedRequest<BridgeWorkerCredentialResponse>(
@@ -432,6 +430,7 @@ export class BridgeWorker {
     assignment: BridgeAssignment,
     stopSignal: AbortSignal,
     serverClockOffsetMs: number,
+    requestSignal?: AbortSignal,
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
@@ -450,7 +449,7 @@ export class BridgeWorker {
       if (stopSignal.aborted || Date.now() >= assignmentDeadlineMs) return;
       try {
         await this.refreshCredential(
-          stopSignal,
+          requestSignal,
           Date.now() + serverClockOffsetMs + refreshWindowMs,
         );
       } catch (error) {
@@ -564,6 +563,7 @@ export class BridgeWorker {
         assignment,
         credentialController.signal,
         serverClockOffsetMs,
+        signal,
       ).catch((error) => {
         credentialMaintenanceError = error;
         executionController.abort();
@@ -652,6 +652,8 @@ export class BridgeWorker {
     clearTimeout(deadlineTimer);
     cancellationController.abort();
     await cancellationWatcher;
+    credentialController.abort();
+    await credentialMaintenance;
     try {
       if (ambiguousSandboxError != null) {
         throw new BridgeWorkspaceQuarantinedError(
@@ -696,8 +698,6 @@ export class BridgeWorker {
     } finally {
       heartbeatController.abort();
       await heartbeat;
-      credentialController.abort();
-      await credentialMaintenance;
       signal?.removeEventListener('abort', abortExecution);
     }
   }

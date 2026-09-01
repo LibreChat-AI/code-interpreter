@@ -1,11 +1,17 @@
 import type { Queue } from 'bullmq';
 import type { Express } from 'express';
-import { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, connection } from './queue';
+import {
+  pyQueue,
+  otherQueue,
+  connection,
+  closeQueueConnections,
+} from './queue';
 import { validateStartupAuthConfig } from './auth/startup';
 import { env } from './config';
 import {
   validateApiBridgePolicy,
   validateApiHardenedConfig,
+  validateApiSandboxBackendPolicy,
   validateExecutionProfilePolicy,
   validateSandboxBackendPolicy,
   validateWorkerHardenedConfig,
@@ -92,7 +98,8 @@ export async function startupApiOnly(): Promise<void> {
   validateApiHardenedConfig();
   validateApiBridgePolicy();
   validateExecutionProfilePolicy({ requireBackendMatch: false });
-  /* No validateSandboxBackendPolicy() here: an API-only pod authenticates and
+  validateApiSandboxBackendPolicy();
+  /* No full validateSandboxBackendPolicy() here: an API-only pod authenticates and
    * enqueues jobs, it never constructs the Lambda backend or checkpoint store.
    * Bridge credentials are validated separately above because this process
    * exposes the public registration, lease, and settlement routes.
@@ -254,12 +261,7 @@ export async function gracefulShutdown(): Promise<void> {
     }
 
     // Close queue connections (both API and Worker need this)
-    await Promise.all([
-      pyQueue.close(),
-      otherQueue.close(),
-      pyQueueEvents.close(),
-      otherQueueEvents.close()
-    ]);
+    await closeQueueConnections();
     logger.info('Queue connections closed');
 
     // Only disconnect Redis if explicitly requested

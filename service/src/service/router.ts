@@ -25,7 +25,13 @@ import { Jobs, Languages } from '../enum';
 import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-authorization';
 import { createUploadSessionRegistrar } from './upload-session';
 import { prepareSandboxJobSecurity } from '../sandbox-egress';
+import {
+  BridgeWorkerSelectionError,
+  CODEAPI_BRIDGE_WORKER_HEADER,
+  resolveBridgeWorkerSelection,
+} from '../bridge/selection';
 import logger from '../logger';
+import { resolveQueuedSandboxBackend } from '../execution-profile';
 
 const { INSTANCE_ID } = env;
 const JOB_COMPLETION_WAIT_TIMEOUT_MS = jobCompletionWaitTimeoutMs(
@@ -140,6 +146,25 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
     return res.status(400).json({ error: `Unsupported language: ${rawLang}` });
   }
 
+  let bridgeWorkerId: string | undefined;
+  try {
+    const bridgeSelection = resolveBridgeWorkerSelection({
+      backend: env.SANDBOX_BACKEND,
+      configuredWorkerId: env.BRIDGE_WORKER_ID,
+      dynamicWorkers: env.BRIDGE_DYNAMIC_WORKERS,
+      requestedWorkerId: req.header(CODEAPI_BRIDGE_WORKER_HEADER),
+      trustedWorkerId: principal.codeWorkerId,
+    });
+    bridgeWorkerId = bridgeSelection?.explicit === true
+      ? bridgeSelection.workerId
+      : undefined;
+  } catch (error) {
+    if (error instanceof BridgeWorkerSelectionError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    throw error;
+  }
+
   let runtimeSessionId: string | undefined;
   try {
     runtimeSessionId = resolveRuntimeSessionIdForExecRequest({
@@ -247,6 +272,12 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
         tenantId: identity.storageNamespace,
         canonicalUserId: identity.canonicalUserId,
         executionProfile: env.EXECUTION_PROFILE,
+        sandboxBackend: resolveQueuedSandboxBackend(
+          env.EXECUTION_PROFILE,
+          env.SANDBOX_BACKEND,
+          env.EXECUTION_PROFILE_SOURCE,
+        ),
+        ...(bridgeWorkerId != null ? { bridgeWorkerId } : {}),
         ...(runtimeSessionId != null ? { runtimeSessionId } : {}),
         runtimeSessionMode,
         executionManifestClaims: sandboxSecurity.executionManifestClaims,

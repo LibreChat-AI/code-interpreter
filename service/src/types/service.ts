@@ -3,7 +3,7 @@ import type { Request } from 'express';
 import type { ExecutionManifestClaims } from '../execution-manifest';
 import type { ExecutionIdentity } from '../execution-identity';
 import type { CodeApiPrincipal } from '../auth/principal';
-import type { ExecutionProfile } from '../execution-profile';
+import type { ExecutionProfile, SandboxBackendName } from '../execution-profile';
 import { Jobs } from '@/enum/service';
 
 /**
@@ -251,8 +251,12 @@ export type JobData = {
   executionId?: string;
   tenantId?: string;
   canonicalUserId?: string;
+  /** Trusted dynamic outbound worker selection. */
+  bridgeWorkerId?: string;
   /** Producer deployment identity. Optional only for pre-profile queued jobs. */
   executionProfile?: ExecutionProfile;
+  /** Required sandbox transport. Optional only for jobs queued before fencing. */
+  sandboxBackend?: SandboxBackendName;
   /**
    * Server-derived runtime session identity. Absence is stateless unless
    * strict mode requires it; explicit exemptions document intentional gaps.

@@ -48,7 +48,7 @@ describe('isValidResourceId (heterogeneous resource identifiers)', () => {
     expect(isValidResourceId('682f49b90f07376815c38ef2')).toBe(true);
   });
 
-  test("accepts 17-char `agent_<nanoid>` slug", () => {
+  test('accepts 17-char `agent_<nanoid>` slug', () => {
     expect(isValidResourceId('agent_abc12345678')).toBe(true);
   });
 
@@ -145,15 +145,39 @@ describe('sandbox error formatting', () => {
     });
   });
 
-  test('maps remote bridge failures without exposing worker details', () => {
+  test('maps bridge authorization and availability failures without leaking worker details', () => {
+    const unauthorized = publicExecutionFailure(
+      new Error('BRIDGE_WORKER_UNAUTHORIZED: Worker private-vm belongs to tenant-secret'),
+    );
+    expect(unauthorized).toEqual({
+      status: 403,
+      body: {
+        error: 'bridge_worker_unauthorized',
+        message: 'Code environment is not authorized for this tenant',
+      },
+    });
+    expect(JSON.stringify(unauthorized)).not.toContain('private-vm');
+    expect(JSON.stringify(unauthorized)).not.toContain('tenant-secret');
+
+    expect(
+      publicExecutionFailure(
+        new Error('BRIDGE_WORKER_OFFLINE: Worker private-vm has not checked in'),
+      ),
+    ).toEqual({
+      status: 503,
+      body: {
+        error: 'bridge_worker_offline',
+        message: 'Code environment is offline',
+      },
+    });
+
     const cases = [
-      ['BRIDGE_WORKER_OFFLINE', 503, 'Remote code worker is unavailable'],
-      ['BRIDGE_WORKER_BUSY', 409, 'Remote code worker is busy'],
-      ['BRIDGE_EXECUTION_FAILED', 502, 'Remote code execution failed'],
+      ['BRIDGE_WORKER_BUSY', 409, 'Code environment is busy'],
+      ['BRIDGE_EXECUTION_FAILED', 502, 'Code environment execution failed'],
       [
         'BRIDGE_DEADLINE_EXCEEDED',
         504,
-        'Remote code execution deadline exceeded',
+        'Code environment execution timed out',
       ],
     ] as const;
     for (const [code, status, message] of cases) {
@@ -177,7 +201,7 @@ describe('sandbox error formatting', () => {
       status: 502,
       body: {
         error: 'bridge_execution_failed',
-        message: 'Remote code execution failed',
+        message: 'Code environment execution failed',
       },
     });
     expect(JSON.stringify(failure)).not.toContain('private second line');

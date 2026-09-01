@@ -3,6 +3,7 @@ import { timingSafeEqual } from 'crypto';
 import { Router } from 'express';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { BridgeWorkerRegistration } from '../../../packages/code/src/protocol';
+import type { BridgePrincipalType, BridgeWorkerBinding } from './pairing';
 import type { CodeBridgeAssignment, CodeBridgeSettlement } from './store';
 
 import {
@@ -15,6 +16,14 @@ import { BridgeStoreError, RedisBridgeStore } from './store';
 
 const INCARNATION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const MAX_LEASE_WAIT_MS = 30_000;
+const BRIDGE_BINDING_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const PRINCIPAL_TYPES = new Set<BridgePrincipalType>([
+  'deployment',
+  'tenant',
+  'user',
+  'role',
+  'group',
+]);
 
 export type BridgeAuthMode = 'static' | 'paired';
 
@@ -24,6 +33,7 @@ export interface BridgeRouterOptions {
   authMode: BridgeAuthMode;
   adminToken: string;
   configuredWorkerId?: string;
+  allowDynamicWorkers?: boolean;
 }
 
 function sameToken(left: string, right: string): boolean {
@@ -47,6 +57,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function parseBinding(value: unknown): BridgeWorkerBinding | undefined {
+  if (!isRecord(value) || !isRecord(value.principal)) return undefined;
+  const { tenantId, principal } = value;
+  if (
+    typeof tenantId !== 'string' ||
+    !BRIDGE_BINDING_ID_PATTERN.test(tenantId) ||
+    typeof principal.type !== 'string' ||
+    !PRINCIPAL_TYPES.has(principal.type as BridgePrincipalType) ||
+    typeof principal.id !== 'string' ||
+    !BRIDGE_BINDING_ID_PATTERN.test(principal.id)
+  ) {
+    return undefined;
+  }
+  return {
+    tenantId,
+    principal: {
+      type: principal.type as BridgePrincipalType,
+      id: principal.id,
+    },
+  };
+}
+
 function asyncRoute(
   handler: (req: Request, res: Response) => Promise<void>,
 ): RequestHandler {
@@ -59,6 +91,8 @@ function sendStoreError(error: BridgeStoreError, res: Response): void {
   const status =
     error.code === 'ASSIGNMENT_NOT_FOUND'
       ? 404
+      : error.code === 'WORKER_UNAUTHORIZED'
+        ? 403
       : error.code === 'WORKER_BUSY'
         ? 503
         : 409;
@@ -92,9 +126,10 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
   const router = Router();
 
   const configuredWorker = (workerId: string): boolean =>
-    options.configuredWorkerId != null &&
-    options.configuredWorkerId !== '' &&
-    workerId === options.configuredWorkerId;
+    options.allowDynamicWorkers === true ||
+    (options.configuredWorkerId != null &&
+      options.configuredWorkerId !== '' &&
+      workerId === options.configuredWorkerId);
 
   const bearerToken = (req: Request): string =>
     req
@@ -201,7 +236,20 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
       res.status(400).json({ error: 'Invalid bridge worker ID' });
       return;
     }
-    const pairing = await options.pairings.issue(workerId);
+    const hasBinding = isRecord(req.body) &&
+      Object.prototype.hasOwnProperty.call(req.body, 'binding');
+    const binding = isRecord(req.body) ? parseBinding(req.body.binding) : undefined;
+    if (hasBinding && binding == null) {
+      res.status(400).json({ error: 'Invalid bridge worker principal binding' });
+      return;
+    }
+    if (options.allowDynamicWorkers === true && binding == null) {
+      res.status(400).json({
+        error: 'Dynamic bridge workers require a valid principal binding',
+      });
+      return;
+    }
+    const pairing = await options.pairings.issue(workerId, binding);
     res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ...pairing });
   }));
 
@@ -283,17 +331,40 @@ router.post(
       });
       return;
     }
+    const authorization = options.authMode === 'paired'
+      ? (
+          res.locals.bridgeWorkerAuthorization as {
+            identityId: string;
+            pairingGeneration: number;
+            credentialId: string;
+            activeCredentialId: string;
+            binding?: BridgeWorkerBinding;
+          }
+        )
+      : undefined;
+    const trustedRegistration: BridgeWorkerRegistration & {
+      binding?: BridgeWorkerBinding;
+      credentialId?: string;
+      identityId?: string;
+    } = {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: registration.workerId,
+      incarnationId: registration.incarnationId,
+      capabilities: registration.capabilities,
+      ...(authorization?.credentialId != null
+        ? { credentialId: authorization.credentialId }
+        : {}),
+      ...(authorization?.identityId != null
+        ? { identityId: authorization.identityId }
+        : {}),
+      ...(authorization?.binding != null
+        ? { binding: authorization.binding }
+        : {}),
+    };
     try {
       await options.store.register(
-        registration as unknown as BridgeWorkerRegistration,
-        options.authMode === 'paired'
-          ? (
-              res.locals.bridgeWorkerAuthorization as {
-                identityId: string;
-                pairingGeneration: number;
-              }
-            )
-          : undefined,
+        trustedRegistration,
+        authorization,
       );
     } catch (error) {
       if (error instanceof BridgeStoreError) {
@@ -403,6 +474,11 @@ router.post(
           body.incarnationId,
           Math.min(requestedWait, MAX_LEASE_WAIT_MS),
           leaseController.signal,
+          (
+            res.locals.bridgeWorkerAuthorization as
+              | { identityId: string }
+              | undefined
+          )?.identityId,
         );
         if (leaseController.signal.aborted) {
           if (assignment != null) await options.store.returnLease(assignment);
@@ -495,6 +571,11 @@ router.post(
           req.params.assignmentId,
           settlement,
           settlementController.signal,
+          (
+            res.locals.bridgeWorkerAuthorization as
+              | { identityId: string }
+              | undefined
+          )?.identityId,
         );
         if (!settlementController.signal.aborted) {
           res.json({

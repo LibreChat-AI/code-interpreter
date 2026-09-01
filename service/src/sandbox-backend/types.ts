@@ -37,6 +37,8 @@ export interface SandboxExecuteContext {
   deadlineAtMs?: number;
   tenantId?: string;
   canonicalUserId?: string;
+  /** Trusted API-selected outbound worker. Presence requires a tenant-bound credential. */
+  bridgeWorkerId?: string;
   /** Absent ⇒ stateless execution (no runtime session affinity). */
   runtimeSessionId?: string;
   runtimeSessionMode: t.RuntimeSessionMode;
@@ -64,6 +66,7 @@ export interface SandboxBackend {
 export type SandboxBackendErrorCode =
   | 'RUNTIME_SESSION_BUSY'
   | 'BRIDGE_WORKER_OFFLINE'
+  | 'BRIDGE_WORKER_UNAUTHORIZED'
   | 'BRIDGE_WORKER_BUSY'
   | 'BRIDGE_EXECUTION_FAILED'
   | 'BRIDGE_DEADLINE_EXCEEDED'
