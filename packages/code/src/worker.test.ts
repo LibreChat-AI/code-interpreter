@@ -615,6 +615,54 @@ test('worker surfaces a definite stateless settlement rejection directly', async
   );
 });
 
+test('worker preserves status for a non-JSON settlement rejection', async () => {
+  let settlementAttempts = 0;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('/execute')) {
+        return new Response(JSON.stringify({ session_id: 'run-1', files: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      settlementAttempts += 1;
+      return new Response('<html>assignment fenced</html>', {
+        status: 409,
+        headers: { 'Content-Type': 'text/html' },
+      });
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'non-json-fenced-settlement',
+      workerId: 'vm-1',
+      incarnationId: 'incarnation-00000001',
+      generation: 1,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 1_000).toISOString(),
+      request: { body: { language: 'bash' }, headers: {} },
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.name === 'BridgeProtocolError' &&
+      'status' in error &&
+      error.status === 409,
+  );
+  assert.equal(settlementAttempts, 1);
+});
+
 test('worker retries an ambiguous settlement before the deadline', async () => {
   let settlementAttempts = 0;
   const fetchImpl: typeof fetch = async (input) => {
@@ -1543,6 +1591,35 @@ test('worker bounds a stalled registration below its lease TTL', async () => {
   });
 
   await assert.rejects(worker.register(), { name: 'AbortError' });
+});
+
+test('worker preserves status for a non-JSON registration rejection', async () => {
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async () =>
+      new Response('<html>unauthorized</html>', {
+        status: 401,
+        headers: { 'Content-Type': 'text/html' },
+      }),
+  });
+
+  await assert.rejects(
+    worker.register(),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.name === 'BridgeProtocolError' &&
+      'status' in error &&
+      error.status === 401,
+  );
 });
 
 test('worker uses the server-relative lease budget despite VM clock skew', async () => {

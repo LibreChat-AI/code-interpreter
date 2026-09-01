@@ -752,13 +752,21 @@ export class BridgeWorker {
       body: JSON.stringify(body),
       signal,
     });
-    const payload = (await response.json()) as object;
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      if (response.ok) throw error;
+      payload = {};
+    }
     if (!response.ok) {
+      const errorPayload =
+        typeof payload === 'object' && payload !== null ? payload : {};
       throw new BridgeProtocolError(
-        errorMessage(payload) ??
+        errorMessage(errorPayload) ??
           `Bridge request failed with HTTP ${response.status}`,
         response.status,
-        errorCode(payload),
+        errorCode(errorPayload),
       );
     }
     return payload as T;
