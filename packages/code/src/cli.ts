@@ -8,6 +8,7 @@ import {
   saveBridgeIdentity,
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
+import { EndpointRuntimeSupervisor } from './runtime.js';
 import {
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
@@ -119,7 +120,10 @@ async function run(runtimeSessionId?: string): Promise<void> {
     token: configuredToken,
     identity: workerIdentity,
     workerId,
-    sandboxEndpoint,
+    runtimeSupervisor: new EndpointRuntimeSupervisor({
+      endpoint: sandboxEndpoint,
+      statefulWorkspace,
+    }),
     capabilities,
     onIdentityChange:
       pairedIdentity && identityPath

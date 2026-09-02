@@ -8,6 +8,7 @@ import {
 } from './worker.js';
 
 import type { BridgeAssignment } from './protocol.js';
+import type { RuntimeSupervisor } from './runtime.js';
 
 const incarnationId = 'incarnation-00000001';
 
@@ -81,6 +82,116 @@ test('worker forwards a fenced assignment to the sandbox and settles the result'
     status: 'fulfilled',
     result: { session_id: 'run-1', files: [] },
   });
+});
+
+test('worker delegates runtime acquisition, release, and reset to its supervisor', async () => {
+  const calls: string[] = [];
+  const supervisor: RuntimeSupervisor = {
+    async acquire(assignment) {
+      calls.push(`acquire:${assignment.runtimeSessionId}`);
+      return {
+        endpoint: 'http://127.0.0.1:3000/runtime',
+        sessionId: assignment.runtimeSessionId,
+        async release() {
+          calls.push(`release:${assignment.runtimeSessionId}`);
+        },
+      };
+    },
+    async reset(runtimeSessionId) {
+      calls.push(`reset:${runtimeSessionId}`);
+    },
+    async quarantine() {},
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    runtimeSupervisor: supervisor,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'oci',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/execute')) {
+        assert.equal(url, 'http://127.0.0.1:3000/runtime/execute');
+        return Response.json({ session_id: 'run-1', files: [] });
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+  const assignment: BridgeAssignment = {
+    protocolVersion: 1,
+    assignmentId: 'assignment-1',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    runtimeSessionId: 'rt-user-1',
+    request: { body: { language: 'bash' }, headers: {} },
+  };
+
+  await worker.executeAndSettle(assignment);
+  await worker.resetWorkspace('rt-user-1');
+
+  assert.deepEqual(calls, [
+    'acquire:rt-user-1',
+    'release:rt-user-1',
+    'reset:rt-user-1',
+  ]);
+});
+
+test('worker asks its supervisor to quarantine an ambiguous stateful runtime', async () => {
+  const quarantined: Array<{ sessionId: string; reason: string }> = [];
+  const supervisor: RuntimeSupervisor = {
+    async acquire() {
+      return { endpoint: 'http://127.0.0.1:3000/runtime', sessionId: 'rt-user-1' };
+    },
+    async reset() {},
+    async quarantine(sessionId, reason) {
+      quarantined.push({ sessionId, reason });
+    },
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    runtimeSupervisor: supervisor,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'oci',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('/execute')) {
+        throw new TypeError('connection reset');
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'assignment-1',
+      workerId: 'vm-1',
+      incarnationId,
+      generation: 1,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 5_000).toISOString(),
+      runtimeSessionId: 'rt-user-1',
+      request: { body: { language: 'bash' }, headers: {} },
+    }),
+    BridgeWorkspaceQuarantinedError,
+  );
+
+  assert.equal(quarantined.length, 1);
+  assert.equal(quarantined[0]?.sessionId, 'rt-user-1');
+  assert.match(quarantined[0]?.reason ?? '', /ambiguous sandbox execution/);
 });
 
 test('worker acknowledges a discarded workspace through the reset endpoint', async () => {

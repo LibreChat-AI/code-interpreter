@@ -5,6 +5,7 @@ import {
   BridgeProtocolError,
   bridgeWorkerPath,
 } from './protocol.js';
+import { EndpointRuntimeSupervisor } from './runtime.js';
 import { signBridgeRequest } from './identity.js';
 
 import type {
@@ -16,13 +17,16 @@ import type {
   BridgeWorkerCredentialResponse,
   BridgeWorkerRegistrationResponse,
 } from './protocol.js';
+import type { RuntimeLease, RuntimeSupervisor } from './runtime.js';
 
 export interface BridgeWorkerOptions {
   codeApiUrl: string;
   token?: string;
   identity?: BridgeWorkerIdentity;
   workerId: string;
-  sandboxEndpoint: string;
+  /** @deprecated Use runtimeSupervisor for new runtime adapters. */
+  sandboxEndpoint?: string;
+  runtimeSupervisor?: RuntimeSupervisor;
   capabilities: BridgeWorkerCapabilities;
   leaseWaitMs?: number;
   leaseTransportGraceMs?: number;
@@ -67,7 +71,6 @@ const CREDENTIAL_REFRESH_RETRY_DELAY_MS = 100;
 const SETTLEMENT_RETRY_DELAY_MS = 100;
 const REJECTION_ACK_GRACE_MS = 30_000;
 const MAX_SETTLEMENT_ERROR_LENGTH = 4_096;
-const RUNTIME_SESSION_PLACEHOLDER = '{runtimeSessionId}';
 
 export function reconnectDelayMs(
   attempt: number,
@@ -121,7 +124,7 @@ export class BridgeWorkspaceQuarantinedError extends Error {
 export class BridgeWorker {
   private readonly fetchImpl: typeof fetch;
   private readonly codeApiUrl: string;
-  private readonly sandboxEndpoint: string;
+  private readonly runtimeSupervisor: RuntimeSupervisor;
   private readonly incarnationId: string;
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
@@ -133,9 +136,22 @@ export class BridgeWorker {
         'Bridge worker requires a static token or paired identity',
       );
     }
+    if (options.runtimeSupervisor != null && options.sandboxEndpoint != null) {
+      throw new BridgeProtocolError(
+        'Bridge worker accepts either a runtime supervisor or sandbox endpoint, not both',
+      );
+    }
+    if (options.runtimeSupervisor == null && !options.sandboxEndpoint?.trim()) {
+      throw new BridgeProtocolError('Bridge worker requires a runtime supervisor');
+    }
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.codeApiUrl = normalizedBaseUrl(options.codeApiUrl);
-    this.sandboxEndpoint = normalizedBaseUrl(options.sandboxEndpoint);
+    this.runtimeSupervisor =
+      options.runtimeSupervisor ??
+      new EndpointRuntimeSupervisor({
+        endpoint: options.sandboxEndpoint ?? '',
+        statefulWorkspace: options.capabilities.statefulWorkspace,
+      });
     this.incarnationId =
       options.incarnationId ?? randomBytes(18).toString('base64url');
   }
@@ -197,6 +213,7 @@ export class BridgeWorker {
     if (runtimeSessionId.trim().length === 0) {
       throw new BridgeProtocolError('Runtime session ID is required');
     }
+    await this.runtimeSupervisor.reset(runtimeSessionId, signal);
     await this.timedRequest(
       `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/workspaces/reset`,
       {
@@ -558,6 +575,7 @@ export class BridgeWorker {
     let ambiguousSandboxError: unknown;
     let sandboxRejectedExecution = false;
     let sandboxStarted = false;
+    let runtimeLease: RuntimeLease | undefined;
     try {
       credentialMaintenance = this.maintainCredential(
         assignment,
@@ -568,13 +586,18 @@ export class BridgeWorker {
         credentialMaintenanceError = error;
         executionController.abort();
       });
-      const sandboxExecuteUrl =
-        `${this.sandboxEndpointFor(assignment)}/execute`;
-      const sandboxSessionId = this.sandboxSessionIdFor(assignment);
+      runtimeLease = await this.runtimeSupervisor.acquire(
+        assignment,
+        executionController.signal,
+      );
+      if (executionController.signal.aborted) {
+        throw executionController.signal.reason ?? new DOMException('aborted', 'AbortError');
+      }
+      const sandboxExecuteUrl = `${runtimeLease.endpoint.replace(/\/+$/, '')}/execute`;
       const headers = {
         ...assignment.request.headers,
-        ...(sandboxSessionId
-          ? { 'X-Runtime-Session-Id': sandboxSessionId }
+        ...(runtimeLease.sessionId
+          ? { 'X-Runtime-Session-Id': runtimeLease.sessionId }
           : {}),
       };
       const sandboxRequestBody = JSON.stringify(assignment.request.body);
@@ -656,7 +679,8 @@ export class BridgeWorker {
     await credentialMaintenance;
     try {
       if (ambiguousSandboxError != null) {
-        throw new BridgeWorkspaceQuarantinedError(
+        throw await this.quarantineWorkspace(
+          assignment.runtimeSessionId,
           `Stateful workspace ${assignment.runtimeSessionId} was quarantined after an ambiguous sandbox execution`,
           ambiguousSandboxError,
         );
@@ -697,21 +721,13 @@ export class BridgeWorker {
       }
     } finally {
       heartbeatController.abort();
-      await heartbeat;
-      signal?.removeEventListener('abort', abortExecution);
+      try {
+        await this.releaseRuntimeLease(runtimeLease, assignment);
+      } finally {
+        await heartbeat;
+        signal?.removeEventListener('abort', abortExecution);
+      }
     }
-  }
-
-  private sandboxSessionIdFor(
-    assignment: BridgeAssignment,
-  ): string | undefined {
-    if (assignment.runtimeSessionId != null) {
-      return assignment.runtimeSessionId;
-    }
-    if (this.sandboxEndpoint.includes(RUNTIME_SESSION_PLACEHOLDER)) {
-      return `assignment-${assignment.assignmentId}`;
-    }
-    return undefined;
   }
 
   private assignmentRemainingMs(assignment: BridgeAssignment): number {
@@ -724,28 +740,40 @@ export class BridgeWorker {
     return Math.max(0, Date.parse(assignment.expiresAt) - Date.now());
   }
 
-  private sandboxEndpointFor(assignment: BridgeAssignment): string {
-    if (assignment.runtimeSessionId == null) {
-      if (!this.sandboxEndpoint.includes(RUNTIME_SESSION_PLACEHOLDER)) {
-        return this.sandboxEndpoint;
-      }
-      return this.sandboxEndpoint.replace(
-        RUNTIME_SESSION_PLACEHOLDER,
-        encodeURIComponent(`assignment-${assignment.assignmentId}`),
+  private async releaseRuntimeLease(
+    lease: RuntimeLease | undefined,
+    assignment: BridgeAssignment,
+  ): Promise<void> {
+    if (lease?.release == null) return;
+    try {
+      await lease.release();
+    } catch (error) {
+      if (assignment.runtimeSessionId == null) throw error;
+      throw await this.quarantineWorkspace(
+        assignment.runtimeSessionId,
+        `Stateful workspace ${assignment.runtimeSessionId} could not release its runtime lease`,
+        error,
       );
     }
-    if (
-      this.options.capabilities.statefulWorkspace !== true ||
-      !this.sandboxEndpoint.includes(RUNTIME_SESSION_PLACEHOLDER)
-    ) {
-      throw new BridgeProtocolError(
-        'Stateful assignments require a sandbox endpoint template containing {runtimeSessionId}',
+  }
+
+  private async quarantineWorkspace(
+    runtimeSessionId: string | undefined,
+    message: string,
+    cause?: unknown,
+  ): Promise<BridgeWorkspaceQuarantinedError> {
+    if (runtimeSessionId == null) {
+      return new BridgeWorkspaceQuarantinedError(message, cause);
+    }
+    try {
+      await this.runtimeSupervisor.quarantine(runtimeSessionId, message, cause);
+      return new BridgeWorkspaceQuarantinedError(message, cause);
+    } catch (error) {
+      return new BridgeWorkspaceQuarantinedError(
+        `${message}; local runtime quarantine could not be confirmed`,
+        error,
       );
     }
-    return this.sandboxEndpoint.replace(
-      RUNTIME_SESSION_PLACEHOLDER,
-      encodeURIComponent(assignment.runtimeSessionId),
-    );
   }
 
   private async delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -831,7 +859,8 @@ export class BridgeWorker {
   ): Promise<void> {
     if (signal?.aborted === true) {
       if (assignment.runtimeSessionId != null) {
-        throw new BridgeWorkspaceQuarantinedError(
+        throw await this.quarantineWorkspace(
+          assignment.runtimeSessionId,
           `Stateful workspace ${assignment.runtimeSessionId} was quarantined before settlement during shutdown`,
           signal.reason,
         );
@@ -871,7 +900,8 @@ export class BridgeWorker {
               assignment.runtimeSessionId != null &&
               settlement.status === 'fulfilled'
             ) {
-              throw new BridgeWorkspaceQuarantinedError(
+              throw await this.quarantineWorkspace(
+                assignment.runtimeSessionId,
                 `Stateful workspace ${assignment.runtimeSessionId} was quarantined after Code API rejected its fulfilled settlement`,
                 error,
               );
@@ -894,7 +924,8 @@ export class BridgeWorker {
       assignment.runtimeSessionId != null &&
       settlement.status === 'fulfilled'
     ) {
-      throw new BridgeWorkspaceQuarantinedError(
+      throw await this.quarantineWorkspace(
+        assignment.runtimeSessionId,
         `Stateful workspace ${assignment.runtimeSessionId} was quarantined after ambiguous settlement delivery`,
         lastError,
       );
