@@ -8,7 +8,7 @@ import {
   saveBridgeIdentity,
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
-import { EndpointRuntimeSupervisor } from './runtime.js';
+import { DockerRuntimeSupervisor, EndpointRuntimeSupervisor } from './runtime.js';
 import {
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
@@ -86,10 +86,21 @@ async function run(runtimeSessionId?: string): Promise<void> {
   const statefulWorkspace =
     process.env.LIBRECHAT_CODE_STATEFUL_WORKSPACE?.trim().toLowerCase() ===
     'true';
+  const runtimeMode =
+    process.env.LIBRECHAT_CODE_RUNTIME_SUPERVISOR?.trim().toLowerCase() ?? 'endpoint';
+  if (runtimeMode !== 'endpoint' && runtimeMode !== 'docker') {
+    throw new Error(
+      'LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be either endpoint or docker',
+    );
+  }
   const sandboxEndpoint =
     process.env.LIBRECHAT_CODE_SANDBOX_ENDPOINT ??
     'http://127.0.0.1:2000/api/v2';
-  if (statefulWorkspace && !sandboxEndpoint.includes('{runtimeSessionId}')) {
+  if (
+    runtimeMode === 'endpoint' &&
+    statefulWorkspace &&
+    !sandboxEndpoint.includes('{runtimeSessionId}')
+  ) {
     throw new Error(
       'LIBRECHAT_CODE_STATEFUL_WORKSPACE requires LIBRECHAT_CODE_SANDBOX_ENDPOINT to contain {runtimeSessionId}',
     );
@@ -103,7 +114,9 @@ async function run(runtimeSessionId?: string): Promise<void> {
     : undefined;
   const capabilities = {
     statefulWorkspace,
-    sandboxProfile: process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ?? 'nsjail',
+    sandboxProfile:
+      process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ??
+      (runtimeMode === 'docker' ? 'oci-docker' : 'nsjail'),
     runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
     policyDigest: createHash('sha256').update(policy).digest('hex'),
   };
@@ -120,10 +133,18 @@ async function run(runtimeSessionId?: string): Promise<void> {
     token: configuredToken,
     identity: workerIdentity,
     workerId,
-    runtimeSupervisor: new EndpointRuntimeSupervisor({
-      endpoint: sandboxEndpoint,
-      statefulWorkspace,
-    }),
+    runtimeSupervisor:
+      runtimeMode === 'docker'
+        ? new DockerRuntimeSupervisor({
+            image:
+              runtimeSessionId == null
+                ? required('LIBRECHAT_CODE_RUNTIME_IMAGE')
+                : process.env.LIBRECHAT_CODE_RUNTIME_IMAGE?.trim(),
+          })
+        : new EndpointRuntimeSupervisor({
+            endpoint: sandboxEndpoint,
+            statefulWorkspace,
+          }),
     capabilities,
     onIdentityChange:
       pairedIdentity && identityPath

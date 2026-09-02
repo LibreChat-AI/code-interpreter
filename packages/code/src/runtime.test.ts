@@ -196,6 +196,18 @@ test('docker runtime supervisor ignores only confirmed missing-container removal
   await supervisor.reset('rt-user-1');
 });
 
+test('docker runtime supervisor resets a workspace without a configured image', async () => {
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      assert.deepEqual(args.slice(0, 3), ['container', 'rm', '--force']);
+      return 'removed\n';
+    },
+  };
+  const supervisor = new DockerRuntimeSupervisor({ client });
+
+  await supervisor.reset('rt-user-1');
+});
+
 test('docker runtime supervisor destroys stateless and reset stateful runtimes', async () => {
   const calls: string[][] = [];
   const client: ContainerRuntimeClient = {

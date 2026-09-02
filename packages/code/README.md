@@ -55,6 +55,21 @@ an arbitrary image into a supported security boundary. Image-specific Linux
 capabilities must be explicitly configured by the trusted launcher; the
 default grants none.
 
+To enable it from the bundled CLI, the host must give the worker access to its
+local Docker daemon and explicitly select a known runtime image:
+
+```bash
+LIBRECHAT_CODE_RUNTIME_SUPERVISOR=docker \
+LIBRECHAT_CODE_RUNTIME_IMAGE=ghcr.io/librechat-ai/code-interpreter-runtime:tag \
+LIBRECHAT_CODE_STATEFUL_WORKSPACE=true \
+librechat-code run
+```
+
+The image reference above is illustrative until the corresponding published
+runtime image ships. Docker mode never binds a runner port on the VM. Do not
+mount the Docker socket into the sandbox; only the trusted worker may control
+the daemon.
+
 ## Static compatibility mode
 
 Non-hardened development deployments may still run with a static token:
