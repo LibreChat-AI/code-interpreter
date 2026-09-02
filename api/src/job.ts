@@ -1173,7 +1173,7 @@ export class Job {
   /**
    * Fetches normalized objects for one inherited session and returns the
    * `.dirkeep` markers belonging to exactly that session. Guards against:
-   *   - non-OK responses (fail the prime rather than silently losing markers)
+   *   - legacy 404 responses (no marker support) and transient backpressure
    *   - non-array JSON bodies
    *   - missing/malformed id/name/storage_session_id fields
    *   - MinIO prefix-list leakage (`abc` prefix also matches `abcdef/...`)
@@ -1203,6 +1203,10 @@ export class Job {
             controller.signal,
           );
           continue;
+        }
+        if (res.status === 404) {
+          await res.body?.cancel().catch(() => {});
+          return [];
         }
         if (!res.ok) {
           await res.body?.cancel().catch(() => {});
