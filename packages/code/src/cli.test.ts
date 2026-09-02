@@ -67,7 +67,7 @@ test('CLI rejects an unknown runtime supervisor before entering the run loop', (
   assert.notEqual(result.status, 0);
   assert.match(
     result.stderr,
-    /LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be either endpoint or docker/,
+    /LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be endpoint, docker, or docker-macos-nsjail/,
   );
 });
 
@@ -89,4 +89,47 @@ test('CLI requires a runtime image for Docker supervision', () => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /LIBRECHAT_CODE_RUNTIME_IMAGE is required/);
+});
+
+test('CLI requires the macOS NsJail seccomp profile', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_RUNTIME_SUPERVISOR: 'docker-macos-nsjail',
+        LIBRECHAT_CODE_RUNTIME_IMAGE: 'example/runtime:latest',
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE is required/);
+});
+
+test('CLI requires a package mount for the macOS NsJail profile', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_RUNTIME_SUPERVISOR: 'docker-macos-nsjail',
+        LIBRECHAT_CODE_RUNTIME_IMAGE: 'example/runtime:latest',
+        LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE: './seccomp/nsjail.json',
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /LIBRECHAT_CODE_DOCKER_PACKAGES_PATH is required/);
 });

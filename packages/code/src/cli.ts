@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
 import {
@@ -28,6 +29,23 @@ function list(value: string | undefined): string[] {
       .filter(Boolean) ?? []
   );
 }
+
+const MACOS_NSJAIL_CAPABILITIES = [
+  'SYS_ADMIN',
+  'SYS_CHROOT',
+  'SYS_PTRACE',
+  'SETUID',
+  'SETGID',
+  'NET_ADMIN',
+  'DAC_OVERRIDE',
+  'DAC_READ_SEARCH',
+  'CHOWN',
+  'FOWNER',
+  'FSETID',
+  'KILL',
+  'SETFCAP',
+  'MKNOD',
+];
 
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -88,9 +106,13 @@ async function run(runtimeSessionId?: string): Promise<void> {
     'true';
   const runtimeMode =
     process.env.LIBRECHAT_CODE_RUNTIME_SUPERVISOR?.trim().toLowerCase() ?? 'endpoint';
-  if (runtimeMode !== 'endpoint' && runtimeMode !== 'docker') {
+  if (
+    runtimeMode !== 'endpoint' &&
+    runtimeMode !== 'docker' &&
+    runtimeMode !== 'docker-macos-nsjail'
+  ) {
     throw new Error(
-      'LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be either endpoint or docker',
+      'LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be endpoint, docker, or docker-macos-nsjail',
     );
   }
   const sandboxEndpoint =
@@ -116,7 +138,7 @@ async function run(runtimeSessionId?: string): Promise<void> {
     statefulWorkspace,
     sandboxProfile:
       process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ??
-      (runtimeMode === 'docker' ? 'oci-docker' : 'nsjail'),
+      (runtimeMode.startsWith('docker') ? 'oci-docker' : 'nsjail'),
     runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
     policyDigest: createHash('sha256').update(policy).digest('hex'),
   };
@@ -134,12 +156,32 @@ async function run(runtimeSessionId?: string): Promise<void> {
     identity: workerIdentity,
     workerId,
     runtimeSupervisor:
-      runtimeMode === 'docker'
+      runtimeMode !== 'endpoint'
         ? new DockerRuntimeSupervisor({
             image:
               runtimeSessionId == null
                 ? required('LIBRECHAT_CODE_RUNTIME_IMAGE')
                 : process.env.LIBRECHAT_CODE_RUNTIME_IMAGE?.trim(),
+            ...(runtimeMode === 'docker-macos-nsjail'
+              ? {
+                  capabilities: MACOS_NSJAIL_CAPABILITIES,
+                  securityOptions: [
+                    `seccomp=${resolve(required('LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE'))}`,
+                  ],
+                  bindMounts: [
+                    {
+                      source: resolve(required('LIBRECHAT_CODE_DOCKER_PACKAGES_PATH')),
+                      target: '/pkgs',
+                      readOnly: true,
+                    },
+                  ],
+                  httpClient: 'bun',
+                  environment: {
+                    SANDBOX_USE_CGROUPV2: 'false',
+                    SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP: 'false',
+                  },
+                }
+              : {}),
           })
         : new EndpointRuntimeSupervisor({
             endpoint: sandboxEndpoint,

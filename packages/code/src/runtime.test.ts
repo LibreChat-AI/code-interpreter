@@ -109,6 +109,54 @@ test('docker runtime supervisor creates a networkless stateful runtime and execu
   assert.ok(health?.includes('--max-time'));
 });
 
+test('docker runtime supervisor applies an explicit macOS NsJail confinement profile', async () => {
+  const calls: string[][] = [];
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      calls.push(args);
+      if (args[0] === 'container' && args[1] === 'inspect') throw new Error('No such container');
+      if (args[0] === 'run') return 'container-id\n';
+      if (args[0] === 'exec') return '200';
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerRuntimeSupervisor({
+    image: 'example/code-runtime:latest',
+    client,
+    capabilities: ['SYS_ADMIN', 'CHOWN'],
+    securityOptions: ['seccomp=/repo/seccomp/nsjail.json'],
+    environment: { SANDBOX_USE_CGROUPV2: 'false' },
+    bindMounts: [{ source: '/repo/data/pkgs', target: '/pkgs', readOnly: true }],
+    httpClient: 'bun',
+  });
+
+  await supervisor.acquire(assignment('rt-user-1'));
+
+  const run = calls.find(args => args[0] === 'run') ?? [];
+  assert.ok(run.includes('SYS_ADMIN'));
+  assert.ok(run.includes('CHOWN'));
+  assert.ok(run.includes('seccomp=/repo/seccomp/nsjail.json'));
+  assert.ok(run.includes('SANDBOX_USE_CGROUPV2=false'));
+  assert.ok(run.includes('type=bind,source=/repo/data/pkgs,target=/pkgs,readonly'));
+  assert.ok(
+    run.indexOf('SANDBOX_USE_CGROUPV2=false') <
+      run.indexOf('SANDBOX_SESSION_WORKSPACE_ENABLED=true'),
+  );
+  const health = calls.find(args => args[0] === 'exec') ?? [];
+  assert.ok(health.includes('bun'));
+});
+
+test('docker runtime supervisor rejects relative bind mount paths', () => {
+  assert.throws(
+    () =>
+      new DockerRuntimeSupervisor({
+        image: 'example/code-runtime:latest',
+        bindMounts: [{ source: './data/pkgs', target: '/pkgs', readOnly: true }],
+      }),
+    /absolute comma-free sources and targets/,
+  );
+});
+
 test('docker runtime supervisor rejects malformed runtime response framing', async () => {
   const client: ContainerRuntimeClient = {
     async run(args) {
