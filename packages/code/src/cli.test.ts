@@ -47,3 +47,46 @@ test('CLI rejects invalid advertised capabilities before registration', () => {
     /LIBRECHAT_CODE_SANDBOX_PROFILE or LIBRECHAT_CODE_RUNTIMES is invalid/,
   );
 });
+
+test('CLI rejects an unknown runtime supervisor before entering the run loop', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_RUNTIME_SUPERVISOR: 'podman',
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be either endpoint or docker/,
+  );
+});
+
+test('CLI requires a runtime image for Docker supervision', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_RUNTIME_SUPERVISOR: 'docker',
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /LIBRECHAT_CODE_RUNTIME_IMAGE is required/);
+});
