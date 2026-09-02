@@ -78,6 +78,11 @@ function containerName(runtimeSessionId: string): string {
   return `${CONTAINER_PREFIX}${containerSuffix(runtimeSessionId)}`;
 }
 
+function isMissingContainerError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /(?:no such container|no such object)/i.test(error.message);
+}
+
 class DockerCliClient implements ContainerRuntimeClient {
   private readonly command: string;
 
@@ -150,7 +155,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     const sessionId = assignmentSessionId(assignment);
     if (sessionId == null) throw new Error('Runtime assignment ID is required');
     const name = containerName(sessionId);
-    await this.ensureContainer(name, sessionId, signal);
+    const created = await this.ensureContainer(name, sessionId, signal);
     try {
       await this.waitForHealth(name, signal);
       return {
@@ -159,13 +164,13 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
         release: assignment.runtimeSessionId == null ? async () => this.remove(name) : undefined,
       };
     } catch (error) {
-      await this.remove(name).catch(() => undefined);
+      if (created) await this.remove(name);
       throw error;
     }
   }
 
-  async reset(runtimeSessionId: string): Promise<void> {
-    await this.remove(containerName(runtimeSessionId));
+  async reset(runtimeSessionId: string, signal?: AbortSignal): Promise<void> {
+    await this.remove(containerName(runtimeSessionId), signal);
   }
 
   async quarantine(
@@ -180,12 +185,12 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     name: string,
     runtimeSessionId: string,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const running = await this.containerRunning(name, signal);
-    if (running) return;
+    if (running) return false;
     if (running === false) {
       await this.client.run(['start', name], { signal });
-      return;
+      return false;
     }
     await this.client.run(
       [
@@ -210,6 +215,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
       ],
       { signal },
     );
+    return true;
   }
 
   private async containerRunning(name: string, signal?: AbortSignal): Promise<boolean | undefined> {
@@ -219,8 +225,9 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
         { signal },
       );
       return value.trim() === 'true';
-    } catch {
-      return undefined;
+    } catch (error) {
+      if (isMissingContainerError(error)) return undefined;
+      throw error;
     }
   }
 
@@ -230,6 +237,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     while (Date.now() < deadline) {
       if (signal?.aborted) throw signal.reason ?? new DOMException('aborted', 'AbortError');
       try {
+        const remainingMs = Math.max(1, deadline - Date.now());
         const status = await this.client.run(
           [
             'exec',
@@ -237,6 +245,8 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
             'curl',
             '--silent',
             '--show-error',
+            '--max-time',
+            (remainingMs / 1000).toFixed(3),
             '--output',
             '/dev/null',
             '--write-out',
@@ -295,11 +305,11 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     };
   }
 
-  private async remove(name: string): Promise<void> {
+  private async remove(name: string, signal?: AbortSignal): Promise<void> {
     try {
-      await this.client.run(['container', 'rm', '--force', name]);
-    } catch {
-      // A missing container is the desired reset and quarantine state.
+      await this.client.run(['container', 'rm', '--force', name], { signal });
+    } catch (error) {
+      if (!isMissingContainerError(error)) throw error;
     }
   }
 }

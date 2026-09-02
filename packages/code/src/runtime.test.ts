@@ -67,7 +67,7 @@ test('docker runtime supervisor creates a networkless stateful runtime and execu
     async run(args) {
       calls.push(args);
       if (args[0] === 'container' && args[1] === 'inspect') {
-        throw new Error('container missing');
+        throw new Error('No such container');
       }
       if (args[0] === 'run') return 'container-id\n';
       if (args[0] === 'exec' && args.some(value => value.includes('/api/v2/health'))) return '200';
@@ -103,12 +103,16 @@ test('docker runtime supervisor creates a networkless stateful runtime and execu
     'no-new-privileges:true',
   ]);
   assert.equal(run?.includes('rt-user-1'), false);
+  const health = calls.find(
+    args => args[0] === 'exec' && args.some(value => value.includes('/api/v2/health')),
+  );
+  assert.ok(health?.includes('--max-time'));
 });
 
 test('docker runtime supervisor rejects malformed runtime response framing', async () => {
   const client: ContainerRuntimeClient = {
     async run(args) {
-      if (args[0] === 'container' && args[1] === 'inspect') throw new Error('container missing');
+      if (args[0] === 'container' && args[1] === 'inspect') throw new Error('No such container');
       if (args[0] === 'run') return 'container-id\n';
       if (args[0] === 'exec' && args.some(value => value.includes('/api/v2/health'))) return '200';
       if (args[0] === 'exec' && args.some(value => value.includes('/api/v2/execute'))) return 'not framed';
@@ -124,12 +128,61 @@ test('docker runtime supervisor rejects malformed runtime response framing', asy
   await assert.rejects(execute({ body: '{}', headers: {} }), /invalid HTTP response/);
 });
 
+test('docker runtime supervisor preserves an existing stateful container after a health failure', async () => {
+  const calls: string[][] = [];
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      calls.push(args);
+      if (args[0] === 'container' && args[1] === 'inspect') return 'true\n';
+      if (args[0] === 'exec') throw new Error('runner unavailable');
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerRuntimeSupervisor({
+    image: 'example/code-runtime:latest',
+    client,
+    startupTimeoutMs: 1,
+  });
+
+  await assert.rejects(supervisor.acquire(assignment('rt-user-1')), /did not become healthy/);
+  assert.equal(calls.some(args => args[0] === 'container' && args[1] === 'rm'), false);
+});
+
+test('docker runtime supervisor propagates removal failures and forwards reset cancellation', async () => {
+  const controller = new AbortController();
+  let receivedSignal: AbortSignal | undefined;
+  const client: ContainerRuntimeClient = {
+    async run(args, options) {
+      if (args[0] === 'container' && args[1] === 'rm') {
+        receivedSignal = options?.signal;
+        throw new Error('Docker daemon unavailable');
+      }
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerRuntimeSupervisor({ image: 'example/code-runtime:latest', client });
+
+  await assert.rejects(supervisor.reset('rt-user-1', controller.signal), /Docker daemon unavailable/);
+  assert.equal(receivedSignal, controller.signal);
+});
+
+test('docker runtime supervisor ignores only confirmed missing-container removal', async () => {
+  const client: ContainerRuntimeClient = {
+    async run() {
+      throw new Error('Error response from daemon: No such container: runtime');
+    },
+  };
+  const supervisor = new DockerRuntimeSupervisor({ image: 'example/code-runtime:latest', client });
+
+  await supervisor.reset('rt-user-1');
+});
+
 test('docker runtime supervisor destroys stateless and reset stateful runtimes', async () => {
   const calls: string[][] = [];
   const client: ContainerRuntimeClient = {
     async run(args) {
       calls.push(args);
-      if (args[0] === 'container' && args[1] === 'inspect') throw new Error('container missing');
+      if (args[0] === 'container' && args[1] === 'inspect') throw new Error('No such container');
       if (args[0] === 'run') return 'container-id\n';
       if (args[0] === 'exec' && args.some(value => value.includes('/api/v2/health'))) return '200';
       if (args[0] === 'container' && args[1] === 'rm') return 'removed\n';
