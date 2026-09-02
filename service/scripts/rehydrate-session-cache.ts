@@ -350,22 +350,42 @@ export function parseRecoveryManifest(
   return { source, records: [...bySessionId.values()] };
 }
 
+type OwnerInspection =
+  | { status: 'agrees'; existing: string | null }
+  | { status: 'conflict' };
+
 /**
- * Reconciles the durable owner record for a session before its cache key
- * is touched. Never overwrites a different owner: a manifest that
- * disagrees with what the service recorded is a conflict, and the record
- * is left for an operator rather than partially recovered.
+ * Reads the durable owner record without writing. A record naming a
+ * different owner is the strongest ownership signal available, so it
+ * settles the session before anything is restored.
  */
-async function reconcileOwnerRecord(
+async function inspectOwnerRecord(
+  store: RecoveryStore,
+  record: RecoveryRecord,
+): Promise<OwnerInspection> {
+  const existing = await store.get(`session-owner:${record.session_id}`);
+  if (existing !== null && existing !== record.expected_session_key) {
+    return { status: 'conflict' };
+  }
+  return { status: 'agrees', existing };
+}
+
+/**
+ * Creates or extends the durable owner record for a session whose cache
+ * key has just been confirmed to name the same owner. Runs only after that
+ * confirmation: writing it earlier would leave a record behind for a
+ * manifest owner the live cache key contradicts, and `sessionAuth` would
+ * later authorize deletion through it.
+ */
+async function ensureOwnerRecord(
   store: RecoveryStore,
   record: RecoveryRecord,
   ownerTtlSeconds: number,
-  apply: boolean,
+  existing: string | null,
 ): Promise<'ready' | 'conflict'> {
   const ownerKey = `session-owner:${record.session_id}`;
-  let existing = await store.get(ownerKey);
 
-  if (existing === null && apply) {
+  if (existing === null) {
     const result = await store.set(
       ownerKey,
       record.expected_session_key,
@@ -376,23 +396,17 @@ async function reconcileOwnerRecord(
     if (result === 'OK') {
       return 'ready';
     }
-    existing = await store.get(ownerKey);
-  }
-
-  if (existing === null) {
-    return 'ready';
-  }
-  if (existing !== record.expected_session_key) {
-    return 'conflict';
-  }
-  if (!apply) {
+    const raced = await store.get(ownerKey);
+    if (raced !== null && raced !== record.expected_session_key) {
+      return 'conflict';
+    }
     return 'ready';
   }
 
-  /* The value already matches, and `SET NX` cannot extend an expiry. A
-   * record near the end of its life would otherwise lapse before the cache
-   * key this run is about to restore, stranding the session again the
-   * moment recovery appeared to succeed. */
+  /* The record already matches, and `SET NX` cannot extend an expiry. One
+   * near the end of its life would otherwise lapse before the cache key
+   * this run just restored, stranding the session again the moment
+   * recovery reported success. */
   const remaining = await store.ttl(ownerKey);
   if (remaining >= 0 && remaining < ownerTtlSeconds) {
     await store.expire(ownerKey, ownerTtlSeconds);
@@ -419,20 +433,40 @@ export async function recoverSessionCache(
 
   for (const record of records) {
     try {
-      /* Reconciled first: a durable owner that disagrees with the manifest
-       * is the strongest ownership signal available, and restoring the
-       * cache key anyway would hand the manifest's claimant a day of
-       * access the service never granted it. */
-      if (await reconcileOwnerRecord(store, record, ownerTtlSeconds, options.apply) === 'conflict') {
+      /* Inspected first, and read-only: a durable owner that disagrees
+       * with the manifest settles the session before anything is written,
+       * including the cache key — restoring that would hand the manifest's
+       * claimant a day of access the service never granted it. */
+      const inspection = await inspectOwnerRecord(store, record);
+      if (inspection.status === 'conflict') {
         summary.conflicts += 1;
         // eslint-disable-next-line no-console
         console.error(`Conflict: ${record.session_id} has a durable owner record for a different owner`);
         continue;
       }
 
+      /* Deferred until the cache key agrees. The durable record outlives
+       * the cache key by design, so creating one for an owner the live
+       * cache key contradicts would outlast the evidence against it. */
+      const commitOwnerRecord = async (): Promise<boolean> => {
+        if (!options.apply) {
+          return true;
+        }
+        if (await ensureOwnerRecord(store, record, ownerTtlSeconds, inspection.existing) === 'ready') {
+          return true;
+        }
+        summary.conflicts += 1;
+        // eslint-disable-next-line no-console
+        console.error(`Conflict: ${record.session_id} durable owner record changed during recovery`);
+        return false;
+      };
+
       const redisKey = `session:${record.session_id}`;
       const current = await store.get(redisKey);
       if (current === record.expected_session_key) {
+        if (!await commitOwnerRecord()) {
+          continue;
+        }
         summary.matching += 1;
         continue;
       }
@@ -456,12 +490,18 @@ export async function recoverSessionCache(
         'NX',
       );
       if (result === 'OK') {
+        if (!await commitOwnerRecord()) {
+          continue;
+        }
         summary.restored += 1;
         continue;
       }
 
       const racedValue = await store.get(redisKey);
       if (racedValue === record.expected_session_key) {
+        if (!await commitOwnerRecord()) {
+          continue;
+        }
         summary.matching += 1;
       } else if (racedValue === null) {
         summary.missing += 1;

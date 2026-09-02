@@ -220,7 +220,16 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
    * sandbox invocation." */
   const session_id = nanoid();
   const execution_id = nanoid();
-  await recordSessionOwnership(connection, session_id, sessionKey);
+  /* Guarded: registration runs before the route's `try`, and Express 4
+   * does not forward a rejected async handler to the error middleware —
+   * an unavailable Redis, or an ACL that permits `session:*` but not
+   * `session-owner:*`, would hang the request instead of answering. */
+  try {
+    await recordSessionOwnership(connection, session_id, sessionKey);
+  } catch (error) {
+    logger.error(`[${INSTANCE_ID}] Error registering session ownership - Session ID: ${session_id}:`, error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 
   try {
     if (!isSyntheticRequest) {

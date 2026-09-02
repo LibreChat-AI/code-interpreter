@@ -244,6 +244,23 @@ describe('rehydrate-session-cache', () => {
     expect(store.values.has(`session:${SESSION_ID}`)).toBe(false);
   });
 
+  it('creates no durable owner record when the live cache key names another owner', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session:${SESSION_ID}`, 'tenant-id:user:someone-else');
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(summary).toEqual({ input: 1, missing: 0, restored: 0, matching: 0, conflicts: 1 });
+    /* A durable record written here would outlive the cache key that
+     * contradicts it, and `sessionAuth` would then authorize the manifest
+     * owner to delete the real owner's files. */
+    expect(store.values.has(`session-owner:${SESSION_ID}`)).toBe(false);
+  });
+
   it('surfaces a conflicting owner record during a dry run', async () => {
     const store = new MemoryStore();
     store.values.set(`session-owner:${SESSION_ID}`, 'tenant-id:user:someone-else');
