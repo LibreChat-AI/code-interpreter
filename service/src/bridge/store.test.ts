@@ -6,6 +6,8 @@ import type * as t from '../types';
 import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
 import { RedisBridgeStore } from './store';
 
+import type { RegisteredBridgeWorker } from './store';
+
 const redis = new RedisMock() as unknown as Redis;
 const store = new RedisBridgeStore(redis);
 const incarnationId = 'incarnation-00000001';
@@ -72,7 +74,29 @@ describe('RedisBridgeStore', () => {
           runtimes: ['bash'],
         },
       }, 'old-authenticated-credential-digest'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(1);
+  });
+
+  test('allocates registration generations only when the active incarnation changes', async () => {
+    const registration: RegisteredBridgeWorker = {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'generation-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+      },
+    };
+
+    await expect(store.register(registration)).resolves.toBe(1);
+    await expect(store.register(registration)).resolves.toBe(1);
+    await expect(
+      store.register({
+        ...registration,
+        incarnationId: 'incarnation-00000002',
+      }),
+    ).resolves.toBe(2);
   });
 
   test('rejects a dynamic worker lease outside its bound tenant', async () => {
@@ -1174,7 +1198,7 @@ describe('RedisBridgeStore', () => {
           runtimes: [],
         },
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(2);
   });
 
   test('recovers only the assignment owner after registration expiry', async () => {
@@ -1227,7 +1251,7 @@ describe('RedisBridgeStore', () => {
           runtimes: [],
         },
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(1);
 
     controller.abort();
     await expect(completion).rejects.toMatchObject({
@@ -2072,6 +2096,6 @@ describe('RedisBridgeStore', () => {
           runtimes: [],
         },
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(1);
   });
 });

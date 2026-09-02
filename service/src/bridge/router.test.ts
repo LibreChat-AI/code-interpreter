@@ -278,6 +278,7 @@ describe('paired bridge HTTP API', () => {
     await expect(registrationResponse.json()).resolves.toMatchObject({
       workerId: 'vm-1',
       incarnationId: 'incarnation-00000001',
+      registrationGeneration: 1,
     });
 
     const crossDeploymentRevoke = await fetch(

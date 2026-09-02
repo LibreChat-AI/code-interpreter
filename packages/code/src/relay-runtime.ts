@@ -53,8 +53,12 @@ export class DockerFileRelaySupervisor {
   private readonly client: ContainerRuntimeClient;
   private readonly network: string;
   private readonly egressNetwork: string;
-  private readonly container: string;
+  private readonly containerPrefix: string;
+  private readonly incarnationHash: string;
   private readonly workerHash: string;
+  private container: string;
+  private prepared = false;
+  private activeGeneration?: number;
 
   constructor(private readonly options: DockerFileRelaySupervisorOptions) {
     if (!options.image.trim()) {
@@ -74,17 +78,125 @@ export class DockerFileRelaySupervisor {
       }
     }
     this.workerHash = suffix(options.workerId);
-    const incarnationHash = suffix(options.incarnationId).slice(0, 12);
+    this.incarnationHash = suffix(options.incarnationId).slice(0, 12);
     this.network = `librechat-code-relay-${this.workerHash}`;
     this.egressNetwork = `librechat-code-egress-${this.workerHash}`;
-    this.container = `librechat-code-relay-${this.workerHash}-${incarnationHash}`;
+    this.containerPrefix = `librechat-code-relay-${this.workerHash}`;
+    this.container = this.stagingContainer();
     this.client = options.client ?? new DockerCliClient(options.dockerCommand);
   }
 
   async prepare(signal?: AbortSignal): Promise<DockerFileRelayProfile> {
     await this.ensureNetwork(this.network, true, 'runtime', signal);
     await this.ensureNetwork(this.egressNetwork, false, 'egress', signal);
+    await this.launchRelay(signal);
+    return {
+      network: this.network,
+      url: 'http://relay:3000',
+      token: this.options.token,
+    };
+  }
+
+  async stop(signal?: AbortSignal): Promise<void> {
     await this.removeRelay(signal);
+  }
+
+  async activate(
+    registrationGeneration: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (
+      !Number.isSafeInteger(registrationGeneration) ||
+      registrationGeneration < 1
+    ) {
+      throw new Error('Docker file relay registration generation is invalid');
+    }
+    if (this.activeGeneration === registrationGeneration) return;
+    if (!this.prepared) await this.launchRelay(signal);
+    const activeContainer = `${this.containerPrefix}-g${registrationGeneration}-${this.incarnationHash}`;
+    if (this.container !== activeContainer) {
+      await this.client.run(
+        ['container', 'rename', this.container, activeContainer],
+        { signal },
+      );
+      this.container = activeContainer;
+    }
+    const containers = await this.client.run(
+      [
+        'container',
+        'ls',
+        '--all',
+        '--filter',
+        'label=com.librechat.code.file-relay=true',
+        '--filter',
+        `label=com.librechat.code.worker-hash=${this.workerHash}`,
+        '--format',
+        '{{.Names}}',
+      ],
+      { signal },
+    );
+    const olderContainers: string[] = [];
+    for (const name of containers.split('\n').map((value) => value.trim())) {
+      if (!name || name === this.container) continue;
+      if (name.startsWith(`${this.containerPrefix}-staging-`)) continue;
+      const candidateGeneration = this.registrationGeneration(name);
+      if (candidateGeneration == null) {
+        throw new Error('Docker returned an invalid stale file relay name');
+      }
+      if (candidateGeneration > registrationGeneration) {
+        await this.removeRelay();
+        throw new Error(
+          'Docker file relay registration was superseded before activation',
+        );
+      }
+      if (candidateGeneration === registrationGeneration) {
+        throw new Error('Docker returned conflicting file relay registrations');
+      }
+      olderContainers.push(name);
+    }
+    for (const name of olderContainers) {
+      try {
+        await this.client.run(['container', 'rm', '--force', name], { signal });
+      } catch (error) {
+        if (!missingContainer(error)) throw error;
+      }
+    }
+    try {
+      await this.client.run(
+        [
+          'network',
+          'connect',
+          '--alias',
+          'relay',
+          this.network,
+          this.container,
+        ],
+        { signal },
+      );
+    } catch (error) {
+      if (missingContainer(error)) this.resetPreparedState();
+      throw error;
+    }
+    this.activeGeneration = registrationGeneration;
+  }
+
+  private registrationGeneration(name: string): number | undefined {
+    const match = new RegExp(
+      `^${this.containerPrefix}-g([1-9][0-9]*)-[a-f0-9]{12}$`,
+    ).exec(name);
+    if (match == null) return undefined;
+    const generation = Number(match[1]);
+    return Number.isSafeInteger(generation) ? generation : undefined;
+  }
+
+  private stagingContainer(): string {
+    return `${this.containerPrefix}-staging-${this.incarnationHash}`;
+  }
+
+  private async launchRelay(signal?: AbortSignal): Promise<void> {
+    this.container = this.stagingContainer();
+    await this.removeRelay(signal);
+    this.container = this.stagingContainer();
     try {
       await this.client.run(
         [
@@ -133,88 +245,9 @@ export class DockerFileRelaySupervisor {
         { signal },
       );
       await this.waitForHealth(signal);
-      await this.client.run(
-        [
-          'network',
-          'connect',
-          '--alias',
-          'relay',
-          this.network,
-          this.container,
-        ],
-        { signal },
-      );
+      this.prepared = true;
     } catch (error) {
       await this.removeRelay();
-      throw error;
-    }
-    return {
-      network: this.network,
-      url: 'http://relay:3000',
-      token: this.options.token,
-    };
-  }
-
-  async stop(signal?: AbortSignal): Promise<void> {
-    await this.removeRelay(signal);
-  }
-
-  async pruneStale(signal?: AbortSignal): Promise<void> {
-    const currentCreatedAt = await this.containerCreatedAt(
-      this.container,
-      signal,
-    );
-    if (currentCreatedAt == null) return;
-    const containers = await this.client.run(
-      [
-        'container',
-        'ls',
-        '--all',
-        '--filter',
-        'label=com.librechat.code.file-relay=true',
-        '--filter',
-        `label=com.librechat.code.worker-hash=${this.workerHash}`,
-        '--format',
-        '{{.Names}}',
-      ],
-      { signal },
-    );
-    for (const name of containers.split('\n').map((value) => value.trim())) {
-      if (!name || name === this.container) continue;
-      if (!name.startsWith(`librechat-code-relay-${this.workerHash}-`)) {
-        throw new Error('Docker returned an invalid stale file relay name');
-      }
-      const candidateCreatedAt = await this.containerCreatedAt(name, signal);
-      if (
-        candidateCreatedAt == null ||
-        candidateCreatedAt >= currentCreatedAt
-      ) {
-        continue;
-      }
-      try {
-        await this.client.run(['container', 'rm', '--force', name], { signal });
-      } catch (error) {
-        if (!missingContainer(error)) throw error;
-      }
-    }
-  }
-
-  private async containerCreatedAt(
-    name: string,
-    signal?: AbortSignal,
-  ): Promise<number | undefined> {
-    try {
-      const created = await this.client.run(
-        ['container', 'inspect', '--format', '{{.Created}}', name],
-        { signal },
-      );
-      const timestamp = Date.parse(created.trim());
-      if (!Number.isFinite(timestamp)) {
-        throw new Error('Docker returned an invalid file relay creation time');
-      }
-      return timestamp;
-    } catch (error) {
-      if (missingContainer(error)) return undefined;
       throw error;
     }
   }
@@ -282,6 +315,13 @@ export class DockerFileRelaySupervisor {
     } catch (error) {
       if (!missingContainer(error)) throw error;
     }
+    this.resetPreparedState();
+  }
+
+  private resetPreparedState(): void {
+    this.container = this.stagingContainer();
+    this.prepared = false;
+    this.activeGeneration = undefined;
   }
 
   private async waitForHealth(signal?: AbortSignal): Promise<void> {

@@ -18,11 +18,7 @@ test('Docker file relay prepares a private runtime network and hardened dual-hom
         throw new Error('No such container');
       }
       if (args[0] === 'container' && args[1] === 'ls') return staleRelay;
-      if (args[0] === 'container' && args[1] === 'inspect') {
-        return args.at(-1) === staleRelay
-          ? '2026-09-02T08:00:00.000000000Z\n'
-          : '2026-09-02T09:00:00.000000000Z\n';
-      }
+      if (args[0] === 'container' && args[1] === 'rename') return '';
       if (args[0] === 'network' && args[1] === 'create') return 'network-id\n';
       if (args[0] === 'run') return 'relay-id\n';
       if (args[0] === 'network' && args[1] === 'connect') return '';
@@ -53,8 +49,8 @@ test('Docker file relay prepares a private runtime network and hardened dual-hom
   assert.equal(networkCreates.length, 2);
   assert.equal(networkCreates.filter((args) => args.includes('--internal')).length, 1);
   const run = calls.find((args) => args[0] === 'run') ?? [];
-  const currentRelay = run[run.indexOf('--name') + 1] ?? '';
-  assert.match(currentRelay, /^librechat-code-relay-.+-[a-f0-9]{12}$/);
+  const stagingRelay = run[run.indexOf('--name') + 1] ?? '';
+  assert.match(stagingRelay, /^librechat-code-relay-.+-staging-[a-f0-9]{12}$/);
   assert.match(run[run.indexOf('--network') + 1] ?? '', /^librechat-code-egress-/);
   assert.ok(run.includes('LIBRECHAT_CODE_FILE_RELAY_MAX_BYTES=20000000'));
   assert.ok(run.includes('LIBRECHAT_CODE_FILE_RELAY_TIMEOUT_MS=45000'));
@@ -62,6 +58,16 @@ test('Docker file relay prepares a private runtime network and hardened dual-hom
   assert.ok(run.includes('ALL'));
   assert.ok(run.includes('no-new-privileges:true'));
   assert.equal(run.includes('--publish'), false);
+  assert.equal(
+    calls.some((args) => args[0] === 'network' && args[1] === 'connect'),
+    false,
+  );
+  staleRelay = stagingRelay.replace('-staging-', '-g1-');
+  await supervisor.activate(2);
+  const rename = calls.find(
+    (args) => args[0] === 'container' && args[1] === 'rename',
+  );
+  assert.match(rename?.at(-1) ?? '', /-g2-[a-f0-9]{12}$/);
   const connect = calls.find(
     (args) => args[0] === 'network' && args[1] === 'connect',
   );
@@ -72,8 +78,6 @@ test('Docker file relay prepares a private runtime network and hardened dual-hom
   assert.match(health.at(-1) ?? '', /^\d+$/);
   assert.ok(calls.indexOf(health) < calls.indexOf(connect ?? []));
 
-  staleRelay = `${currentRelay}-stale`;
-  await supervisor.pruneStale();
   assert.ok(
     calls.some(
       (args) =>
@@ -150,7 +154,7 @@ test('Docker file relay validates a network created by a concurrent incarnation'
   assert.equal(runtimeInspections, 2);
 });
 
-test('Docker file relay stale pruning never removes a newer incarnation', async () => {
+test('Docker file relay rejects a delayed lower registration generation', async () => {
   const calls: string[][] = [];
   let currentRelay = '';
   let newerRelay = '';
@@ -163,21 +167,20 @@ test('Docker file relay stale pruning never removes a newer incarnation', async 
           : 'true|true|runtime\n';
       }
       if (args[0] === 'container' && args[1] === 'rm') {
-        throw new Error('No such container');
+        return 'removed\n';
       }
       if (args[0] === 'run') {
         currentRelay = args[args.indexOf('--name') + 1] ?? '';
-        newerRelay = `${currentRelay.slice(0, -12)}ffffffffffff`;
+        newerRelay = currentRelay.replace(
+          /-staging-[a-f0-9]{12}$/,
+          '-g2-ffffffffffff',
+        );
         return 'relay-id\n';
       }
+      if (args[0] === 'container' && args[1] === 'rename') return '';
       if (args[0] === 'network' && args[1] === 'connect') return '';
       if (args[0] === 'exec') return '200';
       if (args[0] === 'container' && args[1] === 'ls') return `${newerRelay}\n`;
-      if (args[0] === 'container' && args[1] === 'inspect') {
-        return args.at(-1) === currentRelay
-          ? '2026-09-02T08:00:00.000000000Z\n'
-          : '2026-09-02T09:00:00.000000000Z\n';
-      }
       throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
     },
   };
@@ -191,14 +194,96 @@ test('Docker file relay stale pruning never removes a newer incarnation', async 
   });
   await supervisor.prepare();
 
-  await supervisor.pruneStale();
+  await assert.rejects(
+    supervisor.activate(1),
+    /registration was superseded before activation/,
+  );
 
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === 'container' &&
+        args[1] === 'rm' &&
+        args.includes(currentRelay.replace('-staging-', '-g1-')),
+    ),
+  );
   assert.equal(
     calls.some(
       (args) => args[0] === 'container' && args[1] === 'rm' && args.includes(newerRelay),
     ),
     false,
   );
+  assert.equal(
+    calls.some((args) => args[0] === 'network' && args[1] === 'connect'),
+    false,
+  );
+});
+
+test('Docker file relay handoff follows registration order instead of creation order', async () => {
+  const containers = new Set<string>();
+  const connected: string[] = [];
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      if (args[0] === 'network' && args[1] === 'inspect') {
+        return args.at(-1)?.includes('-egress-') === true
+          ? 'false|true|egress\n'
+          : 'true|true|runtime\n';
+      }
+      if (args[0] === 'container' && args[1] === 'rm') {
+        const name = args.at(-1) ?? '';
+        if (!containers.delete(name)) throw new Error('No such container');
+        return 'removed\n';
+      }
+      if (args[0] === 'run') {
+        containers.add(args[args.indexOf('--name') + 1] ?? '');
+        return 'relay-id\n';
+      }
+      if (args[0] === 'exec') return '200';
+      if (args[0] === 'container' && args[1] === 'rename') {
+        const previous = args.at(-2) ?? '';
+        const next = args.at(-1) ?? '';
+        if (!containers.delete(previous)) throw new Error('No such container');
+        containers.add(next);
+        return '';
+      }
+      if (args[0] === 'container' && args[1] === 'ls') {
+        return `${Array.from(containers).join('\n')}\n`;
+      }
+      if (args[0] === 'network' && args[1] === 'connect') {
+        const name = args.at(-1) ?? '';
+        if (!containers.has(name)) throw new Error('No such container');
+        connected.push(name);
+        return '';
+      }
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const olderCreated = new DockerFileRelaySupervisor({
+    workerId: 'engineering-vm',
+    incarnationId: 'older-created-incarnation',
+    image: 'librechat-code-worker:local',
+    upstreamUrl: 'https://code.example/egress',
+    token: 'relay-secret',
+    client,
+  });
+  const newerCreated = new DockerFileRelaySupervisor({
+    workerId: 'engineering-vm',
+    incarnationId: 'newer-created-incarnation',
+    image: 'librechat-code-worker:local',
+    upstreamUrl: 'https://code.example/egress',
+    token: 'relay-secret',
+    client,
+  });
+
+  await olderCreated.prepare();
+  await newerCreated.prepare();
+  await newerCreated.activate(1);
+  await olderCreated.activate(2);
+
+  assert.equal(containers.size, 1);
+  assert.match(Array.from(containers)[0] ?? '', /-g2-[a-f0-9]{12}$/);
+  assert.match(connected[0] ?? '', /-g1-[a-f0-9]{12}$/);
+  assert.match(connected[1] ?? '', /-g2-[a-f0-9]{12}$/);
 });
 
 test('Docker file relay rolls back startup with a fresh signal after abort', async () => {

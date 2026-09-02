@@ -24,6 +24,8 @@ export interface BridgeWorkerRegistrationResponse {
   protocolVersion: BridgeProtocolVersion;
   workerId: string;
   incarnationId: string;
+  /** Monotonic per-worker generation allocated when the active incarnation changes. */
+  registrationGeneration?: number;
   registeredAt: string;
   leaseTtlMs: number;
 }

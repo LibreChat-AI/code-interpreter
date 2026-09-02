@@ -362,10 +362,18 @@ router.post(
         : {}),
     };
     try {
-      await options.store.register(
+      const registrationGeneration = await options.store.register(
         trustedRegistration,
         authorization,
       );
+      res.json({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: registration.workerId,
+        incarnationId: registration.incarnationId,
+        registrationGeneration,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+      });
     } catch (error) {
       if (error instanceof BridgeStoreError) {
         sendStoreError(error, res);
@@ -373,13 +381,6 @@ router.post(
       }
       throw error;
     }
-    res.json({
-      protocolVersion: BRIDGE_PROTOCOL_VERSION,
-      workerId: registration.workerId,
-      incarnationId: registration.incarnationId,
-      registeredAt: new Date().toISOString(),
-      leaseTtlMs: 60_000,
-    });
   }),
 );
 

@@ -270,7 +270,6 @@ async function run(runtimeSessionId?: string): Promise<void> {
   const fileRelayProfile = await fileRelaySupervisor?.prepare(
     controller.signal,
   );
-  let staleRelaysPruned = false;
   try {
     const worker = new BridgeWorker({
       codeApiUrl,
@@ -335,10 +334,20 @@ async function run(runtimeSessionId?: string): Promise<void> {
             }
           : undefined,
       onRegistered: fileRelaySupervisor
-        ? async () => {
-            if (staleRelaysPruned) return;
-            await fileRelaySupervisor.pruneStale(controller.signal);
-            staleRelaysPruned = true;
+        ? async (registration) => {
+            if (
+              registration.registrationGeneration == null ||
+              !Number.isSafeInteger(registration.registrationGeneration) ||
+              registration.registrationGeneration < 1
+            ) {
+              throw new Error(
+                'Code API does not support registration-ordered file relay activation',
+              );
+            }
+            await fileRelaySupervisor.activate(
+              registration.registrationGeneration,
+              controller.signal,
+            );
           }
         : undefined,
       onError: (error) => {

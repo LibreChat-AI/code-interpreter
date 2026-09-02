@@ -68,6 +68,14 @@ function workerIncarnationKey(workerId: string): string {
   return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation`;
 }
 
+function workerRegistrationGenerationKey(workerId: string): string {
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:registration-generation`;
+}
+
+function workerRegistrationGenerationIncarnationKey(workerId: string): string {
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:registration-generation-incarnation`;
+}
+
 function incarnationFenceKey(workerId: string, incarnationId: string): string {
   return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:${incarnationId}:fenced`;
 }
@@ -240,7 +248,7 @@ export class RedisBridgeStore {
       pairingGeneration?: number;
       activeCredentialId?: string;
     },
-  ): Promise<void> {
+  ): Promise<number> {
     const authorizationObject =
       typeof authorization === 'object' ? authorization : undefined;
     const expectedActiveCredentialId =
@@ -278,15 +286,21 @@ export class RedisBridgeStore {
       '    redis.call(\'SET\', ARGV[4] .. current .. \':fenced\', \"1\")',
       '  end',
       'end',
+      'local registrationGeneration = tonumber(redis.call(\'GET\', KEYS[10]) or \"0\")',
+      'local registrationGenerationIncarnation = redis.call(\'GET\', KEYS[11])',
+      'if registrationGeneration < 1 or registrationGenerationIncarnation ~= ARGV[1] then',
+      '  registrationGeneration = redis.call(\'INCR\', KEYS[10])',
+      '  redis.call(\'SET\', KEYS[11], ARGV[1])',
+      'end',
       'redis.call(\'SET\', KEYS[1], ARGV[2], \"EX\", ARGV[3])',
       'redis.call(\'SET\', KEYS[4], ARGV[1], \"EX\", ARGV[3])',
-      'return 1',
+      'return registrationGeneration',
     ].join('\n');
     const result = Number(
       await boundedCommand(
         this.redis.eval(
           script,
-          9,
+          11,
           workerKey(registration.workerId),
           incarnationFenceKey(registration.workerId, registration.incarnationId),
           quarantineKey(registration.workerId, registration.incarnationId),
@@ -296,6 +310,8 @@ export class RedisBridgeStore {
           `${PREFIX}:pairing-generation:${registration.workerId}`,
           `${PREFIX}:stable-identity:${registration.workerId}`,
           `${PREFIX}:identity:${registration.workerId}`,
+          workerRegistrationGenerationKey(registration.workerId),
+          workerRegistrationGenerationIncarnationKey(registration.workerId),
           registration.incarnationId,
           JSON.stringify(registration),
           String(this.workerTtlSeconds),
@@ -341,6 +357,10 @@ export class RedisBridgeStore {
         'Bridge worker authorization was revoked before registration completed',
       );
     }
+    if (!Number.isSafeInteger(result) || result < 1) {
+      throw new Error('Bridge worker registration returned an invalid generation');
+    }
+    return result;
   }
 
   async dispatch(args: {
