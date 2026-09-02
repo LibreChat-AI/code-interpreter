@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+
+import { defaultWorkspacePath } from './storage.js';
 
 test('CLI validates a configured worker directory before registration', () => {
   const result = spawnSync(
@@ -30,6 +32,30 @@ test('CLI validates a configured worker directory before registration', () => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /invalid workspace registration/i);
+});
+
+test('CLI trims an environment-configured worker directory', async (t) => {
+  const workspaceRoot = await mkdtemp(
+    join(tmpdir(), 'librechat-code-env-workspace-'),
+  );
+  t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url)), 'run'],
+    {
+      encoding: 'utf8',
+      timeout: 500,
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_WORKER_DIR: ` ${workspaceRoot} `,
+      },
+    },
+  );
+
+  assert.doesNotMatch(result.stderr, /invalid workspace registration/i);
 });
 
 test('CLI falls back to the workspace ID when the directory basename is invalid', async (t) => {
@@ -115,4 +141,44 @@ test('CLI falls back to the workspace ID when the directory basename is invalid'
       workspaces: [{ id: 'root-workspace', name: 'root-workspace' }],
     },
   );
+});
+
+test('CLI explicitly creates and registers an application-owned default workspace', async () => {
+  const testHome = await mkdtemp(join(tmpdir(), 'librechat-code-home-'));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('./cli.js', import.meta.url)),
+        'run',
+        '--default-workspace',
+      ],
+      {
+        encoding: 'utf8',
+        timeout: 500,
+        env: {
+          ...process.env,
+          HOME: testHome,
+          LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+          LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+          LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+          LIBRECHAT_CODE_WORKER_DIR: '   ',
+        },
+      },
+    );
+
+    assert.doesNotMatch(result.stderr, /invalid workspace registration/i);
+    const workspace = defaultWorkspacePath({
+      codeApiUrl: 'http://127.0.0.1:1/v1',
+      securityIdentity: 'worker-secret',
+      workerId: 'engineering-vm',
+      workspaceId: 'primary',
+      homeDirectory: testHome,
+    });
+    const metadata = await stat(workspace);
+    assert.equal(metadata.isDirectory(), true);
+    assert.equal(metadata.mode & 0o777, 0o700);
+  } finally {
+    await rm(testHome, { recursive: true, force: true });
+  }
 });

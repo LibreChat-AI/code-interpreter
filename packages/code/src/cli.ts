@@ -8,6 +8,8 @@ import { startFileRelay } from './relay.js';
 import { DockerFileRelaySupervisor } from './relay-runtime.js';
 import {
   defaultBridgeIdentityPath,
+  defaultWorkspacePath,
+  ensurePrivateWorkspaceDirectory,
   loadBridgeIdentity,
   saveBridgeIdentity,
 } from './storage.js';
@@ -65,6 +67,10 @@ function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index >= 0) return args[index + 1];
   return args.find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1);
+}
+
+function nonEmpty(value: string | undefined): string | undefined {
+  return value?.trim().length ? value : undefined;
 }
 
 function defaultWorkspaceName(workerDirectory: string, workspaceId: string): string {
@@ -197,15 +203,42 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     runtimeMode === 'docker-macos-nsjail' &&
     runtimeSessionId == null &&
     (fileRelayUpstream?.length ?? 0) > 0;
-  const workerDirectory =
-    runtimeSessionId == null
-      ? option(args, '--worker-dir') ??
-        process.env.LIBRECHAT_CODE_WORKER_DIR?.trim()
-      : undefined;
   const workspaceId =
     option(args, '--workspace-id') ??
     process.env.LIBRECHAT_CODE_WORKSPACE_ID?.trim() ??
     'primary';
+  const explicitWorkerDirectory =
+    runtimeSessionId == null
+      ? nonEmpty(
+          option(args, '--worker-dir') ??
+            process.env.LIBRECHAT_CODE_WORKER_DIR?.trim(),
+        )
+      : undefined;
+  const useDefaultWorkspace =
+    runtimeSessionId == null &&
+    (args.includes('--default-workspace') ||
+      process.env.LIBRECHAT_CODE_DEFAULT_WORKSPACE?.trim().toLowerCase() ===
+        'true');
+  if (explicitWorkerDirectory && useDefaultWorkspace) {
+    throw new Error(
+      '--worker-dir and --default-workspace cannot be used together',
+    );
+  }
+  const workerDirectory =
+    explicitWorkerDirectory ??
+    (useDefaultWorkspace
+      ? defaultWorkspacePath({
+          codeApiUrl,
+          securityIdentity:
+            pairedIdentity?.publicKey ??
+            required('LIBRECHAT_CODE_WORKER_TOKEN', configuredToken),
+          workerId,
+          workspaceId,
+        })
+      : undefined);
+  if (useDefaultWorkspace && workerDirectory) {
+    await ensurePrivateWorkspaceDirectory(workerDirectory);
+  }
   const workspaceTools = workerDirectory
     ? await LocalWorkspaceTools.create({
         workspaces: [
@@ -214,7 +247,9 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
             name:
               option(args, '--workspace-name') ??
               process.env.LIBRECHAT_CODE_WORKSPACE_NAME?.trim() ??
-              defaultWorkspaceName(workerDirectory, workspaceId),
+              (useDefaultWorkspace
+                ? workspaceId
+                : defaultWorkspaceName(workerDirectory, workspaceId)),
             root: workerDirectory,
           },
         ],

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -27,10 +27,58 @@ function isPairedIdentity(value: unknown): value is PairedBridgeWorkerIdentity {
 
 export function defaultBridgeIdentityPath(workerId: string): string {
   const readableName = workerId.replace(/[^A-Za-z0-9._-]/g, '_');
-  const fileName = readableName === workerId
-    ? readableName
-    : `${readableName}-${createHash('sha256').update(workerId).digest('hex').slice(0, 16)}`;
+  const fileName =
+    readableName === workerId
+      ? readableName
+      : `${readableName}-${createHash('sha256')
+          .update(workerId)
+          .digest('hex')
+          .slice(0, 16)}`;
   return join(homedir(), '.config', 'librechat', 'code', `${fileName}.json`);
+}
+
+function workspaceStorageName(value: string): string {
+  return `id-${createHash('sha256').update(value).digest('hex')}`;
+}
+
+export interface DefaultWorkspacePathOptions {
+  codeApiUrl: string;
+  securityIdentity: string;
+  workerId: string;
+  workspaceId: string;
+  homeDirectory?: string;
+}
+
+export function defaultWorkspacePath({
+  codeApiUrl,
+  securityIdentity,
+  workerId,
+  workspaceId,
+  homeDirectory = homedir(),
+}: DefaultWorkspacePathOptions): string {
+  const deploymentIdentity = `${codeApiUrl.replace(/\/+$/, '')}\0${securityIdentity}`;
+  return join(
+    homeDirectory,
+    '.local',
+    'share',
+    'librechat',
+    'code',
+    'workspaces',
+    workspaceStorageName(deploymentIdentity),
+    workspaceStorageName(workerId),
+    workspaceStorageName(workspaceId),
+  );
+}
+
+export async function ensurePrivateWorkspaceDirectory(
+  path: string,
+): Promise<void> {
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  const metadata = await lstat(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new BridgeProtocolError('Default workspace path must be a directory');
+  }
+  await chmod(path, 0o700);
 }
 
 export async function saveBridgeIdentity(

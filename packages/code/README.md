@@ -218,12 +218,31 @@ worker-directory option:
 librechat-code run --worker-dir /path/to/workspace
 ```
 
+To start without an existing project or Git repository, explicitly ask the
+worker to create and reuse an application-owned workspace:
+
+```bash
+librechat-code run --default-workspace
+```
+
+The directory is created with owner-only permissions below
+`~/.local/share/librechat/code/workspaces/`, using stable digests of the worker
+and workspace IDs so distinct IDs cannot alias on case-insensitive filesystems.
+The deployment and paired bridge identity are also part of the namespace, so
+re-pairing or switching Code API deployments cannot expose the previous
+identity's files. It persists across worker restarts. The current workspace
+tools are read-only, so an empty directory must be populated by a local process
+until write-capable coding tools are enabled. The worker never registers its
+process working directory implicitly, and `--default-workspace` cannot be
+combined with `--worker-dir`.
+
 The default public workspace ID is `primary` and the default display name is
 the directory basename. Operators can use `--workspace-id` and
 `--workspace-name`, or `LIBRECHAT_CODE_WORKER_DIR`,
 `LIBRECHAT_CODE_WORKSPACE_ID`, and `LIBRECHAT_CODE_WORKSPACE_NAME`, to set them
 explicitly. `rg` must be installed on the worker for `search_text` and
-`list_files`.
+`list_files`. `LIBRECHAT_CODE_DEFAULT_WORKSPACE=true` is the environment
+equivalent of `--default-workspace`.
 
 The worker advertises these capabilities only when a directory is configured
 and executes matching assignments under the bridge's existing lease,
