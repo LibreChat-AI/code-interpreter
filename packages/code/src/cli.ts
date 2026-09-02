@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -197,6 +197,31 @@ async function run(runtimeSessionId?: string): Promise<void> {
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
   process.once('SIGTERM', () => controller.abort());
+  const incarnationId = randomBytes(18).toString('base64url');
+  const runtimeImage =
+    runtimeMode !== 'endpoint'
+      ? runtimeSessionId == null
+        ? required('LIBRECHAT_CODE_RUNTIME_IMAGE')
+        : process.env.LIBRECHAT_CODE_RUNTIME_IMAGE?.trim()
+      : undefined;
+  const macLaunchProfile =
+    runtimeMode === 'docker-macos-nsjail' && runtimeSessionId == null
+      ? (() => {
+          const seccompProfile = resolve(
+            required('LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE'),
+          );
+          const packagesPath = resolve(
+            required('LIBRECHAT_CODE_DOCKER_PACKAGES_PATH'),
+          );
+          return {
+            seccompProfile,
+            packagesPath,
+            profileRevision: createHash('sha256')
+              .update(readFileSync(seccompProfile))
+              .digest('hex'),
+          };
+        })()
+      : undefined;
   const fileRelayUpstream =
     process.env.LIBRECHAT_CODE_FILE_RELAY_UPSTREAM?.trim();
   const fileRelayEnabled =
@@ -206,12 +231,33 @@ async function run(runtimeSessionId?: string): Promise<void> {
   const executionManifestPublicKey = fileRelayEnabled
     ? required('LIBRECHAT_CODE_EXECUTION_MANIFEST_PUBLIC_KEY')
     : undefined;
-  const fileRelayProfile =
+  const fileRelayLimits = fileRelayEnabled
+    ? {
+        maxBytes: positiveInteger(
+          'LIBRECHAT_CODE_FILE_RELAY_MAX_BYTES',
+          process.env.LIBRECHAT_CODE_FILE_RELAY_MAX_BYTES,
+          16 * 1024 * 1024,
+        ),
+        timeoutMs: positiveInteger(
+          'LIBRECHAT_CODE_FILE_RELAY_TIMEOUT_MS',
+          process.env.LIBRECHAT_CODE_FILE_RELAY_TIMEOUT_MS,
+          30_000,
+        ),
+        maxConcurrentRequests: positiveInteger(
+          'LIBRECHAT_CODE_FILE_RELAY_MAX_CONCURRENT_REQUESTS',
+          process.env.LIBRECHAT_CODE_FILE_RELAY_MAX_CONCURRENT_REQUESTS,
+          8,
+        ),
+      }
+    : undefined;
+  const fileRelaySupervisor =
     fileRelayEnabled && fileRelayUpstream
-      ? await new DockerFileRelaySupervisor({
+      ? new DockerFileRelaySupervisor({
           workerId,
+          incarnationId,
           image: required('LIBRECHAT_CODE_FILE_RELAY_IMAGE'),
           upstreamUrl: fileRelayUpstream,
+          ...fileRelayLimits,
           token: createHmac(
             'sha256',
             pairedIdentity?.privateKey ??
@@ -219,94 +265,101 @@ async function run(runtimeSessionId?: string): Promise<void> {
           )
             .update('librechat-code-file-relay-v1')
             .digest('hex'),
-        }).prepare(controller.signal)
+        })
       : undefined;
-  const worker = new BridgeWorker({
-    codeApiUrl,
-    token: configuredToken,
-    identity: workerIdentity,
-    workerId,
-    runtimeSupervisor:
-      runtimeMode !== 'endpoint'
-        ? new DockerRuntimeSupervisor({
-            image:
-              runtimeSessionId == null
-                ? required('LIBRECHAT_CODE_RUNTIME_IMAGE')
-                : process.env.LIBRECHAT_CODE_RUNTIME_IMAGE?.trim(),
-            ...(runtimeMode === 'docker-macos-nsjail' && runtimeSessionId == null
-              ? (() => {
-                  const seccompProfile = resolve(
-                    required('LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE'),
-                  );
-                  const packagesPath = resolve(
-                    required('LIBRECHAT_CODE_DOCKER_PACKAGES_PATH'),
-                  );
-                  return {
-                    capabilities: MACOS_NSJAIL_CAPABILITIES,
-                    securityOptions: [`seccomp=${seccompProfile}`],
-                    profileRevision: createHash('sha256')
-                      .update(readFileSync(seccompProfile))
-                      .digest('hex'),
-                    restartStoppedContainers: false,
-                    ...(fileRelayProfile
-                      ? { network: fileRelayProfile.network }
-                      : {}),
-                    bindMounts: [
-                      {
-                        source: packagesPath,
-                        target: '/pkgs',
-                        readOnly: true,
-                      },
-                    ],
-                    httpClient: 'bun',
-                    environment: {
-                      SANDBOX_USE_CGROUPV2: 'false',
-                      SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP: 'false',
+  const fileRelayProfile = await fileRelaySupervisor?.prepare(
+    controller.signal,
+  );
+  let staleRelaysPruned = false;
+  try {
+    const worker = new BridgeWorker({
+      codeApiUrl,
+      token: configuredToken,
+      identity: workerIdentity,
+      workerId,
+      incarnationId,
+      runtimeSupervisor:
+        runtimeMode !== 'endpoint'
+          ? new DockerRuntimeSupervisor({
+              image: runtimeImage,
+              ...(runtimeMode === 'docker-macos-nsjail' && runtimeSessionId == null
+                ? (() => {
+                    const { seccompProfile, packagesPath, profileRevision } =
+                      macLaunchProfile!;
+                    return {
+                      capabilities: MACOS_NSJAIL_CAPABILITIES,
+                      securityOptions: [`seccomp=${seccompProfile}`],
+                      profileRevision,
+                      restartStoppedContainers: false,
                       ...(fileRelayProfile
-                        ? {
-                            EGRESS_GATEWAY_URL: fileRelayProfile.url,
-                            SANDBOX_FILE_RELAY_TOKEN: fileRelayProfile.token,
-                            SANDBOX_REQUIRE_EGRESS_MANIFEST: 'true',
-                            SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY:
-                              executionManifestPublicKey!,
-                          }
+                        ? { network: fileRelayProfile.network }
                         : {}),
-                    },
-                  };
-                })()
-              : {}),
-          })
-        : new EndpointRuntimeSupervisor({
-            endpoint: sandboxEndpoint,
-            statefulWorkspace,
-          }),
-    capabilities,
-    onIdentityChange:
-      pairedIdentity && identityPath
-        ? async (identity) => {
-            await saveBridgeIdentity(identityPath, {
-              ...pairedIdentity,
-              credential: identity.credential,
-              expiresAt: identity.expiresAt,
-            });
+                      bindMounts: [
+                        {
+                          source: packagesPath,
+                          target: '/pkgs',
+                          readOnly: true,
+                        },
+                      ],
+                      httpClient: 'bun',
+                      environment: {
+                        SANDBOX_USE_CGROUPV2: 'false',
+                        SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP: 'false',
+                        ...(fileRelayProfile
+                          ? {
+                              EGRESS_GATEWAY_URL: fileRelayProfile.url,
+                              SANDBOX_FILE_RELAY_TOKEN: fileRelayProfile.token,
+                              SANDBOX_REQUIRE_EGRESS_MANIFEST: 'true',
+                              SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY:
+                                executionManifestPublicKey!,
+                            }
+                          : {}),
+                      },
+                    };
+                  })()
+                : {}),
+            })
+          : new EndpointRuntimeSupervisor({
+              endpoint: sandboxEndpoint,
+              statefulWorkspace,
+            }),
+      capabilities,
+      onIdentityChange:
+        pairedIdentity && identityPath
+          ? async (identity) => {
+              await saveBridgeIdentity(identityPath, {
+                ...pairedIdentity,
+                credential: identity.credential,
+                expiresAt: identity.expiresAt,
+              });
+            }
+          : undefined,
+      onRegistered: fileRelaySupervisor
+        ? async () => {
+            if (staleRelaysPruned) return;
+            await fileRelaySupervisor.pruneStale(controller.signal);
+            staleRelaysPruned = true;
           }
         : undefined,
-    onError: (error) => {
-      const message =
-        error instanceof Error ? error.message : 'unknown bridge error';
-      process.stderr.write(`librechat-code: reconnecting after ${message}\n`);
-    },
-  });
-  if (runtimeSessionId !== undefined) {
-    await worker.refreshCredential(controller.signal);
-    await worker.register(controller.signal);
-    await worker.resetWorkspace(runtimeSessionId, controller.signal);
-    process.stdout.write(
-      `librechat-code: reset acknowledged for ${runtimeSessionId}\n`,
-    );
-    return;
+      onError: (error) => {
+        const message =
+          error instanceof Error ? error.message : 'unknown bridge error';
+        process.stderr.write(`librechat-code: reconnecting after ${message}\n`);
+      },
+    });
+    if (runtimeSessionId !== undefined) {
+      await worker.refreshCredential(controller.signal);
+      await worker.register(controller.signal);
+      await worker.resetWorkspace(runtimeSessionId, controller.signal);
+      process.stdout.write(
+        `librechat-code: reset acknowledged for ${runtimeSessionId}\n`,
+      );
+      return;
+    }
+    await worker.run(controller.signal);
+  } finally {
+    await fileRelaySupervisor?.stop();
   }
-  await worker.run(controller.signal);
 }
 
 async function main(): Promise<void> {

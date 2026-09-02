@@ -44,6 +44,9 @@ export interface BridgeWorkerOptions {
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
   onIdentityChange?: (identity: BridgeWorkerIdentity) => void | Promise<void>;
+  onRegistered?: (
+    registration: BridgeWorkerRegistrationResponse,
+  ) => void | Promise<void>;
   incarnationId?: string;
 }
 
@@ -203,6 +206,7 @@ export class BridgeWorker {
     }
     this.registrationTtlMs = registration.leaseTtlMs;
     this.lastRegisteredAtMs = registrationStartedAtMs;
+    await this.options.onRegistered?.(registration);
     return registration;
   }
 

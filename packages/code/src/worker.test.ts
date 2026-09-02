@@ -12,6 +12,37 @@ import type { RuntimeSupervisor } from './runtime.js';
 
 const incarnationId = 'incarnation-00000001';
 
+test('worker invokes lifecycle hooks only after its incarnation registers', async () => {
+  const registered: string[] = [];
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    fetchImpl: async () =>
+      Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+      }),
+    onRegistered: async (registration) => {
+      registered.push(registration.incarnationId);
+    },
+  });
+
+  await worker.register();
+
+  assert.deepEqual(registered, [incarnationId]);
+});
+
 test('worker forwards a fenced assignment to the sandbox and settles the result', async () => {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {

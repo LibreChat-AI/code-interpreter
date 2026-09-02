@@ -332,3 +332,52 @@ test('file relay rejects an oversized chunked upstream response', async () => {
     );
   }
 });
+
+test('file relay accepts a valid scoped grant larger than Node defaults', async () => {
+  const grant = `grant-${'a'.repeat(32 * 1024)}`;
+  const upstream = createServer({ maxHeaderSize: 512 * 1024 }, (req, res) => {
+    assert.equal(req.headers['x-codeapi-egress-grant'], grant);
+    res.writeHead(200).end('ok');
+  });
+  const upstreamUrl = await listen(upstream);
+  const relay = await startFileRelay({
+    host: '127.0.0.1',
+    port: 0,
+    upstreamUrl,
+    token: 'relay-secret',
+    maxBytes: 1024,
+    timeoutMs: 1_000,
+  });
+
+  try {
+    const response = await fetch(
+      `${relay.url}/sessions/storage-1/objects/file-1`,
+      {
+        headers: {
+          'X-LibreChat-Code-Relay-Token': 'relay-secret',
+          'X-CodeAPI-Egress-Grant': grant,
+        },
+      },
+    );
+    assert.equal(response.status, 200);
+  } finally {
+    await relay.close();
+    await new Promise<void>((resolve, reject) =>
+      upstream.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test('file relay rejects plaintext remote upstreams', async () => {
+  await assert.rejects(
+    startFileRelay({
+      host: '127.0.0.1',
+      port: 0,
+      upstreamUrl: 'http://code.example/egress',
+      token: 'relay-secret',
+      maxBytes: 1024,
+      timeoutMs: 1_000,
+    }),
+    /HTTPS unless it is a local development host/,
+  );
+});

@@ -109,15 +109,21 @@ LIBRECHAT_CODE_EXECUTION_MANIFEST_PUBLIC_KEY='<base64 Ed25519 public key>' \
 librechat-code run
 ```
 
-The URL is illustrative; it must be the externally reachable base URL for the
-same Code API deployment's egress-gateway routes. Enabling the relay also
-requires signed execution manifests. The worker creates an internal Docker
-network for each worker identity, connects the runtime only to that network,
-and starts a separate hardened relay container with normal outbound access.
-The relay publishes no host port, accepts only the file-object read, normalized
-list, and generated-object write routes, requires both its worker-derived token
-and the assignment's scoped egress grant, refuses redirects, and caps transfer
-size, duration, and concurrency. Its upstream is fixed at startup.
+The URL is illustrative; it must be the externally reachable HTTPS base URL
+for the same Code API deployment's egress-gateway routes. Plain HTTP is accepted
+only for loopback and Docker Desktop development hosts. Enabling the relay also
+requires signed execution manifests. The worker creates a labeled internal
+Docker network for each worker identity, connects the runtime only to that
+network, and starts a separate hardened relay container on a labeled,
+worker-specific egress network. Reused networks are accepted only when their
+internal flag and ownership labels match the required profile. The relay
+publishes no host port, accepts only the file-object read, normalized list, and
+generated-object write routes, requires both its worker-derived token and the
+assignment's scoped egress grant, refuses redirects, and caps request headers,
+transfer size, duration, and concurrency. Its upstream is fixed at startup.
+Overlapping worker incarnations use separate relay containers; the newly
+registered incarnation removes stale relays only after Code API fences the old
+incarnation, and orderly shutdown removes its own relay.
 
 The trusted runner API can use this relay for file staging. User code still
 runs in NsJail's separate network namespace with no interfaces, so it cannot
