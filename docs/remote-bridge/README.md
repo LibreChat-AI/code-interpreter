@@ -122,13 +122,15 @@ leave Code API, and are bounded to 1 MiB/500 lines for reads or 200 matches for
 searches. Absolute paths, traversal, backslashes, symlink escapes, unexpected
 fields, and host roots are rejected.
 
-This boundary keeps the repository local to the operator's machine, but the
-selected file contents, search matches, and later tool results necessarily
-cross the outbound bridge to Code API and the model. Treat them as explicit
-tool outputs, apply the same retention and audit policy as chat content, and do
-not register a directory containing secrets. The default operations are
-read-only; future mutation and shell operations must be gated by LibreChat's
-tool-approval hooks in addition to worker capability checks.
+The workspace root can be an existing project, a Git repository, or an empty
+directory; Git is not required. This boundary keeps that directory local to the
+operator's machine, but the selected file contents, search matches, and later
+tool results necessarily cross the outbound bridge to Code API and the model.
+Treat them as explicit tool outputs, apply the same retention and audit policy
+as chat content, and do not register a directory containing secrets. The
+default operations are read-only; future mutation and shell operations must be
+gated by LibreChat's tool-approval hooks in addition to worker capability
+checks.
 
 Stateful deployments must also set `LIBRECHAT_CODE_STATEFUL_WORKSPACE=true`
 and route the CLI's `{runtimeSessionId}` endpoint template to an isolated,
