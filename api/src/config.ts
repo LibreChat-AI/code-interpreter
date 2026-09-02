@@ -53,7 +53,7 @@ export const config = {
   disable_networking: (process.env.SANDBOX_DISABLE_NETWORKING ?? 'true') === 'true',
   use_cgroupv2: (process.env.SANDBOX_USE_CGROUPV2 ?? 'true') === 'true',
   allowed_local_network_port: Number(process.env.SANDBOX_ALLOWED_LOCAL_NETWORK_PORT ?? 0),
-  output_max_size: Number(process.env.SANDBOX_OUTPUT_MAX_SIZE ?? 1024),
+  output_max_size: safeInt(process.env.SANDBOX_OUTPUT_MAX_SIZE, 1024),
   max_process_count: Number(process.env.SANDBOX_MAX_PROCESS_COUNT ?? 64),
   max_open_files: Number(process.env.SANDBOX_MAX_OPEN_FILES ?? 2048),
   max_file_size: Number(process.env.SANDBOX_MAX_FILE_SIZE ?? 10000000),
