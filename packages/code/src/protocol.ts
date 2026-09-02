@@ -1,3 +1,5 @@
+import type { WorkspaceToolRequest } from './workspace.js';
+
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const BRIDGE_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const BRIDGE_SANDBOX_PROFILE_MAX_LENGTH = 128;
@@ -77,7 +79,8 @@ export interface BridgeAssignment<TBody = object> {
   /** Server-calculated execution budget at lease time; avoids VM clock skew. */
   remainingMs?: number;
   runtimeSessionId?: string;
-  request: BridgeSandboxRequest<TBody>;
+  executionKind?: 'sandbox' | 'workspace_tool';
+  request: BridgeSandboxRequest<TBody> | WorkspaceToolRequest;
 }
 
 export interface BridgeLeaseResponse<TBody = object> {
