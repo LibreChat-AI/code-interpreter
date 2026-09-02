@@ -289,6 +289,29 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     expect(contents).toBe('legacy bytes');
   });
 
+  it('writes under the requested name when a legacy server returns an opaque storage filename', async () => {
+    const file: TFile = {
+      id: 'opaque-storage-id',
+      storage_session_id: 'prev-session',
+      name: 'Sample_-_Superstore.xlsx',
+    };
+    routes.set(`/sessions/${encodeURIComponent(file.storage_session_id!)}/objects/${encodeURIComponent(file.id!)}`, {
+      status: 200,
+      contentDisposition: "attachment; filename*=UTF-8''opaque-storage-id.xlsx",
+      body: 'workbook bytes',
+    });
+
+    const job = makeJob([file]);
+    asInternals(job).submissionDir = tmpDir;
+
+    const writtenName = await job.downloadAndWriteFile(file);
+
+    expect(writtenName).toBe('Sample_-_Superstore.xlsx');
+    expect(await fsp.readFile(path.join(tmpDir, 'Sample_-_Superstore.xlsx'), 'utf8'))
+      .toBe('workbook bytes');
+    expect(await fsp.stat(path.join(tmpDir, 'opaque-storage-id.xlsx')).catch(() => null)).toBeNull();
+  });
+
   it('resolves concurrent header destinations without provisional-name false conflicts', async () => {
     const renamed: TFile = {
       id: 'renamed-id',

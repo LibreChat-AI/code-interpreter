@@ -179,11 +179,24 @@ export function resolveOriginalName(response: Response, file: TFile): string {
   const header = response.headers.get('content-disposition');
   if (!header) return fallback;
 
+  const preferRequestedName = (candidate: string): string => {
+    /* Older file servers advertised path.basename(objectName) when an
+     * S3-compatible backend omitted original-filename user metadata. That
+     * basename is `<file.id><extension>`, so it is a storage identifier rather
+     * than an authoritative destination. Preserve the caller's requested name
+     * during rolling upgrades instead of exposing the opaque id in /mnt/data. */
+    const opaqueStem = path.basename(candidate, path.extname(candidate));
+    const isFlatObjectBasename = candidate === path.basename(candidate);
+    return file.name && file.id && isFlatObjectBasename && opaqueStem === file.id
+      ? file.name
+      : candidate;
+  };
+
   const star = header.match(/filename\*=(?:UTF-8'[^']*')?([^;]+)/i);
   if (star) {
     const raw = star[1].trim();
     try {
-      return decodeURIComponent(raw);
+      return preferRequestedName(decodeURIComponent(raw));
     } catch {
       /* Malformed percent-encoding (e.g. `%ZZ`) — fall through to the legacy
        * forms. The same header may emit both `filename*=` and a legacy
@@ -194,7 +207,7 @@ export function resolveOriginalName(response: Response, file: TFile): string {
 
   const match = header.match(/filename="([^"]+)"/i)
     ?? header.match(/filename=([^\s;]+)/i);
-  return match ? match[1] : fallback;
+  return match ? preferRequestedName(match[1]) : fallback;
 }
 
 /**
