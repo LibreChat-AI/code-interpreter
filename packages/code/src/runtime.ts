@@ -46,6 +46,7 @@ export interface ContainerRuntimeRunOptions {
 export interface DockerRuntimeSupervisorOptions {
   image?: string;
   profileRevision?: string;
+  restartStoppedContainers?: boolean;
   capabilities?: string[];
   securityOptions?: string[];
   environment?: Record<string, string>;
@@ -163,6 +164,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
   private readonly environment: Record<string, string>;
   private readonly bindMounts: DockerRuntimeBindMount[];
   private readonly httpClient: 'curl' | 'bun';
+  private readonly restartStoppedContainers: boolean;
 
   constructor(private readonly options: DockerRuntimeSupervisorOptions) {
     if (options.image != null && options.image.trim().length === 0) {
@@ -180,6 +182,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     this.environment = { ...options.environment };
     this.bindMounts = (options.bindMounts ?? []).map((mount) => ({ ...mount }));
     this.httpClient = options.httpClient ?? 'curl';
+    this.restartStoppedContainers = options.restartStoppedContainers ?? true;
     if (
       this.bindMounts.some(
         ({ source, target }) =>
@@ -199,7 +202,12 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     const name = containerName(sessionId);
     let created = false;
     try {
-      created = await this.ensureContainer(name, sessionId, signal);
+      created = await this.ensureContainer(
+        name,
+        sessionId,
+        assignment.runtimeSessionId != null,
+        signal,
+      );
       await this.waitForHealth(name, signal);
       return {
         sessionId,
@@ -227,6 +235,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
   private async ensureContainer(
     name: string,
     runtimeSessionId: string,
+    stateful: boolean,
     signal?: AbortSignal,
   ): Promise<boolean> {
     const image = this.options.image?.trim();
@@ -241,10 +250,21 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
       ) {
         await this.remove(name, signal);
         state = undefined;
+        if (stateful) {
+          throw new Error(
+            'Docker runtime workspace was discarded because its confinement profile or image changed',
+          );
+        }
       }
     }
     if (state?.running) return false;
     if (state != null) {
+      if (!this.restartStoppedContainers) {
+        await this.remove(name, signal);
+        throw new Error(
+          'Docker runtime workspace was discarded because its container stopped',
+        );
+      }
       await this.client.run(['start', name], { signal });
       return false;
     }
@@ -289,6 +309,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
           version: 1,
           image,
           profileRevision: this.options.profileRevision ?? null,
+          restartStoppedContainers: this.restartStoppedContainers,
           capabilities: this.capabilities,
           securityOptions: this.securityOptions,
           environment: Object.entries(this.environment).sort(([left], [right]) =>

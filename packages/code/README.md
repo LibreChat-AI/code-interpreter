@@ -88,9 +88,18 @@ librechat-code run
 The packages directory must already be populated using the repository's
 package-init workflow. The worker mounts it read-only into each runtime.
 Changing the image, package path, capabilities, seccomp contents, or other
-confinement settings recreates any surviving session container before reuse;
-its local workspace is discarded. Treat runtime-profile changes as environment
-resets and preserve any needed workspace contents first.
+confinement settings discards any surviving session container; the current
+assignment fails explicitly so the lost workspace is never
+presented as continuous state. Likewise, Docker Desktop remounts a fresh tmpfs
+when this container restarts, so the profile discards a stopped container and
+reports state loss instead of restarting it. The next assignment starts a new
+environment. Treat profile changes and Docker restarts as environment resets
+and preserve any needed workspace contents first.
+
+This first local profile supports inline request files. By-reference inputs and
+generated-file uploads require a worker-mediated file relay and are not yet
+supported; the runtime remains networkless rather than opening general egress
+to reach a file server.
 Direct NsJail shares the Docker Desktop VM kernel and is suitable for local or
 operator-trusted development. Use a separate VM or MicroVM boundary for
 internet-facing execution of code from untrusted users.

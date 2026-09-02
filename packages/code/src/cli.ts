@@ -177,6 +177,7 @@ async function run(runtimeSessionId?: string): Promise<void> {
                     profileRevision: createHash('sha256')
                       .update(readFileSync(seccompProfile))
                       .digest('hex'),
+                    restartStoppedContainers: false,
                     bindMounts: [
                       {
                         source: packagesPath,
