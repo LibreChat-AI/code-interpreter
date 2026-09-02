@@ -45,6 +45,7 @@ export interface ContainerRuntimeRunOptions {
 
 export interface DockerRuntimeSupervisorOptions {
   image?: string;
+  profileRevision?: string;
   capabilities?: string[];
   securityOptions?: string[];
   environment?: Record<string, string>;
@@ -61,6 +62,12 @@ export interface DockerRuntimeBindMount {
   source: string;
   target: string;
   readOnly?: boolean;
+}
+
+interface DockerContainerState {
+  running: boolean;
+  profileDigest?: string;
+  imageId?: string;
 }
 
 const DEFAULT_RUNNER_PORT = 2000;
@@ -91,6 +98,11 @@ function containerName(runtimeSessionId: string): string {
 function isMissingContainerError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /(?:no such container|no such object)/i.test(error.message);
+}
+
+function isMissingImageError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /(?:no such image|no such object)/i.test(error.message);
 }
 
 class DockerCliClient implements ContainerRuntimeClient {
@@ -219,9 +231,20 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
   ): Promise<boolean> {
     const image = this.options.image?.trim();
     if (!image) throw new Error('Docker runtime image is required for acquisition');
-    const running = await this.containerRunning(name, signal);
-    if (running) return false;
-    if (running === false) {
+    const profileDigest = this.profileDigest(image);
+    let state = await this.containerState(name, signal);
+    if (state != null) {
+      const currentImageId = await this.imageId(image, signal);
+      if (
+        state.profileDigest !== profileDigest ||
+        (currentImageId != null && state.imageId !== currentImageId)
+      ) {
+        await this.remove(name, signal);
+        state = undefined;
+      }
+    }
+    if (state?.running) return false;
+    if (state != null) {
       await this.client.run(['start', name], { signal });
       return false;
     }
@@ -247,6 +270,8 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
         'com.librechat.code.runtime=true',
         '--label',
         `com.librechat.code.runtime-hash=${containerSuffix(runtimeSessionId)}`,
+        '--label',
+        `com.librechat.code.profile-digest=${profileDigest}`,
         ...Object.entries(this.environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]),
         '--env',
         'SANDBOX_SESSION_WORKSPACE_ENABLED=true',
@@ -257,15 +282,68 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     return true;
   }
 
-  private async containerRunning(name: string, signal?: AbortSignal): Promise<boolean | undefined> {
+  private profileDigest(image: string): string {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          version: 1,
+          image,
+          profileRevision: this.options.profileRevision ?? null,
+          capabilities: this.capabilities,
+          securityOptions: this.securityOptions,
+          environment: Object.entries(this.environment).sort(([left], [right]) =>
+            left.localeCompare(right),
+          ),
+          bindMounts: this.bindMounts,
+        }),
+      )
+      .digest('hex');
+  }
+
+  private async containerState(
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<DockerContainerState | undefined> {
     try {
       const value = await this.client.run(
-        ['container', 'inspect', '--format', '{{.State.Running}}', name],
+        [
+          'container',
+          'inspect',
+          '--format',
+          '{{.State.Running}}|{{index .Config.Labels "com.librechat.code.profile-digest"}}|{{.Image}}',
+          name,
+        ],
         { signal },
       );
-      return value.trim() === 'true';
+      const [running, profileDigest, imageId] = value.trim().split('|');
+      if (running !== 'true' && running !== 'false') {
+        throw new Error(
+          'Docker runtime container inspection returned an invalid state',
+        );
+      }
+      return {
+        running: running === 'true',
+        ...(profileDigest && profileDigest !== '<no value>' ? { profileDigest } : {}),
+        ...(imageId ? { imageId } : {}),
+      };
     } catch (error) {
       if (isMissingContainerError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  private async imageId(
+    image: string,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    try {
+      const value = await this.client.run(
+        ['image', 'inspect', '--format', '{{.Id}}', image],
+        { signal },
+      );
+      return value.trim() || undefined;
+    } catch (error) {
+      if (isMissingImageError(error)) return undefined;
       throw error;
     }
   }

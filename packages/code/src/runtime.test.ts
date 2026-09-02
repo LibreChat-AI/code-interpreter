@@ -178,10 +178,23 @@ test('docker runtime supervisor rejects malformed runtime response framing', asy
 
 test('docker runtime supervisor preserves an existing stateful container after a health failure', async () => {
   const calls: string[][] = [];
+  let profileDigest: string | undefined;
+  let healthChecks = 0;
   const client: ContainerRuntimeClient = {
     async run(args) {
       calls.push(args);
-      if (args[0] === 'container' && args[1] === 'inspect') return 'true\n';
+      if (args[0] === 'container' && args[1] === 'inspect') {
+        if (!profileDigest) throw new Error('No such container');
+        return `true|${profileDigest}|sha256:image-1\n`;
+      }
+      if (args[0] === 'image' && args[1] === 'inspect') return 'sha256:image-1\n';
+      if (args[0] === 'run') {
+        profileDigest = args
+          .find(value => value.startsWith('com.librechat.code.profile-digest='))
+          ?.split('=')[1];
+        return 'container-id\n';
+      }
+      if (args[0] === 'exec' && healthChecks++ === 0) return '200';
       if (args[0] === 'exec') throw new Error('runner unavailable');
       throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
     },
@@ -192,8 +205,89 @@ test('docker runtime supervisor preserves an existing stateful container after a
     startupTimeoutMs: 1,
   });
 
+  await supervisor.acquire(assignment('rt-user-1'));
   await assert.rejects(supervisor.acquire(assignment('rt-user-1')), /did not become healthy/);
   assert.equal(calls.some(args => args[0] === 'container' && args[1] === 'rm'), false);
+});
+
+test('docker runtime supervisor recreates a stateful container after profile drift', async () => {
+  const calls: string[][] = [];
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      calls.push(args);
+      if (args[0] === 'container' && args[1] === 'inspect') {
+        return 'true|stale-profile|sha256:image-1\n';
+      }
+      if (args[0] === 'image' && args[1] === 'inspect') return 'sha256:image-1\n';
+      if (args[0] === 'container' && args[1] === 'rm') return 'removed\n';
+      if (args[0] === 'run') return 'container-id\n';
+      if (args[0] === 'exec') return '200';
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerRuntimeSupervisor({
+    image: 'example/code-runtime:latest',
+    profileRevision: 'seccomp-v2',
+    client,
+  });
+
+  await supervisor.acquire(assignment('rt-user-1'));
+
+  const removalIndex = calls.findIndex(args => args[0] === 'container' && args[1] === 'rm');
+  const creationIndex = calls.findIndex(args => args[0] === 'run');
+  assert.ok(removalIndex >= 0);
+  assert.ok(creationIndex > removalIndex);
+  assert.ok(
+    calls[creationIndex]?.some(value =>
+      value.startsWith('com.librechat.code.profile-digest='),
+    ),
+  );
+});
+
+test('docker runtime supervisor recreates a stateful container after an image tag moves', async () => {
+  const calls: string[][] = [];
+  let profileDigest: string | undefined;
+  let containerExists = false;
+  let currentImageId = 'sha256:image-1';
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      calls.push(args);
+      if (args[0] === 'container' && args[1] === 'inspect') {
+        if (!containerExists) throw new Error('No such container');
+        return `true|${profileDigest}|sha256:image-1\n`;
+      }
+      if (args[0] === 'image' && args[1] === 'inspect') {
+        return `${currentImageId}\n`;
+      }
+      if (args[0] === 'container' && args[1] === 'rm') {
+        containerExists = false;
+        return 'removed\n';
+      }
+      if (args[0] === 'run') {
+        profileDigest = args
+          .find(value => value.startsWith('com.librechat.code.profile-digest='))
+          ?.split('=')[1];
+        containerExists = true;
+        return 'container-id\n';
+      }
+      if (args[0] === 'exec') return '200';
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerRuntimeSupervisor({
+    image: 'example/code-runtime:latest',
+    client,
+  });
+
+  await supervisor.acquire(assignment('rt-user-1'));
+  currentImageId = 'sha256:image-2';
+  await supervisor.acquire(assignment('rt-user-1'));
+
+  assert.equal(
+    calls.filter(args => args[0] === 'container' && args[1] === 'rm').length,
+    1,
+  );
+  assert.equal(calls.filter(args => args[0] === 'run').length, 2);
 });
 
 test('docker runtime supervisor propagates removal failures and forwards reset cancellation', async () => {

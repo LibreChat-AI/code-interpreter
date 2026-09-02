@@ -87,6 +87,10 @@ librechat-code run
 
 The packages directory must already be populated using the repository's
 package-init workflow. The worker mounts it read-only into each runtime.
+Changing the image, package path, capabilities, seccomp contents, or other
+confinement settings recreates any surviving session container before reuse;
+its local workspace is discarded. Treat runtime-profile changes as environment
+resets and preserve any needed workspace contents first.
 Direct NsJail shares the Docker Desktop VM kernel and is suitable for local or
 operator-trusted development. Use a separate VM or MicroVM boundary for
 internet-facing execution of code from untrusted users.

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
@@ -162,25 +163,34 @@ async function run(runtimeSessionId?: string): Promise<void> {
               runtimeSessionId == null
                 ? required('LIBRECHAT_CODE_RUNTIME_IMAGE')
                 : process.env.LIBRECHAT_CODE_RUNTIME_IMAGE?.trim(),
-            ...(runtimeMode === 'docker-macos-nsjail'
-              ? {
-                  capabilities: MACOS_NSJAIL_CAPABILITIES,
-                  securityOptions: [
-                    `seccomp=${resolve(required('LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE'))}`,
-                  ],
-                  bindMounts: [
-                    {
-                      source: resolve(required('LIBRECHAT_CODE_DOCKER_PACKAGES_PATH')),
-                      target: '/pkgs',
-                      readOnly: true,
+            ...(runtimeMode === 'docker-macos-nsjail' && runtimeSessionId == null
+              ? (() => {
+                  const seccompProfile = resolve(
+                    required('LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE'),
+                  );
+                  const packagesPath = resolve(
+                    required('LIBRECHAT_CODE_DOCKER_PACKAGES_PATH'),
+                  );
+                  return {
+                    capabilities: MACOS_NSJAIL_CAPABILITIES,
+                    securityOptions: [`seccomp=${seccompProfile}`],
+                    profileRevision: createHash('sha256')
+                      .update(readFileSync(seccompProfile))
+                      .digest('hex'),
+                    bindMounts: [
+                      {
+                        source: packagesPath,
+                        target: '/pkgs',
+                        readOnly: true,
+                      },
+                    ],
+                    httpClient: 'bun',
+                    environment: {
+                      SANDBOX_USE_CGROUPV2: 'false',
+                      SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP: 'false',
                     },
-                  ],
-                  httpClient: 'bun',
-                  environment: {
-                    SANDBOX_USE_CGROUPV2: 'false',
-                    SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP: 'false',
-                  },
-                }
+                  };
+                })()
               : {}),
           })
         : new EndpointRuntimeSupervisor({

@@ -133,3 +133,33 @@ test('CLI requires a package mount for the macOS NsJail profile', () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /LIBRECHAT_CODE_DOCKER_PACKAGES_PATH is required/);
 });
+
+test('CLI reset does not require Docker runtime launch inputs', () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL('./cli.js', import.meta.url)),
+      'reset-workspace',
+      'runtime-session-1',
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_RUNTIME_SUPERVISOR: 'docker-macos-nsjail',
+        LIBRECHAT_CODE_RUNTIME_IMAGE: undefined,
+        LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE: undefined,
+        LIBRECHAT_CODE_DOCKER_PACKAGES_PATH: undefined,
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(
+    result.stderr,
+    /LIBRECHAT_CODE_(?:RUNTIME_IMAGE|DOCKER_SECCOMP_PROFILE|DOCKER_PACKAGES_PATH) is required/,
+  );
+});
