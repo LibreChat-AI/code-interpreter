@@ -247,7 +247,9 @@ test('Docker file relay handoff follows registration order instead of creation o
         return '';
       }
       if (args[0] === 'container' && args[1] === 'ls') {
-        return `${Array.from(containers).join('\n')}\n`;
+        return `${Array.from(containers)
+          .map((name) => `${name}|running|1000`)
+          .join('\n')}\n`;
       }
       if (args[0] === 'network' && args[1] === 'connect') {
         const name = args.at(-1) ?? '';
@@ -264,6 +266,7 @@ test('Docker file relay handoff follows registration order instead of creation o
     image: 'librechat-code-worker:local',
     upstreamUrl: 'https://code.example/egress',
     token: 'relay-secret',
+    now: () => 1_000,
     client,
   });
   const newerCreated = new DockerFileRelaySupervisor({
@@ -272,6 +275,7 @@ test('Docker file relay handoff follows registration order instead of creation o
     image: 'librechat-code-worker:local',
     upstreamUrl: 'https://code.example/egress',
     token: 'relay-secret',
+    now: () => 1_000,
     client,
   });
 
@@ -284,6 +288,111 @@ test('Docker file relay handoff follows registration order instead of creation o
   assert.match(Array.from(containers)[0] ?? '', /-g2-[a-f0-9]{12}$/);
   assert.match(connected[0] ?? '', /-g1-[a-f0-9]{12}$/);
   assert.match(connected[1] ?? '', /-g2-[a-f0-9]{12}$/);
+});
+
+test('Docker file relay reclaims stopped and expired staging containers', async () => {
+  const removed: string[] = [];
+  let staging = '';
+  let listCalls = 0;
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      if (args[0] === 'network' && args[1] === 'inspect') {
+        return args.at(-1)?.includes('-egress-') === true
+          ? 'false|true|egress\n'
+          : 'true|true|runtime\n';
+      }
+      if (args[0] === 'container' && args[1] === 'rm') {
+        removed.push(args.at(-1) ?? '');
+        return 'removed\n';
+      }
+      if (args[0] === 'run') {
+        staging = args[args.indexOf('--name') + 1] ?? '';
+        return 'relay-id\n';
+      }
+      if (args[0] === 'exec') return '200';
+      if (args[0] === 'container' && args[1] === 'rename') return '';
+      if (args[0] === 'network' && args[1] === 'connect') return '';
+      if (args[0] === 'container' && args[1] === 'ls') {
+        listCalls += 1;
+        if (listCalls === 1) return '';
+        const prefix = staging.replace(/-staging-[a-f0-9]{12}$/, '-staging-');
+        return [
+          `${prefix}111111111111|exited|99000`,
+          `${prefix}222222222222|running|1`,
+          `${prefix}333333333333|running|99000`,
+        ].join('\n');
+      }
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerFileRelaySupervisor({
+    workerId: 'engineering-vm',
+    incarnationId: 'current-incarnation',
+    image: 'librechat-code-worker:local',
+    upstreamUrl: 'https://code.example/egress',
+    token: 'relay-secret',
+    stagingGraceMs: 10_000,
+    now: () => 100_000,
+    client,
+  });
+
+  await supervisor.prepare();
+  await supervisor.activate(1);
+  await supervisor.activate(1);
+
+  assert.ok(removed.some((name) => name.endsWith('111111111111')));
+  assert.ok(removed.some((name) => name.endsWith('222222222222')));
+  assert.equal(removed.some((name) => name.endsWith('333333333333')), false);
+});
+
+test('Docker file relay relaunches an unhealthy active generation', async () => {
+  let relay = '';
+  let launches = 0;
+  let healthChecks = 0;
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      if (args[0] === 'network' && args[1] === 'inspect') {
+        return args.at(-1)?.includes('-egress-') === true
+          ? 'false|true|egress\n'
+          : 'true|true|runtime\n';
+      }
+      if (args[0] === 'container' && args[1] === 'rm') return 'removed\n';
+      if (args[0] === 'run') {
+        launches += 1;
+        relay = args[args.indexOf('--name') + 1] ?? '';
+        return 'relay-id\n';
+      }
+      if (args[0] === 'exec') {
+        healthChecks += 1;
+        if (healthChecks === 2) throw new Error('container is not running');
+        return '200';
+      }
+      if (args[0] === 'container' && args[1] === 'rename') {
+        relay = args.at(-1) ?? '';
+        return '';
+      }
+      if (args[0] === 'container' && args[1] === 'ls') {
+        return `${relay}|running|1000\n`;
+      }
+      if (args[0] === 'network' && args[1] === 'connect') return '';
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerFileRelaySupervisor({
+    workerId: 'engineering-vm',
+    incarnationId: 'recovering-incarnation',
+    image: 'librechat-code-worker:local',
+    upstreamUrl: 'https://code.example/egress',
+    token: 'relay-secret',
+    client,
+  });
+
+  await supervisor.prepare();
+  await supervisor.activate(1);
+  await supervisor.activate(1);
+
+  assert.equal(launches, 2);
+  assert.ok(healthChecks >= 3);
 });
 
 test('Docker file relay rolls back startup with a fresh signal after abort', async () => {

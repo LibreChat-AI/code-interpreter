@@ -123,7 +123,14 @@ assignment's scoped egress grant, refuses redirects, and caps request headers,
 transfer size, duration, and concurrency. Its upstream is fixed at startup.
 Overlapping worker incarnations use separate relay containers; the newly
 registered incarnation removes stale relays only after Code API fences the old
-incarnation, and orderly shutdown removes its own relay.
+incarnation, and orderly shutdown removes its own relay. Relay-capable workers
+remain unavailable for dispatch until they activate and health-check the relay,
+then confirm readiness for the exact registration incarnation and generation.
+Each registration heartbeat revalidates the relay before renewing its
+shorter-lived readiness confirmation, so a stopped relay ages out without
+creating an availability gap during healthy heartbeats.
+Stopped staging containers are reclaimed on the next activation; running
+staging containers are reclaimed only after a conservative grace period.
 
 The trusted runner API can use this relay for file staging. User code still
 runs in NsJail's separate network namespace with no interfaces, so it cannot

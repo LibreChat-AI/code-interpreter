@@ -205,9 +205,41 @@ export class BridgeWorker {
       this.serverClockOffsetMs = registeredAtMs - registrationStartedAtMs;
     }
     this.registrationTtlMs = registration.leaseTtlMs;
-    this.lastRegisteredAtMs = registrationStartedAtMs;
     await this.options.onRegistered?.(registration);
+    if (this.options.capabilities.requiresReadyConfirmation === true) {
+      await this.confirmReady(registration, signal);
+    }
+    this.lastRegisteredAtMs = registrationStartedAtMs;
     return registration;
+  }
+
+  private async confirmReady(
+    registration: BridgeWorkerRegistrationResponse,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const registrationGeneration = registration.registrationGeneration;
+    if (
+      !Number.isSafeInteger(registrationGeneration) ||
+      (registrationGeneration ?? 0) < 1
+    ) {
+      throw new BridgeProtocolError(
+        'Code API does not support explicit worker readiness confirmation',
+      );
+    }
+    await this.timedRequest(
+      `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/ready`,
+      {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        incarnationId: this.incarnationId,
+        registrationGeneration,
+      },
+      Math.max(
+        1,
+        this.options.registrationTransportTimeoutMs ??
+          DEFAULT_REGISTRATION_TRANSPORT_TIMEOUT_MS,
+      ),
+      signal,
+    );
   }
 
   async resetWorkspace(

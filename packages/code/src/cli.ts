@@ -181,6 +181,12 @@ async function run(runtimeSessionId?: string): Promise<void> {
         expiresAt: pairedIdentity.expiresAt,
       }
     : undefined;
+  const fileRelayUpstream =
+    process.env.LIBRECHAT_CODE_FILE_RELAY_UPSTREAM?.trim();
+  const fileRelayEnabled =
+    runtimeMode === 'docker-macos-nsjail' &&
+    runtimeSessionId == null &&
+    (fileRelayUpstream?.length ?? 0) > 0;
   const capabilities = {
     statefulWorkspace,
     sandboxProfile:
@@ -188,6 +194,7 @@ async function run(runtimeSessionId?: string): Promise<void> {
       (runtimeMode.startsWith('docker') ? 'oci-docker' : 'nsjail'),
     runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
     policyDigest: createHash('sha256').update(policy).digest('hex'),
+    ...(fileRelayEnabled ? { requiresReadyConfirmation: true } : {}),
   };
   if (!isValidBridgeWorkerCapabilities(capabilities)) {
     throw new Error(
@@ -222,12 +229,6 @@ async function run(runtimeSessionId?: string): Promise<void> {
           };
         })()
       : undefined;
-  const fileRelayUpstream =
-    process.env.LIBRECHAT_CODE_FILE_RELAY_UPSTREAM?.trim();
-  const fileRelayEnabled =
-    runtimeMode === 'docker-macos-nsjail' &&
-    runtimeSessionId == null &&
-    fileRelayUpstream != null;
   const executionManifestPublicKey = fileRelayEnabled
     ? required('LIBRECHAT_CODE_EXECUTION_MANIFEST_PUBLIC_KEY')
     : undefined;
@@ -307,6 +308,9 @@ async function run(runtimeSessionId?: string): Promise<void> {
                         ...(fileRelayProfile
                           ? {
                               EGRESS_GATEWAY_URL: fileRelayProfile.url,
+                              SANDBOX_PRIME_CONCURRENCY: String(
+                                fileRelayLimits!.maxConcurrentRequests,
+                              ),
                               SANDBOX_FILE_RELAY_TOKEN: fileRelayProfile.token,
                               SANDBOX_REQUIRE_EGRESS_MANIFEST: 'true',
                               SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY:

@@ -43,6 +43,79 @@ test('worker invokes lifecycle hooks only after its incarnation registers', asyn
   assert.deepEqual(registered, [incarnationId]);
 });
 
+test('worker confirms readiness only after local registration activation succeeds', async () => {
+  const events: string[] = [];
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      requiresReadyConfirmation: true,
+    },
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('/ready')) {
+        events.push('ready');
+        return Response.json({ protocolVersion: 1, ready: true });
+      }
+      events.push('registered');
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId,
+        registrationGeneration: 3,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+      });
+    },
+    onRegistered: async () => {
+      events.push('activated');
+    },
+  });
+
+  await worker.register();
+
+  assert.deepEqual(events, ['registered', 'activated', 'ready']);
+});
+
+test('worker does not confirm readiness when local activation fails', async () => {
+  let readinessRequests = 0;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      requiresReadyConfirmation: true,
+    },
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('/ready')) readinessRequests += 1;
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId,
+        registrationGeneration: 1,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+      });
+    },
+    onRegistered: async () => {
+      throw new Error('relay activation failed');
+    },
+  });
+
+  await assert.rejects(worker.register(), /relay activation failed/);
+  assert.equal(readinessRequests, 0);
+});
+
 test('worker forwards a fenced assignment to the sandbox and settles the result', async () => {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {

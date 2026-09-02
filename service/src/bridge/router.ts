@@ -385,6 +385,47 @@ router.post(
 );
 
 router.post(
+  '/workers/:workerId/ready',
+  workerAuth,
+  asyncRoute(async (req, res) => {
+    const workerId = req.params.workerId;
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      !validWorkerId(workerId) ||
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      !validIncarnationId(body.incarnationId) ||
+      !Number.isSafeInteger(body.registrationGeneration) ||
+      Number(body.registrationGeneration) < 1
+    ) {
+      res.status(400).json({
+        error: 'Invalid bridge worker readiness confirmation',
+      });
+      return;
+    }
+    if (!configuredWorker(workerId)) {
+      res.status(403).json({
+        error: 'Worker is not authorized for this Code API deployment',
+      });
+      return;
+    }
+    try {
+      await options.store.confirmReady(
+        workerId,
+        body.incarnationId,
+        Number(body.registrationGeneration),
+      );
+      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ready: true });
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
+      }
+      throw error;
+    }
+  }),
+);
+
+router.post(
   '/workers/:workerId/workspaces/reset',
   workerAuth,
   asyncRoute(async (req, res) => {

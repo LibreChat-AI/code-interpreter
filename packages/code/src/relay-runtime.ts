@@ -16,6 +16,8 @@ export interface DockerFileRelaySupervisorOptions {
   maxConcurrentRequests?: number;
   dockerCommand?: string;
   startupTimeoutMs?: number;
+  stagingGraceMs?: number;
+  now?: () => number;
   client?: ContainerRuntimeClient;
 }
 
@@ -26,6 +28,8 @@ export interface DockerFileRelayProfile {
 }
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
+const DEFAULT_STAGING_GRACE_MS = 5 * 60_000;
+const TERMINAL_CONTAINER_STATES = new Set(['dead', 'exited']);
 
 function suffix(workerId: string): string {
   return createHash('sha256').update(workerId).digest('hex').slice(0, 20);
@@ -72,6 +76,7 @@ export class DockerFileRelaySupervisor {
       ['maxBytes', options.maxBytes],
       ['timeoutMs', options.timeoutMs],
       ['maxConcurrentRequests', options.maxConcurrentRequests],
+      ['stagingGraceMs', options.stagingGraceMs],
     ] as const) {
       if (value != null && (!Number.isSafeInteger(value) || value <= 0)) {
         throw new Error(`Docker file relay ${name} must be a positive integer`);
@@ -111,7 +116,15 @@ export class DockerFileRelaySupervisor {
     ) {
       throw new Error('Docker file relay registration generation is invalid');
     }
-    if (this.activeGeneration === registrationGeneration) return;
+    let activeAndHealthy = false;
+    if (this.activeGeneration === registrationGeneration) {
+      try {
+        await this.checkHealth(signal);
+        activeAndHealthy = true;
+      } catch {
+        await this.removeRelay();
+      }
+    }
     if (!this.prepared) await this.launchRelay(signal);
     const activeContainer = `${this.containerPrefix}-g${registrationGeneration}-${this.incarnationHash}`;
     if (this.container !== activeContainer) {
@@ -131,14 +144,29 @@ export class DockerFileRelaySupervisor {
         '--filter',
         `label=com.librechat.code.worker-hash=${this.workerHash}`,
         '--format',
-        '{{.Names}}',
+        '{{.Names}}|{{.State}}|{{.Label "com.librechat.code.file-relay-staged-at"}}',
       ],
       { signal },
     );
     const olderContainers: string[] = [];
-    for (const name of containers.split('\n').map((value) => value.trim())) {
+    for (const record of containers.split('\n').map((value) => value.trim())) {
+      const [name, state = '', stagedAtValue = ''] = record.split('|');
       if (!name || name === this.container) continue;
-      if (name.startsWith(`${this.containerPrefix}-staging-`)) continue;
+      if (name.startsWith(`${this.containerPrefix}-staging-`)) {
+        const stagedAt = Number(stagedAtValue);
+        const staleStage =
+          Number.isSafeInteger(stagedAt) &&
+          stagedAt > 0 &&
+          (this.options.now?.() ?? Date.now()) - stagedAt >=
+            (this.options.stagingGraceMs ?? DEFAULT_STAGING_GRACE_MS);
+        if (
+          TERMINAL_CONTAINER_STATES.has(state.toLowerCase()) ||
+          staleStage
+        ) {
+          olderContainers.push(name);
+        }
+        continue;
+      }
       const candidateGeneration = this.registrationGeneration(name);
       if (candidateGeneration == null) {
         throw new Error('Docker returned an invalid stale file relay name');
@@ -161,6 +189,7 @@ export class DockerFileRelaySupervisor {
         if (!missingContainer(error)) throw error;
       }
     }
+    if (activeAndHealthy) return;
     try {
       await this.client.run(
         [
@@ -217,6 +246,8 @@ export class DockerFileRelaySupervisor {
           'com.librechat.code.file-relay=true',
           '--label',
           `com.librechat.code.worker-hash=${this.workerHash}`,
+          '--label',
+          `com.librechat.code.file-relay-staged-at=${this.options.now?.() ?? Date.now()}`,
           '--env',
           `LIBRECHAT_CODE_FILE_RELAY_UPSTREAM=${this.options.upstreamUrl}`,
           '--env',
@@ -335,21 +366,8 @@ export class DockerFileRelaySupervisor {
       }
       try {
         const remainingMs = Math.max(1, deadline - Date.now());
-        const status = await this.client.run(
-          [
-            'exec',
-            this.container,
-            'node',
-            '-e',
-            "fetch('http://127.0.0.1:3000/health',{headers:{'X-LibreChat-Code-Relay-Token':process.env.LIBRECHAT_CODE_FILE_RELAY_TOKEN},signal:AbortSignal.timeout(Number(process.argv.at(-1)))}).then(r=>process.stdout.write(String(r.status)))",
-            String(remainingMs),
-          ],
-          { signal },
-        );
-        if (status.trim() === '200') return;
-        lastError = new Error(
-          `File relay health check returned HTTP ${status.trim()}`,
-        );
+        await this.checkHealth(signal, remainingMs);
+        return;
       } catch (error) {
         if (signal?.aborted) {
           throw signal.reason ?? new DOMException('aborted', 'AbortError');
@@ -361,5 +379,28 @@ export class DockerFileRelaySupervisor {
     throw new Error('Docker file relay did not become healthy', {
       cause: lastError,
     });
+  }
+
+  private async checkHealth(
+    signal?: AbortSignal,
+    timeoutMs = Math.max(
+      1,
+      this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
+    ),
+  ): Promise<void> {
+    const status = await this.client.run(
+      [
+        'exec',
+        this.container,
+        'node',
+        '-e',
+        "fetch('http://127.0.0.1:3000/health',{headers:{'X-LibreChat-Code-Relay-Token':process.env.LIBRECHAT_CODE_FILE_RELAY_TOKEN},signal:AbortSignal.timeout(Number(process.argv.at(-1)))}).then(r=>process.stdout.write(String(r.status)))",
+        String(timeoutMs),
+      ],
+      { signal },
+    );
+    if (status.trim() !== '200') {
+      throw new Error(`File relay health check returned HTTP ${status.trim()}`);
+    }
   }
 }

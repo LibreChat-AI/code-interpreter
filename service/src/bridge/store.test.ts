@@ -15,12 +15,14 @@ const redisEval = redis.eval.bind(redis);
 const redisDel = redis.del.bind(redis);
 const redisLpop = redis.lpop.bind(redis);
 const redisGet = redis.get.bind(redis);
+const redisMget = redis.mget.bind(redis);
 
 afterEach(async () => {
   redis.eval = redisEval as Redis['eval'];
   redis.del = redisDel as Redis['del'];
   redis.lpop = redisLpop as Redis['lpop'];
   redis.get = redisGet as Redis['get'];
+  redis.mget = redisMget as Redis['mget'];
   await redis.flushall();
 });
 
@@ -97,6 +99,126 @@ describe('RedisBridgeStore', () => {
         incarnationId: 'incarnation-00000002',
       }),
     ).resolves.toBe(2);
+  });
+
+  test('dispatches an explicitly gated worker only after exact-generation readiness', async () => {
+    const workerId = 'ready-worker';
+    const registration: RegisteredBridgeWorker = {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId,
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+        requiresReadyConfirmation: true,
+      },
+    };
+    const generation = await store.register(registration);
+
+    await expect(
+      store.dispatch({
+        workerId,
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        deadlineAtMs: Date.now() + 1_000,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_OFFLINE' });
+
+    await store.confirmReady(workerId, incarnationId, generation);
+    const controller = new AbortController();
+    const completion = store.dispatch({
+      workerId,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    });
+    await expect(store.lease(workerId, incarnationId, 1_000)).resolves.toBeDefined();
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+
+    await store.register(registration);
+    const secondController = new AbortController();
+    const secondCompletion = store.dispatch({
+      workerId,
+      body: { language: 'bash' } as t.PayloadBody,
+      headers: {},
+      deadlineAtMs: Date.now() + 5_000,
+      signal: secondController.signal,
+    });
+    await expect(store.lease(workerId, incarnationId, 1_000)).resolves.toBeDefined();
+    secondController.abort();
+    await expect(secondCompletion).rejects.toMatchObject({
+      code: 'ASSIGNMENT_EXPIRED',
+    });
+  });
+
+  test('rejects readiness from a replaced registration generation', async () => {
+    const workerId = 'replaced-ready-worker';
+    const capabilities = {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      requiresReadyConfirmation: true,
+    };
+    const staleGeneration = await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId,
+      incarnationId,
+      capabilities,
+    });
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId,
+      incarnationId: 'incarnation-00000002',
+      capabilities,
+    });
+
+    await expect(
+      store.confirmReady(workerId, incarnationId, staleGeneration),
+    ).rejects.toMatchObject({ code: 'WORKER_FENCED' });
+  });
+
+  test('does not enqueue after readiness is withdrawn during dispatch', async () => {
+    const workerId = 'readiness-race-worker';
+    const generation = await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId,
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+        requiresReadyConfirmation: true,
+      },
+    });
+    await store.confirmReady(workerId, incarnationId, generation);
+    let withdrewReadiness = false;
+    redis.eval = (async (...args: Parameters<Redis['eval']>) => {
+      if (!withdrewReadiness && String(args[0]).includes('ARGV[7]')) {
+        withdrewReadiness = true;
+        await redis.del(`codeapi:bridge:v1:worker:${workerId}:ready`);
+      }
+      return redisEval(...args);
+    }) as Redis['eval'];
+
+    await expect(
+      store.dispatch({
+        workerId,
+        body: { language: 'bash' } as t.PayloadBody,
+        headers: {},
+        deadlineAtMs: Date.now() + 1_000,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_OFFLINE' });
+    expect(withdrewReadiness).toBe(true);
+    await expect(
+      redis.llen(
+        `codeapi:bridge:v1:worker:${workerId}:incarnation:${incarnationId}:assignments`,
+      ),
+    ).resolves.toBe(0);
   });
 
   test('rejects a dynamic worker lease outside its bound tenant', async () => {
@@ -1328,7 +1450,7 @@ describe('RedisBridgeStore', () => {
         runtimes: [],
       },
     });
-    redis.get = (() => new Promise<string | null>(() => {})) as Redis['get'];
+    redis.mget = (() => new Promise<(string | null)[]>(() => {})) as Redis['mget'];
 
     await expect(
       timedStore.dispatch({
