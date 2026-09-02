@@ -188,6 +188,28 @@ accepting another assignment. Reset or discard that session's local runner
 before restarting the worker; its workspace may contain mutations that Code
 API did not commit.
 
+## Local workspace tools (library preview)
+
+`@librechat/code/workspace` provides the provider-neutral foundation for
+coding-agent access to repositories that already live on the worker machine.
+`LocalWorkspaceTools` registers opaque workspace IDs with optional display
+names and exposes bounded `read_file` and literal `search_text` operations.
+Only IDs, names, protocol version, and supported operations appear in worker
+capabilities; absolute host paths remain local to the worker process.
+
+Reads reject absolute paths, traversal, escaping symlinks, non-regular files,
+and files larger than 1 MiB. The opened file is checked against its canonical
+in-workspace inode before it is read. Text search invokes `rg` without a shell,
+respects its normal ignore rules, does not follow symlinks, limits individual
+files to 10 MiB, limits returned line length, and stops after a bounded global
+result count. The worker process still belongs inside the trusted BYOM boundary
+and should receive filesystem access only to roots the operator intentionally
+registers.
+
+This release exposes the library protocol only. The subsequent bridge-dispatch
+layer will route signed, deadline-bound workspace tool assignments to it; until
+that layer is configured, the CLI does not advertise or execute these tools.
+
 After discarding or resetting that session's local runner, acknowledge recovery
 with `librechat-code reset-workspace <runtime-session-id>`. The command uses the
 configured worker credentials, registers a fresh incarnation, and only clears
