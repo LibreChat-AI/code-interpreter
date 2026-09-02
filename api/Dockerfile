@@ -171,6 +171,23 @@ ENV PORT=8080 \
 EXPOSE 8080/tcp
 ENTRYPOINT ["/sandbox_api/entrypoint.sh"]
 
+# Local direct-NsJail runtime used by @librechat/code's Docker supervisor.
+# Runtime packages are mounted read-only at /pkgs, matching docker-compose.mac.
+# This profile shares the Docker Desktop VM kernel and is for operator-trusted
+# local/BYOM development; production untrusted execution should retain the
+# separate MicroVM boundary described in the repository security guidance.
+FROM sandbox-build AS local-oci-runtime
+
+ENV PORT=2000 \
+    SANDBOX_PACKAGES_DIRECTORY=/pkgs \
+    SANDBOX_OUTPUT_MAX_SIZE=65536 \
+    SANDBOX_SESSION_WORKSPACE_ENABLED=true \
+    SANDBOX_USE_CGROUPV2=false \
+    SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP=false
+
+EXPOSE 2000/tcp
+ENTRYPOINT ["/sandbox_api/entrypoint.sh"]
+
 # ============================================================================
 # Stage 3: Build the Rust launcher binary (Fedora for libkrun ABI)
 # ============================================================================

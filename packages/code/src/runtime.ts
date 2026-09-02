@@ -45,12 +45,30 @@ export interface ContainerRuntimeRunOptions {
 
 export interface DockerRuntimeSupervisorOptions {
   image?: string;
+  profileRevision?: string;
+  restartStoppedContainers?: boolean;
   capabilities?: string[];
+  securityOptions?: string[];
+  environment?: Record<string, string>;
+  bindMounts?: DockerRuntimeBindMount[];
+  httpClient?: 'curl' | 'bun';
   dockerCommand?: string;
   runnerPort?: number;
   startupTimeoutMs?: number;
   healthPath?: string;
   client?: ContainerRuntimeClient;
+}
+
+export interface DockerRuntimeBindMount {
+  source: string;
+  target: string;
+  readOnly?: boolean;
+}
+
+interface DockerContainerState {
+  running: boolean;
+  profileDigest?: string;
+  imageId?: string;
 }
 
 const DEFAULT_RUNNER_PORT = 2000;
@@ -81,6 +99,11 @@ function containerName(runtimeSessionId: string): string {
 function isMissingContainerError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /(?:no such container|no such object)/i.test(error.message);
+}
+
+function isMissingImageError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /(?:no such image|no such object)/i.test(error.message);
 }
 
 class DockerCliClient implements ContainerRuntimeClient {
@@ -137,6 +160,11 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
   private readonly startupTimeoutMs: number;
   private readonly healthPath: string;
   private readonly capabilities: string[];
+  private readonly securityOptions: string[];
+  private readonly environment: Record<string, string>;
+  private readonly bindMounts: DockerRuntimeBindMount[];
+  private readonly httpClient: 'curl' | 'bun';
+  private readonly restartStoppedContainers: boolean;
 
   constructor(private readonly options: DockerRuntimeSupervisorOptions) {
     if (options.image != null && options.image.trim().length === 0) {
@@ -149,7 +177,23 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     this.runnerPort = options.runnerPort ?? DEFAULT_RUNNER_PORT;
     this.startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     this.healthPath = options.healthPath ?? DEFAULT_HEALTH_PATH;
-    this.capabilities = options.capabilities ?? [];
+    this.capabilities = [...(options.capabilities ?? [])];
+    this.securityOptions = [...(options.securityOptions ?? [])];
+    this.environment = { ...options.environment };
+    this.bindMounts = (options.bindMounts ?? []).map((mount) => ({ ...mount }));
+    this.httpClient = options.httpClient ?? 'curl';
+    this.restartStoppedContainers = options.restartStoppedContainers ?? true;
+    if (
+      this.bindMounts.some(
+        ({ source, target }) =>
+          !source.startsWith('/') ||
+          !target.startsWith('/') ||
+          source.includes(',') ||
+          target.includes(','),
+      )
+    ) {
+      throw new Error('Docker runtime bind mounts require absolute comma-free sources and targets');
+    }
   }
 
   async acquire(assignment: BridgeAssignment, signal?: AbortSignal): Promise<RuntimeLease> {
@@ -158,7 +202,12 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     const name = containerName(sessionId);
     let created = false;
     try {
-      created = await this.ensureContainer(name, sessionId, signal);
+      created = await this.ensureContainer(
+        name,
+        sessionId,
+        assignment.runtimeSessionId != null,
+        signal,
+      );
       await this.waitForHealth(name, signal);
       return {
         sessionId,
@@ -186,13 +235,36 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
   private async ensureContainer(
     name: string,
     runtimeSessionId: string,
+    stateful: boolean,
     signal?: AbortSignal,
   ): Promise<boolean> {
     const image = this.options.image?.trim();
     if (!image) throw new Error('Docker runtime image is required for acquisition');
-    const running = await this.containerRunning(name, signal);
-    if (running) return false;
-    if (running === false) {
+    const profileDigest = this.profileDigest(image);
+    let state = await this.containerState(name, signal);
+    if (state != null) {
+      const currentImageId = await this.imageId(image, signal);
+      if (
+        state.profileDigest !== profileDigest ||
+        (currentImageId != null && state.imageId !== currentImageId)
+      ) {
+        await this.remove(name, signal);
+        state = undefined;
+        if (stateful) {
+          throw new Error(
+            'Docker runtime workspace was discarded because its confinement profile or image changed',
+          );
+        }
+      }
+    }
+    if (state?.running) return false;
+    if (state != null) {
+      if (!this.restartStoppedContainers) {
+        await this.remove(name, signal);
+        throw new Error(
+          'Docker runtime workspace was discarded because its container stopped',
+        );
+      }
       await this.client.run(['start', name], { signal });
       return false;
     }
@@ -209,10 +281,18 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
         ...this.capabilities.flatMap((capability) => ['--cap-add', capability]),
         '--security-opt',
         'no-new-privileges:true',
+        ...this.securityOptions.flatMap((option) => ['--security-opt', option]),
+        ...this.bindMounts.flatMap(({ source, target, readOnly }) => [
+          '--mount',
+          `type=bind,source=${source},target=${target}${readOnly ? ',readonly' : ''}`,
+        ]),
         '--label',
         'com.librechat.code.runtime=true',
         '--label',
         `com.librechat.code.runtime-hash=${containerSuffix(runtimeSessionId)}`,
+        '--label',
+        `com.librechat.code.profile-digest=${profileDigest}`,
+        ...Object.entries(this.environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]),
         '--env',
         'SANDBOX_SESSION_WORKSPACE_ENABLED=true',
         image,
@@ -222,15 +302,69 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     return true;
   }
 
-  private async containerRunning(name: string, signal?: AbortSignal): Promise<boolean | undefined> {
+  private profileDigest(image: string): string {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          version: 1,
+          image,
+          profileRevision: this.options.profileRevision ?? null,
+          restartStoppedContainers: this.restartStoppedContainers,
+          capabilities: this.capabilities,
+          securityOptions: this.securityOptions,
+          environment: Object.entries(this.environment).sort(([left], [right]) =>
+            left.localeCompare(right),
+          ),
+          bindMounts: this.bindMounts,
+        }),
+      )
+      .digest('hex');
+  }
+
+  private async containerState(
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<DockerContainerState | undefined> {
     try {
       const value = await this.client.run(
-        ['container', 'inspect', '--format', '{{.State.Running}}', name],
+        [
+          'container',
+          'inspect',
+          '--format',
+          '{{.State.Running}}|{{index .Config.Labels "com.librechat.code.profile-digest"}}|{{.Image}}',
+          name,
+        ],
         { signal },
       );
-      return value.trim() === 'true';
+      const [running, profileDigest, imageId] = value.trim().split('|');
+      if (running !== 'true' && running !== 'false') {
+        throw new Error(
+          'Docker runtime container inspection returned an invalid state',
+        );
+      }
+      return {
+        running: running === 'true',
+        ...(profileDigest && profileDigest !== '<no value>' ? { profileDigest } : {}),
+        ...(imageId ? { imageId } : {}),
+      };
     } catch (error) {
       if (isMissingContainerError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  private async imageId(
+    image: string,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    try {
+      const value = await this.client.run(
+        ['image', 'inspect', '--format', '{{.Id}}', image],
+        { signal },
+      );
+      return value.trim() || undefined;
+    } catch (error) {
+      if (isMissingImageError(error)) return undefined;
       throw error;
     }
   }
@@ -242,21 +376,32 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
       if (signal?.aborted) throw signal.reason ?? new DOMException('aborted', 'AbortError');
       try {
         const remainingMs = Math.max(1, deadline - Date.now());
+        const healthUrl = `http://127.0.0.1:${this.runnerPort}${this.healthPath}`;
         const status = await this.client.run(
-          [
-            'exec',
-            name,
-            'curl',
-            '--silent',
-            '--show-error',
-            '--max-time',
-            (remainingMs / 1000).toFixed(3),
-            '--output',
-            '/dev/null',
-            '--write-out',
-            '%{http_code}',
-            `http://127.0.0.1:${this.runnerPort}${this.healthPath}`,
-          ],
+          this.httpClient === 'bun'
+            ? [
+                'exec',
+                name,
+                'bun',
+                '-e',
+                'const r=await fetch(process.argv.at(-2),{signal:AbortSignal.timeout(Number(process.argv.at(-1)))});process.stdout.write(String(r.status));',
+                healthUrl,
+                String(remainingMs),
+              ]
+            : [
+                'exec',
+                name,
+                'curl',
+                '--silent',
+                '--show-error',
+                '--max-time',
+                (remainingMs / 1000).toFixed(3),
+                '--output',
+                '/dev/null',
+                '--write-out',
+                '%{http_code}',
+                healthUrl,
+              ],
           { signal },
         );
         if (status.trim() === '200') return;
@@ -281,23 +426,35 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
       throw new Error('Runtime request headers cannot contain line breaks');
     }
     const marker = randomBytes(32).toString('hex');
+    const executeUrl = `http://127.0.0.1:${this.runnerPort}/api/v2/execute`;
     const output = await this.client.run(
-      [
-        'exec',
-        '--interactive',
-        name,
-        'curl',
-        '--silent',
-        '--show-error',
-        '--request',
-        'POST',
-        ...Object.entries(request.headers).flatMap(([name, value]) => ['--header', `${name}: ${value}`]),
-        '--data-binary',
-        '@-',
-        '--write-out',
-        `\n${marker}%{http_code}`,
-        `http://127.0.0.1:${this.runnerPort}/api/v2/execute`,
-      ],
+      this.httpClient === 'bun'
+        ? [
+            'exec',
+            '--interactive',
+            name,
+            'bun',
+            '-e',
+            `const b=await Bun.stdin.text();const r=await fetch(process.argv.at(-2),{method:'POST',headers:JSON.parse(process.argv.at(-1)),body:b});process.stdout.write(await r.text());process.stdout.write('\\n${marker}'+r.status);`,
+            executeUrl,
+            JSON.stringify(request.headers),
+          ]
+        : [
+            'exec',
+            '--interactive',
+            name,
+            'curl',
+            '--silent',
+            '--show-error',
+            '--request',
+            'POST',
+            ...Object.entries(request.headers).flatMap(([name, value]) => ['--header', `${name}: ${value}`]),
+            '--data-binary',
+            '@-',
+            '--write-out',
+            `\n${marker}%{http_code}`,
+            executeUrl,
+          ],
       { input: request.body, signal: request.signal },
     );
     const suffix = new RegExp(`\\n${marker}(\\d{3})$`);
