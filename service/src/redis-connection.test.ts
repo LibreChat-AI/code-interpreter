@@ -50,6 +50,30 @@ describe('parseRedisNodes', () => {
         expect(parseRedisNodes()).toEqual([{ host: 'myhost', port: 6380 }]);
     });
 
+    test('bracketed IPv6 host with embedded port', () => {
+        resetEnv({ REDIS_HOST: '[2001:db8::1]:6380' });
+        expect(parseRedisNodes()).toEqual([
+            { host: '2001:db8::1', port: 6380 },
+        ]);
+    });
+
+    test('unbracketed IPv6 host uses REDIS_PORT default', () => {
+        resetEnv({ REDIS_HOST: '2001:db8::1', REDIS_PORT: '6380' });
+        expect(parseRedisNodes()).toEqual([
+            { host: '2001:db8::1', port: 6380 },
+        ]);
+    });
+
+    test('comma-separated nodes preserve bracketed IPv6 hosts', () => {
+        resetEnv({
+            REDIS_HOST: '[2001:db8::1]:6379,node2:6380',
+        });
+        expect(parseRedisNodes()).toEqual([
+            { host: '2001:db8::1', port: 6379 },
+            { host: 'node2', port: 6380 },
+        ]);
+    });
+
     test('comma-separated hosts without ports', () => {
         resetEnv({ REDIS_HOST: 'node1,node2,node3', REDIS_PORT: '6380' });
         expect(parseRedisNodes()).toEqual([

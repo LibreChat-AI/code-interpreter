@@ -15,7 +15,8 @@ const MAX_CLUSTER_RECONNECT_ATTEMPTS = 5;
 
 /**
  * Parse REDIS_HOST into an array of {host, port} startup nodes.
- * Accepts comma-separated entries in "host:port" or plain "host" format.
+ * Accepts comma-separated entries in "host:port", "[ipv6]:port", or plain
+ * "host" format. Unbracketed IPv6 addresses are treated as plain hosts.
  * Falls back to REDIS_PORT (default 6379) when no port is embedded.
  */
 export function parseRedisNodes(): Array<{ host: string; port: number }> {
@@ -23,16 +24,29 @@ export function parseRedisNodes(): Array<{ host: string; port: number }> {
     const raw = process.env.REDIS_HOST ?? 'redis';
     return raw.split(',').map(entry => {
         const trimmed = entry.trim();
-        const colonIdx = trimmed.lastIndexOf(':');
-        if (colonIdx > 0) {
-            const potentialPort = Number(trimmed.slice(colonIdx + 1));
-            if (Number.isInteger(potentialPort) && potentialPort > 0) {
-                return {
-                    host: trimmed.slice(0, colonIdx),
-                    port: potentialPort,
-                };
+        if (trimmed.startsWith('[')) {
+            const closingBracket = trimmed.indexOf(']');
+            if (closingBracket > 0) {
+                const host = trimmed.slice(1, closingBracket);
+                const portPart = trimmed.slice(closingBracket + 1);
+                if (portPart.startsWith(':')) {
+                    const port = Number(portPart.slice(1));
+                    if (Number.isInteger(port) && port > 0) {
+                        return { host, port };
+                    }
+                }
+                return { host, port: defaultPort };
             }
         }
+
+        if (trimmed.indexOf(':') === trimmed.lastIndexOf(':')) {
+            const colonIdx = trimmed.indexOf(':');
+            const port = Number(trimmed.slice(colonIdx + 1));
+            if (colonIdx > 0 && Number.isInteger(port) && port > 0) {
+                return { host: trimmed.slice(0, colonIdx), port };
+            }
+        }
+
         return { host: trimmed, port: defaultPort };
     });
 }

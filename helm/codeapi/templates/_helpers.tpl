@@ -189,8 +189,15 @@ value as codeapi.redis.host.
 {{- if .Values.redis.enabled }}
 {{- printf "%s-redis-master" .Release.Name }}
 {{- else if and .Values.redis.cluster.enabled .Values.redis.cluster.nodes }}
-{{- $firstNode := .Values.redis.cluster.nodes | splitList "," | first }}
-{{- $firstNode | splitList ":" | first }}
+{{- $firstNode := .Values.redis.cluster.nodes | splitList "," | first | trim }}
+{{- if hasPrefix "[" $firstNode }}
+{{- $closingBracket := index (splitList "]" $firstNode) 0 }}
+{{- trimPrefix "[" $closingBracket }}
+{{- else if eq (len (splitList ":" $firstNode)) 2 }}
+{{- index (splitList ":" $firstNode) 0 }}
+{{- else }}
+{{- $firstNode }}
+{{- end }}
 {{- else }}
 {{- .Values.redis.external.host }}
 {{- end }}
@@ -203,10 +210,16 @@ Port companion to codeapi.redis.probeHost.
 {{- if .Values.redis.enabled }}
 {{- "6379" }}
 {{- else if and .Values.redis.cluster.enabled .Values.redis.cluster.nodes }}
-{{- $firstNode := .Values.redis.cluster.nodes | splitList "," | first }}
-{{- $parts := $firstNode | splitList ":" }}
-{{- if gt (len $parts) 1 }}
-{{- index $parts 1 }}
+{{- $firstNode := .Values.redis.cluster.nodes | splitList "," | first | trim }}
+{{- if hasPrefix "[" $firstNode }}
+{{- $suffix := index (splitList "]" $firstNode) 1 }}
+{{- if hasPrefix ":" $suffix }}
+{{- trimPrefix ":" $suffix }}
+{{- else }}
+{{- "6379" }}
+{{- end }}
+{{- else if eq (len (splitList ":" $firstNode)) 2 }}
+{{- index (splitList ":" $firstNode) 1 }}
 {{- else }}
 {{- "6379" }}
 {{- end }}

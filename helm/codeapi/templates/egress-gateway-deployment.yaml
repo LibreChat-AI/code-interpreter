@@ -61,7 +61,7 @@ spec:
                   name: {{ include "codeapi.fullname" . }}-secrets
                   key: codeapi-internal-service-token
             - name: REDIS_HOST
-              value: {{ include "codeapi.redis.host" . }}
+              value: {{ include "codeapi.redis.host" . | quote }}
             - name: REDIS_PORT
               value: {{ include "codeapi.redis.port" . | quote }}
             - name: REDIS_PASSWORD

@@ -156,7 +156,7 @@ spec:
             - name: EGRESS_GATEWAY_URL
               value: "http://{{ include "codeapi.fullname" . }}-egress-gateway:{{ .Values.egressGateway.service.port }}"
             - name: REDIS_HOST
-              value: {{ include "codeapi.redis.host" . }}
+              value: {{ include "codeapi.redis.host" . | quote }}
             - name: REDIS_PORT
               value: {{ include "codeapi.redis.port" . | quote }}
             - name: REDIS_PASSWORD
