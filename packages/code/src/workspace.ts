@@ -79,6 +79,7 @@ export type WorkspaceToolResult =
 
 const MAX_READ_LINES = 500;
 const MAX_READ_BYTES = 1024 * 1024;
+const MAX_SEARCH_PREVIEW_LENGTH = 2000;
 const MAX_SEARCH_CANDIDATE_BYTES = 1024 * 1024;
 const MAX_SEARCH_CANDIDATES = 20_000;
 const SEARCH_TIMEOUT_MS = 10_000;
@@ -331,18 +332,18 @@ async function listSearchCandidates(
       const paths: string[] = [];
       let start = 0;
       let end = output.indexOf(0, start);
-      while (end >= 0 && paths.length < MAX_SEARCH_CANDIDATES) {
+      while (end >= 0 && paths.length <= MAX_SEARCH_CANDIDATES) {
         if (end > start)
           paths.push(output.subarray(start, end).toString('utf8'));
         start = end + 1;
         end = output.indexOf(0, start);
       }
+      const exceededCandidateLimit = paths.length > MAX_SEARCH_CANDIDATES;
+      if (exceededCandidateLimit) paths.pop();
       resolvePromise({
         paths,
         truncated:
-          stoppedForLimit ||
-          paths.length === MAX_SEARCH_CANDIDATES ||
-          start < output.length,
+          stoppedForLimit || exceededCandidateLimit || start < output.length,
       });
     });
   });
@@ -353,9 +354,11 @@ async function searchWorkspace(
   request: WorkspaceSearchTextRequest,
   signal?: AbortSignal,
 ): Promise<WorkspaceSearchTextResult> {
+  const encodedQuery = Buffer.from(request.query);
   if (
     !request.query ||
     request.query.length > 4096 ||
+    encodedQuery.length > MAX_SEARCH_PREVIEW_LENGTH ||
     request.query.includes('\0') ||
     request.query.includes('\n') ||
     request.query.includes('\r')
@@ -386,7 +389,7 @@ async function searchWorkspace(
     signal,
     deadline,
   );
-  const query = Buffer.from(request.query);
+  const query = encodedQuery;
   const matches: WorkspaceSearchMatch[] = [];
   let truncated = candidates.truncated;
   for (const candidate of candidates.paths) {
@@ -417,6 +420,18 @@ async function searchWorkspace(
       }
       throw error;
     }
+    if (signal?.aborted) {
+      throw new WorkspaceToolError(
+        'Workspace tool execution aborted',
+        'EXECUTION_ABORTED',
+      );
+    }
+    if (Date.now() >= deadline) {
+      throw new WorkspaceToolError(
+        'Workspace search timed out',
+        'SEARCH_TIMEOUT',
+      );
+    }
     let lineStart = 0;
     let lineNumber = 1;
     while (lineStart <= content.length) {
@@ -434,20 +449,26 @@ async function searchWorkspace(
           truncated = true;
           break;
         }
+        const decodedLine = line.toString('utf8');
+        const decodedColumn = decodedLine.indexOf(request.query);
         const previewStart = Math.min(
           Math.max(
             0,
-            column - Math.floor((2000 - Math.min(query.length, 2000)) / 2),
+            decodedColumn -
+              Math.floor(
+                (MAX_SEARCH_PREVIEW_LENGTH - request.query.length) / 2,
+              ),
           ),
-          Math.max(0, line.length - 2000),
+          Math.max(0, decodedLine.length - MAX_SEARCH_PREVIEW_LENGTH),
         );
         matches.push({
           path,
           line: lineNumber,
           column: column + 1,
-          text: line
-            .subarray(previewStart, previewStart + 2000)
-            .toString('utf8'),
+          text: decodedLine.slice(
+            previewStart,
+            previewStart + MAX_SEARCH_PREVIEW_LENGTH,
+          ),
         });
       }
       if (newline < 0) break;
@@ -551,7 +572,7 @@ export class LocalWorkspaceTools {
       maxLines < 1 ||
       maxLines > MAX_READ_LINES
     ) {
-      throw new Error('Invalid workspace read');
+      throw new WorkspaceToolError('Invalid workspace read', 'INVALID_REQUEST');
     }
     const content = await readConfinedFile(root, request.path);
     if (signal?.aborted) {

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { LocalWorkspaceTools } from './workspace.js';
+import { LocalWorkspaceTools, WorkspaceToolError } from './workspace.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -218,6 +218,47 @@ test('search rejects multiline literal queries', async (t) => {
   );
 });
 
+test('search rejects queries larger than its bounded preview', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'search_text',
+      workspaceId: 'primary',
+      query: 'a'.repeat(2001),
+    }),
+    /invalid workspace search/i,
+  );
+});
+
+test('search keeps valid UTF-8 intact in a centered preview', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, 'unicode.txt'),
+    `${'é'.repeat(2500)} needle ${'é'.repeat(2500)}`,
+  );
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'search_text',
+    workspaceId: 'primary',
+    query: 'needle',
+  });
+
+  if (result.operation !== 'search_text') assert.fail('expected search result');
+  assert.equal(result.matches[0]?.text.includes('\ufffd'), false);
+  assert.match(result.matches[0]?.text ?? '', /needle/);
+});
+
 test('search handles invalid UTF-8 without silently dropping an ASCII match', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -292,7 +333,8 @@ test('rejects unbounded file read parameters before reading the file', async (t)
       path: 'notes.txt',
       startLine: 0,
     }),
-    /invalid workspace read/i,
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
   );
   await assert.rejects(
     tools.execute({
@@ -302,7 +344,8 @@ test('rejects unbounded file read parameters before reading the file', async (t)
       path: 'notes.txt',
       maxLines: 501,
     }),
-    /invalid workspace read/i,
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
   );
 });
 
