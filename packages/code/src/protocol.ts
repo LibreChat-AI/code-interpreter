@@ -392,7 +392,8 @@ export function isWorkspaceToolResult(
         Number.isSafeInteger(candidate.column) &&
         Number(candidate.column) >= 1 &&
         typeof candidate.text === 'string' &&
-        candidate.text.length <= BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH
+        candidate.text.length <= BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH &&
+        candidate.text.includes(request.query)
       );
     })
   );

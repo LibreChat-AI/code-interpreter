@@ -242,6 +242,8 @@ async function listSearchCandidates(
         '--files',
         '--no-config',
         '--no-follow',
+        '--path-separator',
+        '/',
         '--null',
         '--max-filesize',
         '1M',
@@ -380,6 +382,12 @@ async function searchWorkspace(
   if (!isWithinRoot(root, canonicalTarget))
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   const canonicalSearchPath = relative(root, canonicalTarget) || '.';
+  const portableCanonicalSearchPath = canonicalSearchPath.split(sep).join('/');
+  const normalizedRequestedResultPath = request.path
+    ?.split('/')
+    .filter((segment) => segment.length > 0 && segment !== '.')
+    .join('/');
+  const requestedResultPath = normalizedRequestedResultPath || undefined;
 
   const deadline = Date.now() + SEARCH_TIMEOUT_MS;
   const candidates = await listSearchCandidates(
@@ -403,9 +411,16 @@ async function searchWorkspace(
         'SEARCH_TIMEOUT',
       );
     }
-    const path = candidate.startsWith(`.${sep}`)
-      ? candidate.slice(2)
-      : candidate;
+    const path = candidate.startsWith('./') ? candidate.slice(2) : candidate;
+    const resultPath =
+      requestedResultPath == null
+        ? path
+        : portableCanonicalSearchPath === '.'
+          ? `${requestedResultPath}/${path}`
+          : path === portableCanonicalSearchPath ||
+              path.startsWith(`${portableCanonicalSearchPath}/`)
+            ? `${requestedResultPath}${path.slice(portableCanonicalSearchPath.length)}`
+            : path;
     let content: Buffer;
     try {
       content = await readConfinedFileBuffer(root, path);
@@ -464,7 +479,7 @@ async function searchWorkspace(
           ),
         );
         matches.push({
-          path,
+          path: resultPath,
           line: lineNumber,
           column: column + 1,
           text: sliceWithoutSplittingSurrogates(

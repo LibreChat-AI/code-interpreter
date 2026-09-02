@@ -214,6 +214,35 @@ test('search does not read an explicitly targeted escaping symlink', async (t) =
   );
 });
 
+test('search preserves an in-workspace symlink namespace in returned paths', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'src'));
+  await writeFile(join(root, 'src', 'app.ts'), 'const needle = true;');
+  await symlink(join(root, 'src'), join(root, 'alias'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'search_text',
+    workspaceId: 'primary',
+    query: 'needle',
+    path: 'alias',
+  });
+
+  if (result.operation !== 'search_text') assert.fail('expected search result');
+  assert.deepEqual(result.matches, [
+    {
+      path: 'alias/app.ts',
+      line: 1,
+      column: 7,
+      text: 'const needle = true;',
+    },
+  ]);
+});
+
 test('search returns a bounded match for a very long line', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -656,6 +685,15 @@ test('validates workspace results against the originating request', () => {
       { ...request, maxLines: 1 },
       { ...result, content: 'first\nsecond' },
     ),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      matches: [
+        { path: 'src/index.ts', line: 1, column: 1, text: 'unrelated' },
+      ],
+    }),
     false,
   );
 });
