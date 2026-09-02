@@ -253,6 +253,26 @@ function isSafePortableRelativePath(value: unknown): value is string {
   return value.split('/').every((segment) => segment !== '..');
 }
 
+function normalizePortableRelativePath(value: string): string {
+  return (
+    value
+      .split('/')
+      .filter((segment) => segment.length > 0 && segment !== '.')
+      .join('/') || '.'
+  );
+}
+
+function isWithinRequestedPath(candidate: string, requested?: string): boolean {
+  if (requested == null) return true;
+  const normalizedCandidate = normalizePortableRelativePath(candidate);
+  const normalizedRequested = normalizePortableRelativePath(requested);
+  return (
+    normalizedRequested === '.' ||
+    normalizedCandidate === normalizedRequested ||
+    normalizedCandidate.startsWith(`${normalizedRequested}/`)
+  );
+}
+
 function hasOnlyKeys(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
@@ -366,6 +386,7 @@ export function isWorkspaceToolResult(
       return (
         hasOnlyKeys(candidate, WORKSPACE_SEARCH_MATCH_KEYS) &&
         isSafePortableRelativePath(candidate.path) &&
+        isWithinRequestedPath(candidate.path, request.path) &&
         Number.isSafeInteger(candidate.line) &&
         Number(candidate.line) >= 1 &&
         Number.isSafeInteger(candidate.column) &&

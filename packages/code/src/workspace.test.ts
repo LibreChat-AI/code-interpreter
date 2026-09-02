@@ -519,6 +519,31 @@ test('bounds bytes read from a workspace file', async (t) => {
   );
 });
 
+test('bounds workspace reads after UTF-16 decoding', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const utf16 = Buffer.from('\u4e00'.repeat(400_000), 'utf16le');
+  await writeFile(
+    join(root, 'large-utf16.txt'),
+    Buffer.concat([Buffer.from([0xff, 0xfe]), utf16]),
+  );
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'primary',
+      path: 'large-utf16.txt',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'READ_LIMIT_EXCEEDED',
+  );
+});
+
 test('rejects ambiguous workspace registrations', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -631,6 +656,45 @@ test('validates workspace results against the originating request', () => {
       { ...request, maxLines: 1 },
       { ...result, content: 'first\nsecond' },
     ),
+    false,
+  );
+});
+
+test('validates search result paths against the requested scope', () => {
+  const request = {
+    protocolVersion: 1 as const,
+    operation: 'search_text' as const,
+    workspaceId: 'primary',
+    query: 'needle',
+    path: './src',
+  };
+  const result = {
+    protocolVersion: 1 as const,
+    operation: 'search_text' as const,
+    workspaceId: 'primary',
+    matches: [
+      { path: 'src/index.ts', line: 1, column: 1, text: 'needle' },
+    ],
+    truncated: false,
+  };
+
+  assert.equal(isWorkspaceToolResult(request, result), true);
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      matches: [
+        { path: 'src-old/index.ts', line: 1, column: 1, text: 'needle' },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      matches: [
+        { path: 'secrets.env', line: 1, column: 1, text: 'needle' },
+      ],
+    }),
     false,
   );
 });

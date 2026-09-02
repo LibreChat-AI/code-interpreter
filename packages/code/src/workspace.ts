@@ -209,7 +209,16 @@ async function readConfinedFile(
   root: string,
   requestedPath: string,
 ): Promise<string> {
-  return decodeWorkspaceText(await readConfinedFileBuffer(root, requestedPath));
+  const decoded = decodeWorkspaceText(
+    await readConfinedFileBuffer(root, requestedPath),
+  );
+  if (Buffer.byteLength(decoded, 'utf8') > BRIDGE_WORKSPACE_READ_MAX_BYTES) {
+    throw new WorkspaceToolError(
+      'Workspace file exceeds read limit',
+      'READ_LIMIT_EXCEEDED',
+    );
+  }
+  return decoded;
 }
 
 interface SearchCandidates {
