@@ -1,0 +1,90 @@
+# `@librechat/code`
+
+Provider-neutral protocol and worker CLI for attaching a stateful, sandboxed
+code environment to LibreChat Code API.
+
+The CLI owns the runtime-supervisor seam. The bundled endpoint adapter connects
+to an already-running loopback Code Interpreter sandbox; future adapters create
+and isolate the runtime themselves. It connects outbound to Code API,
+long-polls for assignments, sends them to the local runtime, and returns fenced
+results. The VM does not need an inbound public port.
+
+## Pair
+
+Hardened deployments use a one-time code instead of copying a long-lived
+worker secret onto the VM. After an administrator creates a code, run:
+
+```bash
+librechat-code pair https://code.example.com/v1 '<one-time-code>' \
+  --worker-id my-vm
+```
+
+The CLI generates an Ed25519 key locally and writes its paired identity to
+`~/.config/librechat/code/my-vm.json` with owner-only permissions. The private
+key never leaves the VM. Worker requests carry an exact-request signature,
+timestamp, and one-time nonce; the short-lived credential rotates
+automatically.
+
+Then start the worker without a shared secret:
+
+```bash
+LIBRECHAT_CODE_WORKER_ID=my-vm \
+LIBRECHAT_CODE_SANDBOX_ENDPOINT=http://127.0.0.1:2000/api/v2 \
+librechat-code run
+```
+
+Use `--identity <path>` while pairing and
+`LIBRECHAT_CODE_IDENTITY_FILE=<path>` while running to override the identity
+file location.
+
+## Static compatibility mode
+
+Non-hardened development deployments may still run with a static token:
+
+```bash
+npm install -g @librechat/code
+
+LIBRECHAT_CODE_URL=https://code.example.com/v1 \
+LIBRECHAT_CODE_WORKER_TOKEN='<strong random secret>' \
+LIBRECHAT_CODE_WORKER_ID=my-vm \
+LIBRECHAT_CODE_SANDBOX_ENDPOINT=http://127.0.0.1:2000/api/v2 \
+librechat-code run
+```
+
+Optional environment variables:
+
+- `LIBRECHAT_CODE_SANDBOX_PROFILE`: capability label; defaults to `nsjail`.
+- `LIBRECHAT_CODE_RUNTIMES`: comma-separated capability labels.
+- `LIBRECHAT_CODE_POLICY`: local policy description hashed into the worker's
+  registration; defaults to `default-deny`.
+- `LIBRECHAT_CODE_STATEFUL_WORKSPACE`: defaults to `false`. Set it to `true`
+  only when the local runtime supervisor provides a distinct persistent runner
+  for every runtime session. The bundled endpoint adapter requires the endpoint
+  to contain a
+  `{runtimeSessionId}` placeholder, for example
+  `http://127.0.0.1:2000/sessions/{runtimeSessionId}/api/v2`. The worker URL-
+  encodes and substitutes the assigned session ID before execution. Hintless
+  assignments use an ephemeral `assignment-<id>` session so affinity-mode
+  stateless work never reaches a literal placeholder route.
+
+A single built-in sandbox runner binds itself to one runtime session and must
+not be advertised as stateful. Use the default stateless capability until a
+session-routing supervisor is configured. The endpoint adapter is a
+compatibility adapter: it validates and routes a session but cannot create,
+discard, or attest the underlying sandbox on its own.
+
+Static worker authentication is rejected when Code API hardened mode is
+enabled. Expose only the sandbox loopback endpoint to the CLI, and enforce
+VM/container egress policy independently of the bridge transport.
+
+The worker retries result settlement through the assignment deadline. If a
+stateful result remains ambiguous, it exits with a quarantine error instead of
+accepting another assignment. Reset or discard that session's local runner
+before restarting the worker; its workspace may contain mutations that Code
+API did not commit.
+
+After discarding or resetting that session's local runner, acknowledge recovery
+with `librechat-code reset-workspace <runtime-session-id>`. The command uses the
+configured worker credentials, registers a fresh incarnation, and only clears
+the server fence when no assignment is active. Run it while the normal worker
+process is stopped, then restart the normal worker after the command exits.

@@ -48,6 +48,7 @@ type JwtClaims = {
   chc_user_id?: string;
   auth_context_hash?: string;
   plan_id?: string;
+  code_worker_id?: string;
 };
 
 const originalEnv = new Map<string, string | undefined>();
@@ -75,6 +76,7 @@ function baseClaims(overrides: Partial<JwtClaims> = {}): JwtClaims {
     external_user_id: 'chc_123',
     auth_context_hash: 'hash_123',
     plan_id: 'prod_plan_123',
+    code_worker_id: 'code-user_123',
     ...overrides,
   };
 }
@@ -166,6 +168,7 @@ describe('LibreChat JWT auth provider', () => {
       principalSource: 'openid_reuse',
       authContextHash: 'hash_123',
       planId: 'prod_plan_123',
+      codeWorkerId: 'code-user_123',
     });
   });
 

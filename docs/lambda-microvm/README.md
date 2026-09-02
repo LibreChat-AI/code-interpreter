@@ -246,6 +246,7 @@ builds.
 
 ```bash
 CODEAPI_SANDBOX_BACKEND=lambda-microvm
+CODEAPI_EXECUTION_PROFILE=stateful
 CODEAPI_RUNTIME_SESSION_MODE=affinity          # warm sessions + checkpoints
 LAMBDA_MICROVM_IMAGE_ARN=<from step 4>
 LAMBDA_MICROVM_IMAGE_VERSION=<exact version from step 4>  # required for affinity/strict
@@ -310,6 +311,7 @@ appear in `api/src/config.ts`.
 | Env | Default | Meaning |
 |---|---|---|
 | `CODEAPI_SANDBOX_BACKEND` | `http` | `http` (byte-identical to today) or `lambda-microvm`. |
+| `CODEAPI_EXECUTION_PROFILE` | inferred | `default` for the HTTP/stateless deployment or `stateful` for the Lambda affinity/strict deployment. An explicit `stateful` value selects isolated BullMQ queues. Inferred affinity/strict and legacy Lambda/stateless deployments keep the legacy queues only for a pre-profile binary rollout and must not share Redis with the default deployment. |
 | `CODEAPI_RUNTIME_SESSION_MODE` | `stateless` | `stateless` \| `affinity` \| `strict`. `affinity` and `strict` require the `lambda-microvm` backend. See [Operating modes](#operating-modes). |
 | `CODEAPI_RUNTIME_SESSION_LOCK_WAIT_MS` | `15000` | How long a stateful execution waits for the session lock before returning `RUNTIME_SESSION_BUSY` (HTTP 409). |
 
@@ -408,9 +410,11 @@ You do not have to adopt the whole stack at once. The knobs compose:
 **No AWS at all.** Leave `CODEAPI_SANDBOX_BACKEND` unset (`http`). Today's
 behavior, no MicroVMs, no changes needed anywhere.
 
-**MicroVM isolation without sessions.** `lambda-microvm` + `stateless`. Every
-execution gets a fresh, strongly-isolated Firecracker VM. No registry, no
-checkpoints, no session workspace. Simplest way to get the isolation boundary.
+**MicroVM isolation without sessions.** `lambda-microvm` + `stateless`, with
+`CODEAPI_EXECUTION_PROFILE` unset for compatibility. Every execution gets a
+fresh, strongly-isolated Firecracker VM. No registry, no checkpoints, no
+session workspace. This legacy profile uses the shared queue names and must
+not share Redis with a separate default deployment.
 
 **Base container image and snapshot boundary.** The default runner uses a stock
 `oven/bun` base and is **hookless** — session mode arrives per request via the

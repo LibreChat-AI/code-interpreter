@@ -48,7 +48,7 @@ describe('isValidResourceId (heterogeneous resource identifiers)', () => {
     expect(isValidResourceId('682f49b90f07376815c38ef2')).toBe(true);
   });
 
-  test("accepts 17-char `agent_<nanoid>` slug", () => {
+  test('accepts 17-char `agent_<nanoid>` slug', () => {
     expect(isValidResourceId('agent_abc12345678')).toBe(true);
   });
 
@@ -143,6 +143,68 @@ describe('sandbox error formatting', () => {
       status: 503,
       body: { error: 'microvm_launch_failed', message: 'Sandbox launch failed' },
     });
+  });
+
+  test('maps bridge authorization and availability failures without leaking worker details', () => {
+    const unauthorized = publicExecutionFailure(
+      new Error('BRIDGE_WORKER_UNAUTHORIZED: Worker private-vm belongs to tenant-secret'),
+    );
+    expect(unauthorized).toEqual({
+      status: 403,
+      body: {
+        error: 'bridge_worker_unauthorized',
+        message: 'Code environment is not authorized for this tenant',
+      },
+    });
+    expect(JSON.stringify(unauthorized)).not.toContain('private-vm');
+    expect(JSON.stringify(unauthorized)).not.toContain('tenant-secret');
+
+    expect(
+      publicExecutionFailure(
+        new Error('BRIDGE_WORKER_OFFLINE: Worker private-vm has not checked in'),
+      ),
+    ).toEqual({
+      status: 503,
+      body: {
+        error: 'bridge_worker_offline',
+        message: 'Code environment is offline',
+      },
+    });
+
+    const cases = [
+      ['BRIDGE_WORKER_BUSY', 409, 'Code environment is busy'],
+      ['BRIDGE_EXECUTION_FAILED', 502, 'Code environment execution failed'],
+      [
+        'BRIDGE_DEADLINE_EXCEEDED',
+        504,
+        'Code environment execution timed out',
+      ],
+    ] as const;
+    for (const [code, status, message] of cases) {
+      const failure = publicExecutionFailure(
+        new Error(`${code}: worker vm-private failed at redis.internal`),
+      );
+      expect(failure).toEqual({
+        status,
+        body: { error: code.toLowerCase(), message },
+      });
+      expect(JSON.stringify(failure)).not.toContain('vm-private');
+      expect(JSON.stringify(failure)).not.toContain('redis.internal');
+    }
+  });
+
+  test('maps multiline remote bridge failures without exposing details', () => {
+    const failure = publicExecutionFailure(
+      new Error('BRIDGE_EXECUTION_FAILED: first line\nprivate second line'),
+    );
+    expect(failure).toEqual({
+      status: 502,
+      body: {
+        error: 'bridge_execution_failed',
+        message: 'Code environment execution failed',
+      },
+    });
+    expect(JSON.stringify(failure)).not.toContain('private second line');
   });
 
   test('maps a recycled dirty session to a retryable public failure', () => {

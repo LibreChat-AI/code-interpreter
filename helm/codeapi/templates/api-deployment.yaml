@@ -17,11 +17,15 @@ spec:
   {{- if not .Values.api.autoscaling.enabled }}
   replicas: {{ .Values.api.replicaCount }}
   {{- end }}
+  strategy:
+    {{- toYaml .Values.api.strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "codeapi.api.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        codeapi.librechat.ai/pairing-fence-version: "1"
       labels:
         {{- include "codeapi.api.selectorLabels" . | nindent 8 }}
     spec:
@@ -41,6 +45,10 @@ spec:
 {{ include "codeapi.otel.env" (dict "root" . "serviceName" "aiml-codeapi-api") | nindent 12 }}
             - name: CODEAPI_HARDENED_SANDBOX_MODE
               value: {{ .Values.hardenedSandboxMode | quote }}
+            {{- with .Values.executionProfile }}
+            - name: CODEAPI_EXECUTION_PROFILE
+              value: {{ . | quote }}
+            {{- end }}
             # Redis connection
             - name: REDIS_HOST
               value: {{ include "codeapi.redis.host" . }}
@@ -54,6 +62,13 @@ spec:
             - name: USE_REDIS_CLUSTER
               value: {{ include "codeapi.redis.clusterEnabled" . | quote }}
             {{- include "codeapi.redis.tlsEnv" . | nindent 12 }}
+            - name: CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codeapi.fullname" . }}-pairing-rollback
+                  key: epoch
+                  optional: true
+            # Service URLs
             - name: FILE_SERVER_URL
               value: "http://{{ include "codeapi.fullname" . }}-file-server:{{ .Values.fileServer.service.port }}"
             - name: TOOL_CALL_SERVER_URL

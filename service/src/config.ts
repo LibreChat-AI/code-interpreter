@@ -3,6 +3,10 @@ dotenv.config();
 import { nanoid } from 'nanoid';
 import type * as t from './types';
 import { Languages } from './enum';
+import {
+  resolveExecutionProfile,
+  resolveExecutionProfileSource,
+} from './execution-profile';
 
 export const languageConfig: Record<
     Languages | string,
@@ -260,6 +264,20 @@ export function lambdaMicrovmNumericConfigError(
     return undefined;
 }
 
+export function resolvePositiveIntEnv(
+    raw: string | undefined,
+    defaultValue: number,
+): number {
+    if (raw == null || raw.trim() === '') {
+        return defaultValue;
+    }
+    const parsed = Math.floor(Number(raw));
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+        return defaultValue;
+    }
+    return parsed;
+}
+
 export function resolveEgressGrantTtlSeconds(
     rawTtlSeconds: string | undefined,
     jobTimeoutMs: number,
@@ -301,10 +319,11 @@ function configuredChoice<T extends string>(
 
 export function resolveSandboxBackend(
     raw: string | undefined,
-): 'http' | 'lambda-microvm' {
+): 'http' | 'lambda-microvm' | 'remote-bridge' {
     return configuredChoice(raw, 'CODEAPI_SANDBOX_BACKEND', 'http', [
         'http',
         'lambda-microvm',
+        'remote-bridge',
     ]);
 }
 
@@ -318,58 +337,47 @@ export function resolveRuntimeSessionMode(
     ]);
 }
 
+export function resolveBridgeAuthMode(
+  raw: string | undefined,
+): 'static' | 'paired' {
+  return configuredChoice(
+    raw,
+    'CODEAPI_BRIDGE_AUTH_MODE',
+    'static',
+    ['static', 'paired'],
+  );
+}
+
+const sandboxBackend = resolveSandboxBackend(process.env.CODEAPI_SANDBOX_BACKEND);
+const runtimeSessionMode = resolveRuntimeSessionMode(process.env.CODEAPI_RUNTIME_SESSION_MODE);
+const bridgeAuthMode = resolveBridgeAuthMode(process.env.CODEAPI_BRIDGE_AUTH_MODE);
+
 export const env = {
     PORT: process.env.SERVICE_PORT ?? 3112,
     LOCAL_MODE: process.env.LOCAL_MODE === 'true',
     HARDENED_SANDBOX_MODE: process.env.CODEAPI_HARDENED_SANDBOX_MODE === 'true',
     INSTANCE_ID: process.env.INSTANCE_ID ?? nanoid(),
     HTTP_JSON_LIMIT: process.env.CODEAPI_HTTP_JSON_LIMIT ?? '50mb',
-    SANDBOX_ENDPOINT:
-        process.env.SANDBOX_ENDPOINT ?? 'http://localhost:2000/api/v2',
+    SANDBOX_ENDPOINT: process.env.SANDBOX_ENDPOINT ?? 'http://localhost:2000/api/v2',
     EGRESS_GATEWAY_URL: process.env.EGRESS_GATEWAY_URL ?? '',
     FILE_SERVER_URL: process.env.FILE_SERVER_URL ?? 'http://localhost:3000',
-    TOOL_CALL_SERVER_URL:
-        process.env.TOOL_CALL_SERVER_URL ?? 'http://localhost:3033',
+    TOOL_CALL_SERVER_URL: process.env.TOOL_CALL_SERVER_URL ?? 'http://localhost:3033',
     EGRESS_GATEWAY_PORT: Number(process.env.EGRESS_GATEWAY_PORT) || 3190,
-    EGRESS_GATEWAY_FILE_SERVER_URL:
-        process.env.EGRESS_GATEWAY_FILE_SERVER_URL ??
-        process.env.FILE_SERVER_URL ??
-        'http://localhost:3000',
-    EGRESS_GATEWAY_TOOL_CALL_SERVER_URL:
-        process.env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL ??
-        process.env.TOOL_CALL_SERVER_URL ??
-        'http://localhost:3033',
-    EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES:
-        Number(process.env.EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES) || 1024 * 1024,
-    EGRESS_GATEWAY_MAX_FILE_BYTES:
-        Number(
-            process.env.EGRESS_GATEWAY_MAX_FILE_BYTES ??
-                process.env.SANDBOX_MAX_FILE_SIZE,
-        ) || 10_000_000,
-    EGRESS_GATEWAY_MAX_PATH_LENGTH:
-        Number(
-            process.env.EGRESS_GATEWAY_MAX_PATH_LENGTH ??
-                process.env.SANDBOX_MAX_PATH_LENGTH,
-        ) || 256,
-    EGRESS_GATEWAY_MAX_NESTING_DEPTH:
-        Number(
-            process.env.EGRESS_GATEWAY_MAX_NESTING_DEPTH ??
-                process.env.SANDBOX_MAX_NESTING_DEPTH,
-        ) || 10,
-    EGRESS_GATEWAY_REQUEST_TIMEOUT_MS:
-        Number(process.env.EGRESS_GATEWAY_REQUEST_TIMEOUT_MS) || 30_000,
-    EGRESS_GATEWAY_REVOKE_TIMEOUT_MS:
-        Number(process.env.EGRESS_GATEWAY_REVOKE_TIMEOUT_MS) || 5_000,
-    EGRESS_LEDGER_REQUIRED:
-        process.env.CODEAPI_EGRESS_LEDGER_REQUIRED === 'true' ||
-        process.env.CODEAPI_HARDENED_SANDBOX_MODE === 'true',
-    EGRESS_LEDGER_TTL_GRACE_SECONDS:
-        Number(process.env.CODEAPI_EGRESS_LEDGER_TTL_GRACE_SECONDS) || 300,
+    EGRESS_GATEWAY_FILE_SERVER_URL: process.env.EGRESS_GATEWAY_FILE_SERVER_URL ?? process.env.FILE_SERVER_URL ?? 'http://localhost:3000',
+    EGRESS_GATEWAY_TOOL_CALL_SERVER_URL: process.env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL ?? process.env.TOOL_CALL_SERVER_URL ?? 'http://localhost:3033',
+    EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES: Number(process.env.EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES) || 1024 * 1024,
+    // Per-entry / aggregate caps for PTC tool results persisted in `tool_history:` (see replay-state.ts).
+    PTC_MAX_TOOL_RESULT_BYTES: resolvePositiveIntEnv(process.env.PTC_MAX_TOOL_RESULT_BYTES, 5_000_000),
+    PTC_MAX_TOOL_HISTORY_TOTAL_BYTES: resolvePositiveIntEnv(process.env.PTC_MAX_TOOL_HISTORY_TOTAL_BYTES, 40_000_000),
+    EGRESS_GATEWAY_MAX_FILE_BYTES: Number(process.env.EGRESS_GATEWAY_MAX_FILE_BYTES ?? process.env.SANDBOX_MAX_FILE_SIZE) || 10_000_000,
+    EGRESS_GATEWAY_MAX_PATH_LENGTH: Number(process.env.EGRESS_GATEWAY_MAX_PATH_LENGTH ?? process.env.SANDBOX_MAX_PATH_LENGTH) || 256,
+    EGRESS_GATEWAY_MAX_NESTING_DEPTH: Number(process.env.EGRESS_GATEWAY_MAX_NESTING_DEPTH ?? process.env.SANDBOX_MAX_NESTING_DEPTH) || 10,
+    EGRESS_GATEWAY_REQUEST_TIMEOUT_MS: Number(process.env.EGRESS_GATEWAY_REQUEST_TIMEOUT_MS) || 30_000,
+    EGRESS_GATEWAY_REVOKE_TIMEOUT_MS: Number(process.env.EGRESS_GATEWAY_REVOKE_TIMEOUT_MS) || 5_000,
+    EGRESS_LEDGER_REQUIRED: process.env.CODEAPI_EGRESS_LEDGER_REQUIRED === 'true' || process.env.CODEAPI_HARDENED_SANDBOX_MODE === 'true',
+    EGRESS_LEDGER_TTL_GRACE_SECONDS: Number(process.env.CODEAPI_EGRESS_LEDGER_TTL_GRACE_SECONDS) || 300,
     EGRESS_GRANT_SECRET: process.env.CODEAPI_EGRESS_GRANT_SECRET ?? '',
-    EGRESS_GRANT_TTL_SECONDS: resolveEgressGrantTtlSeconds(
-        process.env.EGRESS_GRANT_TTL_SECONDS,
-        defaultJobTimeoutMs,
-    ),
+    EGRESS_GRANT_TTL_SECONDS: resolveEgressGrantTtlSeconds(process.env.EGRESS_GRANT_TTL_SECONDS, defaultJobTimeoutMs),
     PYTHON_CONCURRENCY: Number(process.env.PYTHON_CONCURRENCY) || 1,
     OTHER_CONCURRENCY: Number(process.env.OTHER_CONCURRENCY) || 8,
     JOB_WINDOW: Number(process.env.JOB_WINDOW) || 1000,
@@ -381,12 +389,10 @@ export const env = {
     EXEC_LIMIT_WINDOW: Number(process.env.RATE_LIMIT_WINDOW) || 30 * 1000, // 30 seconds
     EXEC_MAX_REQUESTS: Number(process.env.MAX_REQUESTS) || 20, // execution requests per window
     // Upload Rate Limits
-    UPLOAD_LIMIT_WINDOW:
-        Number(process.env.UPLOAD_LIMIT_WINDOW) || 5 * 60 * 1000, // 5 minutes
+    UPLOAD_LIMIT_WINDOW: Number(process.env.UPLOAD_LIMIT_WINDOW) || 5 * 60 * 1000, // 5 minutes
     UPLOAD_MAX_REQUESTS: Number(process.env.UPLOAD_MAX_REQUESTS) || 30, // 30 uploads per 5 minutes
     // Download Rate Limits
-    DOWNLOAD_LIMIT_WINDOW:
-        Number(process.env.DOWNLOAD_LIMIT_WINDOW) || 60 * 1000, // 1 minute
+    DOWNLOAD_LIMIT_WINDOW: Number(process.env.DOWNLOAD_LIMIT_WINDOW) || 60 * 1000, // 1 minute
     DOWNLOAD_MAX_REQUESTS: Number(process.env.DOWNLOAD_MAX_REQUESTS) || 60, // 60 downloads per minute
     // Files List Rate Limits
     FETCH_LIMIT_WINDOW: Number(process.env.FETCH_LIMIT_WINDOW) || 60 * 1000, // 1 minute
@@ -400,34 +406,24 @@ export const env = {
      *  working; multi-tenant deploys MUST set this to `true` before any tenant
      *  is multi-homed, otherwise a missing tenantId would silently bucket
      *  cross-tenant requests under the same `'legacy'` prefix. */
-    TENANT_ISOLATION_STRICT:
-        process.env.CODEAPI_TENANT_ISOLATION_STRICT === 'true',
+    TENANT_ISOLATION_STRICT: process.env.CODEAPI_TENANT_ISOLATION_STRICT === 'true',
     // Signed execution manifests. Prefer private/public key mode for split-runner
     // deployments so sandbox-runner receives only a verifier, not a signing secret.
-    EXECUTION_MANIFEST_PRIVATE_KEY:
-        process.env.CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY ?? '',
-    EXECUTION_MANIFEST_PUBLIC_KEY:
-        process.env.CODEAPI_EXECUTION_MANIFEST_PUBLIC_KEY ?? '',
+    EXECUTION_MANIFEST_PRIVATE_KEY: process.env.CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY ?? '',
+    EXECUTION_MANIFEST_PUBLIC_KEY: process.env.CODEAPI_EXECUTION_MANIFEST_PUBLIC_KEY ?? '',
     // Legacy HMAC fallback for non-split deployments. Do not mount into sandbox-runner.
-    EXECUTION_MANIFEST_SECRET:
-        process.env.CODEAPI_EXECUTION_MANIFEST_SECRET ?? '',
+    EXECUTION_MANIFEST_SECRET: process.env.CODEAPI_EXECUTION_MANIFEST_SECRET ?? '',
     EXECUTION_MANIFEST_TTL_SECONDS: Math.min(
-        Number(process.env.EXECUTION_MANIFEST_TTL_SECONDS) ||
-            defaultExecutionManifestTtlSeconds,
+        Number(process.env.EXECUTION_MANIFEST_TTL_SECONDS) || defaultExecutionManifestTtlSeconds,
         600,
     ),
-    EXECUTION_MANIFEST_MAX_UPLOAD_BYTES:
-        Number(process.env.EXECUTION_MANIFEST_MAX_UPLOAD_BYTES) ||
-        defaultMaxFileSize,
-    EXECUTION_MANIFEST_MAX_OUTPUT_FILES:
-        Number(process.env.EXECUTION_MANIFEST_MAX_OUTPUT_FILES) || 50,
-    EXECUTION_MANIFEST_MAX_REQUESTS:
-        Number(process.env.EXECUTION_MANIFEST_MAX_REQUESTS) || 1000,
+    EXECUTION_MANIFEST_MAX_UPLOAD_BYTES: Number(process.env.EXECUTION_MANIFEST_MAX_UPLOAD_BYTES) || defaultMaxFileSize,
+    EXECUTION_MANIFEST_MAX_OUTPUT_FILES: Number(process.env.EXECUTION_MANIFEST_MAX_OUTPUT_FILES) || 50,
+    EXECUTION_MANIFEST_MAX_REQUESTS: Number(process.env.EXECUTION_MANIFEST_MAX_REQUESTS) || 1000,
     // Redis - Cluster mode (GCP Memorystore cluster, AWS ElastiCache cluster, etc.)
     USE_REDIS_CLUSTER: process.env.USE_REDIS_CLUSTER === 'true',
     // Redis - Alternative DNS Lookup for AWS ElastiCache TLS connections
-    REDIS_USE_ALTERNATIVE_DNS_LOOKUP:
-        process.env.REDIS_USE_ALTERNATIVE_DNS_LOOKUP === 'true',
+    REDIS_USE_ALTERNATIVE_DNS_LOOKUP: process.env.REDIS_USE_ALTERNATIVE_DNS_LOOKUP === 'true',
     /**
      * Programmatic Tool Calling execution model.
      * - `replay` (default): Temporal-style replay. Sandbox exits between round-trips;
@@ -438,17 +434,24 @@ export const env = {
      *   via a long-polling HTTP callback through the Tool Call Server. Retained as
      *   an explicit opt-in during rollout; scheduled for removal in a follow-up.
      */
-    PTC_MODE: (process.env.PTC_MODE === 'blocking' ? 'blocking' : 'replay') as
-        | 'replay'
-        | 'blocking',
+    PTC_MODE: (process.env.PTC_MODE === 'blocking' ? 'blocking' : 'replay') as 'replay' | 'blocking',
     PTC_DEBUG: process.env.PTC_DEBUG === 'true',
     /**
      * Sandbox execution backend.
      * - `http` (default): POST signed execute requests to SANDBOX_ENDPOINT
      *   (current Kubernetes/libkrun sandbox-runner).
      * - `lambda-microvm`: AWS Lambda MicroVM backend.
+     * - `remote-bridge`: dispatch to an outbound-connected @librechat/code worker.
      */
-    SANDBOX_BACKEND: resolveSandboxBackend(process.env.CODEAPI_SANDBOX_BACKEND),
+    SANDBOX_BACKEND: sandboxBackend,
+    /** Permit trusted callers to route each execution to a paired worker ID. */
+    BRIDGE_DYNAMIC_WORKERS: process.env.CODEAPI_BRIDGE_DYNAMIC_WORKERS === 'true',
+    /** Outbound worker selected by the remote-bridge backend. */
+    BRIDGE_WORKER_ID: process.env.CODEAPI_BRIDGE_WORKER_ID ?? '',
+    /** Static compatibility auth or short-lived proof-of-possession credentials. */
+    BRIDGE_AUTH_MODE: bridgeAuthMode,
+    /** Enrollment and lease credential shared only with the configured worker. */
+    BRIDGE_TOKEN: process.env.CODEAPI_BRIDGE_TOKEN ?? '',
     /**
      * Runtime session affinity for stateful sandbox backends.
      * - `stateless` (default): no runtime sessions; `runtime_session_hint` ignored.
@@ -457,8 +460,19 @@ export const env = {
      * - `strict`: same serialized session semantics, and a session hint is
      *   required instead of degrading requests without one to stateless.
      */
-    RUNTIME_SESSION_MODE: resolveRuntimeSessionMode(
-        process.env.CODEAPI_RUNTIME_SESSION_MODE,
+    RUNTIME_SESSION_MODE: runtimeSessionMode,
+    /**
+     * Deployment identity used by trusted callers to route each agent to the
+     * intended execution stack. `default` is HTTP/stateless; `stateful` is
+     * Lambda MicroVM with session affinity. The startup policy rejects mixed
+     * tuples so an endpoint cannot claim one profile while running the other.
+     */
+    EXECUTION_PROFILE: resolveExecutionProfile(
+        process.env.CODEAPI_EXECUTION_PROFILE,
+        runtimeSessionMode,
+    ),
+    EXECUTION_PROFILE_SOURCE: resolveExecutionProfileSource(
+        process.env.CODEAPI_EXECUTION_PROFILE,
     ),
     RUNTIME_SESSION_LOCK_WAIT_MS: configuredNumber(
         process.env.CODEAPI_RUNTIME_SESSION_LOCK_WAIT_MS,
@@ -466,26 +480,19 @@ export const env = {
     ),
     // Lambda MicroVM backend. Connector lists are comma-separated ARNs.
     LAMBDA_MICROVM_IMAGE_ARN: process.env.LAMBDA_MICROVM_IMAGE_ARN ?? '',
-    LAMBDA_MICROVM_IMAGE_VERSION:
-        process.env.LAMBDA_MICROVM_IMAGE_VERSION || undefined,
-    LAMBDA_MICROVM_EXECUTION_ROLE_ARN:
-        process.env.LAMBDA_MICROVM_EXECUTION_ROLE_ARN || undefined,
+    LAMBDA_MICROVM_IMAGE_VERSION: process.env.LAMBDA_MICROVM_IMAGE_VERSION || undefined,
+    LAMBDA_MICROVM_EXECUTION_ROLE_ARN: process.env.LAMBDA_MICROVM_EXECUTION_ROLE_ARN || undefined,
     /* Runtime VM stdout reaches CloudWatch only when RunMicrovm sends a logging
      * config AND an executionRoleArn is set — pairs with the role above. */
     LAMBDA_MICROVM_LOG_GROUP: process.env.LAMBDA_MICROVM_LOG_GROUP || undefined,
     LAMBDA_MICROVM_REGION: process.env.LAMBDA_MICROVM_REGION || undefined,
-    LAMBDA_MICROVM_INGRESS_CONNECTOR_ARNS: parseArnList(
-        process.env.LAMBDA_MICROVM_INGRESS_CONNECTOR_ARNS,
-    ),
-    LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS: parseArnList(
-        process.env.LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS,
-    ),
+    LAMBDA_MICROVM_INGRESS_CONNECTOR_ARNS: parseArnList(process.env.LAMBDA_MICROVM_INGRESS_CONNECTOR_ARNS),
+    LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS: parseArnList(process.env.LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS),
     ...lambdaMicrovmNumericConfig,
     /* CreateMicrovmAuthToken is minted per execute + per checkpoint; share a
      * fleet-wide budget so concurrent warm-session executes queue instead of
      * bursting past the AWS TPS limit. */
-    LAMBDA_MICROVM_ALLOW_SHELL:
-        process.env.LAMBDA_MICROVM_ALLOW_SHELL === 'true',
+    LAMBDA_MICROVM_ALLOW_SHELL: process.env.LAMBDA_MICROVM_ALLOW_SHELL === 'true',
     /* Session workspace checkpoints (effective only in affinity/strict modes).
      * On by default so VM expiry/eviction recovery is automatic; the byte cap
      * bounds tar size pulled from the VM and stored to S3. */
@@ -494,12 +501,8 @@ export const env = {
         process.env.CODEAPI_CHECKPOINT_MAX_BYTES,
         512 * 1024 * 1024,
     ),
-    CHECKPOINT_TIMEOUT_MS: configuredNumber(
-        process.env.CODEAPI_CHECKPOINT_TIMEOUT_MS,
-        60_000,
-    ),
-    CHECKPOINT_PREFIX:
-        process.env.CODEAPI_CHECKPOINT_PREFIX ?? 'rtsx-checkpoints/',
+    CHECKPOINT_TIMEOUT_MS: configuredNumber(process.env.CODEAPI_CHECKPOINT_TIMEOUT_MS, 60_000),
+    CHECKPOINT_PREFIX: process.env.CODEAPI_CHECKPOINT_PREFIX ?? 'rtsx-checkpoints/',
 };
 
 const default_run_memory_limit = 256 * 1024 * 1024;

@@ -19,6 +19,7 @@ RUN cd /temp/prod && bun install --frozen-lockfile --production
 FROM base AS builder
 COPY --from=install /temp/dev/node_modules node_modules
 COPY service/src ./src
+COPY packages/code/src /packages/code/src
 COPY shared /shared
 COPY service/tsconfig.json ./
 RUN bun build ./src/worker-server.ts --minify --outdir .build --target bun --external '@opentelemetry/*'
@@ -43,6 +44,7 @@ FROM base AS development
 ENV NODE_ENV=development
 COPY --from=install /temp/dev/node_modules node_modules
 COPY service/src ./src
+COPY packages/code/src /packages/code/src
 COPY shared /shared
 COPY service/tsconfig.json ./
 EXPOSE 3113 9230

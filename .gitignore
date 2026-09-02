@@ -1,5 +1,6 @@
 data/
 node_modules
+packages/*/dist/
 .env
 .git
 .npmrc

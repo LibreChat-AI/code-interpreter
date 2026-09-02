@@ -15,6 +15,8 @@ Code Interpreter (internally `codeapi`, the prefix used by its env vars, images,
 - **Package Delivery** - Bakes Python, Node, and Bun into the default microVM
   block-root image; a package-init PVC mode remains available for direct NsJail
   development
+- **Remote Code Bridge** - Lets an operator-owned VM connect outbound and serve
+  as a fenced, stateful sandbox through the `@librechat/code` worker
 
 ## Architecture
 
@@ -24,12 +26,60 @@ Code Interpreter (internally `codeapi`, the prefix used by its env vars, images,
 4. Files are persisted/retrieved via the **File Server** (backed by S3)
 5. Tool calls from within sandboxes are routed through the **Tool Call Server**
 
+## Execution profiles
+
+Code API can run two isolated deployments at the same time:
+
+- `default`: the AWS-free HTTP/libkrun path, with stateless executions.
+- `stateful`: the AWS Lambda MicroVM path, with runtime-session affinity.
+
+Set `CODEAPI_EXECUTION_PROFILE` consistently on an API deployment and its
+workers. The default profile keeps the existing `python-queue` and
+`other-queue`; the stateful profile uses `stateful-python-queue` and
+`stateful-other-queue`. This allows both deployments to share Redis without
+cross-consuming jobs. The `remote-bridge` backend additionally uses
+`remote-bridge-python-queue` and `remote-bridge-other-queue`, fencing attached
+worker jobs from Lambda consumers during rolling deployments.
+
+An existing Lambda MicroVM deployment upgraded from a pre-profile release may
+leave `CODEAPI_EXECUTION_PROFILE` unset for its first binary rollout. An
+affinity/strict deployment still identifies itself as `stateful`; a stateless
+Lambda deployment identifies itself as `default`. Both temporarily keep the
+legacy queue names so separately deployed APIs and workers remain compatible
+with old binaries.
+Move that deployment to the isolated stateful queues with a blue/green cutover:
+start replacement API and worker pools with the profile explicitly set to
+`stateful`, verify them together, switch the stateful endpoint, and drain the
+legacy pool. For rollback, switch the endpoint back before stopping the
+replacement pool. Do not run the inferred stateful compatibility mode beside a
+default deployment on the same Redis because both use the legacy queues.
+
+Trusted callers should send `X-CodeAPI-Expected-Profile: default|stateful` on
+every Code API request. A request that reaches the wrong deployment fails
+before enqueue with HTTP 409 and `error=execution_profile_mismatch`; every
+response advertises the actual deployment in `X-CodeAPI-Execution-Profile`.
+Omitting the expected-profile header remains supported for older clients, but
+provides no wrong-endpoint protection. There is deliberately no silent
+fallback between profiles and no automatic workspace or file migration.
+
 ## Sandbox Isolation
 
 Two modes are supported:
 
 - **NsJail mode** (`kvmEnabled: false`): Direct NsJail sandboxing with Linux namespaces and cgroups
 - **MicroVM mode** (`kvmEnabled: true`): libkrun microVM with its own kernel, NsJail runs inside the guest
+
+## Remote stateful environments
+
+The `remote-bridge` backend keeps the Code API as the policy and queue boundary
+while moving execution to a sandbox on an operator-selected VM. The worker only
+makes outbound authenticated requests, so the VM does not need a public ingress
+port. Assignments carry a deadline, a single-active-worker lock, a monotonically
+increasing generation, and a one-time lease token to fence stale workers.
+
+See [Remote Code Bridge](docs/remote-bridge/README.md) for deployment and threat
+model details. The worker protocol and CLI live in the provider-neutral
+[`@librechat/code`](packages/code/README.md) package.
 
 ## Security disclaimer
 

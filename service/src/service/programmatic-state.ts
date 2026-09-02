@@ -2,6 +2,26 @@ import type * as t from '../types';
 import type { LCTool } from '../preamble';
 import type { ExecutionState } from './replay-state';
 import { buildExecutionIdentity, type ExecutionIdentity } from '../execution-identity';
+import { resolveQueuedSandboxBackend } from '../execution-profile';
+import type {
+  ExecutionProfile,
+  ExecutionProfileSource,
+  SandboxBackendName,
+} from '../execution-profile';
+
+export function resolveReplayStateSandboxBackend(params: {
+  executionProfile: ExecutionProfile;
+  executionProfileSource: ExecutionProfileSource;
+  apiSandboxBackend: SandboxBackendName;
+  bridgeWorkerId?: string;
+}): SandboxBackendName | undefined {
+  if (params.bridgeWorkerId != null) return 'remote-bridge';
+  return resolveQueuedSandboxBackend(
+    params.executionProfile,
+    params.apiSandboxBackend,
+    params.executionProfileSource,
+  );
+}
 
 export interface BuildReplayExecutionStateParams {
   executionId: string;
@@ -17,6 +37,10 @@ export interface BuildReplayExecutionStateParams {
   isPyPlot: boolean;
   timeout: number;
   language: 'python' | 'bash';
+  bridgeWorkerId?: string;
+  sandboxBackend?: SandboxBackendName;
+  executionProfile: ExecutionProfile;
+  executionProfileSource: ExecutionProfileSource;
   now?: number;
 }
 
@@ -41,6 +65,10 @@ export function buildReplayExecutionState(
     principalSource: identity.principalSource,
     authContextHash: identity.authContextHash,
     apiKeyId: params.apiKeyId,
+    bridgeWorkerId: params.bridgeWorkerId,
+    sandboxBackend: params.sandboxBackend,
+    executionProfile: params.executionProfile,
+    executionProfileSource: params.executionProfileSource,
     startTime: now,
     lastActivity: now,
     mode: 'replay',
