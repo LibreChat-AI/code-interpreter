@@ -118,6 +118,25 @@ function errorCode(value: object): string | undefined {
   return undefined;
 }
 
+function workspaceCapabilitiesMatch(
+  advertised: NonNullable<BridgeWorkerCapabilities['workspaceTools']>,
+  executor: NonNullable<BridgeWorkerCapabilities['workspaceTools']>,
+): boolean {
+  return (
+    advertised.protocolVersion === executor.protocolVersion &&
+    advertised.operations.length === executor.operations.length &&
+    advertised.operations.every(
+      (operation, index) => operation === executor.operations[index],
+    ) &&
+    advertised.workspaces.length === executor.workspaces.length &&
+    advertised.workspaces.every(
+      (workspace, index) =>
+        workspace.id === executor.workspaces[index]?.id &&
+        workspace.name === executor.workspaces[index]?.name,
+    )
+  );
+}
+
 export class BridgeWorkspaceQuarantinedError extends Error {
   constructor(
     message: string,
@@ -155,8 +174,11 @@ export class BridgeWorker {
       (options.workspaceTools == null) !==
         (options.capabilities.workspaceTools == null) ||
       (options.workspaceTools != null &&
-        JSON.stringify(options.workspaceTools.capabilities) !==
-          JSON.stringify(options.capabilities.workspaceTools))
+        options.capabilities.workspaceTools != null &&
+        !workspaceCapabilitiesMatch(
+          options.capabilities.workspaceTools,
+          options.workspaceTools.capabilities,
+        ))
     ) {
       throw new BridgeProtocolError(
         'Workspace tool capabilities require a matching executor',
@@ -665,6 +687,17 @@ export class BridgeWorker {
           workspaceRequest,
           executionController.signal,
         );
+        if (executionController.signal.aborted) {
+          throw (
+            executionController.signal.reason ??
+            new DOMException('aborted', 'AbortError')
+          );
+        }
+        if (Date.now() >= localDeadlineAtMs) {
+          throw new BridgeProtocolError(
+            'Bridge assignment expired during workspace execution',
+          );
+        }
       } else {
         runtimeLease = await this.runtimeSupervisor.acquire(
           assignment,
