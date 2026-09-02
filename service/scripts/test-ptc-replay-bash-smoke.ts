@@ -519,5 +519,46 @@ get_weather '{"city":"Rome"}'
   );
 }
 
+{
+  // Regression: input past ARG_MAX (~128KB) must still replay from history,
+  // not get silently re-issued as a new pending call each run.
+  const bigExpr = '1+1;#' + 'x'.repeat(300_000);
+  const user = `
+result=$(calculate '{"expression":"${bigExpr}"}')
+echo "Result: $result"
+`;
+  const r1 = runBash(assemble(user), {});
+  const p1 = extractPending(r1.stdout);
+  assert(r1.exitCode === 0, 'large_input: first run exit 0');
+  assert(p1.pending?.[0]?.call_id === 'call_001', 'large_input: first pending is call_001');
+  assert(
+    typeof p1.pending?.[0]?.input_hash === 'string' && p1.pending[0].input_hash.length === 64,
+    'large_input: pending carries a hash for the oversized input',
+  );
+
+  const history = {
+    call_001: {
+      result: 'ok-large',
+      tool_name: 'calculate',
+      input_hash: hashToolInput({ expression: bigExpr }),
+      received_at: 1,
+    },
+  };
+  const r2 = runBash(assemble(user), history);
+  const p2 = extractPending(r2.stdout);
+  assert(r2.exitCode === 0, 'large_input_replay: exit 0');
+  assert(p2.pending === null, 'large_input_replay: no pending re-emitted for the same oversized call');
+  assert(p2.stdout.includes('Result: "ok-large"'), 'large_input_replay: cached result used instead of re-invoking');
+}
+
+{
+  // Regression: a stray second JSON document must be rejected, not silently
+  // truncated to the first one.
+  const user = `calculate '{"expression":"1+1"} {"expression":"2+2"}'`;
+  const r = runBash(assemble(user), {});
+  assert(r.exitCode === 1, 'multi_doc_input: exit 1');
+  assert(r.stderr.includes('must be a single JSON object'), 'multi_doc_input: stderr explains the rejection');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

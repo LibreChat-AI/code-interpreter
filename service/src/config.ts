@@ -210,6 +210,17 @@ export function lambdaMicrovmNumericConfigError(
   return undefined;
 }
 
+export function resolvePositiveIntEnv(raw: string | undefined, defaultValue: number): number {
+  if (raw == null || raw.trim() === '') {
+    return defaultValue;
+  }
+  const parsed = Math.floor(Number(raw));
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    return defaultValue;
+  }
+  return parsed;
+}
+
 export function resolveEgressGrantTtlSeconds(rawTtlSeconds: string | undefined, jobTimeoutMs: number): number {
   const defaultTtlSeconds = Math.max(1, Math.ceil((jobTimeoutMs + EGRESS_GRANT_GRACE_MS) / 1000));
   if (rawTtlSeconds == null || rawTtlSeconds.trim() === '') {
@@ -292,6 +303,9 @@ export const env = {
   EGRESS_GATEWAY_FILE_SERVER_URL: process.env.EGRESS_GATEWAY_FILE_SERVER_URL ?? process.env.FILE_SERVER_URL ?? 'http://localhost:3000',
   EGRESS_GATEWAY_TOOL_CALL_SERVER_URL: process.env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL ?? process.env.TOOL_CALL_SERVER_URL ?? 'http://localhost:3033',
   EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES: Number(process.env.EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES) || 1024 * 1024,
+  // Per-entry / aggregate caps for PTC tool results persisted in `tool_history:` (see replay-state.ts).
+  PTC_MAX_TOOL_RESULT_BYTES: resolvePositiveIntEnv(process.env.PTC_MAX_TOOL_RESULT_BYTES, 5_000_000),
+  PTC_MAX_TOOL_HISTORY_TOTAL_BYTES: resolvePositiveIntEnv(process.env.PTC_MAX_TOOL_HISTORY_TOTAL_BYTES, 40_000_000),
   EGRESS_GATEWAY_MAX_FILE_BYTES: Number(process.env.EGRESS_GATEWAY_MAX_FILE_BYTES ?? process.env.SANDBOX_MAX_FILE_SIZE) || 10_000_000,
   EGRESS_GATEWAY_MAX_PATH_LENGTH: Number(process.env.EGRESS_GATEWAY_MAX_PATH_LENGTH ?? process.env.SANDBOX_MAX_PATH_LENGTH) || 256,
   EGRESS_GATEWAY_MAX_NESTING_DEPTH: Number(process.env.EGRESS_GATEWAY_MAX_NESTING_DEPTH ?? process.env.SANDBOX_MAX_NESTING_DEPTH) || 10,
