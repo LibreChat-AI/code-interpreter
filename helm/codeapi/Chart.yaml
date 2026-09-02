@@ -18,12 +18,17 @@ maintainers:
     url: https://github.com/danny-avila
 
 # Dependencies (we'll use these for Redis and MinIO)
+# Bitnami distributes charts OCI-only. The classic charts.bitnami.com/bitnami
+# index still lists these versions but resolves them to an oci:// download URL,
+# which HTTP-repository getters (notably FluxCD's source-controller) cannot
+# follow -- dependency resolution fails outright. Point at the OCI registry
+# directly; requires Helm >= 3.8.
 dependencies:
   - name: redis
     version: "24.1.0"
-    repository: "https://charts.bitnami.com/bitnami"
+    repository: "oci://registry-1.docker.io/bitnamicharts"
     condition: redis.enabled
   - name: minio
     version: "17.0.21"
-    repository: "https://charts.bitnami.com/bitnami"
+    repository: "oci://registry-1.docker.io/bitnamicharts"
     condition: minio.enabled
