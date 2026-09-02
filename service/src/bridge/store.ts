@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'crypto';
 
-import type Redis from 'ioredis';
+import type { RedisClient } from '../redis-connection';
 import type * as t from '../types';
 import type {
   BridgeAssignment,
@@ -193,7 +193,7 @@ async function boundedCommand<T>(
 
 export class RedisBridgeStore {
   constructor(
-    private readonly redis: Redis,
+    private readonly redis: RedisClient,
     private readonly workerTtlSeconds = DEFAULT_WORKER_TTL_SECONDS,
     private readonly redisCommandTimeoutMs = DEFAULT_REDIS_COMMAND_TIMEOUT_MS,
   ) {}
