@@ -199,12 +199,13 @@ capabilities; absolute host paths remain local to the worker process.
 
 Reads reject absolute paths, traversal, escaping symlinks, non-regular files,
 and files larger than 1 MiB. The opened file is checked against its canonical
-in-workspace inode before it is read. Text search invokes `rg` without a shell,
-respects its normal ignore rules, does not follow symlinks, limits individual
-files to 10 MiB, limits returned line length, and stops after a bounded global
-result count. The worker process still belongs inside the trusted BYOM boundary
-and should receive filesystem access only to roots the operator intentionally
-registers.
+in-workspace inode before it is read. Text search uses `rg` only to enumerate a
+bounded set of ignored-aware candidates with configuration and symlink following
+disabled. It then opens and verifies each candidate through the same confined
+1 MiB read boundary before matching locally. Search limits returned line length
+and stops after a bounded global result count. The worker process still belongs
+inside the trusted BYOM boundary and should receive filesystem access only to
+roots the operator intentionally registers.
 
 This release exposes the library protocol only. The subsequent bridge-dispatch
 layer will route signed, deadline-bound workspace tool assignments to it; until

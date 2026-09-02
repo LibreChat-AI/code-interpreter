@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import { LocalWorkspaceTools } from './workspace.js';
+
+const execFileAsync = promisify(execFile);
 
 test('reads a bounded range from a registered local workspace', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
@@ -117,6 +121,142 @@ test('searches workspace text with a hard global result bound', async (t) => {
       matches: [{ path: 'notes.txt', line: 1, column: 1, text: 'needle one' }],
       truncated: true,
     },
+  );
+});
+
+test('search ignores ripgrep config that follows escaping symlinks', async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), 'librechat-code-search-parent-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, 'repo');
+  const outside = join(parent, 'outside');
+  await mkdir(root);
+  await mkdir(outside);
+  await writeFile(join(outside, 'secret.txt'), 'needle secret');
+  await symlink(outside, join(root, 'linked-outside'));
+  const config = join(parent, 'ripgrep.conf');
+  await writeFile(config, '--follow\n');
+  const previousConfig = process.env.RIPGREP_CONFIG_PATH;
+  process.env.RIPGREP_CONFIG_PATH = config;
+  t.after(() => {
+    if (previousConfig === undefined) delete process.env.RIPGREP_CONFIG_PATH;
+    else process.env.RIPGREP_CONFIG_PATH = previousConfig;
+  });
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'search_text',
+    workspaceId: 'primary',
+    query: 'needle',
+  });
+
+  if (result.operation !== 'search_text') assert.fail('expected search result');
+  assert.deepEqual(result.matches, []);
+});
+
+test('search does not read an explicitly targeted escaping symlink', async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), 'librechat-code-search-parent-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, 'repo');
+  await mkdir(root);
+  await writeFile(join(parent, 'secret.txt'), 'needle secret');
+  await symlink(join(parent, 'secret.txt'), join(root, 'linked-secret.txt'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'search_text',
+      workspaceId: 'primary',
+      query: 'needle',
+      path: 'linked-secret.txt',
+    }),
+    /invalid workspace path/i,
+  );
+});
+
+test('search returns a bounded match for a very long line', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'long.txt'), `${'a'.repeat(512 * 1024)} needle`);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'search_text',
+    workspaceId: 'primary',
+    query: 'needle',
+  });
+
+  if (result.operation !== 'search_text') assert.fail('expected search result');
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0]?.text.length, 2000);
+});
+
+test('search rejects multiline literal queries', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'search_text',
+      workspaceId: 'primary',
+      query: 'first\nsecond',
+    }),
+    /invalid workspace search/i,
+  );
+});
+
+test('search handles invalid UTF-8 without silently dropping an ASCII match', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, 'legacy.txt'),
+    Buffer.concat([Buffer.from([0xff]), Buffer.from(' needle\n')]),
+  );
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'search_text',
+    workspaceId: 'primary',
+    query: 'needle',
+  });
+
+  if (result.operation !== 'search_text') assert.fail('expected search result');
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0]?.path, 'legacy.txt');
+});
+
+test('read rejects a FIFO without waiting for a writer', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fifo = join(root, 'pipe');
+  await execFileAsync('mkfifo', [fifo]);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'primary',
+      path: 'pipe',
+    }),
+    /invalid workspace path/i,
   );
 });
 

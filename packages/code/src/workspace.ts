@@ -73,14 +73,15 @@ export interface WorkspaceSearchTextResult {
 }
 
 export type WorkspaceToolRequest =
-  | WorkspaceReadFileRequest
-  | WorkspaceSearchTextRequest;
+  WorkspaceReadFileRequest | WorkspaceSearchTextRequest;
 export type WorkspaceToolResult =
-  | WorkspaceReadFileResult
-  | WorkspaceSearchTextResult;
+  WorkspaceReadFileResult | WorkspaceSearchTextResult;
 
 const MAX_READ_LINES = 500;
 const MAX_READ_BYTES = 1024 * 1024;
+const MAX_SEARCH_CANDIDATE_BYTES = 1024 * 1024;
+const MAX_SEARCH_CANDIDATES = 20_000;
+const SEARCH_TIMEOUT_MS = 10_000;
 
 export class WorkspaceToolError extends Error {
   constructor(
@@ -161,14 +162,17 @@ function resolveWorkspacePath(root: string, requestedPath: string): string {
   return candidate;
 }
 
-async function readConfinedFile(
+async function readConfinedFileBuffer(
   root: string,
   requestedPath: string,
-): Promise<string> {
+): Promise<Buffer> {
   const candidate = resolveWorkspacePath(root, requestedPath);
   let handle: FileHandle | undefined;
   try {
-    handle = await open(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(
+      candidate,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
     const [openedFile, canonicalPath] = await Promise.all([
       handle.stat(),
       realpath(candidate),
@@ -206,7 +210,7 @@ async function readConfinedFile(
         'READ_LIMIT_EXCEEDED',
       );
     }
-    return buffer.subarray(0, bytesRead).toString('utf8');
+    return buffer.subarray(0, bytesRead);
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
@@ -215,14 +219,133 @@ async function readConfinedFile(
   }
 }
 
-interface RipgrepMatch {
-  type?: string;
-  data?: {
-    path?: { text?: string };
-    lines?: { text?: string };
-    line_number?: number;
-    submatches?: Array<{ start?: number }>;
-  };
+async function readConfinedFile(
+  root: string,
+  requestedPath: string,
+): Promise<string> {
+  return (await readConfinedFileBuffer(root, requestedPath)).toString('utf8');
+}
+
+interface SearchCandidates {
+  paths: string[];
+  truncated: boolean;
+}
+
+async function listSearchCandidates(
+  root: string,
+  searchPath: string,
+  signal: AbortSignal | undefined,
+  deadline: number,
+): Promise<SearchCandidates> {
+  return new Promise<SearchCandidates>((resolvePromise, reject) => {
+    const chunks: Buffer[] = [];
+    let outputBytes = 0;
+    let stoppedForLimit = false;
+    const child = spawn(
+      'rg',
+      [
+        '--files',
+        '--no-config',
+        '--no-follow',
+        '--null',
+        '--max-filesize',
+        '1M',
+        '--',
+        searchPath,
+      ],
+      { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    let aborted = false;
+    let timedOut = false;
+    const abort = () => {
+      aborted = true;
+      child.kill();
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    const timeout = setTimeout(
+      () => {
+        timedOut = true;
+        child.kill();
+      },
+      Math.max(0, deadline - Date.now()),
+    );
+    const cleanup = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
+    };
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (stoppedForLimit) return;
+      const remaining = MAX_SEARCH_CANDIDATE_BYTES - outputBytes;
+      if (chunk.length > remaining) {
+        if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+        outputBytes = MAX_SEARCH_CANDIDATE_BYTES;
+        stoppedForLimit = true;
+        child.kill();
+        return;
+      }
+      chunks.push(chunk);
+      outputBytes += chunk.length;
+    });
+    child.once('error', () => {
+      cleanup();
+      reject(
+        new WorkspaceToolError(
+          'Workspace search unavailable',
+          'SEARCH_UNAVAILABLE',
+        ),
+      );
+    });
+    child.once('close', (code) => {
+      cleanup();
+      if (aborted) {
+        reject(
+          new WorkspaceToolError(
+            'Workspace tool execution aborted',
+            'EXECUTION_ABORTED',
+          ),
+        );
+        return;
+      }
+      if (timedOut) {
+        reject(
+          new WorkspaceToolError(
+            'Workspace search timed out',
+            'SEARCH_TIMEOUT',
+          ),
+        );
+        return;
+      }
+      if (!stoppedForLimit && code !== 0 && code !== 1) {
+        reject(
+          new WorkspaceToolError(
+            'Workspace search unavailable',
+            'SEARCH_UNAVAILABLE',
+          ),
+        );
+        return;
+      }
+
+      const output = Buffer.concat(chunks);
+      const paths: string[] = [];
+      let start = 0;
+      let end = output.indexOf(0, start);
+      while (end >= 0 && paths.length < MAX_SEARCH_CANDIDATES) {
+        if (end > start)
+          paths.push(output.subarray(start, end).toString('utf8'));
+        start = end + 1;
+        end = output.indexOf(0, start);
+      }
+      resolvePromise({
+        paths,
+        truncated:
+          stoppedForLimit ||
+          paths.length === MAX_SEARCH_CANDIDATES ||
+          start < output.length,
+      });
+    });
+  });
 }
 
 async function searchWorkspace(
@@ -233,7 +356,9 @@ async function searchWorkspace(
   if (
     !request.query ||
     request.query.length > 4096 ||
-    request.query.includes('\0')
+    request.query.includes('\0') ||
+    request.query.includes('\n') ||
+    request.query.includes('\r')
   ) {
     throw new WorkspaceToolError('Invalid workspace search', 'INVALID_REQUEST');
   }
@@ -254,128 +379,74 @@ async function searchWorkspace(
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   const canonicalSearchPath = relative(root, canonicalTarget) || '.';
 
+  const deadline = Date.now() + SEARCH_TIMEOUT_MS;
+  const candidates = await listSearchCandidates(
+    root,
+    canonicalSearchPath,
+    signal,
+    deadline,
+  );
+  const query = Buffer.from(request.query);
   const matches: WorkspaceSearchMatch[] = [];
-  let truncated = false;
-  let pending = '';
-  let stoppedForLimit = false;
-  await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn(
-      'rg',
-      [
-        '--json',
-        '--fixed-strings',
-        '--no-messages',
-        '--max-filesize',
-        '10M',
-        '--max-columns',
-        '2000',
-        '--max-columns-preview',
-        '--',
-        request.query,
-        canonicalSearchPath,
-      ],
-      { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] },
-    );
-    let aborted = false;
-    let timedOut = false;
-    const abort = () => {
-      aborted = true;
-      child.kill();
-    };
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill();
-    }, 10_000);
-    const cleanup = () => {
-      clearTimeout(timeout);
-      signal?.removeEventListener('abort', abort);
-    };
-
-    const consumeLine = (line: string) => {
-      if (!line || stoppedForLimit) return;
-      let event: RipgrepMatch;
-      try {
-        event = JSON.parse(line) as RipgrepMatch;
-      } catch {
-        return;
-      }
-      if (event.type !== 'match' || !event.data) return;
-      const path = event.data.path?.text;
-      const lineNumber = event.data.line_number;
-      const column = event.data.submatches?.[0]?.start;
-      const text = event.data.lines?.text;
-      if (
-        typeof path !== 'string' ||
-        typeof lineNumber !== 'number' ||
-        typeof column !== 'number' ||
-        typeof text !== 'string'
-      ) {
-        return;
-      }
-      if (matches.length === maxResults) {
-        truncated = true;
-        stoppedForLimit = true;
-        child.kill();
-        return;
-      }
-      matches.push({
-        path: path.startsWith(`.${sep}`) ? path.slice(2) : path,
-        line: lineNumber,
-        column: column + 1,
-        text: text.replace(/[\r\n]+$/, '').slice(0, 2000),
-      });
-    };
-
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      pending += chunk;
-      let newline = pending.indexOf('\n');
-      while (newline >= 0) {
-        consumeLine(pending.slice(0, newline));
-        pending = pending.slice(newline + 1);
-        newline = pending.indexOf('\n');
-      }
-    });
-    child.once('error', () => {
-      cleanup();
-      reject(
-        new WorkspaceToolError(
-          'Workspace search unavailable',
-          'SEARCH_UNAVAILABLE',
-        ),
+  let truncated = candidates.truncated;
+  for (const candidate of candidates.paths) {
+    if (signal?.aborted) {
+      throw new WorkspaceToolError(
+        'Workspace tool execution aborted',
+        'EXECUTION_ABORTED',
       );
-    });
-    child.once('close', (code) => {
-      cleanup();
-      consumeLine(pending);
-      if (aborted) {
-        reject(
-          new WorkspaceToolError(
-            'Workspace tool execution aborted',
-            'EXECUTION_ABORTED',
-          ),
-        );
-      } else if (timedOut) {
-        reject(
-          new WorkspaceToolError(
-            'Workspace search timed out',
-            'SEARCH_TIMEOUT',
-          ),
-        );
-      } else if (stoppedForLimit || code === 0 || code === 1) {
-        resolvePromise();
-      } else {
-        reject(
-          new WorkspaceToolError(
-            'Workspace search unavailable',
-            'SEARCH_UNAVAILABLE',
-          ),
-        );
+    }
+    if (Date.now() >= deadline) {
+      throw new WorkspaceToolError(
+        'Workspace search timed out',
+        'SEARCH_TIMEOUT',
+      );
+    }
+    const path = candidate.startsWith(`.${sep}`)
+      ? candidate.slice(2)
+      : candidate;
+    let content: Buffer;
+    try {
+      content = await readConfinedFileBuffer(root, path);
+    } catch (error) {
+      if (
+        error instanceof WorkspaceToolError &&
+        (error.code === 'INVALID_PATH' || error.code === 'READ_LIMIT_EXCEEDED')
+      ) {
+        continue;
       }
-    });
-  });
+      throw error;
+    }
+    let lineStart = 0;
+    let lineNumber = 1;
+    while (lineStart <= content.length) {
+      const newline = content.indexOf(0x0a, lineStart);
+      const lineEnd = newline < 0 ? content.length : newline;
+      const line = content.subarray(
+        lineStart,
+        lineEnd > lineStart && content[lineEnd - 1] === 0x0d
+          ? lineEnd - 1
+          : lineEnd,
+      );
+      const column = line.indexOf(query);
+      if (column >= 0) {
+        if (matches.length === maxResults) {
+          truncated = true;
+          break;
+        }
+        matches.push({
+          path,
+          line: lineNumber,
+          column: column + 1,
+          text: line.toString('utf8').slice(0, 2000),
+        });
+      }
+      if (newline < 0) break;
+      lineStart = newline + 1;
+      lineNumber += 1;
+    }
+    if (matches.length === maxResults && truncated) break;
+  }
 
   return {
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
