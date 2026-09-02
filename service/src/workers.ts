@@ -4,6 +4,7 @@ import type * as t from './types';
 import { filterSystemLogs, applySystemReplacements, getAxiosErrorDetails, sandboxErrorMessageFromAxios } from './utils';
 import { jobProcessingDuration, jobsCompleted, jobsFailed, activeJobs, workerRunning } from './metrics';
 import { connection, queueNames } from './queue';
+import { bullmqPrefix } from './redis-connection';
 import { env, jobDeadlineAtMs } from './config';
 import { summarizeSandboxResponse, summarizeText } from './execution-log';
 import { createGatewayEgressGrant, restoreGatewaySandboxResult, revokeGatewayEgressGrant } from './egress-gateway-client';
@@ -253,6 +254,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
 // Each worker respects its own concurrency limit based on its co-located sandbox capacity
 export const pyWorker = new Worker(queueNames.python, processJob, {
   connection,
+  prefix: bullmqPrefix(),
   concurrency: env.PYTHON_CONCURRENCY,
   limiter: {
     max: env.PYTHON_CONCURRENCY,
@@ -262,6 +264,7 @@ export const pyWorker = new Worker(queueNames.python, processJob, {
 
 export const otherWorker = new Worker(queueNames.other, processJob, {
   connection,
+  prefix: bullmqPrefix(),
   concurrency: env.OTHER_CONCURRENCY,
   limiter: {
     max: env.OTHER_CONCURRENCY,

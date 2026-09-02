@@ -152,11 +152,15 @@ app.kubernetes.io/component: tool-call-server
 {{- end }}
 
 {{/*
-Redis host - either from subchart or external
+Redis host - either from subchart or external.
+In cluster mode this renders the comma-separated node list from redis.cluster.nodes
+(falling back to redis.external.host for single-node external deployments).
 */}}
 {{- define "codeapi.redis.host" -}}
 {{- if .Values.redis.enabled }}
 {{- printf "%s-redis-master" .Release.Name }}
+{{- else if and .Values.redis.cluster.enabled .Values.redis.cluster.nodes }}
+{{- .Values.redis.cluster.nodes }}
 {{- else }}
 {{- .Values.redis.external.host }}
 {{- end }}
@@ -170,6 +174,128 @@ Redis port
 {{- "6379" }}
 {{- else }}
 {{- .Values.redis.external.port | default "6379" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Redis host used ONLY for the wait-for-redis readiness probe. In cluster mode
+codeapi.redis.host renders the full comma-separated startup-node list
+("n1:6379,n2:6379,..."), which `nc -z` cannot resolve as a single
+[destination] [port] pair. This always resolves to one reachable host —
+the first cluster startup node when in cluster mode, otherwise the same
+value as codeapi.redis.host.
+*/}}
+{{- define "codeapi.redis.probeHost" -}}
+{{- if .Values.redis.enabled }}
+{{- printf "%s-redis-master" .Release.Name }}
+{{- else if and .Values.redis.cluster.enabled .Values.redis.cluster.nodes }}
+{{- $firstNode := .Values.redis.cluster.nodes | splitList "," | first | trim }}
+{{- if hasPrefix "[" $firstNode }}
+{{- $closingBracket := index (splitList "]" $firstNode) 0 }}
+{{- trimPrefix "[" $closingBracket }}
+{{- else if eq (len (splitList ":" $firstNode)) 2 }}
+{{- index (splitList ":" $firstNode) 0 }}
+{{- else }}
+{{- $firstNode }}
+{{- end }}
+{{- else }}
+{{- .Values.redis.external.host }}
+{{- end }}
+{{- end }}
+
+{{/*
+Port companion to codeapi.redis.probeHost.
+*/}}
+{{- define "codeapi.redis.probePort" -}}
+{{- if .Values.redis.enabled }}
+{{- "6379" }}
+{{- else if and .Values.redis.cluster.enabled .Values.redis.cluster.nodes }}
+{{- $firstNode := .Values.redis.cluster.nodes | splitList "," | first | trim }}
+{{- if hasPrefix "[" $firstNode }}
+{{- $suffix := index (splitList "]" $firstNode) 1 }}
+{{- if hasPrefix ":" $suffix }}
+{{- trimPrefix ":" $suffix }}
+{{- else }}
+{{- "6379" }}
+{{- end }}
+{{- else if eq (len (splitList ":" $firstNode)) 2 }}
+{{- index (splitList ":" $firstNode) 1 }}
+{{- else }}
+{{- "6379" }}
+{{- end }}
+{{- else }}
+{{- .Values.redis.external.port | default "6379" }}
+{{- end }}
+{{- end }}
+
+{{/*
+USE_REDIS_CLUSTER value – "true" when redis.cluster.enabled or when
+redis.cluster.nodes contains a comma (auto-detect multiple nodes).
+*/}}
+{{- define "codeapi.redis.clusterEnabled" -}}
+{{- if .Values.redis.cluster.enabled }}
+{{- "true" }}
+{{- else if and .Values.redis.cluster.nodes (contains "," .Values.redis.cluster.nodes) }}
+{{- "true" }}
+{{- else }}
+{{- "false" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Emit the Redis TLS + CA environment variables and volume mount for each
+component that needs it. These only apply to an external managed Redis, so
+they render nothing while the bundled subchart is enabled (redis.enabled=true
+always uses plain TCP to the in-cluster Bitnami Redis) or when redis.tls.enabled
+is false.
+Usage: {{ include "codeapi.redis.tlsEnv" . }}
+*/}}
+{{- define "codeapi.redis.tlsEnv" -}}
+{{- if not .Values.redis.enabled }}
+{{- if .Values.redis.tls.enabled }}
+- name: REDIS_TLS
+  value: "true"
+{{- if .Values.redis.tls.caSecretName }}
+- name: REDIS_CA
+  value: {{ .Values.redis.tls.caMountPath | quote }}
+{{- end }}
+{{- end }}
+{{- if .Values.redis.useAlternativeDnsLookup }}
+- name: REDIS_USE_ALTERNATIVE_DNS_LOOKUP
+  value: "true"
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Volume definition for the Redis CA certificate secret.
+Renders nothing when redis.tls.caSecretName is empty, or the bundled Redis
+subchart is enabled (it never speaks TLS).
+Usage: {{ include "codeapi.redis.caVolume" . }}
+*/}}
+{{- define "codeapi.redis.caVolume" -}}
+{{- if and (not .Values.redis.enabled) .Values.redis.tls.enabled .Values.redis.tls.caSecretName }}
+- name: redis-ca
+  secret:
+    secretName: {{ .Values.redis.tls.caSecretName }}
+    items:
+      - key: {{ .Values.redis.tls.caKey }}
+        path: ca.crt
+{{- end }}
+{{- end }}
+
+{{/*
+VolumeMount for the Redis CA certificate inside a container.
+Renders nothing when redis.tls.caSecretName is empty, or the bundled Redis
+subchart is enabled (it never speaks TLS).
+Usage: {{ include "codeapi.redis.caVolumeMount" . }}
+*/}}
+{{- define "codeapi.redis.caVolumeMount" -}}
+{{- if and (not .Values.redis.enabled) .Values.redis.tls.enabled .Values.redis.tls.caSecretName }}
+- name: redis-ca
+  mountPath: {{ .Values.redis.tls.caMountPath | quote }}
+  subPath: ca.crt
+  readOnly: true
 {{- end }}
 {{- end }}
 

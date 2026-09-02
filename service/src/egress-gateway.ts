@@ -636,12 +636,13 @@ app.get('/sessions/:sessionHandle/objects/:objectHandle', async (req, res) => {
       ),
       { headers: injectTraceHeaders(internalServiceHeaders()) },
     );
-    const headerOverrides = isOpaqueObjectContentDisposition(
-      upstream.headers.get('content-disposition'),
-      object.id,
-    )
-      ? { 'content-disposition': 'attachment' }
-      : {};
+    const headerOverrides: Record<string, string> =
+      isOpaqueObjectContentDisposition(
+        upstream.headers.get('content-disposition'),
+        object.id,
+      )
+        ? { 'content-disposition': 'attachment' }
+        : {};
     return pipeFetchResponse(upstream, res, headerOverrides);
   } catch (error) {
     return sendEgressError(req, res, error);

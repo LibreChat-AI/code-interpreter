@@ -131,7 +131,7 @@ spec:
       initContainers:
         - name: wait-for-redis
           image: busybox:1.36.1
-          command: ['sh', '-c', 'until nc -z {{ include "codeapi.redis.host" . }} {{ include "codeapi.redis.port" . }}; do echo waiting for redis; sleep 2; done']
+          command: ['sh', '-c', 'until nc -z {{ include "codeapi.redis.probeHost" . }} {{ include "codeapi.redis.probePort" . }}; do echo waiting for redis; sleep 2; done']
         - name: wait-for-sandbox-runner
           image: busybox:1.36.1
           command: ['sh', '-c', 'until nc -z {{ include "codeapi.fullname" . }}-sandbox-runner {{ .Values.workerSandbox.sandbox.port }}; do echo waiting for sandbox-runner; sleep 2; done']
@@ -156,7 +156,7 @@ spec:
             - name: EGRESS_GATEWAY_URL
               value: "http://{{ include "codeapi.fullname" . }}-egress-gateway:{{ .Values.egressGateway.service.port }}"
             - name: REDIS_HOST
-              value: {{ include "codeapi.redis.host" . }}
+              value: {{ include "codeapi.redis.host" . | quote }}
             - name: REDIS_PORT
               value: {{ include "codeapi.redis.port" . | quote }}
             - name: REDIS_PASSWORD
@@ -164,6 +164,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "codeapi.fullname" . }}-secrets
                   key: redis-password
+            - name: USE_REDIS_CLUSTER
+              value: {{ include "codeapi.redis.clusterEnabled" . | quote }}
+            {{- include "codeapi.redis.tlsEnv" . | nindent 12 }}
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -191,6 +194,10 @@ spec:
             {{- with .Values.workerSandbox.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- with (include "codeapi.redis.caVolumeMount" . | trim) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health
@@ -211,6 +218,10 @@ spec:
             limits:
               {{- toYaml . | nindent 14 }}
             {{- end }}
+      {{- with (include "codeapi.redis.caVolume" . | trim) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
       {{- with $serviceWorkerNodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
