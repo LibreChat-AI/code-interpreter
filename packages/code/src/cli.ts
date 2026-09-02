@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
 import {
@@ -8,7 +10,7 @@ import {
   saveBridgeIdentity,
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
-import { EndpointRuntimeSupervisor } from './runtime.js';
+import { DockerRuntimeSupervisor, EndpointRuntimeSupervisor } from './runtime.js';
 import {
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
@@ -28,6 +30,23 @@ function list(value: string | undefined): string[] {
       .filter(Boolean) ?? []
   );
 }
+
+const MACOS_NSJAIL_CAPABILITIES = [
+  'SYS_ADMIN',
+  'SYS_CHROOT',
+  'SYS_PTRACE',
+  'SETUID',
+  'SETGID',
+  'NET_ADMIN',
+  'DAC_OVERRIDE',
+  'DAC_READ_SEARCH',
+  'CHOWN',
+  'FOWNER',
+  'FSETID',
+  'KILL',
+  'SETFCAP',
+  'MKNOD',
+];
 
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -86,10 +105,25 @@ async function run(runtimeSessionId?: string): Promise<void> {
   const statefulWorkspace =
     process.env.LIBRECHAT_CODE_STATEFUL_WORKSPACE?.trim().toLowerCase() ===
     'true';
+  const runtimeMode =
+    process.env.LIBRECHAT_CODE_RUNTIME_SUPERVISOR?.trim().toLowerCase() ?? 'endpoint';
+  if (
+    runtimeMode !== 'endpoint' &&
+    runtimeMode !== 'docker' &&
+    runtimeMode !== 'docker-macos-nsjail'
+  ) {
+    throw new Error(
+      'LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be endpoint, docker, or docker-macos-nsjail',
+    );
+  }
   const sandboxEndpoint =
     process.env.LIBRECHAT_CODE_SANDBOX_ENDPOINT ??
     'http://127.0.0.1:2000/api/v2';
-  if (statefulWorkspace && !sandboxEndpoint.includes('{runtimeSessionId}')) {
+  if (
+    runtimeMode === 'endpoint' &&
+    statefulWorkspace &&
+    !sandboxEndpoint.includes('{runtimeSessionId}')
+  ) {
     throw new Error(
       'LIBRECHAT_CODE_STATEFUL_WORKSPACE requires LIBRECHAT_CODE_SANDBOX_ENDPOINT to contain {runtimeSessionId}',
     );
@@ -103,7 +137,9 @@ async function run(runtimeSessionId?: string): Promise<void> {
     : undefined;
   const capabilities = {
     statefulWorkspace,
-    sandboxProfile: process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ?? 'nsjail',
+    sandboxProfile:
+      process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ??
+      (runtimeMode.startsWith('docker') ? 'oci-docker' : 'nsjail'),
     runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
     policyDigest: createHash('sha256').update(policy).digest('hex'),
   };
@@ -120,10 +156,48 @@ async function run(runtimeSessionId?: string): Promise<void> {
     token: configuredToken,
     identity: workerIdentity,
     workerId,
-    runtimeSupervisor: new EndpointRuntimeSupervisor({
-      endpoint: sandboxEndpoint,
-      statefulWorkspace,
-    }),
+    runtimeSupervisor:
+      runtimeMode !== 'endpoint'
+        ? new DockerRuntimeSupervisor({
+            image:
+              runtimeSessionId == null
+                ? required('LIBRECHAT_CODE_RUNTIME_IMAGE')
+                : process.env.LIBRECHAT_CODE_RUNTIME_IMAGE?.trim(),
+            ...(runtimeMode === 'docker-macos-nsjail' && runtimeSessionId == null
+              ? (() => {
+                  const seccompProfile = resolve(
+                    required('LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE'),
+                  );
+                  const packagesPath = resolve(
+                    required('LIBRECHAT_CODE_DOCKER_PACKAGES_PATH'),
+                  );
+                  return {
+                    capabilities: MACOS_NSJAIL_CAPABILITIES,
+                    securityOptions: [`seccomp=${seccompProfile}`],
+                    profileRevision: createHash('sha256')
+                      .update(readFileSync(seccompProfile))
+                      .digest('hex'),
+                    restartStoppedContainers: false,
+                    bindMounts: [
+                      {
+                        source: packagesPath,
+                        target: '/pkgs',
+                        readOnly: true,
+                      },
+                    ],
+                    httpClient: 'bun',
+                    environment: {
+                      SANDBOX_USE_CGROUPV2: 'false',
+                      SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP: 'false',
+                    },
+                  };
+                })()
+              : {}),
+          })
+        : new EndpointRuntimeSupervisor({
+            endpoint: sandboxEndpoint,
+            statefulWorkspace,
+          }),
     capabilities,
     onIdentityChange:
       pairedIdentity && identityPath

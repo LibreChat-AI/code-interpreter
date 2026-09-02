@@ -6,7 +6,9 @@ Deploy the horizontally-scalable Code Interpreter API stack to Kubernetes.
 
 - Docker Desktop with Kubernetes enabled, OR
 - Minikube installed (`brew install minikube` / `choco install minikube`)
-- Helm 3.x (`brew install helm` / `choco install kubernetes-helm`)
+- Helm >= 3.8 (`brew install helm` / `choco install kubernetes-helm`) — the
+  redis and minio subcharts are pulled from an OCI registry, which older Helm
+  releases only support behind an experimental flag
 - kubectl (`brew install kubectl` / `choco install kubernetes-cli`)
 
 ## Execution manifest signing keys (required)

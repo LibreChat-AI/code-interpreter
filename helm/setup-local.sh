@@ -32,9 +32,38 @@ check_command() {
     echo "✓ $1 found"
 }
 
+# The chart's subchart dependencies are OCI references, which Helm only
+# resolves without an experimental flag from 3.8 onward.
+check_helm_version() {
+    local required_major=3 required_minor=8
+    local raw major minor
+    raw=$(helm version --template '{{.Version}}' 2>/dev/null || true)
+    if [ -z "$raw" ]; then
+        echo "❌ could not determine the installed Helm version (need >= ${required_major}.${required_minor})."
+        exit 1
+    fi
+    raw=${raw#v}
+    major=${raw%%.*}
+    minor=${raw#*.}
+    minor=${minor%%.*}
+    case "$major$minor" in
+        *[!0-9]*|'')
+            echo "❌ could not parse the installed Helm version '$raw' (need >= ${required_major}.${required_minor})."
+            exit 1
+            ;;
+    esac
+    if [ "$major" -lt "$required_major" ] ||
+        { [ "$major" -eq "$required_major" ] && [ "$minor" -lt "$required_minor" ]; }; then
+        echo "❌ Helm $raw is too old. The chart's OCI subchart dependencies need >= ${required_major}.${required_minor}."
+        exit 1
+    fi
+    echo "✓ helm $raw supports OCI dependencies"
+}
+
 echo "📋 Checking prerequisites..."
 check_command docker
 check_command helm
+check_helm_version
 check_command kubectl
 check_command "$CLUSTER_TYPE"
 echo ""
@@ -96,8 +125,8 @@ fi
 
 # Add Helm repos and update dependencies
 echo "📚 Setting up Helm dependencies..."
-helm repo add bitnami https://charts.bitnami.com/bitnami 2>/dev/null || true
-helm repo update
+# Subcharts resolve from oci://registry-1.docker.io/bitnamicharts, so no
+# classic chart repository needs registering.
 helm dependency update ./helm/codeapi
 echo ""
 

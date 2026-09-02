@@ -42,6 +42,7 @@ import { isValidId } from './utils';
 import logger from './logger';
 import { parseBoundedContentLength } from './http-limits';
 import { validateEgressGatewayHardenedConfig } from './secure-startup';
+import { isOpaqueObjectContentDisposition } from './file-metadata';
 
 export const app: Express = express();
 app.disable('x-powered-by');
@@ -347,9 +348,13 @@ function responseHeaders(fetchResponse: globalThis.Response): Record<string, str
   return headers;
 }
 
-function pipeFetchResponse(fetchResponse: globalThis.Response, res: Response): void {
+function pipeFetchResponse(
+  fetchResponse: globalThis.Response,
+  res: Response,
+  headerOverrides: Record<string, string> = {},
+): void {
   res.status(fetchResponse.status);
-  res.set(responseHeaders(fetchResponse));
+  res.set({ ...responseHeaders(fetchResponse), ...headerOverrides });
   if (!fetchResponse.body) {
     res.end();
     return;
@@ -631,7 +636,14 @@ app.get('/sessions/:sessionHandle/objects/:objectHandle', async (req, res) => {
       ),
       { headers: injectTraceHeaders(internalServiceHeaders()) },
     );
-    return pipeFetchResponse(upstream, res);
+    const headerOverrides: Record<string, string> =
+      isOpaqueObjectContentDisposition(
+        upstream.headers.get('content-disposition'),
+        object.id,
+      )
+        ? { 'content-disposition': 'attachment' }
+        : {};
+    return pipeFetchResponse(upstream, res, headerOverrides);
   } catch (error) {
     return sendEgressError(req, res, error);
   }

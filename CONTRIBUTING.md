@@ -22,6 +22,14 @@ Practical consequences:
 - **History is snapshot-based.** Commits here intentionally do not mirror the
   internal commit history.
 
+## Releases
+
+Tagged releases are cut from `main` as `vMAJOR.MINOR.PATCH` (with `-rcN` for
+release candidates), and each one carries the packaged Helm chart. The version
+comes from `helm/codeapi/Chart.yaml`'s `appVersion`, so a version bump lands on
+`main` through the pull request flow above before it can be released. See
+[docs/RELEASING.md](docs/RELEASING.md) for the full process.
+
 ## Development
 
 See the [README](README.md) for the architecture overview and

@@ -177,6 +177,33 @@ describe('resolveOriginalName', () => {
       ),
     ).toBe('nested/file.txt');
   });
+
+  it('keeps the requested name when an old file server advertises the opaque object basename', () => {
+    expect(
+      resolveOriginalName(
+        responseWithHeader("attachment; filename*=UTF-8''storage-id.xlsx"),
+        { name: 'Sample_-_Superstore.xlsx', id: 'storage-id' },
+      ),
+    ).toBe('Sample_-_Superstore.xlsx');
+  });
+
+  it('keeps the requested name for a legacy opaque filename header', () => {
+    expect(
+      resolveOriginalName(
+        responseWithHeader('attachment; filename="storage-id.csv"'),
+        { name: 'original.csv', id: 'storage-id' },
+      ),
+    ).toBe('original.csv');
+  });
+
+  it('keeps an authoritative nested filename even when its basename matches the object id', () => {
+    expect(
+      resolveOriginalName(
+        responseWithHeader("attachment; filename*=UTF-8''exports%2Fstorage-id.csv"),
+        { name: 'original.csv', id: 'storage-id' },
+      ),
+    ).toBe('exports/storage-id.csv');
+  });
 });
 
 describe('mimeTypeFor', () => {

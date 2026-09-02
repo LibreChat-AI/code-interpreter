@@ -37,6 +37,73 @@ Use `--identity <path>` while pairing and
 `LIBRECHAT_CODE_IDENTITY_FILE=<path>` while running to override the identity
 file location.
 
+## Docker runtime supervisor (programmatic adapter)
+
+`DockerRuntimeSupervisor` is the first self-contained local OCI adapter. It
+owns one named container per runtime session, does not publish the runner port,
+starts the container with `--network none`, drops every Linux capability, and
+sets `no-new-privileges`. The trusted worker invokes the runner only through
+`docker exec` to `127.0.0.1` inside that container. The sandbox therefore has
+neither an inbound host port nor network egress.
+
+It requires a
+runtime image that provides the Code Interpreter `/api/v2/health` and
+`/api/v2/execute` endpoints and supports
+`SANDBOX_SESSION_WORKSPACE_ENABLED=true`. The repository's
+`local-oci-runtime` target supplies that API for the direct-NsJail macOS
+profile. This adapter intentionally does not turn an arbitrary image into a
+supported security boundary. Image-specific Linux capabilities must be
+explicitly configured by the trusted launcher; the default grants none.
+
+To enable it from the bundled CLI, the host must give the worker access to its
+local Docker daemon and explicitly select a known runtime image:
+
+```bash
+LIBRECHAT_CODE_RUNTIME_SUPERVISOR=docker \
+LIBRECHAT_CODE_RUNTIME_IMAGE=ghcr.io/librechat-ai/code-interpreter-runtime:tag \
+LIBRECHAT_CODE_STATEFUL_WORKSPACE=true \
+librechat-code run
+```
+
+The image reference above is illustrative until the corresponding published
+runtime image ships. Docker mode never binds a runner port on the VM. Do not
+mount the Docker socket into the sandbox; only the trusted worker may control
+the daemon.
+
+For local Docker Desktop development, build the direct-NsJail target and use
+the same capability and seccomp policy as `docker-compose.mac.yml`:
+
+```bash
+docker build --target local-oci-runtime \
+  -t librechat-code-runtime:local -f api/Dockerfile .
+
+LIBRECHAT_CODE_RUNTIME_SUPERVISOR=docker-macos-nsjail \
+LIBRECHAT_CODE_RUNTIME_IMAGE=librechat-code-runtime:local \
+LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE=./seccomp/nsjail.json \
+LIBRECHAT_CODE_DOCKER_PACKAGES_PATH=./data/pkgs \
+LIBRECHAT_CODE_STATEFUL_WORKSPACE=true \
+librechat-code run
+```
+
+The packages directory must already be populated using the repository's
+package-init workflow. The worker mounts it read-only into each runtime.
+Changing the image, package path, capabilities, seccomp contents, or other
+confinement settings discards any surviving session container; the current
+assignment fails explicitly so the lost workspace is never
+presented as continuous state. Likewise, Docker Desktop remounts a fresh tmpfs
+when this container restarts, so the profile discards a stopped container and
+reports state loss instead of restarting it. The next assignment starts a new
+environment. Treat profile changes and Docker restarts as environment resets
+and preserve any needed workspace contents first.
+
+This first local profile supports inline request files. By-reference inputs and
+generated-file uploads require a worker-mediated file relay and are not yet
+supported; the runtime remains networkless rather than opening general egress
+to reach a file server.
+Direct NsJail shares the Docker Desktop VM kernel and is suitable for local or
+operator-trusted development. Use a separate VM or MicroVM boundary for
+internet-facing execution of code from untrusted users.
+
 ## Static compatibility mode
 
 Non-hardened development deployments may still run with a static token:

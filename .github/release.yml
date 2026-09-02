@@ -1,0 +1,31 @@
+# Categories for the changelog `gh release create --generate-notes` appends to
+# every release body (see .github/workflows/release.yml). Labels are matched
+# against the merged pull requests in the range; anything unlabelled lands in
+# "Other changes" rather than being dropped, which matters here because sync
+# pull requests from the internal monorepo usually carry no labels.
+changelog:
+  exclude:
+    labels:
+      - duplicate
+      - invalid
+      - wontfix
+  categories:
+    - title: Security
+      labels:
+        - security
+    - title: Features
+      labels:
+        - enhancement
+        - feature
+    - title: Fixes
+      labels:
+        - bug
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other changes
+      labels:
+        - '*'
