@@ -317,7 +317,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
           image,
           profileRevision: this.options.profileRevision ?? null,
           restartStoppedContainers: this.restartStoppedContainers,
-          network: this.network,
+          ...(this.network !== 'none' ? { network: this.network } : {}),
           capabilities: this.capabilities,
           securityOptions: this.securityOptions,
           environment: Object.entries(this.environment).sort(([left], [right]) =>

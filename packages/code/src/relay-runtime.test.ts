@@ -18,6 +18,11 @@ test('Docker file relay prepares a private runtime network and hardened dual-hom
         throw new Error('No such container');
       }
       if (args[0] === 'container' && args[1] === 'ls') return staleRelay;
+      if (args[0] === 'container' && args[1] === 'inspect') {
+        return args.at(-1) === staleRelay
+          ? '2026-09-02T08:00:00.000000000Z\n'
+          : '2026-09-02T09:00:00.000000000Z\n';
+      }
       if (args[0] === 'network' && args[1] === 'create') return 'network-id\n';
       if (args[0] === 'run') return 'relay-id\n';
       if (args[0] === 'network' && args[1] === 'connect') return '';
@@ -65,6 +70,7 @@ test('Docker file relay prepares a private runtime network and hardened dual-hom
   assert.ok(connect?.includes(profile.network));
   const health = calls.find((args) => args[0] === 'exec') ?? [];
   assert.match(health.at(-1) ?? '', /^\d+$/);
+  assert.ok(calls.indexOf(health) < calls.indexOf(connect ?? []));
 
   staleRelay = `${currentRelay}-stale`;
   await supervisor.pruneStale();
@@ -142,4 +148,102 @@ test('Docker file relay validates a network created by a concurrent incarnation'
   await supervisor.prepare();
 
   assert.equal(runtimeInspections, 2);
+});
+
+test('Docker file relay stale pruning never removes a newer incarnation', async () => {
+  const calls: string[][] = [];
+  let currentRelay = '';
+  let newerRelay = '';
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      calls.push(args);
+      if (args[0] === 'network' && args[1] === 'inspect') {
+        return args.at(-1)?.includes('-egress-') === true
+          ? 'false|true|egress\n'
+          : 'true|true|runtime\n';
+      }
+      if (args[0] === 'container' && args[1] === 'rm') {
+        throw new Error('No such container');
+      }
+      if (args[0] === 'run') {
+        currentRelay = args[args.indexOf('--name') + 1] ?? '';
+        newerRelay = `${currentRelay.slice(0, -12)}ffffffffffff`;
+        return 'relay-id\n';
+      }
+      if (args[0] === 'network' && args[1] === 'connect') return '';
+      if (args[0] === 'exec') return '200';
+      if (args[0] === 'container' && args[1] === 'ls') return `${newerRelay}\n`;
+      if (args[0] === 'container' && args[1] === 'inspect') {
+        return args.at(-1) === currentRelay
+          ? '2026-09-02T08:00:00.000000000Z\n'
+          : '2026-09-02T09:00:00.000000000Z\n';
+      }
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerFileRelaySupervisor({
+    workerId: 'engineering-vm',
+    incarnationId: 'older-incarnation',
+    image: 'librechat-code-worker:local',
+    upstreamUrl: 'https://code.example/egress',
+    token: 'relay-secret',
+    client,
+  });
+  await supervisor.prepare();
+
+  await supervisor.pruneStale();
+
+  assert.equal(
+    calls.some(
+      (args) => args[0] === 'container' && args[1] === 'rm' && args.includes(newerRelay),
+    ),
+    false,
+  );
+});
+
+test('Docker file relay rolls back startup with a fresh signal after abort', async () => {
+  const controller = new AbortController();
+  let currentRelay = '';
+  let cleanupCalls = 0;
+  let cleanupSignal: AbortSignal | undefined;
+  const client: ContainerRuntimeClient = {
+    async run(args, options) {
+      if (args[0] === 'network' && args[1] === 'inspect') {
+        return args.at(-1)?.includes('-egress-') === true
+          ? 'false|true|egress\n'
+          : 'true|true|runtime\n';
+      }
+      if (args[0] === 'container' && args[1] === 'rm') {
+        if (args.includes(currentRelay)) {
+          cleanupCalls += 1;
+          cleanupSignal = options?.signal;
+        }
+        return 'removed\n';
+      }
+      if (args[0] === 'run') {
+        currentRelay = args[args.indexOf('--name') + 1] ?? '';
+        return 'relay-id\n';
+      }
+      if (args[0] === 'network' && args[1] === 'connect') return '';
+      if (args[0] === 'exec') {
+        controller.abort(new Error('shutdown'));
+        throw controller.signal.reason;
+      }
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerFileRelaySupervisor({
+    workerId: 'engineering-vm',
+    incarnationId: 'aborted-incarnation',
+    image: 'librechat-code-worker:local',
+    upstreamUrl: 'https://code.example/egress',
+    token: 'relay-secret',
+    startupTimeoutMs: 1,
+    client,
+  });
+
+  await assert.rejects(supervisor.prepare(controller.signal), /shutdown/);
+
+  assert.equal(cleanupCalls, 1);
+  assert.equal(cleanupSignal?.aborted ?? false, false);
 });

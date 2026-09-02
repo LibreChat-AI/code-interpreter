@@ -85,53 +85,54 @@ export class DockerFileRelaySupervisor {
     await this.ensureNetwork(this.network, true, 'runtime', signal);
     await this.ensureNetwork(this.egressNetwork, false, 'egress', signal);
     await this.removeRelay(signal);
-    await this.client.run(
-      [
-        'run',
-        '--detach',
-        '--name',
-        this.container,
-        '--network',
-        this.egressNetwork,
-        '--cap-drop',
-        'ALL',
-        '--security-opt',
-        'no-new-privileges:true',
-        '--read-only',
-        '--tmpfs',
-        '/tmp:rw,noexec,nosuid,size=16m',
-        '--label',
-        'com.librechat.code.file-relay=true',
-        '--label',
-        `com.librechat.code.worker-hash=${this.workerHash}`,
-        '--env',
-        `LIBRECHAT_CODE_FILE_RELAY_UPSTREAM=${this.options.upstreamUrl}`,
-        '--env',
-        `LIBRECHAT_CODE_FILE_RELAY_TOKEN=${this.options.token}`,
-        ...(this.options.maxBytes != null
-          ? [
-              '--env',
-              `LIBRECHAT_CODE_FILE_RELAY_MAX_BYTES=${this.options.maxBytes}`,
-            ]
-          : []),
-        ...(this.options.timeoutMs != null
-          ? [
-              '--env',
-              `LIBRECHAT_CODE_FILE_RELAY_TIMEOUT_MS=${this.options.timeoutMs}`,
-            ]
-          : []),
-        ...(this.options.maxConcurrentRequests != null
-          ? [
-              '--env',
-              `LIBRECHAT_CODE_FILE_RELAY_MAX_CONCURRENT_REQUESTS=${this.options.maxConcurrentRequests}`,
-            ]
-          : []),
-        this.options.image,
-        'relay',
-      ],
-      { signal },
-    );
     try {
+      await this.client.run(
+        [
+          'run',
+          '--detach',
+          '--name',
+          this.container,
+          '--network',
+          this.egressNetwork,
+          '--cap-drop',
+          'ALL',
+          '--security-opt',
+          'no-new-privileges:true',
+          '--read-only',
+          '--tmpfs',
+          '/tmp:rw,noexec,nosuid,size=16m',
+          '--label',
+          'com.librechat.code.file-relay=true',
+          '--label',
+          `com.librechat.code.worker-hash=${this.workerHash}`,
+          '--env',
+          `LIBRECHAT_CODE_FILE_RELAY_UPSTREAM=${this.options.upstreamUrl}`,
+          '--env',
+          `LIBRECHAT_CODE_FILE_RELAY_TOKEN=${this.options.token}`,
+          ...(this.options.maxBytes != null
+            ? [
+                '--env',
+                `LIBRECHAT_CODE_FILE_RELAY_MAX_BYTES=${this.options.maxBytes}`,
+              ]
+            : []),
+          ...(this.options.timeoutMs != null
+            ? [
+                '--env',
+                `LIBRECHAT_CODE_FILE_RELAY_TIMEOUT_MS=${this.options.timeoutMs}`,
+              ]
+            : []),
+          ...(this.options.maxConcurrentRequests != null
+            ? [
+                '--env',
+                `LIBRECHAT_CODE_FILE_RELAY_MAX_CONCURRENT_REQUESTS=${this.options.maxConcurrentRequests}`,
+              ]
+            : []),
+          this.options.image,
+          'relay',
+        ],
+        { signal },
+      );
+      await this.waitForHealth(signal);
       await this.client.run(
         [
           'network',
@@ -143,9 +144,8 @@ export class DockerFileRelaySupervisor {
         ],
         { signal },
       );
-      await this.waitForHealth(signal);
     } catch (error) {
-      await this.removeRelay(signal);
+      await this.removeRelay();
       throw error;
     }
     return {
@@ -160,6 +160,11 @@ export class DockerFileRelaySupervisor {
   }
 
   async pruneStale(signal?: AbortSignal): Promise<void> {
+    const currentCreatedAt = await this.containerCreatedAt(
+      this.container,
+      signal,
+    );
+    if (currentCreatedAt == null) return;
     const containers = await this.client.run(
       [
         'container',
@@ -179,11 +184,38 @@ export class DockerFileRelaySupervisor {
       if (!name.startsWith(`librechat-code-relay-${this.workerHash}-`)) {
         throw new Error('Docker returned an invalid stale file relay name');
       }
+      const candidateCreatedAt = await this.containerCreatedAt(name, signal);
+      if (
+        candidateCreatedAt == null ||
+        candidateCreatedAt >= currentCreatedAt
+      ) {
+        continue;
+      }
       try {
         await this.client.run(['container', 'rm', '--force', name], { signal });
       } catch (error) {
         if (!missingContainer(error)) throw error;
       }
+    }
+  }
+
+  private async containerCreatedAt(
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<number | undefined> {
+    try {
+      const created = await this.client.run(
+        ['container', 'inspect', '--format', '{{.Created}}', name],
+        { signal },
+      );
+      const timestamp = Date.parse(created.trim());
+      if (!Number.isFinite(timestamp)) {
+        throw new Error('Docker returned an invalid file relay creation time');
+      }
+      return timestamp;
+    } catch (error) {
+      if (missingContainer(error)) return undefined;
+      throw error;
     }
   }
 
@@ -258,6 +290,9 @@ export class DockerFileRelaySupervisor {
       (this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
     let lastError: unknown;
     while (Date.now() < deadline) {
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException('aborted', 'AbortError');
+      }
       try {
         const remainingMs = Math.max(1, deadline - Date.now());
         const status = await this.client.run(
@@ -276,6 +311,9 @@ export class DockerFileRelaySupervisor {
           `File relay health check returned HTTP ${status.trim()}`,
         );
       } catch (error) {
+        if (signal?.aborted) {
+          throw signal.reason ?? new DOMException('aborted', 'AbortError');
+        }
         lastError = error;
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
