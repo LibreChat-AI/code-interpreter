@@ -141,6 +141,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       },
       {
         executionId: job.data.executionId ?? '',
+        queuedJobId: job.id != null ? String(job.id) : undefined,
         language,
         isSynthetic: isSyntheticJob,
         signal: controller.signal,

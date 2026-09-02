@@ -138,6 +138,48 @@ export function runtimeSessionLaunchGenerationSeed(config: LambdaMicrovmBackendC
   return RUNTIME_SESSION_NAMESPACED_GENERATION_MIN + offset;
 }
 
+/** Stateless one-shot launch token.
+ *
+ * PTC replay reuses one executionId across every iteration, so a token derived
+ * from the executionId alone repeats while the launch parameters change with
+ * each iteration's payload. AWS rejects that with "The provided clientToken was
+ * used with different request parameters" and the whole execution fails.
+ *
+ * The discriminator is the queued job id rather than the request body: the body
+ * is rebuilt with a fresh egress grant, sandbox session id and re-signed
+ * manifest on every job attempt, so hashing it would hand a replacement worker
+ * a different token after a stalled-job takeover and launch a second VM instead
+ * of recovering the accepted one through RunMicrovm idempotency. The job id is
+ * distinct per replay iteration and stable across attempts of the same job.
+ *
+ * The launch configuration stays in the digest because a worker whose config
+ * differs must not reuse another worker's token. */
+export function statelessLaunchClientToken(
+  executionId: string,
+  config: LambdaMicrovmBackendConfig,
+  maxDurationSeconds: number,
+  queuedJobId: string,
+): string {
+  const suffix = createHash('sha256')
+    .update(
+      JSON.stringify({
+        launchRequest: runtimeSessionLaunchRequestFingerprint(config),
+        maximumDurationSeconds: maxDurationSeconds,
+        queuedJobId,
+      }),
+      'utf8',
+    )
+    .digest('hex')
+    .slice(0, 16);
+  const token = `exec-${executionId}-${suffix}`;
+  /* launch() can add "-r1" after a clean boot-time death; reserve those three
+   * characters so both attempts stay within AWS's 128-byte limit. */
+  if (token.length > 125) {
+    throw new Error('Stateless launch clientToken exceeds the AWS length limit');
+  }
+  return token;
+}
+
 export function runtimeSessionLaunchClientToken(runtimeSessionId: string, generation: number): string {
   if (!Number.isSafeInteger(generation) || generation < 1) {
     throw new Error('Runtime session generation must be a positive safe integer');
@@ -259,7 +301,14 @@ export class LambdaMicrovmSandboxBackend implements SandboxBackend {
       Math.ceil(this.config.jobTimeoutMs / 1_000) + 120,
     );
     const vm = await this.launch(client, ctx, {
-      clientToken: ctx.executionId !== '' ? `exec-${ctx.executionId}` : `exec-${nanoid()}`,
+      clientToken: statelessLaunchClientToken(
+        ctx.executionId !== '' ? ctx.executionId : nanoid(),
+        this.config,
+        maxDurationSeconds,
+        /* No queued job id (direct backend caller): fall back to a fresh value
+         * so distinct launches never collide on one token. */
+        ctx.queuedJobId ?? nanoid(),
+      ),
       maxDurationSeconds,
     });
     let terminateReason = 'stateless';
