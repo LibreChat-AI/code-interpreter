@@ -197,6 +197,7 @@ test('search returns a bounded match for a very long line', async (t) => {
   if (result.operation !== 'search_text') assert.fail('expected search result');
   assert.equal(result.matches.length, 1);
   assert.equal(result.matches[0]?.text.length, 2000);
+  assert.match(result.matches[0]?.text ?? '', /needle/);
 });
 
 test('search rejects multiline literal queries', async (t) => {

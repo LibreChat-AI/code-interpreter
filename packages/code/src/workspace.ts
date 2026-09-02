@@ -434,11 +434,20 @@ async function searchWorkspace(
           truncated = true;
           break;
         }
+        const previewStart = Math.min(
+          Math.max(
+            0,
+            column - Math.floor((2000 - Math.min(query.length, 2000)) / 2),
+          ),
+          Math.max(0, line.length - 2000),
+        );
         matches.push({
           path,
           line: lineNumber,
           column: column + 1,
-          text: line.toString('utf8').slice(0, 2000),
+          text: line
+            .subarray(previewStart, previewStart + 2000)
+            .toString('utf8'),
         });
       }
       if (newline < 0) break;
