@@ -71,6 +71,8 @@ test('rejects new workspace dispatches while the service is shutting down', asyn
 test.each([
   ['SEARCH_TIMEOUT', 504],
   ['SEARCH_UNAVAILABLE', 503],
+  ['LIST_TIMEOUT', 504],
+  ['LIST_UNAVAILABLE', 503],
 ] as const)('maps worker %s rejections to HTTP %i', async (errorCode, expectedStatus) => {
   const app = express();
   app.use(json());

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
@@ -157,6 +157,170 @@ test('searches workspace text with a hard global result bound', async (t) => {
       truncated: true,
     },
   );
+});
+
+test('lists workspace files deterministically with a hard result bound', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'src'));
+  await mkdir(join(root, 'docs'));
+  await writeFile(join(root, 'src', 'app.ts'), 'export {}');
+  await writeFile(join(root, 'src', 'worker.ts'), 'export {}');
+  await writeFile(join(root, 'docs', 'guide.md'), '# Guide');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  assert.deepEqual(
+    await tools.execute({
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      maxResults: 2,
+    }),
+    {
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      paths: ['docs/guide.md', 'src/app.ts'],
+      truncated: true,
+    },
+  );
+  assert.deepEqual(
+    await tools.execute({
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      path: 'src',
+      maxResults: 10,
+    }),
+    {
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      paths: ['src/app.ts', 'src/worker.ts'],
+      truncated: false,
+    },
+  );
+});
+
+test('rejects listing through a directory symlink that leaves the workspace', async (t) => {
+  const parent = await mkdtemp(
+    join(tmpdir(), 'librechat-code-workspace-parent-'),
+  );
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, 'workspace');
+  const outside = join(parent, 'outside');
+  await mkdir(root);
+  await mkdir(outside);
+  await writeFile(join(outside, 'secret.txt'), 'host secret');
+  await symlink(outside, join(root, 'linked-outside'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      path: 'linked-outside',
+    }),
+    /invalid workspace path/i,
+  );
+});
+
+test('listing preserves an in-workspace symlink namespace', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'src'));
+  await writeFile(join(root, 'src', 'app.ts'), 'export const app = true;');
+  await symlink(join(root, 'src'), join(root, 'alias'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+    path: 'alias',
+  });
+
+  if (result.operation !== 'list_files') assert.fail('expected list result');
+  assert.deepEqual(result.paths, ['alias/app.ts']);
+});
+
+test('listing ignores ripgrep config that follows escaping symlinks', async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), 'librechat-code-list-parent-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, 'workspace');
+  const outside = join(parent, 'outside');
+  await mkdir(root);
+  await mkdir(outside);
+  await writeFile(join(root, 'safe.txt'), 'safe');
+  await writeFile(join(outside, 'secret.txt'), 'secret');
+  await symlink(outside, join(root, 'linked-outside'));
+  const config = join(parent, 'ripgrep.conf');
+  await writeFile(config, '--follow\n');
+  const previousConfig = process.env.RIPGREP_CONFIG_PATH;
+  process.env.RIPGREP_CONFIG_PATH = config;
+  t.after(() => {
+    if (previousConfig === undefined) delete process.env.RIPGREP_CONFIG_PATH;
+    else process.env.RIPGREP_CONFIG_PATH = previousConfig;
+  });
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+  });
+
+  if (result.operation !== 'list_files') assert.fail('expected list result');
+  assert.deepEqual(result.paths, ['safe.txt']);
+});
+
+test('listing skips filenames the portable protocol cannot represent', async (t) => {
+  if (sep === '\\') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'invalid\\name.txt'), 'invalid');
+  await writeFile(join(root, 'safe.txt'), 'safe');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+  });
+
+  if (result.operation !== 'list_files') assert.fail('expected list result');
+  assert.deepEqual(result.paths, ['safe.txt']);
+});
+
+test('listing excludes a non-regular explicit target', async (t) => {
+  if (sep === '\\') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await execFileAsync('mkfifo', [join(root, 'events.pipe')]);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+    path: 'events.pipe',
+  });
+
+  if (result.operation !== 'list_files') assert.fail('expected list result');
+  assert.deepEqual(result.paths, []);
 });
 
 test('search ignores ripgrep config that follows escaping symlinks', async (t) => {
@@ -491,7 +655,7 @@ test('advertises workspace IDs and names without exposing host roots', async (t)
 
   assert.deepEqual(tools.capabilities, {
     protocolVersion: 1,
-    operations: ['read_file', 'search_text'],
+    operations: ['read_file', 'search_text', 'list_files'],
     workspaces: [{ id: 'primary', name: 'LibreChat' }],
   });
   assert.equal(JSON.stringify(tools.capabilities).includes(root), false);

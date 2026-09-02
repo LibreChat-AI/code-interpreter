@@ -379,6 +379,11 @@ router.post(
         registrationGeneration,
         registeredAt: new Date().toISOString(),
         leaseTtlMs: 60_000,
+        supportedWorkspaceToolOperations: [
+          'read_file',
+          'search_text',
+          'list_files',
+        ],
       });
     } catch (error) {
       if (error instanceof BridgeStoreError) {

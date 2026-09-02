@@ -195,7 +195,8 @@ coding-agent access to workspace directories on the worker machine. A workspace
 may be an existing project, a Git repository, or a newly created empty
 directory; Git is optional.
 `LocalWorkspaceTools` registers opaque workspace IDs with optional display
-names and exposes bounded `read_file` and literal `search_text` operations.
+names and exposes bounded `read_file`, literal `search_text`, and deterministic
+`list_files` operations.
 Only IDs, names, protocol version, and supported operations appear in worker
 capabilities; absolute host paths remain local to the worker process.
 
@@ -204,10 +205,11 @@ and files larger than 1 MiB. The opened file is checked against its canonical
 in-workspace inode before it is read. Text search uses `rg` only to enumerate a
 bounded set of ignored-aware candidates with configuration and symlink following
 disabled. It then opens and verifies each candidate through the same confined
-1 MiB read boundary before matching locally. Search limits returned line length
-and stops after a bounded global result count. The worker process still belongs
-inside the trusted BYOM boundary and should receive filesystem access only to
-roots the operator intentionally registers.
+1 MiB read boundary before matching locally. File listing invokes `rg` without
+a shell, with configuration and symlink following disabled. Both operations
+stop after bounded global result counts. The worker process still belongs inside
+the trusted BYOM boundary and should receive filesystem access only to roots the
+operator intentionally registers.
 
 Register one directory already present on the worker machine with the
 worker-directory option:
@@ -220,17 +222,18 @@ The default public workspace ID is `primary` and the default display name is
 the directory basename. Operators can use `--workspace-id` and
 `--workspace-name`, or `LIBRECHAT_CODE_WORKER_DIR`,
 `LIBRECHAT_CODE_WORKSPACE_ID`, and `LIBRECHAT_CODE_WORKSPACE_NAME`, to set them
-explicitly. `rg` must be installed on the worker for `search_text`.
+explicitly. `rg` must be installed on the worker for `search_text` and
+`list_files`.
 
 The worker advertises these capabilities only when a directory is configured
 and executes matching assignments under the bridge's existing lease,
 deadline, cancellation, credential-refresh, and settlement fencing. The
 workspace itself remains on the worker. As with Cursor's self-hosted agents,
-text deliberately selected by `read_file` or `search_text` crosses the outbound
-bridge so the remote agent/model can reason over it. Host paths are never part
-of that payload. The Code API workspace-tool endpoint is delivered as a
-dependent layer; deployments without it continue to use sandbox assignments
-unchanged.
+text and relative paths deliberately selected by `read_file`, `search_text`, or
+`list_files` cross the outbound bridge so the remote agent/model can reason over
+them. Host paths are never part of that payload. The Code API workspace-tool
+endpoint is delivered as a dependent layer; deployments without it continue to
+use sandbox assignments unchanged.
 
 After discarding or resetting that session's local runner, acknowledge recovery
 with `librechat-code reset-workspace <runtime-session-id>`. The command uses the

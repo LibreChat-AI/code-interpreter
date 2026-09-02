@@ -279,6 +279,11 @@ describe('paired bridge HTTP API', () => {
       workerId: 'vm-1',
       incarnationId: 'incarnation-00000001',
       registrationGeneration: 1,
+      supportedWorkspaceToolOperations: [
+        'read_file',
+        'search_text',
+        'list_files',
+      ],
     });
 
     const crossDeploymentRevoke = await fetch(
