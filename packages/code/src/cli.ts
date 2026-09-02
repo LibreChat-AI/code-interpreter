@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
+import { startFileRelay } from './relay.js';
+import { DockerFileRelaySupervisor } from './relay-runtime.js';
 import {
   defaultBridgeIdentityPath,
   loadBridgeIdentity,
@@ -29,6 +31,15 @@ function list(value: string | undefined): string[] {
       .map((item) => item.trim())
       .filter(Boolean) ?? []
   );
+}
+
+function positiveInteger(name: string, value: string | undefined, fallback: number): number {
+  if (value == null || value.trim().length === 0) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
 }
 
 const MACOS_NSJAIL_CAPABILITIES = [
@@ -71,6 +82,41 @@ async function pair(args: string[]): Promise<void> {
     `Paired worker ${workerId}. Identity saved to ${identityPath}\n`,
   );
 }
+
+async function relay(): Promise<void> {
+  const handle = await startFileRelay({
+    host: process.env.LIBRECHAT_CODE_FILE_RELAY_HOST?.trim() || '0.0.0.0',
+    port: positiveInteger(
+      'LIBRECHAT_CODE_FILE_RELAY_PORT',
+      process.env.LIBRECHAT_CODE_FILE_RELAY_PORT,
+      3000,
+    ),
+    upstreamUrl: required('LIBRECHAT_CODE_FILE_RELAY_UPSTREAM'),
+    token: required('LIBRECHAT_CODE_FILE_RELAY_TOKEN'),
+    maxBytes: positiveInteger(
+      'LIBRECHAT_CODE_FILE_RELAY_MAX_BYTES',
+      process.env.LIBRECHAT_CODE_FILE_RELAY_MAX_BYTES,
+      16 * 1024 * 1024,
+    ),
+    timeoutMs: positiveInteger(
+      'LIBRECHAT_CODE_FILE_RELAY_TIMEOUT_MS',
+      process.env.LIBRECHAT_CODE_FILE_RELAY_TIMEOUT_MS,
+      30_000,
+    ),
+    maxConcurrentRequests: positiveInteger(
+      'LIBRECHAT_CODE_FILE_RELAY_MAX_CONCURRENT_REQUESTS',
+      process.env.LIBRECHAT_CODE_FILE_RELAY_MAX_CONCURRENT_REQUESTS,
+      8,
+    ),
+  });
+  process.stdout.write(`librechat-code: file relay listening at ${handle.url}\n`);
+  await new Promise<void>((resolve) => {
+    process.once('SIGINT', resolve);
+    process.once('SIGTERM', resolve);
+  });
+  await handle.close();
+}
+
 async function run(runtimeSessionId?: string): Promise<void> {
   const configuredWorkerId = process.env.LIBRECHAT_CODE_WORKER_ID?.trim();
   const configuredIdentityPath = process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
@@ -151,6 +197,30 @@ async function run(runtimeSessionId?: string): Promise<void> {
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
   process.once('SIGTERM', () => controller.abort());
+  const fileRelayUpstream =
+    process.env.LIBRECHAT_CODE_FILE_RELAY_UPSTREAM?.trim();
+  const fileRelayEnabled =
+    runtimeMode === 'docker-macos-nsjail' &&
+    runtimeSessionId == null &&
+    fileRelayUpstream != null;
+  const executionManifestPublicKey = fileRelayEnabled
+    ? required('LIBRECHAT_CODE_EXECUTION_MANIFEST_PUBLIC_KEY')
+    : undefined;
+  const fileRelayProfile =
+    fileRelayEnabled && fileRelayUpstream
+      ? await new DockerFileRelaySupervisor({
+          workerId,
+          image: required('LIBRECHAT_CODE_FILE_RELAY_IMAGE'),
+          upstreamUrl: fileRelayUpstream,
+          token: createHmac(
+            'sha256',
+            pairedIdentity?.privateKey ??
+              required('LIBRECHAT_CODE_WORKER_TOKEN', configuredToken),
+          )
+            .update('librechat-code-file-relay-v1')
+            .digest('hex'),
+        }).prepare(controller.signal)
+      : undefined;
   const worker = new BridgeWorker({
     codeApiUrl,
     token: configuredToken,
@@ -178,6 +248,9 @@ async function run(runtimeSessionId?: string): Promise<void> {
                       .update(readFileSync(seccompProfile))
                       .digest('hex'),
                     restartStoppedContainers: false,
+                    ...(fileRelayProfile
+                      ? { network: fileRelayProfile.network }
+                      : {}),
                     bindMounts: [
                       {
                         source: packagesPath,
@@ -189,6 +262,15 @@ async function run(runtimeSessionId?: string): Promise<void> {
                     environment: {
                       SANDBOX_USE_CGROUPV2: 'false',
                       SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP: 'false',
+                      ...(fileRelayProfile
+                        ? {
+                            EGRESS_GATEWAY_URL: fileRelayProfile.url,
+                            SANDBOX_FILE_RELAY_TOKEN: fileRelayProfile.token,
+                            SANDBOX_REQUIRE_EGRESS_MANIFEST: 'true',
+                            SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY:
+                              executionManifestPublicKey!,
+                          }
+                        : {}),
                     },
                   };
                 })()
@@ -229,6 +311,10 @@ async function run(runtimeSessionId?: string): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (args[0] === 'relay') {
+    await relay();
+    return;
+  }
   if (args[0] === 'pair') {
     await pair(args);
     return;

@@ -103,6 +103,7 @@ export const config = {
   max_input_files: safeInt(process.env.SANDBOX_MAX_INPUT_FILES, 256),
   prime_concurrency: safeInt(process.env.SANDBOX_PRIME_CONCURRENCY, 8),
   egress_gateway_url: egressGatewayUrl,
+  file_relay_token: process.env.SANDBOX_FILE_RELAY_TOKEN ?? '',
   file_server_url: process.env.FILE_SERVER_URL ?? '',
   max_nesting_depth: safeInt(process.env.SANDBOX_MAX_NESTING_DEPTH, 10),
   max_path_length: safeInt(process.env.SANDBOX_MAX_PATH_LENGTH, 256),

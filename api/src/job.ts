@@ -1131,6 +1131,9 @@ export class Job {
     return injectTraceHeaders({
       ...headers,
       [EGRESS_GRANT_HEADER]: this.egressGrantToken,
+      ...(config.file_relay_token
+        ? { 'X-LibreChat-Code-Relay-Token': config.file_relay_token }
+        : {}),
     });
   }
 

@@ -96,10 +96,35 @@ reports state loss instead of restarting it. The next assignment starts a new
 environment. Treat profile changes and Docker restarts as environment resets
 and preserve any needed workspace contents first.
 
-This first local profile supports inline request files. By-reference inputs and
-generated-file uploads require a worker-mediated file relay and are not yet
-supported; the runtime remains networkless rather than opening general egress
-to reach a file server.
+By-reference inputs and generated-file uploads remain disabled unless the
+worker-managed file relay is configured. Build the worker image, then point the
+relay at the deployment's public egress-gateway base URL:
+
+```bash
+docker build -t librechat-code-worker:local packages/code
+
+LIBRECHAT_CODE_FILE_RELAY_IMAGE=librechat-code-worker:local \
+LIBRECHAT_CODE_FILE_RELAY_UPSTREAM=https://code.example.com/egress \
+LIBRECHAT_CODE_EXECUTION_MANIFEST_PUBLIC_KEY='<base64 Ed25519 public key>' \
+librechat-code run
+```
+
+The URL is illustrative; it must be the externally reachable base URL for the
+same Code API deployment's egress-gateway routes. Enabling the relay also
+requires signed execution manifests. The worker creates an internal Docker
+network for each worker identity, connects the runtime only to that network,
+and starts a separate hardened relay container with normal outbound access.
+The relay publishes no host port, accepts only the file-object read, normalized
+list, and generated-object write routes, requires both its worker-derived token
+and the assignment's scoped egress grant, refuses redirects, and caps transfer
+size, duration, and concurrency. Its upstream is fixed at startup.
+
+The trusted runner API can use this relay for file staging. User code still
+runs in NsJail's separate network namespace with no interfaces, so it cannot
+reach the relay or the public internet. Anyone with access to the Docker daemon
+remains inside the trusted worker boundary and can inspect container
+configuration and secrets.
+
 Direct NsJail shares the Docker Desktop VM kernel and is suitable for local or
 operator-trusted development. Use a separate VM or MicroVM boundary for
 internet-facing execution of code from untrusted users.

@@ -123,6 +123,7 @@ test('docker runtime supervisor applies an explicit macOS NsJail confinement pro
   const supervisor = new DockerRuntimeSupervisor({
     image: 'example/code-runtime:latest',
     client,
+    network: 'librechat-code-worker',
     capabilities: ['SYS_ADMIN', 'CHOWN'],
     securityOptions: ['seccomp=/repo/seccomp/nsjail.json'],
     environment: { SANDBOX_USE_CGROUPV2: 'false' },
@@ -134,6 +135,7 @@ test('docker runtime supervisor applies an explicit macOS NsJail confinement pro
 
   const run = calls.find(args => args[0] === 'run') ?? [];
   assert.ok(run.includes('SYS_ADMIN'));
+  assert.equal(run[run.indexOf('--network') + 1], 'librechat-code-worker');
   assert.ok(run.includes('CHOWN'));
   assert.ok(run.includes('seccomp=/repo/seccomp/nsjail.json'));
   assert.ok(run.includes('SANDBOX_USE_CGROUPV2=false'));
