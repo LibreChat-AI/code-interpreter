@@ -26,6 +26,12 @@ describe('getSandboxBackend', () => {
     expect(backend.name).toBe('lambda-microvm');
   });
 
+  test('selects the outbound remote bridge backend when configured', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    const backend = getSandboxBackend();
+    expect(backend.name).toBe('remote-bridge');
+  });
+
   test('does not load Lambda-only modules for the HTTP backend', async () => {
     const serviceRoot = path.resolve(import.meta.dir, '../..');
     const probe = Bun.spawn([

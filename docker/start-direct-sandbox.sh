@@ -44,35 +44,4 @@ else
 fi
 
 export SANDBOX_ROOTFS="$ROOTFS"
-
-exec unshare --mount bash -c '
-    ROOTFS="${SANDBOX_ROOTFS:-/sandbox-rootfs}"
-
-    mount -o bind,ro "$ROOTFS/usr/sbin"     /usr/sbin    || { echo "FATAL: cannot bind /usr/sbin"; exit 1; }
-    mount -o bind,ro "$ROOTFS/usr/lib"      /usr/lib     || { echo "FATAL: cannot bind /usr/lib"; exit 1; }
-
-    if [ -d "$ROOTFS/usr/lib64" ] && ! [ -L "$ROOTFS/usr/lib64" ]; then
-        mount -o bind,ro "$ROOTFS/usr/lib64" /usr/lib64 2>/dev/null || \
-            echo "[sandbox] WARNING: could not bind /usr/lib64 - sandboxed binaries may fail to exec"
-    fi
-
-    mount -o bind,ro "$ROOTFS/usr/local"    /usr/local   || { echo "FATAL: cannot bind /usr/local"; exit 1; }
-    mount -o bind,ro "$ROOTFS/sandbox_api"  /sandbox_api || { echo "FATAL: cannot bind /sandbox_api"; exit 1; }
-    mount -o bind,ro "$ROOTFS/pkgs"       /pkgs      || { echo "FATAL: cannot bind /pkgs"; exit 1; }
-
-    if [ -d /host-packages ]; then
-        mount --bind /host-packages /pkgs 2>/dev/null || \
-            echo "WARNING: could not bind /host-packages - sandbox will run without packages"
-    fi
-
-    mount -o bind,ro "$ROOTFS/usr/bin" /usr/bin || { echo "FATAL: cannot bind /usr/bin"; exit 1; }
-
-    multiarch_libdir=$(find /usr/lib -maxdepth 1 -type d -name "*-linux-gnu" -print -quit)
-    if [ -n "$multiarch_libdir" ]; then
-        export LD_LIBRARY_PATH="$multiarch_libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    fi
-
-    export PATH="/root/.bun/bin:$PATH"
-
-    exec /sandbox_api/entrypoint.sh
-'
+exec unshare --mount /sandbox-rootfs-setup "$ROOTFS"

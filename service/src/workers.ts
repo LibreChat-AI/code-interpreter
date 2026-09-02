@@ -3,8 +3,7 @@ import { Worker } from 'bullmq';
 import type * as t from './types';
 import { filterSystemLogs, applySystemReplacements, getAxiosErrorDetails, sandboxErrorMessageFromAxios } from './utils';
 import { jobProcessingDuration, jobsCompleted, jobsFailed, activeJobs, workerRunning } from './metrics';
-import { Queues } from './enum';
-import { connection } from './queue';
+import { connection, queueNames } from './queue';
 import { env, jobDeadlineAtMs } from './config';
 import { summarizeSandboxResponse, summarizeText } from './execution-log';
 import { createGatewayEgressGrant, restoreGatewaySandboxResult, revokeGatewayEgressGrant } from './egress-gateway-client';
@@ -18,6 +17,10 @@ import { isSyntheticPrincipalSource } from './auth/synthetic';
 import { withSpan, withTraceContext } from './telemetry';
 import { workerDeadlineFailure } from './worker-error';
 import logger from './logger';
+import {
+  validateQueuedExecutionProfile,
+  validateQueuedSandboxBackend,
+} from './execution-profile';
 
 const { INSTANCE_ID } = env;
 const WORKER_ID = `${INSTANCE_ID}-${process.pid}`;
@@ -32,11 +35,13 @@ async function processJob(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     'messaging.operation.name': 'process',
     'messaging.message.id': typeof job.id === 'string' ? job.id : String(job.id ?? ''),
     'codeapi.language': job.data.payload?.language ?? 'unknown',
+    'codeapi.execution_profile': job.data.executionProfile ?? 'legacy',
+    'codeapi.worker_execution_profile': env.EXECUTION_PROFILE,
   }, () => processJobInner(job), 'CONSUMER'));
 }
 
 async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
-  const { code, payload, isPyPlot } = job.data;
+  const { payload, isPyPlot } = job.data;
   const isSyntheticJob = job.data.isSynthetic === true || isSyntheticPrincipalSource(job.data.principalSource);
   const language = payload?.language ?? 'unknown';
   const endTimer = jobProcessingDuration.startTimer({ language });
@@ -57,6 +62,12 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     if (controller.signal.aborted) {
       throw new Error(`Job timed out after ${env.JOB_TIMEOUT}ms`);
     }
+    validateQueuedExecutionProfile(job.data.executionProfile, env.EXECUTION_PROFILE);
+    validateQueuedSandboxBackend(
+      job.data.sandboxBackend,
+      env.SANDBOX_BACKEND,
+      job.data.bridgeWorkerId,
+    );
     let sandboxPayload = payload;
     let executionManifestClaims = job.data.executionManifestClaims;
     let egressGrantToken = job.data.egressGrantToken;
@@ -136,6 +147,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
         deadlineAtMs,
         tenantId: job.data.tenantId,
         canonicalUserId: job.data.canonicalUserId,
+        bridgeWorkerId: job.data.bridgeWorkerId,
         runtimeSessionId: runtimeSession.runtimeSessionId,
         runtimeSessionMode: runtimeSession.runtimeSessionMode,
         /* Stateful backends run this as a commit barrier after user code but
@@ -238,7 +250,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
 // Global workers - no INSTANCE_ID prefix
 // This enables horizontal scaling where any worker can process any job from the shared queue
 // Each worker respects its own concurrency limit based on its co-located sandbox capacity
-export const pyWorker = new Worker(Queues.python, processJob, {
+export const pyWorker = new Worker(queueNames.python, processJob, {
   connection,
   concurrency: env.PYTHON_CONCURRENCY,
   limiter: {
@@ -247,7 +259,7 @@ export const pyWorker = new Worker(Queues.python, processJob, {
   },
 });
 
-export const otherWorker = new Worker(Queues.other, processJob, {
+export const otherWorker = new Worker(queueNames.other, processJob, {
   connection,
   concurrency: env.OTHER_CONCURRENCY,
   limiter: {

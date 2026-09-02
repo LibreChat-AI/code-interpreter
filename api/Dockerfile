@@ -29,8 +29,10 @@ RUN git clone -b master --single-branch https://github.com/google/nsjail.git . \
 RUN make -j$(nproc)
 
 COPY api/src/spec-guard.c /tmp/spec-guard.c
+COPY docker/rootfs-setup.c /tmp/rootfs-setup.c
 RUN gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
-    && chmod 0111 /usr/local/bin/spec-guard
+    && gcc -O2 -static -o /usr/local/bin/sandbox-rootfs-setup /tmp/rootfs-setup.c \
+    && chmod 0111 /usr/local/bin/spec-guard /usr/local/bin/sandbox-rootfs-setup
 
 # ============================================================================
 # Stage 1b: Build language runtime packages (only consumed by sandbox-runner-baked)
@@ -212,6 +214,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     && dnf clean all
 
 COPY --from=launcher-builder /launcher/target/release/sandbox-launcher /usr/local/bin/launcher
+COPY --from=nsjail-builder /usr/local/bin/sandbox-rootfs-setup /sandbox-rootfs-setup
 
 COPY launcher/entrypoint.sh /usr/local/bin/launcher-entrypoint.sh
 COPY docker/start-direct-sandbox.sh /usr/local/bin/start-direct-sandbox.sh

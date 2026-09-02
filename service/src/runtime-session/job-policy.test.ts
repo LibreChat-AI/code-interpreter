@@ -92,6 +92,19 @@ describe('resolveRuntimeSessionForJob', () => {
     })).toThrow('http/affinity worker cannot honor queued affinity runtime session');
   });
 
+  test('allows a remote bridge worker to honor a stateful job', () => {
+    expect(resolveRuntimeSessionForJob({
+      workerBackend: 'remote-bridge',
+      workerMode: 'strict',
+      runtimeSessionMode: 'strict',
+      runtimeSessionId: 'rt_attached',
+      isSynthetic: false,
+    })).toEqual({
+      runtimeSessionId: 'rt_attached',
+      runtimeSessionMode: 'strict',
+    });
+  });
+
   test('rejects contradictory or invalid producer decisions', () => {
     expect(() => resolveRuntimeSessionForJob({
       ...LAMBDA_WORKER,

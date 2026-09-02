@@ -2,8 +2,10 @@ import express, { json, Router } from 'express';
 import { startServer, gracefulShutdown } from './lifecycle';
 import { apiKeyAuth } from './middleware/auth';
 import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-error-logger';
+import { executionProfileMiddleware } from './middleware/execution-profile';
 import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
+import bridgeRouter from './bridge';
 import { connection } from './queue';
 import { env } from './config';
 import logger from './logger';
@@ -11,6 +13,7 @@ import logger from './logger';
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+app.use(executionProfileMiddleware);
 
 const v1 = Router();
 
@@ -26,6 +29,7 @@ app.get('/v1/health', async (_, res) => {
   }
 });
 
+v1.use('/bridge', bridgeRouter);
 v1.use(apiKeyAuth);
 
 v1.use(serviceRouter);

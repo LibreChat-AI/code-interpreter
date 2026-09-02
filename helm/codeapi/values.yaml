@@ -22,6 +22,12 @@ internalServiceAuth:
 
 hardenedSandboxMode: true
 
+# Stable identity advertised by this API/worker deployment. Leave empty for a
+# backwards-compatible inferred profile. Set explicitly to `default` or
+# `stateful` when deploying both stacks against shared Redis; explicit
+# `stateful` selects isolated BullMQ queues.
+executionProfile: ""
+
 otel:
   enabled: false
   # OTLP/HTTP collector endpoint, e.g. "http://opentelemetry-collector.observability:4318".
@@ -62,10 +68,20 @@ api:
   enabled: true
   replicaCount: 2  # Start with 2 API pods
 
+  # Pairing revocation relies on every serving replica honoring the Redis
+  # generation fence. Recreate prevents a pre-fence binary from redeeming an
+  # already-revoked code during the first rollout of paired bridge workers.
+  # Roll back to pre-fence revisions only with scripts/safe-pairing-rollback.sh.
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+
   image:
     repository: codeapi-api
     tag: latest
-    pullPolicy: IfNotPresent  # Use Always in production
+    # Recreate is a security fence only if replacement pods cannot reuse a
+    # cached pre-fence image behind the mutable default tag.
+    pullPolicy: Always
 
   # Resource limits
   resources:

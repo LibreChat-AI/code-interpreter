@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   parsePlanLimits,
+  resolveBridgeAuthMode,
   resolvePositiveIntEnv,
   resolveRuntimeSessionMode,
   resolveSandboxBackend,
@@ -10,19 +11,23 @@ describe('sandbox execution configuration', () => {
   test('defaults only unset backend and session mode values', () => {
     expect(resolveSandboxBackend(undefined)).toBe('http');
     expect(resolveRuntimeSessionMode(undefined)).toBe('stateless');
+    expect(resolveBridgeAuthMode(undefined)).toBe('static');
   });
 
   test('accepts every supported backend and session mode', () => {
     expect(resolveSandboxBackend('http')).toBe('http');
     expect(resolveSandboxBackend('lambda-microvm')).toBe('lambda-microvm');
+    expect(resolveSandboxBackend('remote-bridge')).toBe('remote-bridge');
     expect(resolveRuntimeSessionMode('stateless')).toBe('stateless');
     expect(resolveRuntimeSessionMode('affinity')).toBe('affinity');
     expect(resolveRuntimeSessionMode('strict')).toBe('strict');
+    expect(resolveBridgeAuthMode('static')).toBe('static');
+    expect(resolveBridgeAuthMode('paired')).toBe('paired');
   });
 
   test('rejects unknown values instead of silently changing execution semantics', () => {
     expect(() => resolveSandboxBackend('lambda_microvm')).toThrow(
-      'CODEAPI_SANDBOX_BACKEND must be one of: http, lambda-microvm',
+      'CODEAPI_SANDBOX_BACKEND must be one of: http, lambda-microvm, remote-bridge',
     );
     expect(() => resolveSandboxBackend('')).toThrow('CODEAPI_SANDBOX_BACKEND');
     expect(() => resolveSandboxBackend(' ')).toThrow('CODEAPI_SANDBOX_BACKEND');
@@ -31,6 +36,9 @@ describe('sandbox execution configuration', () => {
     );
     expect(() => resolveRuntimeSessionMode('')).toThrow('CODEAPI_RUNTIME_SESSION_MODE');
     expect(() => resolveRuntimeSessionMode(' ')).toThrow('CODEAPI_RUNTIME_SESSION_MODE');
+    expect(() => resolveBridgeAuthMode('token')).toThrow(
+      'CODEAPI_BRIDGE_AUTH_MODE must be one of: static, paired',
+    );
   });
 });
 

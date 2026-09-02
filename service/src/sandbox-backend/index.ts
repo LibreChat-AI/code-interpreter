@@ -14,6 +14,25 @@ export { HttpSandboxBackend } from './http';
 
 let backend: SandboxBackend | undefined;
 
+class LazyRemoteBridgeSandboxBackend implements SandboxBackend {
+  readonly name = 'remote-bridge' as const;
+  private backendPromise: Promise<SandboxBackend> | undefined;
+
+  private load(): Promise<SandboxBackend> {
+    this.backendPromise ??= import('./remote-bridge').then(
+      ({ RemoteBridgeSandboxBackend }) => new RemoteBridgeSandboxBackend(),
+    );
+    return this.backendPromise;
+  }
+
+  async execute(
+    req: SandboxTransportRequest,
+    ctx: SandboxExecuteContext,
+  ): Promise<SandboxRawResponse> {
+    return (await this.load()).execute(req, ctx);
+  }
+}
+
 class LazyLambdaMicrovmSandboxBackend implements SandboxBackend {
   readonly name = 'lambda-microvm' as const;
   private backendPromise: Promise<SandboxBackend> | undefined;
@@ -72,6 +91,9 @@ class LazyLambdaMicrovmSandboxBackend implements SandboxBackend {
 }
 
 function createBackend(): SandboxBackend {
+  if (env.SANDBOX_BACKEND === 'remote-bridge') {
+    return new LazyRemoteBridgeSandboxBackend();
+  }
   if (env.SANDBOX_BACKEND === 'lambda-microvm') {
     /* Loading the concrete backend also loads its session registry and
      * checkpoint code. Defer the whole graph so the default HTTP worker does

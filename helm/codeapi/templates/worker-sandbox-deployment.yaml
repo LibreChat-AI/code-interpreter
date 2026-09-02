@@ -147,6 +147,10 @@ spec:
 {{ include "codeapi.otel.env" (dict "root" . "serviceName" "aiml-codeapi-service-worker") | nindent 12 }}
             - name: CODEAPI_HARDENED_SANDBOX_MODE
               value: {{ .Values.hardenedSandboxMode | quote }}
+            {{- with .Values.executionProfile }}
+            - name: CODEAPI_EXECUTION_PROFILE
+              value: {{ . | quote }}
+            {{- end }}
             - name: SANDBOX_ENDPOINT
               value: "http://{{ include "codeapi.fullname" . }}-sandbox-runner:{{ .Values.workerSandbox.sandbox.port }}/api/v2"
             - name: EGRESS_GATEWAY_URL

@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { env } from './config';
 import {
+  validateApiBridgePolicy,
   validateApiHardenedConfig,
+  validateApiSandboxBackendPolicy,
   validateEgressGatewayHardenedConfig,
+  validateExecutionProfilePolicy,
   validateSandboxBackendPolicy,
   validateWorkerHardenedConfig,
 } from './secure-startup';
@@ -10,7 +13,13 @@ import {
 const savedEnv = { ...process.env };
 const saved = {
   hardened: env.HARDENED_SANDBOX_MODE,
+  executionProfile: env.EXECUTION_PROFILE,
+  executionProfileSource: env.EXECUTION_PROFILE_SOURCE,
   sandboxBackend: env.SANDBOX_BACKEND,
+  bridgeDynamicWorkers: env.BRIDGE_DYNAMIC_WORKERS,
+  bridgeWorkerId: env.BRIDGE_WORKER_ID,
+  bridgeAuthMode: env.BRIDGE_AUTH_MODE,
+  bridgeToken: env.BRIDGE_TOKEN,
   ptcMode: env.PTC_MODE,
   runtimeSessionMode: env.RUNTIME_SESSION_MODE,
   lambdaImageArn: env.LAMBDA_MICROVM_IMAGE_ARN,
@@ -46,7 +55,13 @@ function restore(): void {
   }
   Object.assign(process.env, savedEnv);
   env.HARDENED_SANDBOX_MODE = saved.hardened;
+  env.EXECUTION_PROFILE = saved.executionProfile;
+  env.EXECUTION_PROFILE_SOURCE = saved.executionProfileSource;
   env.SANDBOX_BACKEND = saved.sandboxBackend;
+  env.BRIDGE_DYNAMIC_WORKERS = saved.bridgeDynamicWorkers;
+  env.BRIDGE_WORKER_ID = saved.bridgeWorkerId;
+  env.BRIDGE_AUTH_MODE = saved.bridgeAuthMode;
+  env.BRIDGE_TOKEN = saved.bridgeToken;
   env.PTC_MODE = saved.ptcMode;
   env.RUNTIME_SESSION_MODE = saved.runtimeSessionMode;
   env.LAMBDA_MICROVM_IMAGE_ARN = saved.lambdaImageArn;
@@ -77,6 +92,74 @@ function restore(): void {
 }
 
 afterEach(restore);
+
+describe('execution profile policy', () => {
+  test('accepts the AWS-free default profile', () => {
+    env.EXECUTION_PROFILE = 'default';
+    env.EXECUTION_PROFILE_SOURCE = 'explicit';
+    env.SANDBOX_BACKEND = 'http';
+    env.RUNTIME_SESSION_MODE = 'stateless';
+    expect(() => validateExecutionProfilePolicy()).not.toThrow();
+  });
+
+  test('accepts affinity and strict stateful profiles', () => {
+    env.EXECUTION_PROFILE = 'stateful';
+    env.EXECUTION_PROFILE_SOURCE = 'explicit';
+    env.SANDBOX_BACKEND = 'lambda-microvm';
+    env.RUNTIME_SESSION_MODE = 'affinity';
+    expect(() => validateExecutionProfilePolicy()).not.toThrow();
+    env.RUNTIME_SESSION_MODE = 'strict';
+    expect(() => validateExecutionProfilePolicy()).not.toThrow();
+  });
+
+  test('does not require worker-only backend config on API-only pods', () => {
+    env.EXECUTION_PROFILE = 'stateful';
+    env.EXECUTION_PROFILE_SOURCE = 'explicit';
+    env.SANDBOX_BACKEND = 'http';
+    env.RUNTIME_SESSION_MODE = 'affinity';
+    expect(() => validateExecutionProfilePolicy({ requireBackendMatch: false })).not.toThrow();
+  });
+
+  test('rejects a default profile backed by AWS or stateful sessions', () => {
+    env.EXECUTION_PROFILE = 'default';
+    env.EXECUTION_PROFILE_SOURCE = 'explicit';
+    env.SANDBOX_BACKEND = 'lambda-microvm';
+    env.RUNTIME_SESSION_MODE = 'stateless';
+    expect(() => validateExecutionProfilePolicy()).toThrow(
+      'CODEAPI_EXECUTION_PROFILE=default requires',
+    );
+
+    env.SANDBOX_BACKEND = 'http';
+    env.RUNTIME_SESSION_MODE = 'affinity';
+    expect(() => validateExecutionProfilePolicy()).toThrow(
+      'CODEAPI_EXECUTION_PROFILE=default requires',
+    );
+  });
+
+  test('preserves a pre-profile Lambda/stateless deployment when inferred', () => {
+    env.EXECUTION_PROFILE = 'default';
+    env.EXECUTION_PROFILE_SOURCE = 'inferred';
+    env.SANDBOX_BACKEND = 'lambda-microvm';
+    env.RUNTIME_SESSION_MODE = 'stateless';
+    expect(() => validateExecutionProfilePolicy()).not.toThrow();
+  });
+
+  test('rejects a stateful profile without Lambda affinity', () => {
+    env.EXECUTION_PROFILE = 'stateful';
+    env.EXECUTION_PROFILE_SOURCE = 'explicit';
+    env.SANDBOX_BACKEND = 'http';
+    env.RUNTIME_SESSION_MODE = 'affinity';
+    expect(() => validateExecutionProfilePolicy()).toThrow(
+      'CODEAPI_EXECUTION_PROFILE=stateful requires',
+    );
+
+    env.SANDBOX_BACKEND = 'lambda-microvm';
+    env.RUNTIME_SESSION_MODE = 'stateless';
+    expect(() => validateExecutionProfilePolicy()).toThrow(
+      'CODEAPI_EXECUTION_PROFILE=stateful requires',
+    );
+  });
+});
 
 describe('hardened CodeAPI startup config', () => {
   test('rejects grant secrets in API and worker processes', () => {
@@ -206,12 +289,174 @@ describe('sandbox backend policy', () => {
     expect(() => validateSandboxBackendPolicy()).not.toThrow();
   });
 
-  test('stateful runtime session modes require the lambda backend', () => {
+  test('stateful runtime session modes require a stateful backend', () => {
     env.SANDBOX_BACKEND = 'http';
     env.RUNTIME_SESSION_MODE = 'affinity';
-    expect(() => validateSandboxBackendPolicy()).toThrow('requires the lambda-microvm backend');
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'requires the lambda-microvm or remote-bridge backend',
+    );
     env.RUNTIME_SESSION_MODE = 'strict';
-    expect(() => validateSandboxBackendPolicy()).toThrow('requires the lambda-microvm backend');
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'requires the lambda-microvm or remote-bridge backend',
+    );
+  });
+
+  test('accepts a configured remote bridge and fails closed on missing enrollment', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.RUNTIME_SESSION_MODE = 'strict';
+    env.PTC_MODE = 'replay';
+    env.BRIDGE_WORKER_ID = '';
+    env.BRIDGE_TOKEN = '';
+    expect(() => validateSandboxBackendPolicy()).toThrow('CODEAPI_BRIDGE_WORKER_ID');
+
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    expect(() => validateSandboxBackendPolicy()).toThrow('CODEAPI_BRIDGE_TOKEN');
+
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    expect(() => validateSandboxBackendPolicy()).not.toThrow();
+  });
+
+  test('allows dynamic-only paired workers without a configured default', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.RUNTIME_SESSION_MODE = 'strict';
+    env.PTC_MODE = 'replay';
+    env.BRIDGE_DYNAMIC_WORKERS = true;
+    env.BRIDGE_WORKER_ID = '';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.BRIDGE_AUTH_MODE = 'static';
+
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'CODEAPI_BRIDGE_AUTH_MODE=paired',
+    );
+
+    env.BRIDGE_AUTH_MODE = 'paired';
+    expect(() => validateSandboxBackendPolicy()).not.toThrow();
+  });
+
+  test('requires paired dynamic worker auth in an API-only process', () => {
+    env.SANDBOX_BACKEND = 'http';
+    env.BRIDGE_DYNAMIC_WORKERS = true;
+    env.BRIDGE_AUTH_MODE = 'static';
+
+    expect(() => validateApiSandboxBackendPolicy()).toThrow(
+      'CODEAPI_BRIDGE_AUTH_MODE=paired',
+    );
+
+    env.BRIDGE_AUTH_MODE = 'paired';
+    expect(() => validateApiSandboxBackendPolicy()).not.toThrow();
+  });
+
+  test('hardened remote bridge requires replay PTC, paired auth, and a strong administrator token', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.RUNTIME_SESSION_MODE = 'affinity';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.PTC_MODE = 'blocking';
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'PTC replay is the only supported PTC mode',
+    );
+
+    env.PTC_MODE = 'replay';
+    env.HARDENED_SANDBOX_MODE = true;
+    expect(() => validateSandboxBackendPolicy()).toThrow('at least 32 bytes');
+
+    env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'CODEAPI_BRIDGE_AUTH_MODE=paired',
+    );
+
+    env.BRIDGE_AUTH_MODE = 'paired';
+    expect(() => validateSandboxBackendPolicy()).not.toThrow();
+  });
+
+  test('API-only hardened bridge validation rejects static worker auth', () => {
+    env.SANDBOX_BACKEND = 'http';
+    env.HARDENED_SANDBOX_MODE = true;
+    env.BRIDGE_AUTH_MODE = 'static';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'CODEAPI_BRIDGE_AUTH_MODE=paired',
+    );
+
+    env.BRIDGE_AUTH_MODE = 'paired';
+    expect(() => validateApiBridgePolicy()).not.toThrow();
+
+    env.BRIDGE_TOKEN = 'guessable';
+    expect(() => validateApiBridgePolicy()).toThrow('at least 32 bytes');
+  });
+
+  test('API bridge policy requires a strong token in hardened mode', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = 'short-token';
+    env.PTC_MODE = 'replay';
+    env.HARDENED_SANDBOX_MODE = true;
+    env.BRIDGE_AUTH_MODE = 'paired';
+
+    expect(() => validateApiBridgePolicy()).toThrow('at least 32 bytes');
+
+    env.BRIDGE_TOKEN = 'strong-remote-bridge-token-32-bytes';
+    expect(() => validateApiBridgePolicy()).not.toThrow();
+  });
+
+  test('API bridge policy rejects worker IDs the router cannot accept', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering/vm';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.PTC_MODE = 'replay';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'must match the bridge worker ID format',
+    );
+  });
+
+  test('API bridge policy rejects whitespace-padded tokens', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = ' padded-development-bridge-token ';
+    env.PTC_MODE = 'replay';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'must not contain surrounding whitespace',
+    );
+  });
+
+  test('paired API routes require a configured worker on every backend', () => {
+    env.SANDBOX_BACKEND = 'http';
+    env.BRIDGE_AUTH_MODE = 'paired';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.BRIDGE_WORKER_ID = '';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'CODEAPI_BRIDGE_WORKER_ID',
+    );
+  });
+
+  test('hardened API routes reject padded bridge tokens on HTTP backends', () => {
+    env.SANDBOX_BACKEND = 'http';
+    env.HARDENED_SANDBOX_MODE = true;
+    env.BRIDGE_AUTH_MODE = 'paired';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = ' strong-remote-bridge-token-32-bytes ';
+
+    expect(() => validateApiBridgePolicy()).toThrow(
+      'must not contain surrounding whitespace',
+    );
+  });
+
+  test('remote bridge requires a positive finite job timeout', () => {
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    env.BRIDGE_WORKER_ID = 'engineering-vm';
+    env.BRIDGE_TOKEN = 'development-bridge-token';
+    env.PTC_MODE = 'replay';
+
+    env.JOB_TIMEOUT = -1;
+    expect(() => validateApiBridgePolicy()).toThrow('JOB_TIMEOUT');
+    env.JOB_TIMEOUT = Number.POSITIVE_INFINITY;
+    expect(() => validateApiBridgePolicy()).toThrow('JOB_TIMEOUT');
+    env.JOB_TIMEOUT = 300_000;
+    expect(() => validateApiBridgePolicy()).not.toThrow();
   });
 
   test('rejects blocking PTC on the lambda backend', () => {

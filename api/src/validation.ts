@@ -20,6 +20,30 @@ export function isDirkeep(name: string): boolean {
   return path.basename(name) === DIRKEEP;
 }
 
+/**
+ * Whether a request carries something the runtime can actually run: a utf8
+ * source file that is not the .dirkeep sentinel. `file` runtimes are exempt —
+ * they take arbitrary inputs.
+ *
+ * Single source of truth on purpose. The request gate and `Job.execute` used to
+ * ask this question differently (the gate accepted a lone `.dirkeep` as a utf8
+ * file), so a request with only `.dirkeep` plus binary inputs passed the gate,
+ * primed its files into the session workspace, and only then failed in
+ * execute — leaving the rejected request's writes behind.
+ */
+export function hasRunnableSource(
+  files: Array<{ name?: string; encoding?: string }>,
+  language: string,
+): boolean {
+  if (language === 'file') return true;
+  return files.some(
+    /* Request files may omit `name`; Job normalizes those to `file${i}.code`,
+     * which is runnable and cannot be the .dirkeep sentinel. */
+    (file) => (file.name === undefined || !isDirkeep(file.name))
+      && (!file.encoding || file.encoding === 'utf8'),
+  );
+}
+
 export class ValidationError extends Error {
   constructor(message: string) {
     super(message);

@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import type { CodeApiAuthContext, RequestFile } from '../types';
 import type { LCTool } from '../preamble';
-import { buildReplayExecutionState } from './programmatic-state';
+import {
+  buildReplayExecutionState,
+  resolveReplayStateSandboxBackend,
+} from './programmatic-state';
 
 const TOOLS = [
   {
@@ -22,7 +25,9 @@ const FILES = [
   },
 ] as RequestFile[];
 
-function build(overrides: Partial<Parameters<typeof buildReplayExecutionState>[0]> = {}) {
+function build(
+  overrides: Partial<Parameters<typeof buildReplayExecutionState>[0]> = {},
+): ReturnType<typeof buildReplayExecutionState> {
   return buildReplayExecutionState({
     executionId: 'exec_123',
     sessionId: 'session_123',
@@ -35,12 +40,35 @@ function build(overrides: Partial<Parameters<typeof buildReplayExecutionState>[0
     isPyPlot: false,
     timeout: 300000,
     language: 'python',
+    executionProfile: 'default',
+    executionProfileSource: 'inferred',
     now: 1778250000000,
     ...overrides,
   });
 }
 
 describe('buildReplayExecutionState', () => {
+  test('persists the resolved queue consumer backend for split stateful deployments', () => {
+    expect(
+      resolveReplayStateSandboxBackend({
+        executionProfile: 'stateful',
+        executionProfileSource: 'explicit',
+        apiSandboxBackend: 'http',
+      }),
+    ).toBe('lambda-microvm');
+  });
+
+  test('pins bridge replay state to the remote bridge backend', () => {
+    expect(
+      resolveReplayStateSandboxBackend({
+        executionProfile: 'stateful',
+        executionProfileSource: 'explicit',
+        apiSandboxBackend: 'http',
+        bridgeWorkerId: 'worker-1',
+      }),
+    ).toBe('remote-bridge');
+  });
+
   test('persists canonical LibreChat auth context for replay continuations', () => {
     const authContext: CodeApiAuthContext = {
       userId: 'user_canonical',
@@ -52,7 +80,13 @@ describe('buildReplayExecutionState', () => {
       authContextHash: 'hash_123',
     };
 
-    const state = build({ authContext });
+    const state = build({
+      authContext,
+      bridgeWorkerId: 'code-user_123',
+      sandboxBackend: 'remote-bridge',
+      executionProfile: 'stateful',
+      executionProfileSource: 'explicit',
+    });
 
     expect(state).toMatchObject({
       execution_id: 'exec_123',
@@ -67,6 +101,10 @@ describe('buildReplayExecutionState', () => {
       principalSource: 'openid_reuse',
       authContextHash: 'hash_123',
       apiKeyId: 'key_legacy',
+      bridgeWorkerId: 'code-user_123',
+      sandboxBackend: 'remote-bridge',
+      executionProfile: 'stateful',
+      executionProfileSource: 'explicit',
       mode: 'replay',
       userCode: 'print("hello")',
       tools: TOOLS,

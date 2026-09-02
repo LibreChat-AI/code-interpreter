@@ -24,6 +24,11 @@ import { nanoid } from 'nanoid';
 import type { Redis } from 'ioredis';
 import type * as t from '../types';
 import type { LCTool } from '../preamble';
+import type {
+  ExecutionProfile,
+  ExecutionProfileSource,
+  SandboxBackendName,
+} from '../execution-profile';
 import { connection } from '../queue';
 import { env } from '../config';
 import { internalServiceHeaders } from '../internal-service-auth';
@@ -109,6 +114,14 @@ export interface ExecutionState {
    *  after one `EXECUTION_STATE_TTL` window post a trusted-source
    *  apiKeyId invariant. */
   apiKeyId?: string;
+  /** Authenticated worker selection retained across every replay iteration. */
+  bridgeWorkerId?: string;
+  /** Original queue/backend target retained across replay continuations. */
+  sandboxBackend?: SandboxBackendName;
+  /** Original producer profile retained so continuations use the same queue. */
+  executionProfile?: ExecutionProfile;
+  /** Original profile source retained because inferred profiles use legacy queues. */
+  executionProfileSource?: ExecutionProfileSource;
   startTime: number;
   /**
    * Wall-clock ms of the last interaction that advanced this execution (initial

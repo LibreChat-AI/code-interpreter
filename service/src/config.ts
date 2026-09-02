@@ -3,6 +3,10 @@ dotenv.config();
 import { nanoid } from 'nanoid';
 import type * as t from './types';
 import { Languages } from './enum';
+import {
+  resolveExecutionProfile,
+  resolveExecutionProfileSource,
+} from './execution-profile';
 
 export const languageConfig: Record<Languages | string, t.LanguageConfig | undefined> = {
   [Languages.bash]: { language: 'bash', version: '5.2.0', fileName: 'script.sh' },
@@ -250,12 +254,12 @@ function configuredChoice<T extends string>(
 
 export function resolveSandboxBackend(
   raw: string | undefined,
-): 'http' | 'lambda-microvm' {
+): 'http' | 'lambda-microvm' | 'remote-bridge' {
   return configuredChoice(
     raw,
     'CODEAPI_SANDBOX_BACKEND',
     'http',
-    ['http', 'lambda-microvm'],
+    ['http', 'lambda-microvm', 'remote-bridge'],
   );
 }
 
@@ -269,6 +273,21 @@ export function resolveRuntimeSessionMode(
     ['stateless', 'affinity', 'strict'],
   );
 }
+
+export function resolveBridgeAuthMode(
+  raw: string | undefined,
+): 'static' | 'paired' {
+  return configuredChoice(
+    raw,
+    'CODEAPI_BRIDGE_AUTH_MODE',
+    'static',
+    ['static', 'paired'],
+  );
+}
+
+const sandboxBackend = resolveSandboxBackend(process.env.CODEAPI_SANDBOX_BACKEND);
+const runtimeSessionMode = resolveRuntimeSessionMode(process.env.CODEAPI_RUNTIME_SESSION_MODE);
+const bridgeAuthMode = resolveBridgeAuthMode(process.env.CODEAPI_BRIDGE_AUTH_MODE);
 
 export const env = {
   PORT: process.env.SERVICE_PORT ?? 3112,
@@ -357,8 +376,17 @@ export const env = {
    * - `http` (default): POST signed execute requests to SANDBOX_ENDPOINT
    *   (current Kubernetes/libkrun sandbox-runner).
    * - `lambda-microvm`: AWS Lambda MicroVM backend.
+   * - `remote-bridge`: dispatch to an outbound-connected @librechat/code worker.
    */
-  SANDBOX_BACKEND: resolveSandboxBackend(process.env.CODEAPI_SANDBOX_BACKEND),
+  SANDBOX_BACKEND: sandboxBackend,
+  /** Permit trusted callers to route each execution to a paired worker ID. */
+  BRIDGE_DYNAMIC_WORKERS: process.env.CODEAPI_BRIDGE_DYNAMIC_WORKERS === 'true',
+  /** Outbound worker selected by the remote-bridge backend. */
+  BRIDGE_WORKER_ID: process.env.CODEAPI_BRIDGE_WORKER_ID ?? '',
+  /** Static compatibility auth or short-lived proof-of-possession credentials. */
+  BRIDGE_AUTH_MODE: bridgeAuthMode,
+  /** Enrollment and lease credential shared only with the configured worker. */
+  BRIDGE_TOKEN: process.env.CODEAPI_BRIDGE_TOKEN ?? '',
   /**
    * Runtime session affinity for stateful sandbox backends.
    * - `stateless` (default): no runtime sessions; `runtime_session_hint` ignored.
@@ -367,7 +395,20 @@ export const env = {
    * - `strict`: same serialized session semantics, and a session hint is
    *   required instead of degrading requests without one to stateless.
    */
-  RUNTIME_SESSION_MODE: resolveRuntimeSessionMode(process.env.CODEAPI_RUNTIME_SESSION_MODE),
+  RUNTIME_SESSION_MODE: runtimeSessionMode,
+  /**
+   * Deployment identity used by trusted callers to route each agent to the
+   * intended execution stack. `default` is HTTP/stateless; `stateful` is
+   * Lambda MicroVM with session affinity. The startup policy rejects mixed
+   * tuples so an endpoint cannot claim one profile while running the other.
+   */
+  EXECUTION_PROFILE: resolveExecutionProfile(
+    process.env.CODEAPI_EXECUTION_PROFILE,
+    runtimeSessionMode,
+  ),
+  EXECUTION_PROFILE_SOURCE: resolveExecutionProfileSource(
+    process.env.CODEAPI_EXECUTION_PROFILE,
+  ),
   RUNTIME_SESSION_LOCK_WAIT_MS: configuredNumber(
     process.env.CODEAPI_RUNTIME_SESSION_LOCK_WAIT_MS,
     15_000,

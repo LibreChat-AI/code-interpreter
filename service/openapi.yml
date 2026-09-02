@@ -2,7 +2,10 @@ openapi: '3.0.0'
 info:
   title: LibreChat Code Interpreter API
   version: '1.0.0'
-  description: API for sandbox code execution and file management
+  description: >-
+    API for sandbox code execution and file management. Trusted callers should
+    assert the intended deployment with X-CodeAPI-Expected-Profile on every
+    request; responses advertise the actual profile.
 servers:
   - url: https://api.librechat.ai/v1
     description: LibreChat API server
@@ -16,6 +19,49 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+
+  parameters:
+    ExpectedExecutionProfile:
+      name: X-CodeAPI-Expected-Profile
+      in: header
+      required: false
+      description: >-
+        Trusted routing assertion. A mismatched endpoint returns HTTP 409
+        before any work is enqueued. Optional only for backwards compatibility.
+      schema:
+        type: string
+        enum: [default, stateful]
+
+  headers:
+    ExecutionProfile:
+      description: Execution profile served by this deployment.
+      schema:
+        type: string
+        enum: [default, stateful]
+
+  responses:
+    BadRequest:
+      description: Invalid request or invalid expected execution profile
+      headers:
+        X-CodeAPI-Execution-Profile:
+          $ref: '#/components/headers/ExecutionProfile'
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/Error'
+              - $ref: '#/components/schemas/ExecutionProfileError'
+    Conflict:
+      description: Request conflict or execution-profile mismatch
+      headers:
+        X-CodeAPI-Execution-Profile:
+          $ref: '#/components/headers/ExecutionProfile'
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/Error'
+              - $ref: '#/components/schemas/ExecutionProfileError'
 
   schemas:
     FileRef:
@@ -108,6 +154,14 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RequestFile'
+        runtime_session_hint:
+          type: string
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._:-]+$'
+          description: >-
+            Stable opaque hint for stateful runtime reuse. The server binds it
+            to the authenticated tenant and user. Required in strict runtime
+            session mode and ignored by the default stateless profile.
 
     FileObject:
       type: object
@@ -155,6 +209,23 @@ components:
           type: string
         details:
           type: string
+        message:
+          type: string
+
+    ExecutionProfileError:
+      type: object
+      required: [error, message, actual_profile]
+      properties:
+        error:
+          type: string
+          enum: [invalid_execution_profile, execution_profile_mismatch]
+        message:
+          type: string
+        expected_profile:
+          type: string
+        actual_profile:
+          type: string
+          enum: [default, stateful]
 
 paths:
   /exec:
@@ -162,6 +233,8 @@ paths:
       summary: Execute code
       description: Execute code with specified language and parameters
       operationId: executeCode
+      parameters:
+        - $ref: '#/components/parameters/ExpectedExecutionProfile'
       requestBody:
         required: true
         content:
@@ -171,6 +244,9 @@ paths:
       responses:
         '200':
           description: Successful execution
+          headers:
+            X-CodeAPI-Execution-Profile:
+              $ref: '#/components/headers/ExecutionProfile'
           content:
             application/json:
               schema:
@@ -181,6 +257,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '503':
           description: Service unavailable
           content:
@@ -192,6 +272,7 @@ paths:
     get:
       summary: Download a file
       parameters:
+        - $ref: '#/components/parameters/ExpectedExecutionProfile'
         - name: session_id
           in: path
           required: true
@@ -205,6 +286,9 @@ paths:
       responses:
         '200':
           description: File content
+          headers:
+            X-CodeAPI-Execution-Profile:
+              $ref: '#/components/headers/ExecutionProfile'
           content:
             application/octet-stream:
               schema:
@@ -216,10 +300,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /upload:
     post:
       summary: Upload files
+      parameters:
+        - $ref: '#/components/parameters/ExpectedExecutionProfile'
       requestBody:
         required: true
         content:
@@ -237,6 +327,9 @@ paths:
       responses:
         '200':
           description: Successful upload
+          headers:
+            X-CodeAPI-Execution-Profile:
+              $ref: '#/components/headers/ExecutionProfile'
           content:
             application/json:
               schema:
@@ -247,11 +340,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /files/{session_id}:
     get:
       summary: Get files information
       parameters:
+        - $ref: '#/components/parameters/ExpectedExecutionProfile'
         - name: session_id
           in: path
           required: true
@@ -265,17 +363,25 @@ paths:
       responses:
         '200':
           description: Files information
+          headers:
+            X-CodeAPI-Execution-Profile:
+              $ref: '#/components/headers/ExecutionProfile'
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: '#/components/schemas/FileObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /files/{session_id}/{fileId}:
     delete:
       summary: Delete a file
       parameters:
+        - $ref: '#/components/parameters/ExpectedExecutionProfile'
         - name: session_id
           in: path
           required: true
@@ -289,9 +395,16 @@ paths:
       responses:
         '200':
           description: File deleted successfully
+          headers:
+            X-CodeAPI-Execution-Profile:
+              $ref: '#/components/headers/ExecutionProfile'
         '500':
           description: Error deleting file
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
