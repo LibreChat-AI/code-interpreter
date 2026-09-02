@@ -123,7 +123,7 @@ export async function scanKeys(
     client: RedisClient,
     match: string,
     count = 200,
-    limit = SCAN_KEYS_DEFAULT_LIMIT,
+    limit = SCAN_KEYS_DEFAULT_LIMIT
 ): Promise<string[]> {
     const out: string[] = [];
 
@@ -136,7 +136,7 @@ export async function scanKeys(
                     stream.destroy();
                     logger.warn(
                         'scanKeys hit limit; remaining keys deferred to next pass',
-                        { match, limit },
+                        { match, limit }
                     );
                     return;
                 }
@@ -163,7 +163,7 @@ type ConnectionOverrides = Partial<
         | 'enableReadyCheck'
         | 'retryStrategy'
         | 'reconnectOnError'
-        | 'disconnectTimeout'
+        | 'connectTimeout'
     >
 >;
 
@@ -179,7 +179,7 @@ type ConnectionOverrides = Partial<
  * `clusterRetryStrategy`.
  */
 export function createRedisConnection(
-    overrides: ConnectionOverrides,
+    overrides: ConnectionOverrides
 ): RedisClient {
     const tls = buildTlsOptions() as RedisOptions['tls'];
     const dnsLookup: ClusterOptions['dnsLookup'] | undefined =
@@ -204,7 +204,7 @@ export function createRedisConnection(
             clusterRetryStrategy(times) {
                 if (times > MAX_CLUSTER_RECONNECT_ATTEMPTS) {
                     logger.error(
-                        `Redis cluster giving up after ${times} reconnection attempts`,
+                        `Redis cluster giving up after ${times} reconnection attempts`
                     );
                     return null;
                 }
