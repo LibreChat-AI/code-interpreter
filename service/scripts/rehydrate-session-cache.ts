@@ -26,6 +26,8 @@ import { redisKeepAliveOptions } from '../src/redis-options';
 
 const DEFAULT_SESSION_CACHE_TTL_SECONDS = 86400;
 const DEFAULT_SESSION_OWNER_TTL_SECONDS = 90 * 86400;
+/** Redis `TTL` reply for a key that does not exist. */
+const KEY_ABSENT_TTL = -2;
 const MAX_RECOVERY_CONTEXT_LENGTH = 128;
 const MAX_RECOVERY_SESSION_KEY_LENGTH = 512;
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -55,7 +57,7 @@ export interface RecoveryStore {
     condition: 'NX',
   ): Promise<'OK' | null>;
   ttl(key: string): Promise<number>;
-  expire(key: string, ttlSeconds: number): Promise<unknown>;
+  expire(key: string, ttlSeconds: number): Promise<number>;
   del(key: string): Promise<unknown>;
 }
 
@@ -376,16 +378,33 @@ async function inspectOwnerRecord(
  * run just restored. `SET NX` cannot do it: a record near the end of its
  * life would otherwise strand the session again the moment recovery
  * reported success.
+ *
+ * The read, the extension and the confirmation are three round trips, so
+ * the record is re-read afterwards rather than assumed: it can expire in
+ * between (the caller then creates it fresh) or name somebody else (a
+ * conflict). Extending a record that turns out to belong to another owner
+ * prolongs a claim the service itself wrote and grants nothing new, but
+ * reporting the session as recovered on that basis would be a lie.
  */
 async function refreshOwnerTtl(
   store: RecoveryStore,
   ownerKey: string,
+  record: RecoveryRecord,
   ownerTtlSeconds: number,
-): Promise<void> {
+): Promise<'ready' | 'conflict' | 'vanished'> {
   const remaining = await store.ttl(ownerKey);
-  if (remaining >= 0 && remaining < ownerTtlSeconds) {
-    await store.expire(ownerKey, ownerTtlSeconds);
+  if (remaining === KEY_ABSENT_TTL) {
+    return 'vanished';
   }
+  if (remaining >= 0 && remaining < ownerTtlSeconds && await store.expire(ownerKey, ownerTtlSeconds) === 0) {
+    return 'vanished';
+  }
+
+  const confirmed = await store.get(ownerKey);
+  if (confirmed === null) {
+    return 'vanished';
+  }
+  return confirmed === record.expected_session_key ? 'ready' : 'conflict';
 }
 
 /**
@@ -404,8 +423,12 @@ async function ensureOwnerRecord(
   const ownerKey = `session-owner:${record.session_id}`;
 
   if (existing !== null) {
-    await refreshOwnerTtl(store, ownerKey, ownerTtlSeconds);
-    return 'ready';
+    const refreshed = await refreshOwnerTtl(store, ownerKey, record, ownerTtlSeconds);
+    if (refreshed !== 'vanished') {
+      return refreshed;
+    }
+    /* Expired between the inspection and the refresh. Fall through and
+     * create it as though it had never been there. */
   }
 
   /* `SET NX` can lose to a writer whose key then expires before the
@@ -424,8 +447,11 @@ async function ensureOwnerRecord(
     }
     const raced = await store.get(ownerKey);
     if (raced === record.expected_session_key) {
-      await refreshOwnerTtl(store, ownerKey, ownerTtlSeconds);
-      return 'ready';
+      const refreshed = await refreshOwnerTtl(store, ownerKey, record, ownerTtlSeconds);
+      if (refreshed !== 'vanished') {
+        return refreshed;
+      }
+      continue;
     }
     if (raced !== null) {
       return 'conflict';

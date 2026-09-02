@@ -246,13 +246,22 @@ export const sessionAuth = async (req: AuthenticatedRequest, res: Response, next
    * the 24h following upload and is stranded in the bucket forever after
    * that — see `session-ownership.ts`. */
   const isDelete = req.method === 'DELETE';
-  const ownership = await authorizeSessionOwnership(connection, {
-    /* Narrowed by the `isValidId` guard above, which is not a type
-     * predicate. */
-    session_id: session_id as string,
-    expectedSessionKey: sessionKey,
-    allowExpiredCache: isDelete,
-  });
+  let ownership: Awaited<ReturnType<typeof authorizeSessionOwnership>>;
+  try {
+    ownership = await authorizeSessionOwnership(connection, {
+      /* Narrowed by the `isValidId` guard above, which is not a type
+       * predicate. */
+      session_id: session_id as string,
+      expectedSessionKey: sessionKey,
+      allowExpiredCache: isDelete,
+    });
+  } catch (err) {
+    /* Express 4 does not forward a rejected async middleware, so an
+     * unavailable Redis — or an ACL that grants `session:*` but not
+     * `session-owner:*` — would hang the request instead of answering. */
+    logger.error(`Session ownership lookup failed - Session ID: ${session_id} | File ID: ${fileId}`, err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
   if (!ownership.authorized) {
     logger.error(`Unauthorized ${isDelete ? 'delete' : 'download'}: Cached session key: ${ownership.cachedSessionKey} | Expected session key: ${sessionKey} | Session ID: ${session_id} | File ID: ${fileId} | Reason: ${ownership.reason}`);
     return res.status(403).json({ error: 'Unauthorized' });

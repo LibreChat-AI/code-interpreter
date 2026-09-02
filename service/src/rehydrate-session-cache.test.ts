@@ -372,6 +372,59 @@ describe('rehydrate-session-cache', () => {
     expect(summary).toEqual({ input: 1, missing: 0, restored: 0, matching: 1, conflicts: 0 });
   });
 
+  it('creates the owner record when it expires between inspection and refresh', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session:${SESSION_ID}`, SESSION_KEY);
+    store.values.set(`session-owner:${SESSION_ID}`, SESSION_KEY);
+    store.ttls.set(`session-owner:${SESSION_ID}`, 600);
+    const realTtl = store.ttl.bind(store);
+    let ttlReads = 0;
+    store.ttl = async (key: string): Promise<number> => {
+      ttlReads += 1;
+      if (ttlReads === 1) {
+        /* Lapses in the window between the inspection read and the
+         * extension it was about to perform. */
+        store.values.delete(`session-owner:${SESSION_ID}`);
+        store.ttls.delete(`session-owner:${SESSION_ID}`);
+        return -2;
+      }
+      return realTtl(key);
+    };
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(summary).toEqual({ input: 1, missing: 0, restored: 0, matching: 1, conflicts: 0 });
+    expect(store.values.get(`session-owner:${SESSION_ID}`)).toBe(SESSION_KEY);
+    expect(store.ttls.get(`session-owner:${SESSION_ID}`)).toBe(7776000);
+  });
+
+  it('reports an owner record replaced during the refresh as a conflict', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session:${SESSION_ID}`, SESSION_KEY);
+    store.values.set(`session-owner:${SESSION_ID}`, SESSION_KEY);
+    store.ttls.set(`session-owner:${SESSION_ID}`, 600);
+    const realExpire = store.expire.bind(store);
+    store.expire = async (key: string, ttlSeconds: number): Promise<number> => {
+      const result = await realExpire(key, ttlSeconds);
+      store.values.set(`session-owner:${SESSION_ID}`, 'tenant-id:user:someone-else');
+      return result;
+    };
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    /* The extension itself is harmless — it prolongs a claim the service
+     * wrote — but the session must not be reported as recovered. */
+    expect(summary).toEqual({ input: 1, missing: 0, restored: 0, matching: 0, conflicts: 1 });
+  });
+
   it('surfaces a conflicting owner record during a dry run', async () => {
     const store = new MemoryStore();
     store.values.set(`session-owner:${SESSION_ID}`, 'tenant-id:user:someone-else');
@@ -448,11 +501,12 @@ describe('rehydrate-session-cache', () => {
   it('preserves partial counts when a Redis operation fails', async () => {
     let reads = 0;
     const store: RecoveryStore = {
-      /* Two reads per record: the durable owner record, then the cache
-       * key. The first record resolves as matching; the second fails. */
+      /* Three reads to settle the first record: the durable owner, the
+       * cache key, then the owner re-read that confirms the refresh. The
+       * second record fails on its first read. */
       async get(): Promise<string | null> {
         reads += 1;
-        if (reads <= 2) {
+        if (reads <= 3) {
           return SESSION_KEY;
         }
         throw new Error('Redis unavailable');
