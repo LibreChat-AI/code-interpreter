@@ -6,6 +6,7 @@ import { executionProfileMiddleware } from './middleware/execution-profile';
 import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
 import bridgeRouter from './bridge';
+import workspaceToolsRouter from './workspace-tools';
 import { connection } from './queue';
 import { env } from './config';
 import logger from './logger';
@@ -32,6 +33,7 @@ app.get('/v1/health', async (_, res) => {
 v1.use('/bridge', bridgeRouter);
 v1.use(apiKeyAuth);
 
+v1.use(workspaceToolsRouter);
 v1.use(serviceRouter);
 v1.use(programmaticRouter);
 

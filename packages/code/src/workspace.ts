@@ -7,15 +7,37 @@ import type { FileHandle } from 'node:fs/promises';
 
 import {
   BRIDGE_PROTOCOL_VERSION,
-  isValidBridgeWorkerId,
+  BRIDGE_WORKSPACE_READ_MAX_BYTES,
+  BRIDGE_WORKSPACE_READ_MAX_LINES,
+  BRIDGE_WORKSPACE_SEARCH_MAX_RESULTS,
+  BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH,
   isValidBridgeWorkspaceToolCapabilities,
+  isWorkspaceToolRequest,
+  isWorkspaceToolResult,
 } from './protocol.js';
 
 import type {
-  BridgeProtocolVersion,
   BridgeWorkspaceDescriptor,
   BridgeWorkspaceToolCapabilities,
+  WorkspaceReadFileRequest,
+  WorkspaceReadFileResult,
+  WorkspaceSearchMatch,
+  WorkspaceSearchTextRequest,
+  WorkspaceSearchTextResult,
+  WorkspaceToolRequest,
+  WorkspaceToolResult,
 } from './protocol.js';
+
+export { isWorkspaceToolRequest, isWorkspaceToolResult };
+export type {
+  WorkspaceReadFileRequest,
+  WorkspaceReadFileResult,
+  WorkspaceSearchMatch,
+  WorkspaceSearchTextRequest,
+  WorkspaceSearchTextResult,
+  WorkspaceToolRequest,
+  WorkspaceToolResult,
+};
 
 export interface LocalWorkspaceConfig {
   id: string;
@@ -35,59 +57,6 @@ export interface WorkspaceToolExecutor {
   ): Promise<WorkspaceToolResult>;
 }
 
-export interface WorkspaceReadFileRequest {
-  protocolVersion: BridgeProtocolVersion;
-  operation: 'read_file';
-  workspaceId: string;
-  path: string;
-  startLine?: number;
-  maxLines?: number;
-}
-
-export interface WorkspaceReadFileResult {
-  protocolVersion: BridgeProtocolVersion;
-  operation: 'read_file';
-  workspaceId: string;
-  path: string;
-  content: string;
-  startLine: number;
-  endLine: number;
-  truncated: boolean;
-  nextStartLine?: number;
-}
-
-export interface WorkspaceSearchTextRequest {
-  protocolVersion: BridgeProtocolVersion;
-  operation: 'search_text';
-  workspaceId: string;
-  query: string;
-  path?: string;
-  maxResults?: number;
-}
-
-export interface WorkspaceSearchMatch {
-  path: string;
-  line: number;
-  column: number;
-  text: string;
-}
-
-export interface WorkspaceSearchTextResult {
-  protocolVersion: BridgeProtocolVersion;
-  operation: 'search_text';
-  workspaceId: string;
-  matches: WorkspaceSearchMatch[];
-  truncated: boolean;
-}
-
-export type WorkspaceToolRequest =
-  WorkspaceReadFileRequest | WorkspaceSearchTextRequest;
-export type WorkspaceToolResult =
-  WorkspaceReadFileResult | WorkspaceSearchTextResult;
-
-const MAX_READ_LINES = 500;
-const MAX_READ_BYTES = 1024 * 1024;
-const MAX_SEARCH_PREVIEW_LENGTH = 2000;
 const MAX_SEARCH_CANDIDATE_BYTES = 1024 * 1024;
 const MAX_SEARCH_CANDIDATES = 20_000;
 const SEARCH_TIMEOUT_MS = 10_000;
@@ -154,46 +123,6 @@ export class WorkspaceToolError extends Error {
   }
 }
 
-export function isWorkspaceToolRequest(
-  value: unknown,
-): value is WorkspaceToolRequest {
-  if (typeof value !== 'object' || value === null) return false;
-  const request = value as Record<string, unknown>;
-  if (
-    request.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
-    typeof request.workspaceId !== 'string' ||
-    !isValidBridgeWorkerId(request.workspaceId)
-  ) {
-    return false;
-  }
-  if (request.operation === 'read_file') {
-    return (
-      typeof request.path === 'string' &&
-      request.path.length > 0 &&
-      request.path.length <= 4096 &&
-      isUtf8ScalarString(request.path) &&
-      (request.startLine === undefined ||
-        Number.isSafeInteger(request.startLine)) &&
-      (request.maxLines === undefined || Number.isSafeInteger(request.maxLines))
-    );
-  }
-  if (request.operation === 'search_text') {
-    return (
-      typeof request.query === 'string' &&
-      request.query.length > 0 &&
-      request.query.length <= 4096 &&
-      (request.path === undefined ||
-        (typeof request.path === 'string' &&
-          request.path.length > 0 &&
-          request.path.length <= 4096 &&
-          isUtf8ScalarString(request.path))) &&
-      (request.maxResults === undefined ||
-        Number.isSafeInteger(request.maxResults))
-    );
-  }
-  return false;
-}
-
 function isWithinRoot(root: string, candidate: string): boolean {
   const relativePath = relative(root, candidate);
   return !(
@@ -243,15 +172,15 @@ async function readConfinedFileBuffer(
     ) {
       throw new Error('Invalid workspace path');
     }
-    if (openedFile.size > MAX_READ_BYTES) {
+    if (openedFile.size > BRIDGE_WORKSPACE_READ_MAX_BYTES) {
       throw new WorkspaceToolError(
         'Workspace file exceeds read limit',
         'READ_LIMIT_EXCEEDED',
       );
     }
-    const buffer = Buffer.allocUnsafe(MAX_READ_BYTES + 1);
+    const buffer = Buffer.allocUnsafe(BRIDGE_WORKSPACE_READ_MAX_BYTES + 1);
     let bytesRead = 0;
-    while (bytesRead <= MAX_READ_BYTES) {
+    while (bytesRead <= BRIDGE_WORKSPACE_READ_MAX_BYTES) {
       const result = await handle.read(
         buffer,
         bytesRead,
@@ -261,7 +190,7 @@ async function readConfinedFileBuffer(
       if (result.bytesRead === 0) break;
       bytesRead += result.bytesRead;
     }
-    if (bytesRead > MAX_READ_BYTES) {
+    if (bytesRead > BRIDGE_WORKSPACE_READ_MAX_BYTES) {
       throw new WorkspaceToolError(
         'Workspace file exceeds read limit',
         'READ_LIMIT_EXCEEDED',
@@ -414,7 +343,7 @@ async function searchWorkspace(
   if (
     !request.query ||
     request.query.length > 4096 ||
-    encodedQuery.length > MAX_SEARCH_PREVIEW_LENGTH ||
+    encodedQuery.length > BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH ||
     encodedQuery.toString('utf8') !== request.query ||
     request.query.includes('\0') ||
     request.query.includes('\n') ||
@@ -423,7 +352,11 @@ async function searchWorkspace(
     throw new WorkspaceToolError('Invalid workspace search', 'INVALID_REQUEST');
   }
   const maxResults = request.maxResults ?? 50;
-  if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 200) {
+  if (
+    !Number.isSafeInteger(maxResults) ||
+    maxResults < 1 ||
+    maxResults > BRIDGE_WORKSPACE_SEARCH_MAX_RESULTS
+  ) {
     throw new WorkspaceToolError('Invalid workspace search', 'INVALID_REQUEST');
   }
 
@@ -511,10 +444,15 @@ async function searchWorkspace(
             0,
             column -
               Math.floor(
-                (MAX_SEARCH_PREVIEW_LENGTH - request.query.length) / 2,
+                (BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH -
+                  request.query.length) /
+                  2,
               ),
           ),
-          Math.max(0, line.length - MAX_SEARCH_PREVIEW_LENGTH),
+          Math.max(
+            0,
+            line.length - BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH,
+          ),
         );
         matches.push({
           path,
@@ -523,7 +461,7 @@ async function searchWorkspace(
           text: sliceWithoutSplittingSurrogates(
             line,
             previewStart,
-            MAX_SEARCH_PREVIEW_LENGTH,
+            BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH,
           ),
         });
       }
@@ -626,7 +564,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       startLine < 1 ||
       !Number.isSafeInteger(maxLines) ||
       maxLines < 1 ||
-      maxLines > MAX_READ_LINES
+      maxLines > BRIDGE_WORKSPACE_READ_MAX_LINES
     ) {
       throw new WorkspaceToolError('Invalid workspace read', 'INVALID_REQUEST');
     }

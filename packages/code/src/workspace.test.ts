@@ -6,7 +6,11 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { LocalWorkspaceTools, WorkspaceToolError } from './workspace.js';
+import {
+  isWorkspaceToolResult,
+  LocalWorkspaceTools,
+  WorkspaceToolError,
+} from './workspace.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -67,7 +71,7 @@ test('rejects traversal outside a registered workspace without leaking its host 
     }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /invalid workspace path/i);
+      assert.match(error.message, /invalid workspace/i);
       assert.equal(error.message.includes(parent), false);
       return true;
     },
@@ -573,5 +577,51 @@ test('does not start workspace I/O after its execution is aborted', async (t) =>
       controller.signal,
     ),
     /workspace tool execution aborted/i,
+  );
+});
+
+test('validates workspace results against the originating request', () => {
+  const request = {
+    protocolVersion: 1 as const,
+    operation: 'read_file' as const,
+    workspaceId: 'primary',
+    path: 'README.md',
+  };
+  const result = {
+    protocolVersion: 1 as const,
+    operation: 'read_file' as const,
+    workspaceId: 'primary',
+    path: 'README.md',
+    content: '# LibreChat',
+    startLine: 1,
+    endLine: 1,
+    truncated: false,
+  };
+
+  assert.equal(isWorkspaceToolResult(request, result), true);
+  assert.equal(
+    isWorkspaceToolResult(request, { ...result, path: '/Users/operator/key' }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      root: '/Users/operator/private',
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      truncated: true,
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      nextStartLine: 2,
+    }),
+    false,
   );
 });
