@@ -751,6 +751,14 @@ export class BridgeWorker {
           );
         }
       }
+      cancellationController.abort();
+      await cancellationWatcher;
+      if (executionController.signal.aborted) {
+        throw (
+          executionController.signal.reason ??
+          new DOMException('aborted', 'AbortError')
+        );
+      }
       if (credentialMaintenanceError != null) {
         throw credentialMaintenanceError;
       }

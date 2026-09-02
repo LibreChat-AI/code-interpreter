@@ -229,6 +229,95 @@ test('worker rejects a workspace result returned after its deadline', async () =
   assert.match(String(settlements[0]?.error), /aborted|expired/i);
 });
 
+test('worker drains a completed cancellation poll before fulfilling workspace work', async () => {
+  const settlements: Array<Record<string, unknown>> = [];
+  let finishExecution: (() => void) | undefined;
+  let finishCancellation: (() => void) | undefined;
+  let markPollStarted: (() => void) | undefined;
+  const pollStarted = new Promise<void>((resolve) => {
+    markPollStarted = resolve;
+  });
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute(request) {
+        await new Promise<void>((resolve) => {
+          finishExecution = resolve;
+        });
+        return {
+          protocolVersion: 1,
+          operation: 'read_file',
+          workspaceId: request.workspaceId,
+          path: 'README.md',
+          content: '# cancelled',
+          startLine: 1,
+          endLine: 1,
+          truncated: false,
+        };
+      },
+    },
+    cancellationPollIntervalMs: 1,
+    fetchImpl: async (input, init) => {
+      if (String(input).endsWith('/cancellation')) {
+        markPollStarted?.();
+        return await new Promise<Response>((resolve) => {
+          finishCancellation = () =>
+            resolve(Response.json({ protocolVersion: 1, cancelled: true }));
+        });
+      }
+      if (String(input).endsWith('/settle') && init?.body != null) {
+        settlements.push(
+          JSON.parse(String(init.body)) as Record<string, unknown>,
+        );
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  const completion = worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-workspace-cancelled',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    remainingMs: 5_000,
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'primary',
+      path: 'README.md',
+    },
+  });
+
+  await pollStarted;
+  finishExecution?.();
+  finishCancellation?.();
+  await completion;
+
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0]?.status, 'rejected');
+  assert.match(String(settlements[0]?.error), /aborted/i);
+});
+
 test('worker rejects workspace operations outside its advertised capability', async () => {
   let executions = 0;
   let settlement: Record<string, unknown> | undefined;

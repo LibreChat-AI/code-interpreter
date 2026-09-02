@@ -193,18 +193,19 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
       ? option(args, '--worker-dir') ??
         process.env.LIBRECHAT_CODE_WORKER_DIR?.trim()
       : undefined;
+  const workspaceId =
+    option(args, '--workspace-id') ??
+    process.env.LIBRECHAT_CODE_WORKSPACE_ID?.trim() ??
+    'primary';
   const workspaceTools = workerDirectory
     ? await LocalWorkspaceTools.create({
         workspaces: [
           {
-            id:
-              option(args, '--workspace-id') ??
-              process.env.LIBRECHAT_CODE_WORKSPACE_ID?.trim() ??
-              'primary',
+            id: workspaceId,
             name:
               option(args, '--workspace-name') ??
               process.env.LIBRECHAT_CODE_WORKSPACE_NAME?.trim() ??
-              basename(resolve(workerDirectory)),
+              (basename(resolve(workerDirectory)) || workspaceId),
             root: workerDirectory,
           },
         ],
