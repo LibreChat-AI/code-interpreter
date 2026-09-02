@@ -311,6 +311,9 @@ async function run(runtimeSessionId?: string): Promise<void> {
                               SANDBOX_PRIME_CONCURRENCY: String(
                                 fileRelayLimits!.maxConcurrentRequests,
                               ),
+                              SANDBOX_UPLOAD_CONCURRENCY: String(
+                                fileRelayLimits!.maxConcurrentRequests,
+                              ),
                               SANDBOX_FILE_RELAY_TOKEN: fileRelayProfile.token,
                               SANDBOX_REQUIRE_EGRESS_MANIFEST: 'true',
                               SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY:

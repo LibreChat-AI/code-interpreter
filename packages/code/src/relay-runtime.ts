@@ -128,10 +128,19 @@ export class DockerFileRelaySupervisor {
     if (!this.prepared) await this.launchRelay(signal);
     const activeContainer = `${this.containerPrefix}-g${registrationGeneration}-${this.incarnationHash}`;
     if (this.container !== activeContainer) {
-      await this.client.run(
-        ['container', 'rename', this.container, activeContainer],
-        { signal },
-      );
+      try {
+        await this.renameRelay(activeContainer, signal);
+      } catch (error) {
+        if (!missingContainer(error)) throw error;
+        this.resetPreparedState();
+        await this.launchRelay(signal);
+        try {
+          await this.renameRelay(activeContainer, signal);
+        } catch (retryError) {
+          if (missingContainer(retryError)) this.resetPreparedState();
+          throw retryError;
+        }
+      }
       this.container = activeContainer;
     }
     const containers = await this.client.run(
@@ -220,6 +229,16 @@ export class DockerFileRelaySupervisor {
 
   private stagingContainer(): string {
     return `${this.containerPrefix}-staging-${this.incarnationHash}`;
+  }
+
+  private async renameRelay(
+    activeContainer: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.client.run(
+      ['container', 'rename', this.container, activeContainer],
+      { signal },
+    );
   }
 
   private async launchRelay(signal?: AbortSignal): Promise<void> {

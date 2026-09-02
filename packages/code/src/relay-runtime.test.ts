@@ -395,6 +395,69 @@ test('Docker file relay relaunches an unhealthy active generation', async () => 
   assert.ok(healthChecks >= 3);
 });
 
+test('Docker file relay relaunches when its live staging container was reclaimed', async () => {
+  let container = '';
+  let launches = 0;
+  let renameAttempts = 0;
+  let connected = false;
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      if (args[0] === 'network' && args[1] === 'inspect') {
+        return args.at(-1)?.includes('-egress-') === true
+          ? 'false|true|egress\n'
+          : 'true|true|runtime\n';
+      }
+      if (args[0] === 'container' && args[1] === 'rm') {
+        const name = args.at(-1) ?? '';
+        if (name !== container || container === '') {
+          throw new Error('No such container');
+        }
+        container = '';
+        return 'removed\n';
+      }
+      if (args[0] === 'run') {
+        launches += 1;
+        container = args[args.indexOf('--name') + 1] ?? '';
+        return 'relay-id\n';
+      }
+      if (args[0] === 'exec') return '200';
+      if (args[0] === 'container' && args[1] === 'rename') {
+        renameAttempts += 1;
+        if (renameAttempts === 1) {
+          container = '';
+          throw new Error('No such container');
+        }
+        container = args.at(-1) ?? '';
+        return '';
+      }
+      if (args[0] === 'container' && args[1] === 'ls') {
+        return `${container}|running|1000\n`;
+      }
+      if (args[0] === 'network' && args[1] === 'connect') {
+        connected = true;
+        return '';
+      }
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerFileRelaySupervisor({
+    workerId: 'engineering-vm',
+    incarnationId: 'delayed-incarnation',
+    image: 'librechat-code-worker:local',
+    upstreamUrl: 'https://code.example/egress',
+    token: 'relay-secret',
+    client,
+  });
+
+  await supervisor.prepare();
+  await supervisor.activate(2);
+
+  assert.equal(launches, 2);
+  assert.equal(renameAttempts, 2);
+  assert.equal(connected, true);
+  assert.match(container, /-g2-[a-f0-9]{12}$/);
+});
+
 test('Docker file relay rolls back startup with a fresh signal after abort', async () => {
   const controller = new AbortController();
   let currentRelay = '';
