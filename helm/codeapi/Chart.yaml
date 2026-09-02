@@ -3,7 +3,7 @@ apiVersion: v2
 name: codeapi
 description: A Helm chart for Code Interpreter API - scalable code execution service
 type: application
-version: 0.3.0       # Chart version (bump this when you change the chart)
+version: 0.3.1       # Chart version (bump this when you change the chart)
 appVersion: "2.0.0"  # App version (bump this when you change the app)
 
 # Keywords for searching
