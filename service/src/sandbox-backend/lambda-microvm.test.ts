@@ -26,6 +26,7 @@ import {
   runtimeSessionLaunchClientToken,
   runtimeSessionLaunchFingerprint,
   runtimeSessionLaunchGenerationSeed,
+  statelessLaunchClientToken,
   type LambdaMicrovmBackendConfig,
 } from './lambda-microvm';
 import { SandboxBackendError } from './types';
@@ -301,6 +302,49 @@ describe('runtime session launch tokens', () => {
   });
 });
 
+describe('statelessLaunchClientToken', () => {
+  const ptcIteration = (history: string): SandboxTransportRequest => ({
+    ...request(),
+    body: {
+      ...payloadBody(),
+      files: [{ id: history, storage_session_id: 'sess_store_1', name: '_ptc_history.json' }],
+    },
+  });
+
+  test('is deterministic for an identical relaunch', () => {
+    const first = statelessLaunchClientToken('exec_42', config(), 420, request());
+    const second = statelessLaunchClientToken('exec_42', config(), 420, request());
+    expect(first).toBe(second);
+  });
+
+  /* PTC replay reuses one executionId across iterations while the sandbox
+   * payload gains a new _ptc_history.json each round. A token derived from the
+   * executionId alone repeated, and AWS rejected the relaunch with "The
+   * provided clientToken was used with different request parameters". */
+  test('differs per replay iteration when the request body changes', () => {
+    const round1 = statelessLaunchClientToken('exec_42', config(), 420, ptcIteration('hist_1'));
+    const round2 = statelessLaunchClientToken('exec_42', config(), 420, ptcIteration('hist_2'));
+    expect(round1).not.toBe(round2);
+    expect(round1).toMatch(/^exec-exec_42-[0-9a-f]{16}$/);
+    expect(round2).toMatch(/^exec-exec_42-[0-9a-f]{16}$/);
+  });
+
+  test('differs when launch configuration or duration changes', () => {
+    const base = statelessLaunchClientToken('exec_42', config(), 420, request());
+    expect(statelessLaunchClientToken('exec_42', config({ imageVersion: '4' }), 420, request()))
+      .not.toBe(base);
+    expect(statelessLaunchClientToken('exec_42', config(), 421, request())).not.toBe(base);
+  });
+
+  test('stays within the AWS clientToken budget including the retry suffix', () => {
+    const token = statelessLaunchClientToken('exec_42', config(), 420, request());
+    expect(`${token}-r1`.length).toBeLessThanOrEqual(128);
+    expect(() => statelessLaunchClientToken('e'.repeat(200), config(), 420, request())).toThrow(
+      'Stateless launch clientToken exceeds the AWS length limit',
+    );
+  });
+});
+
 describe('LambdaMicrovmSandboxBackend stateless execution', () => {
   test('run -> health -> execute -> terminate happy path', async () => {
     const fake = fakeClient();
@@ -315,7 +359,7 @@ describe('LambdaMicrovmSandboxBackend stateless execution', () => {
     expect(runCalls).toHaveLength(1);
     const runArgs = runCalls[0].args as { imageIdentifier: string; clientToken?: string; maximumDurationSeconds: number };
     expect(runArgs.imageIdentifier).toBe('arn:aws:lambda:us-east-2:1:microvm-image:codeapi');
-    expect(runArgs.clientToken).toBe('exec-exec_42');
+    expect(runArgs.clientToken).toMatch(/^exec-exec_42-[0-9a-f]{16}$/);
     expect(runArgs.maximumDurationSeconds).toBe(Math.ceil(300_000 / 1_000) + 120);
 
     const executeReq = captured.find((c) => c.path === '/api/v2/execute');
@@ -509,8 +553,8 @@ describe('LambdaMicrovmSandboxBackend stateless execution', () => {
     const runCalls = fake.callsFor('runMicrovm');
     expect(runCalls).toHaveLength(2);
     const tokens = runCalls.map((call) => (call.args as { clientToken?: string }).clientToken);
-    expect(tokens[0]).toBe('exec-exec_42');
-    expect(tokens[1]).toBe('exec-exec_42-r1');
+    expect(tokens[0]).toMatch(/^exec-exec_42-[0-9a-f]{16}$/);
+    expect(tokens[1]).toBe(`${tokens[0]}-r1`);
   });
 
   test('the boot-death retry consumes only the first attempt remaining launch budget', async () => {
@@ -533,7 +577,8 @@ describe('LambdaMicrovmSandboxBackend stateless execution', () => {
     });
     const tokens = fake.callsFor('runMicrovm')
       .map(call => (call.args as { clientToken?: string }).clientToken);
-    expect(tokens).toEqual(['exec-exec_42', 'exec-exec_42-r1']);
+    expect(tokens[0]).toMatch(/^exec-exec_42-[0-9a-f]{16}$/);
+    expect(tokens).toEqual([tokens[0], `${tokens[0]}-r1`]);
     expect(captured.some(request => request.path === '/api/v2/execute')).toBe(false);
     expect(fake.callsFor('terminateMicrovm')).toHaveLength(2);
   });

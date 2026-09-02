@@ -138,6 +138,41 @@ export function runtimeSessionLaunchGenerationSeed(config: LambdaMicrovmBackendC
   return RUNTIME_SESSION_NAMESPACED_GENERATION_MIN + offset;
 }
 
+/** Stateless one-shot launch token.
+ *
+ * PTC replay reuses one executionId across every iteration, so a token derived
+ * from the executionId alone repeats while the sandbox payload changes between
+ * iterations (each carries a new `_ptc_history.json`). AWS rejects that with
+ * "The provided clientToken was used with different request parameters" and the
+ * whole execution fails. Fold the launch inputs and the per-iteration request
+ * body into the token so each distinct launch gets a distinct token while an
+ * identical retry stays idempotent. */
+export function statelessLaunchClientToken(
+  executionId: string,
+  config: LambdaMicrovmBackendConfig,
+  maxDurationSeconds: number,
+  request: SandboxTransportRequest,
+): string {
+  const suffix = createHash('sha256')
+    .update(
+      JSON.stringify({
+        launchRequest: runtimeSessionLaunchRequestFingerprint(config),
+        maximumDurationSeconds: maxDurationSeconds,
+        body: request.body,
+      }),
+      'utf8',
+    )
+    .digest('hex')
+    .slice(0, 16);
+  const token = `exec-${executionId}-${suffix}`;
+  /* launch() can add "-r1" after a clean boot-time death; reserve those three
+   * characters so both attempts stay within AWS's 128-byte limit. */
+  if (token.length > 125) {
+    throw new Error('Stateless launch clientToken exceeds the AWS length limit');
+  }
+  return token;
+}
+
 export function runtimeSessionLaunchClientToken(runtimeSessionId: string, generation: number): string {
   if (!Number.isSafeInteger(generation) || generation < 1) {
     throw new Error('Runtime session generation must be a positive safe integer');
@@ -259,7 +294,12 @@ export class LambdaMicrovmSandboxBackend implements SandboxBackend {
       Math.ceil(this.config.jobTimeoutMs / 1_000) + 120,
     );
     const vm = await this.launch(client, ctx, {
-      clientToken: ctx.executionId !== '' ? `exec-${ctx.executionId}` : `exec-${nanoid()}`,
+      clientToken: statelessLaunchClientToken(
+        ctx.executionId !== '' ? ctx.executionId : nanoid(),
+        this.config,
+        maxDurationSeconds,
+        req,
+      ),
       maxDurationSeconds,
     });
     let terminateReason = 'stateless';
