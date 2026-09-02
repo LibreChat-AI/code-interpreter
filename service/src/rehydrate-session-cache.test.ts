@@ -60,6 +60,35 @@ class MemoryStore implements RecoveryStore {
     this.ttls.set(key, ttlSeconds);
     return 1;
   }
+
+  async del(key: string): Promise<number> {
+    this.ttls.delete(key);
+    return this.values.delete(key) ? 1 : 0;
+  }
+}
+
+/** Loses every `SET NX` on the durable owner key, optionally planting a
+ *  different owner for the follow-up read to find. */
+class RacingOwnerStore extends MemoryStore {
+  constructor(private readonly ownerAfterRace: string | null) {
+    super();
+  }
+
+  async set(
+    key: string,
+    value: string,
+    expiryMode: 'EX',
+    ttlSeconds: number,
+    condition: 'NX',
+  ): Promise<'OK' | null> {
+    if (!key.startsWith('session-owner:')) {
+      return super.set(key, value, expiryMode, ttlSeconds, condition);
+    }
+    if (this.ownerAfterRace !== null) {
+      this.values.set(key, this.ownerAfterRace);
+    }
+    return null;
+  }
 }
 
 describe('rehydrate-session-cache', () => {
@@ -261,6 +290,88 @@ describe('rehydrate-session-cache', () => {
     expect(store.values.has(`session-owner:${SESSION_ID}`)).toBe(false);
   });
 
+  it('rolls back a restored cache key when the owner record turns out to be another owner', async () => {
+    const store = new RacingOwnerStore('tenant-id:user:someone-else');
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(summary).toEqual({ input: 1, missing: 0, restored: 0, matching: 0, conflicts: 1 });
+    /* Left in place, the grant would authorize the manifest owner for a
+     * full ttlSeconds against a session the durable record says is not
+     * theirs. */
+    expect(store.values.has(`session:${SESSION_ID}`)).toBe(false);
+  });
+
+  it('reports an owner record that cannot be created as missing', async () => {
+    const store = new RacingOwnerStore(null);
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    /* `missing` during an apply is what drives the nonzero exit — the run
+     * must not look like a completed recovery. */
+    expect(summary).toEqual({ input: 1, missing: 1, restored: 0, matching: 0, conflicts: 0 });
+    expect(store.values.has(`session-owner:${SESSION_ID}`)).toBe(false);
+    /* The cache key stays: no durable record is where this session already
+     * was, and removing it would leave the operator with nothing. */
+    expect(store.values.get(`session:${SESSION_ID}`)).toBe(SESSION_KEY);
+  });
+
+  it('reports pending owner work during a dry run', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session:${SESSION_ID}`, SESSION_KEY);
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: false, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    /* Counting this as `matching` would tell an operator the session is
+     * fully in place and invite them to skip the apply that creates its
+     * durable record. */
+    expect(summary).toEqual({ input: 1, missing: 1, restored: 0, matching: 0, conflicts: 0 });
+    expect(store.values.has(`session-owner:${SESSION_ID}`)).toBe(false);
+  });
+
+  it('reports a short-lived owner record as pending work during a dry run', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session:${SESSION_ID}`, SESSION_KEY);
+    store.values.set(`session-owner:${SESSION_ID}`, SESSION_KEY);
+    store.ttls.set(`session-owner:${SESSION_ID}`, 600);
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: false, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(summary).toEqual({ input: 1, missing: 1, restored: 0, matching: 0, conflicts: 0 });
+    expect(store.ttls.get(`session-owner:${SESSION_ID}`)).toBe(600);
+  });
+
+  it('counts a fully in-place session as matching during a dry run', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session:${SESSION_ID}`, SESSION_KEY);
+    store.values.set(`session-owner:${SESSION_ID}`, SESSION_KEY);
+    store.ttls.set(`session-owner:${SESSION_ID}`, 7776000);
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: false, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(summary).toEqual({ input: 1, missing: 0, restored: 0, matching: 1, conflicts: 0 });
+  });
+
   it('surfaces a conflicting owner record during a dry run', async () => {
     const store = new MemoryStore();
     store.values.set(`session-owner:${SESSION_ID}`, 'tenant-id:user:someone-else');
@@ -355,6 +466,9 @@ describe('rehydrate-session-cache', () => {
       async expire(): Promise<number> {
         throw new Error('unexpected expire');
       },
+      async del(): Promise<number> {
+        throw new Error('unexpected del');
+      },
     };
 
     try {
@@ -391,6 +505,9 @@ describe('rehydrate-session-cache', () => {
         return -2;
       },
       async expire(): Promise<number> {
+        return 0;
+      },
+      async del(): Promise<number> {
         return 0;
       },
     };

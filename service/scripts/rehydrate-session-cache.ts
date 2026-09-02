@@ -56,6 +56,7 @@ export interface RecoveryStore {
   ): Promise<'OK' | null>;
   ttl(key: string): Promise<number>;
   expire(key: string, ttlSeconds: number): Promise<unknown>;
+  del(key: string): Promise<unknown>;
 }
 
 export interface RecoverySummary {
@@ -371,6 +372,23 @@ async function inspectOwnerRecord(
 }
 
 /**
+ * Extends the durable record when it would lapse before the cache key this
+ * run just restored. `SET NX` cannot do it: a record near the end of its
+ * life would otherwise strand the session again the moment recovery
+ * reported success.
+ */
+async function refreshOwnerTtl(
+  store: RecoveryStore,
+  ownerKey: string,
+  ownerTtlSeconds: number,
+): Promise<void> {
+  const remaining = await store.ttl(ownerKey);
+  if (remaining >= 0 && remaining < ownerTtlSeconds) {
+    await store.expire(ownerKey, ownerTtlSeconds);
+  }
+}
+
+/**
  * Creates or extends the durable owner record for a session whose cache
  * key has just been confirmed to name the same owner. Runs only after that
  * confirmation: writing it earlier would leave a record behind for a
@@ -382,10 +400,18 @@ async function ensureOwnerRecord(
   record: RecoveryRecord,
   ownerTtlSeconds: number,
   existing: string | null,
-): Promise<'ready' | 'conflict'> {
+): Promise<'ready' | 'conflict' | 'unresolved'> {
   const ownerKey = `session-owner:${record.session_id}`;
 
-  if (existing === null) {
+  if (existing !== null) {
+    await refreshOwnerTtl(store, ownerKey, ownerTtlSeconds);
+    return 'ready';
+  }
+
+  /* `SET NX` can lose to a writer whose key then expires before the
+   * follow-up read, leaving no record and no conflict to report. One retry
+   * settles that; anything past it is reported rather than assumed. */
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     const result = await store.set(
       ownerKey,
       record.expected_session_key,
@@ -397,21 +423,34 @@ async function ensureOwnerRecord(
       return 'ready';
     }
     const raced = await store.get(ownerKey);
-    if (raced !== null && raced !== record.expected_session_key) {
+    if (raced === record.expected_session_key) {
+      await refreshOwnerTtl(store, ownerKey, ownerTtlSeconds);
+      return 'ready';
+    }
+    if (raced !== null) {
       return 'conflict';
     }
-    return 'ready';
   }
+  return 'unresolved';
+}
 
-  /* The record already matches, and `SET NX` cannot extend an expiry. One
-   * near the end of its life would otherwise lapse before the cache key
-   * this run just restored, stranding the session again the moment
-   * recovery reported success. */
-  const remaining = await store.ttl(ownerKey);
-  if (remaining >= 0 && remaining < ownerTtlSeconds) {
-    await store.expire(ownerKey, ownerTtlSeconds);
+/**
+ * Whether an apply would still have durable-record work to do. Keeps the
+ * dry run honest: a session whose cache key already matches can still need
+ * its owner record created or extended, and reporting it as fully in place
+ * invites operators to skip the apply.
+ */
+async function ownerRepairPending(
+  store: RecoveryStore,
+  record: RecoveryRecord,
+  ownerTtlSeconds: number,
+  existing: string | null,
+): Promise<boolean> {
+  if (existing === null) {
+    return true;
   }
-  return 'ready';
+  const remaining = await store.ttl(`session-owner:${record.session_id}`);
+  return remaining >= 0 && remaining < ownerTtlSeconds;
 }
 
 export async function recoverSessionCache(
@@ -445,29 +484,47 @@ export async function recoverSessionCache(
         continue;
       }
 
+      const redisKey = `session:${record.session_id}`;
+
       /* Deferred until the cache key agrees. The durable record outlives
        * the cache key by design, so creating one for an owner the live
-       * cache key contradicts would outlast the evidence against it. */
-      const commitOwnerRecord = async (): Promise<boolean> => {
+       * cache key contradicts would outlast the evidence against it.
+       * Returns the bucket the record lands in when the durable half did
+       * not settle, or null to keep the cache-key bucket. */
+      const settleOwnerRecord = async (
+        restoredCacheKey: boolean,
+      ): Promise<'conflicts' | 'missing' | null> => {
         if (!options.apply) {
-          return true;
+          const pending = await ownerRepairPending(store, record, ownerTtlSeconds, inspection.existing);
+          return pending ? 'missing' : null;
         }
-        if (await ensureOwnerRecord(store, record, ownerTtlSeconds, inspection.existing) === 'ready') {
-          return true;
+
+        const outcome = await ensureOwnerRecord(store, record, ownerTtlSeconds, inspection.existing);
+        if (outcome === 'ready') {
+          return null;
         }
-        summary.conflicts += 1;
+        if (outcome === 'conflict') {
+          if (restoredCacheKey) {
+            /* Undo the grant just made: left in place it would authorize
+             * the manifest owner to read and delete for `ttlSeconds` while
+             * the durable record names somebody else. */
+            await store.del(redisKey);
+          }
+          // eslint-disable-next-line no-console
+          console.error(`Conflict: ${record.session_id} durable owner record changed during recovery`);
+          return 'conflicts';
+        }
+        /* The cache key stays: a session without a durable record is no
+         * worse off than before this run, and removing the grant would
+         * leave the operator with nothing at all. */
         // eslint-disable-next-line no-console
-        console.error(`Conflict: ${record.session_id} durable owner record changed during recovery`);
-        return false;
+        console.error(`Missing: ${record.session_id} durable owner record could not be created`);
+        return 'missing';
       };
 
-      const redisKey = `session:${record.session_id}`;
       const current = await store.get(redisKey);
       if (current === record.expected_session_key) {
-        if (!await commitOwnerRecord()) {
-          continue;
-        }
-        summary.matching += 1;
+        summary[await settleOwnerRecord(false) ?? 'matching'] += 1;
         continue;
       }
       if (current !== null) {
@@ -490,19 +547,13 @@ export async function recoverSessionCache(
         'NX',
       );
       if (result === 'OK') {
-        if (!await commitOwnerRecord()) {
-          continue;
-        }
-        summary.restored += 1;
+        summary[await settleOwnerRecord(true) ?? 'restored'] += 1;
         continue;
       }
 
       const racedValue = await store.get(redisKey);
       if (racedValue === record.expected_session_key) {
-        if (!await commitOwnerRecord()) {
-          continue;
-        }
-        summary.matching += 1;
+        summary[await settleOwnerRecord(false) ?? 'matching'] += 1;
       } else if (racedValue === null) {
         summary.missing += 1;
         // eslint-disable-next-line no-console
