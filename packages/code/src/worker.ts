@@ -759,6 +759,11 @@ export class BridgeWorker {
           new DOMException('aborted', 'AbortError')
         );
       }
+      if (Date.now() >= localDeadlineAtMs) {
+        throw new BridgeProtocolError(
+          'Bridge assignment expired while draining cancellation',
+        );
+      }
       if (credentialMaintenanceError != null) {
         throw credentialMaintenanceError;
       }
@@ -1119,11 +1124,11 @@ export class BridgeWorker {
           return;
         }
       } catch (error) {
-        if (signal.aborted) return;
         if (error instanceof BridgeProtocolError && error.status === 404) {
           executionController.abort();
           return;
         }
+        if (signal.aborted) return;
       } finally {
         clearTimeout(timeout);
         executionController.signal.removeEventListener('abort', abortPoll);
