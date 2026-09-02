@@ -17,6 +17,11 @@ import { shutdownTelemetry, traceHttpRequest } from './telemetry';
 import logger from './fileServerLogger';
 import { env } from './config';
 import { redisKeepAliveOptions } from './redis-options';
+import {
+  contentDispositionForOriginalFilename,
+  decodeOriginalFilename,
+  originalFilenameFromMetadata,
+} from './file-metadata';
 
 const { INSTANCE_ID } = env;
 
@@ -458,11 +463,11 @@ app.get('/sessions/:session_id/objects/:objectId/metadata', async (req, res) => 
     }
 
     const stat: Partial<BucketItemStat> = await minioClient.statObject(bucketName, objectName);
-    const originalFilename = decodeOriginalFilename(stat.metaData, path.basename(objectName));
+    const originalFilename = originalFilenameFromMetadata(stat.metaData);
 
     return res.status(200).json({
       name: objectName,
-      originalFilename,
+      ...(originalFilename ? { originalFilename } : {}),
       size: stat.size,
       lastModified: stat.lastModified,
       etag: stat.etag,
@@ -508,17 +513,7 @@ app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
 
     const stat: Partial<BucketItemStat> = await minioClient.statObject(bucketName, objectName);
 
-    let originalFilename = path.basename(objectName);
-    if (stat.metaData?.['original-filename-encoded'] === 'base64' && stat.metaData['original-filename'] != null) {
-      try {
-        originalFilename = Buffer.from(stat.metaData['original-filename'], 'base64').toString('utf8');
-      } catch (err) {
-        logger.warn('Failed to decode filename from metadata, using fallback', { error: err });
-        originalFilename = stat.metaData['original-filename'] ?? path.basename(objectName);
-      }
-    } else if (stat.metaData?.['original-filename'] != null) {
-      originalFilename = stat.metaData['original-filename'];
-    }
+    const originalFilename = originalFilenameFromMetadata(stat.metaData);
 
     logger.info(`[${INSTANCE_ID}] File found: ${objectName}`);
 
@@ -526,8 +521,11 @@ app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
     res.removeHeader('Transfer-Encoding');
     res.removeHeader('Date');
 
-    const encodedFilename = encodeURIComponent(originalFilename);
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodedFilename}`);
+    /* An object-key basename is only a storage identifier, not an original
+     * filename. If an S3-compatible backend drops user metadata, retain
+     * attachment semantics but omit the filename so the runner uses its
+     * caller-supplied destination. */
+    res.setHeader('Content-Disposition', contentDispositionForOriginalFilename(originalFilename));
     if (stat.metaData?.['content-type'] != null) {
       res.setHeader('Content-Type', stat.metaData['content-type']);
     }
@@ -572,27 +570,6 @@ app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
     });
   }
 });
-
-/**
- * Decodes the original filename from metadata.
- * Handles both base64-encoded and plain text filenames for consistency.
- */
-function decodeOriginalFilename(metadata: Record<string, string> | undefined, fallbackName: string): string {
-  if (!metadata) return fallbackName;
-
-  const encodedFilename = metadata['original-filename'];
-  const encodingType = metadata['original-filename-encoded'];
-
-  if (encodedFilename && encodingType === 'base64') {
-    try {
-      return Buffer.from(encodedFilename, 'base64').toString('utf8');
-    } catch {
-      return encodedFilename;
-    }
-  }
-
-  return encodedFilename || fallbackName;
-}
 
 /**
  * Extracts session_id and file_id from object name (format: {session_id}/{file_id}.ext)

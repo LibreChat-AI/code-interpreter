@@ -632,7 +632,10 @@ describe('egress gateway routes', () => {
   test('downloads scoped objects by unwrapping handles', async () => {
     upstreamResponse = new Response('file-body', {
       status: 200,
-      headers: { 'Content-Type': 'text/plain' },
+      headers: {
+        'Content-Type': 'text/plain',
+        'Content-Disposition': "attachment; filename*=UTF-8''file_123.csv",
+      },
     });
     const readSession = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
     const object = objectHandle({});
@@ -643,8 +646,27 @@ describe('egress gateway routes', () => {
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('file-body');
+    expect(response.headers.get('content-disposition')).toBe('attachment');
     expect(upstreamCalls[0].url).toBe('http://file-server/sessions/sess_input/objects/file_123');
     expect(header(upstreamCalls[0].init, INTERNAL_SERVICE_TOKEN_HEADER)).toBe(INTERNAL_TOKEN);
+  });
+
+  test('preserves an authoritative upstream download filename', async () => {
+    upstreamResponse = new Response('file-body', {
+      status: 200,
+      headers: {
+        'Content-Disposition': "attachment; filename*=UTF-8''reports%2Fdata.csv",
+      },
+    });
+    const readSession = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+    const object = objectHandle({});
+
+    const response = await gatewayFetch(`/sessions/${readSession}/objects/${object}`, {
+      headers: grantHeader(),
+    });
+
+    expect(response.headers.get('content-disposition'))
+      .toBe("attachment; filename*=UTF-8''reports%2Fdata.csv");
   });
 
   test('downloads required dirkeep markers without allowing unrelated markers', async () => {
