@@ -72,6 +72,9 @@ export function validateFilePath(name: string, submissionDir: string): void {
   if (!name || name === '.') {
     throw new ValidationError('File path must not be empty');
   }
+  if (name.includes('\0')) {
+    throw new ValidationError('File path must not contain NUL bytes');
+  }
   /* Reject absolute paths up front. `path.resolve(submissionDir, name)`
    * ignores `submissionDir` when `name` is absolute, so an absolute path
    * that happens to point inside `submissionDir` (e.g. the exact on-disk

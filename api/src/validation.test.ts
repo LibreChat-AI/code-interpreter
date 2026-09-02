@@ -126,6 +126,10 @@ describe('validateFilePath', () => {
     expect(() => validateFilePath('.', submissionDir)).toThrow(ValidationError);
   });
 
+  it('rejects NUL bytes in file names', () => {
+    expect(() => validateFilePath('file\0.txt', submissionDir)).toThrow(/NUL/);
+  });
+
   it('rejects path traversal with .. segments', () => {
     expect(() => validateFilePath('../etc/passwd', submissionDir)).toThrow(ValidationError);
     expect(() => validateFilePath('a/../../escape', submissionDir)).toThrow(ValidationError);
@@ -187,5 +191,9 @@ describe('isValidFilePath', () => {
   it('returns false for empty or shape-violating paths', () => {
     expect(isValidFilePath('', submissionDir)).toBe(false);
     expect(isValidFilePath('a'.repeat(MAX_LEN + 10), submissionDir)).toBe(false);
+  });
+
+  it('returns false for paths containing NUL bytes', () => {
+    expect(isValidFilePath('file\0.txt', submissionDir)).toBe(false);
   });
 });
