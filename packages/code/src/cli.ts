@@ -136,7 +136,10 @@ async function run(runtimeSessionId?: string): Promise<void> {
     runtimeSupervisor:
       runtimeMode === 'docker'
         ? new DockerRuntimeSupervisor({
-            image: required('LIBRECHAT_CODE_RUNTIME_IMAGE'),
+            image:
+              runtimeSessionId == null
+                ? required('LIBRECHAT_CODE_RUNTIME_IMAGE')
+                : process.env.LIBRECHAT_CODE_RUNTIME_IMAGE?.trim(),
           })
         : new EndpointRuntimeSupervisor({
             endpoint: sandboxEndpoint,

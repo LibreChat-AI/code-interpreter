@@ -44,7 +44,7 @@ export interface ContainerRuntimeRunOptions {
 }
 
 export interface DockerRuntimeSupervisorOptions {
-  image: string;
+  image?: string;
   capabilities?: string[];
   dockerCommand?: string;
   runnerPort?: number;
@@ -139,8 +139,8 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
   private readonly capabilities: string[];
 
   constructor(private readonly options: DockerRuntimeSupervisorOptions) {
-    if (options.image.trim().length === 0) {
-      throw new Error('Docker runtime image is required');
+    if (options.image != null && options.image.trim().length === 0) {
+      throw new Error('Docker runtime image cannot be empty');
     }
     if (options.capabilities?.some((capability) => !CAPABILITY_PATTERN.test(capability))) {
       throw new Error('Docker runtime capabilities must be uppercase capability names');
@@ -188,6 +188,8 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     runtimeSessionId: string,
     signal?: AbortSignal,
   ): Promise<boolean> {
+    const image = this.options.image?.trim();
+    if (!image) throw new Error('Docker runtime image is required for acquisition');
     const running = await this.containerRunning(name, signal);
     if (running) return false;
     if (running === false) {
@@ -213,7 +215,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
         `com.librechat.code.runtime-hash=${containerSuffix(runtimeSessionId)}`,
         '--env',
         'SANDBOX_SESSION_WORKSPACE_ENABLED=true',
-        this.options.image,
+        image,
       ],
       { signal },
     );
