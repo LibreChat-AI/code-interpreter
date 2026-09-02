@@ -593,7 +593,6 @@ export class BridgeWorker {
       if (executionController.signal.aborted) {
         throw executionController.signal.reason ?? new DOMException('aborted', 'AbortError');
       }
-      const sandboxExecuteUrl = `${runtimeLease.endpoint.replace(/\/+$/, '')}/execute`;
       const headers = {
         ...assignment.request.headers,
         ...(runtimeLease.sessionId
@@ -607,28 +606,25 @@ export class BridgeWorker {
         );
       }
       sandboxStarted = true;
-      const response = await this.fetchImpl(
-        sandboxExecuteUrl,
+      const response = await this.executeRuntime(
+        runtimeLease,
+        sandboxRequestBody,
         {
-          method: 'POST',
-          headers: {
-            ...headers,
-            'Content-Type': 'application/json',
-          },
-          body: sandboxRequestBody,
-          signal: executionController.signal,
+          ...headers,
+          'Content-Type': 'application/json',
         },
+        executionController.signal,
       );
       let payload: object = {};
       try {
-        payload = (await response.json()) as object;
+        payload = JSON.parse(response.body) as object;
       } catch (error) {
-        if (response.ok) throw error;
+        if (response.status >= 200 && response.status < 300) throw error;
       }
       if (credentialMaintenanceError != null) {
         throw credentialMaintenanceError;
       }
-      if (!response.ok) {
+      if (response.status < 200 || response.status >= 300) {
         sandboxRejectedExecution =
           response.status >= 400 &&
           response.status < 500 &&
@@ -738,6 +734,28 @@ export class BridgeWorker {
       return assignment.remainingMs ?? 0;
     }
     return Math.max(0, Date.parse(assignment.expiresAt) - Date.now());
+  }
+
+  private async executeRuntime(
+    lease: RuntimeLease,
+    body: string,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+  ): Promise<{ status: number; body: string }> {
+    if (lease.execute != null) {
+      return await lease.execute({ body, headers, signal });
+    }
+    if (lease.endpoint == null) {
+      throw new BridgeProtocolError('Runtime lease does not provide an execution transport');
+    }
+    const endpoint = lease.endpoint.replace(/\/+$/, '');
+    const response = await this.fetchImpl(`${endpoint}/execute`, {
+      method: 'POST',
+      headers,
+      body,
+      signal,
+    });
+    return { status: response.status, body: await response.text() };
   }
 
   private async releaseRuntimeLease(

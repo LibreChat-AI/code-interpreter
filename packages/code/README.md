@@ -37,6 +37,24 @@ Use `--identity <path>` while pairing and
 `LIBRECHAT_CODE_IDENTITY_FILE=<path>` while running to override the identity
 file location.
 
+## Docker runtime supervisor (programmatic adapter)
+
+`DockerRuntimeSupervisor` is the first self-contained local OCI adapter. It
+owns one named container per runtime session, does not publish the runner port,
+starts the container with `--network none`, drops every Linux capability, and
+sets `no-new-privileges`. The trusted worker invokes the runner only through
+`docker exec` to `127.0.0.1` inside that container. The sandbox therefore has
+neither an inbound host port nor network egress.
+
+It is exported for use by a deployment-specific worker launcher. It requires a
+runtime image that provides the Code Interpreter `/api/v2/health` and
+`/api/v2/execute` endpoints and supports
+`SANDBOX_SESSION_WORKSPACE_ENABLED=true`. A dedicated LibreChat runtime image
+and CLI selector are the next layer; this adapter intentionally does not turn
+an arbitrary image into a supported security boundary. Image-specific Linux
+capabilities must be explicitly configured by the trusted launcher; the
+default grants none.
+
 ## Static compatibility mode
 
 Non-hardened development deployments may still run with a static token:
