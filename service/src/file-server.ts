@@ -17,7 +17,11 @@ import { shutdownTelemetry, traceHttpRequest } from './telemetry';
 import logger from './fileServerLogger';
 import { env } from './config';
 import { redisKeepAliveOptions } from './redis-options';
-import { decodeOriginalFilename, originalFilenameFromMetadata } from './file-metadata';
+import {
+  contentDispositionForOriginalFilename,
+  decodeOriginalFilename,
+  originalFilenameFromMetadata,
+} from './file-metadata';
 
 const { INSTANCE_ID } = env;
 
@@ -518,12 +522,10 @@ app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
     res.removeHeader('Date');
 
     /* An object-key basename is only a storage identifier, not an original
-     * filename. If an S3-compatible backend drops user metadata, omit the
-     * header so the runner keeps the destination supplied by the caller. */
-    if (originalFilename) {
-      const encodedFilename = encodeURIComponent(originalFilename);
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodedFilename}`);
-    }
+     * filename. If an S3-compatible backend drops user metadata, retain
+     * attachment semantics but omit the filename so the runner uses its
+     * caller-supplied destination. */
+    res.setHeader('Content-Disposition', contentDispositionForOriginalFilename(originalFilename));
     if (stat.metaData?.['content-type'] != null) {
       res.setHeader('Content-Type', stat.metaData['content-type']);
     }
