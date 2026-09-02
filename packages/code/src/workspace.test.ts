@@ -236,6 +236,26 @@ test('search rejects queries larger than its bounded preview', async (t) => {
   );
 });
 
+test('search rejects non-scalar Unicode queries', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'notes.txt'), '\ufffd');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'search_text',
+      workspaceId: 'primary',
+      query: '\ud800',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
+  );
+});
+
 test('search keeps valid UTF-8 intact in a centered preview', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -280,6 +300,41 @@ test('search handles invalid UTF-8 without silently dropping an ASCII match', as
   if (result.operation !== 'search_text') assert.fail('expected search result');
   assert.equal(result.matches.length, 1);
   assert.equal(result.matches[0]?.path, 'legacy.txt');
+});
+
+test('search decodes BOM-marked UTF-16 text', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const utf16le = Buffer.from('before needle after', 'utf16le');
+  const utf16be = Buffer.from(utf16le);
+  utf16be.swap16();
+  await writeFile(
+    join(root, 'little-endian.txt'),
+    Buffer.concat([Buffer.from([0xff, 0xfe]), utf16le]),
+  );
+  await writeFile(
+    join(root, 'big-endian.txt'),
+    Buffer.concat([Buffer.from([0xfe, 0xff]), utf16be]),
+  );
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'search_text',
+    workspaceId: 'primary',
+    query: 'needle',
+  });
+
+  if (result.operation !== 'search_text') assert.fail('expected search result');
+  assert.deepEqual(
+    result.matches.map(({ path, column, text }) => ({ path, column, text })),
+    [
+      { path: 'big-endian.txt', column: 8, text: 'before needle after' },
+      { path: 'little-endian.txt', column: 8, text: 'before needle after' },
+    ],
+  );
 });
 
 test('read rejects a FIFO without waiting for a writer', async (t) => {

@@ -359,6 +359,7 @@ async function searchWorkspace(
     !request.query ||
     request.query.length > 4096 ||
     encodedQuery.length > MAX_SEARCH_PREVIEW_LENGTH ||
+    encodedQuery.toString('utf8') !== request.query ||
     request.query.includes('\0') ||
     request.query.includes('\n') ||
     request.query.includes('\r')
@@ -389,7 +390,6 @@ async function searchWorkspace(
     signal,
     deadline,
   );
-  const query = encodedQuery;
   const matches: WorkspaceSearchMatch[] = [];
   let truncated = candidates.truncated;
   for (const candidate of candidates.paths) {
@@ -432,40 +432,44 @@ async function searchWorkspace(
         'SEARCH_TIMEOUT',
       );
     }
+    const decodedContent =
+      content[0] === 0xff && content[1] === 0xfe
+        ? new TextDecoder('utf-16le').decode(content)
+        : content[0] === 0xfe && content[1] === 0xff
+          ? new TextDecoder('utf-16be').decode(content)
+          : content.toString('utf8');
     let lineStart = 0;
     let lineNumber = 1;
-    while (lineStart <= content.length) {
-      const newline = content.indexOf(0x0a, lineStart);
-      const lineEnd = newline < 0 ? content.length : newline;
-      const line = content.subarray(
+    while (lineStart <= decodedContent.length) {
+      const newline = decodedContent.indexOf('\n', lineStart);
+      const lineEnd = newline < 0 ? decodedContent.length : newline;
+      const line = decodedContent.slice(
         lineStart,
-        lineEnd > lineStart && content[lineEnd - 1] === 0x0d
+        lineEnd > lineStart && decodedContent[lineEnd - 1] === '\r'
           ? lineEnd - 1
           : lineEnd,
       );
-      const column = line.indexOf(query);
+      const column = line.indexOf(request.query);
       if (column >= 0) {
         if (matches.length === maxResults) {
           truncated = true;
           break;
         }
-        const decodedLine = line.toString('utf8');
-        const decodedColumn = decodedLine.indexOf(request.query);
         const previewStart = Math.min(
           Math.max(
             0,
-            decodedColumn -
+            column -
               Math.floor(
                 (MAX_SEARCH_PREVIEW_LENGTH - request.query.length) / 2,
               ),
           ),
-          Math.max(0, decodedLine.length - MAX_SEARCH_PREVIEW_LENGTH),
+          Math.max(0, line.length - MAX_SEARCH_PREVIEW_LENGTH),
         );
         matches.push({
           path,
           line: lineNumber,
           column: column + 1,
-          text: decodedLine.slice(
+          text: line.slice(
             previewStart,
             previewStart + MAX_SEARCH_PREVIEW_LENGTH,
           ),
