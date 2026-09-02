@@ -74,6 +74,37 @@ test('rejects traversal outside a registered workspace without leaking its host 
   );
 });
 
+test('rejects non-scalar Unicode workspace paths', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, '\ufffd.txt'), 'needle');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'primary',
+      path: '\ud800.txt',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
+  );
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'search_text',
+      workspaceId: 'primary',
+      query: 'needle',
+      path: '\ud800.txt',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
+  );
+});
+
 test('rejects a symlink that escapes a registered workspace', async (t) => {
   const parent = await mkdtemp(
     join(tmpdir(), 'librechat-code-workspace-parent-'),
@@ -279,6 +310,54 @@ test('search keeps valid UTF-8 intact in a centered preview', async (t) => {
   assert.match(result.matches[0]?.text ?? '', /needle/);
 });
 
+test('search does not split surrogate pairs in a centered preview', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, 'emoji.txt'),
+    `${'\ud83d\ude00'.repeat(1500)}needle${'\ud83d\ude00'.repeat(1500)}`,
+  );
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'search_text',
+    workspaceId: 'primary',
+    query: 'needle',
+  });
+
+  if (result.operation !== 'search_text') assert.fail('expected search result');
+  const preview = result.matches[0]?.text ?? '';
+  assert.equal(Buffer.from(preview).toString('utf8'), preview);
+  assert.match(preview, /needle/);
+});
+
+test('search strips a UTF-8 BOM before reporting columns', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, 'utf8-bom.txt'),
+    Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('needle')]),
+  );
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'search_text',
+    workspaceId: 'primary',
+    query: 'needle',
+  });
+
+  if (result.operation !== 'search_text') assert.fail('expected search result');
+  assert.deepEqual(result.matches, [
+    { path: 'utf8-bom.txt', line: 1, column: 1, text: 'needle' },
+  ]);
+});
+
 test('search handles invalid UTF-8 without silently dropping an ASCII match', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -335,6 +414,17 @@ test('search decodes BOM-marked UTF-16 text', async (t) => {
       { path: 'little-endian.txt', column: 8, text: 'before needle after' },
     ],
   );
+
+  for (const path of ['big-endian.txt', 'little-endian.txt']) {
+    const read = await tools.execute({
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'primary',
+      path,
+    });
+    if (read.operation !== 'read_file') assert.fail('expected read result');
+    assert.equal(read.content, 'before needle after');
+  }
 });
 
 test('read rejects a FIFO without waiting for a writer', async (t) => {

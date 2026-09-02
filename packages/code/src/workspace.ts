@@ -84,6 +84,51 @@ const MAX_SEARCH_CANDIDATE_BYTES = 1024 * 1024;
 const MAX_SEARCH_CANDIDATES = 20_000;
 const SEARCH_TIMEOUT_MS = 10_000;
 
+function isUtf8ScalarString(value: string): boolean {
+  return Buffer.from(value).toString('utf8') === value;
+}
+
+function decodeWorkspaceText(content: Buffer): string {
+  if (content[0] === 0xff && content[1] === 0xfe) {
+    return new TextDecoder('utf-16le').decode(content.subarray(2));
+  }
+  if (content[0] === 0xfe && content[1] === 0xff) {
+    return new TextDecoder('utf-16be').decode(content.subarray(2));
+  }
+  const utf8Start =
+    content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf ? 3 : 0;
+  return content.subarray(utf8Start).toString('utf8');
+}
+
+function sliceWithoutSplittingSurrogates(
+  value: string,
+  start: number,
+  maxLength: number,
+): string {
+  let safeStart = start;
+  if (
+    safeStart > 0 &&
+    safeStart < value.length &&
+    value.charCodeAt(safeStart) >= 0xdc00 &&
+    value.charCodeAt(safeStart) <= 0xdfff &&
+    value.charCodeAt(safeStart - 1) >= 0xd800 &&
+    value.charCodeAt(safeStart - 1) <= 0xdbff
+  ) {
+    safeStart += 1;
+  }
+  let safeEnd = Math.min(value.length, safeStart + maxLength);
+  if (
+    safeEnd < value.length &&
+    value.charCodeAt(safeEnd - 1) >= 0xd800 &&
+    value.charCodeAt(safeEnd - 1) <= 0xdbff &&
+    value.charCodeAt(safeEnd) >= 0xdc00 &&
+    value.charCodeAt(safeEnd) <= 0xdfff
+  ) {
+    safeEnd -= 1;
+  }
+  return value.slice(safeStart, safeEnd);
+}
+
 export class WorkspaceToolError extends Error {
   constructor(
     message: string,
@@ -118,6 +163,7 @@ export function isWorkspaceToolRequest(
       typeof request.path === 'string' &&
       request.path.length > 0 &&
       request.path.length <= 4096 &&
+      isUtf8ScalarString(request.path) &&
       (request.startLine === undefined ||
         Number.isSafeInteger(request.startLine)) &&
       (request.maxLines === undefined || Number.isSafeInteger(request.maxLines))
@@ -131,7 +177,8 @@ export function isWorkspaceToolRequest(
       (request.path === undefined ||
         (typeof request.path === 'string' &&
           request.path.length > 0 &&
-          request.path.length <= 4096)) &&
+          request.path.length <= 4096 &&
+          isUtf8ScalarString(request.path))) &&
       (request.maxResults === undefined ||
         Number.isSafeInteger(request.maxResults))
     );
@@ -152,6 +199,7 @@ function resolveWorkspacePath(root: string, requestedPath: string): string {
   if (
     !requestedPath ||
     requestedPath.includes('\0') ||
+    !isUtf8ScalarString(requestedPath) ||
     isAbsolute(requestedPath)
   ) {
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
@@ -224,7 +272,7 @@ async function readConfinedFile(
   root: string,
   requestedPath: string,
 ): Promise<string> {
-  return (await readConfinedFileBuffer(root, requestedPath)).toString('utf8');
+  return decodeWorkspaceText(await readConfinedFileBuffer(root, requestedPath));
 }
 
 interface SearchCandidates {
@@ -432,12 +480,7 @@ async function searchWorkspace(
         'SEARCH_TIMEOUT',
       );
     }
-    const decodedContent =
-      content[0] === 0xff && content[1] === 0xfe
-        ? new TextDecoder('utf-16le').decode(content)
-        : content[0] === 0xfe && content[1] === 0xff
-          ? new TextDecoder('utf-16be').decode(content)
-          : content.toString('utf8');
+    const decodedContent = decodeWorkspaceText(content);
     let lineStart = 0;
     let lineNumber = 1;
     while (lineStart <= decodedContent.length) {
@@ -469,9 +512,10 @@ async function searchWorkspace(
           path,
           line: lineNumber,
           column: column + 1,
-          text: line.slice(
+          text: sliceWithoutSplittingSurrogates(
+            line,
             previewStart,
-            previewStart + MAX_SEARCH_PREVIEW_LENGTH,
+            MAX_SEARCH_PREVIEW_LENGTH,
           ),
         });
       }
