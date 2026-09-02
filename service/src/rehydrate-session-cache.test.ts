@@ -45,6 +45,21 @@ class MemoryStore implements RecoveryStore {
     this.ttls.set(key, ttlSeconds);
     return 'OK';
   }
+
+  async ttl(key: string): Promise<number> {
+    if (!this.values.has(key)) {
+      return -2;
+    }
+    return this.ttls.get(key) ?? -1;
+  }
+
+  async expire(key: string, ttlSeconds: number): Promise<number> {
+    if (!this.values.has(key)) {
+      return 0;
+    }
+    this.ttls.set(key, ttlSeconds);
+    return 1;
+  }
 }
 
 describe('rehydrate-session-cache', () => {
@@ -212,9 +227,56 @@ describe('rehydrate-session-cache', () => {
     expect(store.values.get(`session-owner:${SESSION_ID}`)).toBe(SESSION_KEY);
   });
 
-  it('never replaces an existing owner record', async () => {
+  it('reports a conflicting owner record and restores nothing for that session', async () => {
     const store = new MemoryStore();
     store.values.set(`session-owner:${SESSION_ID}`, 'tenant-id:user:someone-else');
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(summary).toEqual({ input: 1, missing: 0, restored: 0, matching: 0, conflicts: 1 });
+    expect(store.values.get(`session-owner:${SESSION_ID}`)).toBe('tenant-id:user:someone-else');
+    /* The manifest's claimant must not get a day of access the service
+     * never granted it. */
+    expect(store.values.has(`session:${SESSION_ID}`)).toBe(false);
+  });
+
+  it('surfaces a conflicting owner record during a dry run', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session-owner:${SESSION_ID}`, 'tenant-id:user:someone-else');
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: false, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(summary).toEqual({ input: 1, missing: 0, restored: 0, matching: 0, conflicts: 1 });
+    expect(store.values.size).toBe(1);
+  });
+
+  it('extends a matching owner record that would expire before the restored cache key', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session-owner:${SESSION_ID}`, SESSION_KEY);
+    store.ttls.set(`session-owner:${SESSION_ID}`, 600);
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(summary).toMatchObject({ restored: 1, conflicts: 0 });
+    expect(store.ttls.get(`session-owner:${SESSION_ID}`)).toBe(7776000);
+  });
+
+  it('leaves a longer-lived owner record alone', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session-owner:${SESSION_ID}`, SESSION_KEY);
+    store.ttls.set(`session-owner:${SESSION_ID}`, 9999999);
 
     await recoverSessionCache(
       [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
@@ -222,7 +284,7 @@ describe('rehydrate-session-cache', () => {
       { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
     );
 
-    expect(store.values.get(`session-owner:${SESSION_ID}`)).toBe('tenant-id:user:someone-else');
+    expect(store.ttls.get(`session-owner:${SESSION_ID}`)).toBe(9999999);
   });
 
   it('does not write during a dry run', async () => {
@@ -258,15 +320,23 @@ describe('rehydrate-session-cache', () => {
   it('preserves partial counts when a Redis operation fails', async () => {
     let reads = 0;
     const store: RecoveryStore = {
+      /* Two reads per record: the durable owner record, then the cache
+       * key. The first record resolves as matching; the second fails. */
       async get(): Promise<string | null> {
         reads += 1;
-        if (reads === 1) {
+        if (reads <= 2) {
           return SESSION_KEY;
         }
         throw new Error('Redis unavailable');
       },
       async set(): Promise<'OK' | null> {
         throw new Error('unexpected set');
+      },
+      async ttl(): Promise<number> {
+        return 7776000;
+      },
+      async expire(): Promise<number> {
+        throw new Error('unexpected expire');
       },
     };
 
@@ -299,6 +369,12 @@ describe('rehydrate-session-cache', () => {
       },
       async set(): Promise<null> {
         return null;
+      },
+      async ttl(): Promise<number> {
+        return -2;
+      },
+      async expire(): Promise<number> {
+        return 0;
       },
     };
 

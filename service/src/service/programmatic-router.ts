@@ -1316,7 +1316,12 @@ async function handleBlocking(
   const execution_id = nanoid();
   const identity = getExecutionIdentity(req, userId);
 
-  void recordSessionOwnership(connection, session_id, sessionKey);
+  /* Awaited: a partial registration (cache key written, durable record
+   * refused — a Redis ACL scoped to `session:*` would do it) would let the
+   * job write files that become undeletable once `SESSION_CACHE_TTL`
+   * lapses. The caller turns a rejection into a 500 before anything is
+   * enqueued. */
+  await recordSessionOwnership(connection, session_id, sessionKey);
 
   const executionState: ExecutionState = {
     execution_id,

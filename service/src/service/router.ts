@@ -932,7 +932,13 @@ const deleteSessionObject = async (req: t.AuthenticatedRequest, res: Response) =
      * as retryable and has it re-issuing the same DELETE for an object
      * that no longer exists on every subsequent pass. */
     if (axios.isAxiosError(error) && error.response?.status === 404) {
-      await connection.del(`upload:${req.sessionKey}${session_id}${fileId}`);
+      /* Best effort: this runs inside the catch block, where a rejection
+       * has no handler above it — Express 4 does not forward async
+       * rejections, so it would hang the request instead of answering.
+       * The key expires on its own, and the object is already gone. */
+      await connection.del(`upload:${req.sessionKey}${session_id}${fileId}`).catch((err: unknown) => {
+        logger.warn(`[${INSTANCE_ID}] Failed to clear upload key for absent file - Session ID: ${session_id} | File ID: ${fileId}:`, err);
+      });
       logger.info(`[${INSTANCE_ID}] File already absent: Session ID: ${session_id} | File ID: ${fileId}`);
       return res.status(404).json({ error: 'File not found' });
     }
