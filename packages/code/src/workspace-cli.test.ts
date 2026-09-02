@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -29,7 +32,11 @@ test('CLI validates a configured worker directory before registration', () => {
   assert.match(result.stderr, /invalid workspace registration/i);
 });
 
-test('CLI falls back to the workspace ID when the directory basename is empty', async (t) => {
+test('CLI falls back to the workspace ID when the directory basename is invalid', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-cli-'));
+  const workspaceRoot = join(root, '   ');
+  await mkdir(workspaceRoot);
+  t.after(() => rm(root, { recursive: true, force: true }));
   let resolveRegistration: ((value: Record<string, unknown>) => void) | undefined;
   const registration = new Promise<Record<string, unknown>>((resolve) => {
     resolveRegistration = resolve;
@@ -73,7 +80,7 @@ test('CLI falls back to the workspace ID when the directory basename is empty', 
       fileURLToPath(new URL('./cli.js', import.meta.url)),
       'run',
       '--worker-dir',
-      '/',
+      workspaceRoot,
       '--workspace-id',
       'root-workspace',
     ],

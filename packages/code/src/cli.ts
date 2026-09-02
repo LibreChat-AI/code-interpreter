@@ -15,6 +15,7 @@ import { BridgeWorker } from './worker.js';
 import { DockerRuntimeSupervisor, EndpointRuntimeSupervisor } from './runtime.js';
 import { LocalWorkspaceTools } from './workspace.js';
 import {
+  BRIDGE_WORKSPACE_NAME_MAX_LENGTH,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
 } from './protocol.js';
@@ -64,6 +65,14 @@ function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index >= 0) return args[index + 1];
   return args.find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1);
+}
+
+function defaultWorkspaceName(workerDirectory: string, workspaceId: string): string {
+  const directoryName = basename(resolve(workerDirectory));
+  return directoryName.trim().length > 0 &&
+    directoryName.length <= BRIDGE_WORKSPACE_NAME_MAX_LENGTH
+    ? directoryName
+    : workspaceId;
 }
 
 async function pair(args: string[]): Promise<void> {
@@ -205,7 +214,7 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
             name:
               option(args, '--workspace-name') ??
               process.env.LIBRECHAT_CODE_WORKSPACE_NAME?.trim() ??
-              (basename(resolve(workerDirectory)) || workspaceId),
+              defaultWorkspaceName(workerDirectory, workspaceId),
             root: workerDirectory,
           },
         ],
