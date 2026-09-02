@@ -11,6 +11,7 @@ export interface BridgeWorkerCapabilities {
   sandboxProfile: string;
   runtimes: string[];
   policyDigest?: string;
+  requiresReadyConfirmation?: boolean;
 }
 
 export interface BridgeWorkerRegistration {
@@ -24,6 +25,8 @@ export interface BridgeWorkerRegistrationResponse {
   protocolVersion: BridgeProtocolVersion;
   workerId: string;
   incarnationId: string;
+  /** Monotonic per-worker generation allocated when the active incarnation changes. */
+  registrationGeneration?: number;
   registeredAt: string;
   leaseTtlMs: number;
 }
@@ -138,6 +141,8 @@ export function isValidBridgeWorkerCapabilities(
     ) &&
     (capabilities.policyDigest === undefined ||
       (typeof capabilities.policyDigest === 'string' &&
-        /^[a-f0-9]{64}$/.test(capabilities.policyDigest)))
+        /^[a-f0-9]{64}$/.test(capabilities.policyDigest))) &&
+    (capabilities.requiresReadyConfirmation === undefined ||
+      typeof capabilities.requiresReadyConfirmation === 'boolean')
   );
 }

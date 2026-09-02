@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import { DockerRuntimeSupervisor, EndpointRuntimeSupervisor } from './runtime.js';
@@ -109,6 +110,42 @@ test('docker runtime supervisor creates a networkless stateful runtime and execu
   assert.ok(health?.includes('--max-time'));
 });
 
+test('docker runtime supervisor preserves the legacy profile digest for the default network', async () => {
+  const image = 'example/code-runtime:latest';
+  const legacyDigest = createHash('sha256')
+    .update(
+      JSON.stringify({
+        version: 1,
+        image,
+        profileRevision: null,
+        restartStoppedContainers: true,
+        capabilities: [],
+        securityOptions: [],
+        environment: [],
+        bindMounts: [],
+      }),
+    )
+    .digest('hex');
+  const calls: string[][] = [];
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      calls.push(args);
+      if (args[0] === 'container' && args[1] === 'inspect') {
+        return `true|${legacyDigest}|sha256:image-1\n`;
+      }
+      if (args[0] === 'image' && args[1] === 'inspect') return 'sha256:image-1\n';
+      if (args[0] === 'exec') return '200';
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerRuntimeSupervisor({ image, client });
+
+  await supervisor.acquire(assignment('existing-workspace'));
+
+  assert.equal(calls.some((args) => args[0] === 'container' && args[1] === 'rm'), false);
+  assert.equal(calls.some((args) => args[0] === 'run'), false);
+});
+
 test('docker runtime supervisor applies an explicit macOS NsJail confinement profile', async () => {
   const calls: string[][] = [];
   const client: ContainerRuntimeClient = {
@@ -123,6 +160,7 @@ test('docker runtime supervisor applies an explicit macOS NsJail confinement pro
   const supervisor = new DockerRuntimeSupervisor({
     image: 'example/code-runtime:latest',
     client,
+    network: 'librechat-code-worker',
     capabilities: ['SYS_ADMIN', 'CHOWN'],
     securityOptions: ['seccomp=/repo/seccomp/nsjail.json'],
     environment: { SANDBOX_USE_CGROUPV2: 'false' },
@@ -134,6 +172,7 @@ test('docker runtime supervisor applies an explicit macOS NsJail confinement pro
 
   const run = calls.find(args => args[0] === 'run') ?? [];
   assert.ok(run.includes('SYS_ADMIN'));
+  assert.equal(run[run.indexOf('--network') + 1], 'librechat-code-worker');
   assert.ok(run.includes('CHOWN'));
   assert.ok(run.includes('seccomp=/repo/seccomp/nsjail.json'));
   assert.ok(run.includes('SANDBOX_USE_CGROUPV2=false'));

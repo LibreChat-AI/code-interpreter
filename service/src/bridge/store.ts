@@ -68,6 +68,25 @@ function workerIncarnationKey(workerId: string): string {
   return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation`;
 }
 
+function workerRegistrationGenerationKey(workerId: string): string {
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:registration-generation`;
+}
+
+function workerRegistrationGenerationIncarnationKey(workerId: string): string {
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:registration-generation-incarnation`;
+}
+
+function workerReadyKey(workerId: string): string {
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:ready`;
+}
+
+function workerReadyToken(
+  incarnationId: string,
+  registrationGeneration: number,
+): string {
+  return `${incarnationId}:${registrationGeneration}`;
+}
+
 function incarnationFenceKey(workerId: string, incarnationId: string): string {
   return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:${incarnationId}:fenced`;
 }
@@ -240,7 +259,7 @@ export class RedisBridgeStore {
       pairingGeneration?: number;
       activeCredentialId?: string;
     },
-  ): Promise<void> {
+  ): Promise<number> {
     const authorizationObject =
       typeof authorization === 'object' ? authorization : undefined;
     const expectedActiveCredentialId =
@@ -278,15 +297,24 @@ export class RedisBridgeStore {
       '    redis.call(\'SET\', ARGV[4] .. current .. \':fenced\', \"1\")',
       '  end',
       'end',
+      'local registrationGeneration = tonumber(redis.call(\'GET\', KEYS[10]) or \"0\")',
+      'local registrationGenerationIncarnation = redis.call(\'GET\', KEYS[11])',
+      'local registrationGenerationChanged = false',
+      'if registrationGeneration < 1 or registrationGenerationIncarnation ~= ARGV[1] then',
+      '  registrationGeneration = redis.call(\'INCR\', KEYS[10])',
+      '  redis.call(\'SET\', KEYS[11], ARGV[1])',
+      '  registrationGenerationChanged = true',
+      'end',
       'redis.call(\'SET\', KEYS[1], ARGV[2], \"EX\", ARGV[3])',
       'redis.call(\'SET\', KEYS[4], ARGV[1], \"EX\", ARGV[3])',
-      'return 1',
+      'if ARGV[9] == "1" and registrationGenerationChanged then redis.call(\'DEL\', KEYS[12]) end',
+      'return registrationGeneration',
     ].join('\n');
     const result = Number(
       await boundedCommand(
         this.redis.eval(
           script,
-          9,
+          12,
           workerKey(registration.workerId),
           incarnationFenceKey(registration.workerId, registration.incarnationId),
           quarantineKey(registration.workerId, registration.incarnationId),
@@ -296,6 +324,9 @@ export class RedisBridgeStore {
           `${PREFIX}:pairing-generation:${registration.workerId}`,
           `${PREFIX}:stable-identity:${registration.workerId}`,
           `${PREFIX}:identity:${registration.workerId}`,
+          workerRegistrationGenerationKey(registration.workerId),
+          workerRegistrationGenerationIncarnationKey(registration.workerId),
+          workerReadyKey(registration.workerId),
           registration.incarnationId,
           JSON.stringify(registration),
           String(this.workerTtlSeconds),
@@ -306,6 +337,7 @@ export class RedisBridgeStore {
           authorizationObject?.identityId ?? '',
           expectedActiveCredentialId ?? '',
           registration.identityId ?? '',
+          registration.capabilities.requiresReadyConfirmation === true ? '1' : '0',
         ),
         this.redisCommandTimeoutMs,
         'Bridge worker registration',
@@ -341,6 +373,73 @@ export class RedisBridgeStore {
         'Bridge worker authorization was revoked before registration completed',
       );
     }
+    if (!Number.isSafeInteger(result) || result < 1) {
+      throw new Error('Bridge worker registration returned an invalid generation');
+    }
+    return result;
+  }
+
+  async confirmReady(
+    workerId: string,
+    incarnationId: string,
+    registrationGeneration: number,
+  ): Promise<void> {
+    const result = Number(
+      await boundedCommand(
+        this.redis.eval(
+          [
+            'if redis.call(\'EXISTS\', KEYS[1]) == 0 then return -1 end',
+            'if redis.call(\'GET\', KEYS[2]) ~= ARGV[1] then return -2 end',
+            'if redis.call(\'GET\', KEYS[3]) ~= ARGV[2] then return -2 end',
+            'if redis.call(\'GET\', KEYS[4]) ~= ARGV[1] then return -2 end',
+            'if redis.call(\'EXISTS\', KEYS[5]) == 1 then return -2 end',
+            'if redis.call(\'EXISTS\', KEYS[6]) == 1 then return -3 end',
+            'redis.call(\'SET\', KEYS[7], ARGV[3], "EX", ARGV[4])',
+            'return 1',
+          ].join('\n'),
+          7,
+          workerKey(workerId),
+          workerIncarnationKey(workerId),
+          workerRegistrationGenerationKey(workerId),
+          workerRegistrationGenerationIncarnationKey(workerId),
+          incarnationFenceKey(workerId, incarnationId),
+          quarantineKey(workerId, incarnationId),
+          workerReadyKey(workerId),
+          incarnationId,
+          String(registrationGeneration),
+          workerReadyToken(incarnationId, registrationGeneration),
+          String(
+            Math.min(
+              this.workerTtlSeconds,
+              Math.ceil(this.workerTtlSeconds / 2) + 5,
+            ),
+          ),
+        ),
+        this.redisCommandTimeoutMs,
+        'Bridge worker readiness confirmation',
+      ),
+    );
+    if (result === -1) {
+      throw new BridgeStoreError(
+        'WORKER_OFFLINE',
+        'Bridge worker registration expired before readiness confirmation',
+      );
+    }
+    if (result === -2) {
+      throw new BridgeStoreError(
+        'WORKER_FENCED',
+        'Bridge worker readiness confirmation is stale',
+      );
+    }
+    if (result === -3) {
+      throw new BridgeStoreError(
+        'WORKER_QUARANTINED',
+        'Bridge worker incarnation is quarantined',
+      );
+    }
+    if (result !== 1) {
+      throw new Error('Bridge worker readiness confirmation failed');
+    }
   }
 
   async dispatch(args: {
@@ -357,17 +456,18 @@ export class RedisBridgeStore {
     ) => Promise<CodeBridgeSettlement>;
   }): Promise<CodeBridgeSettlement> {
     this.assertDispatchActive(args.signal, args.deadlineAtMs);
-    let registration = await this.dispatchCommand(
-      () => this.registration(args.workerId),
+    const dispatchable = await this.dispatchCommand(
+      () => this.dispatchableRegistration(args.workerId),
       args,
       'Bridge worker registration read',
     );
-    if (registration == null) {
+    if (dispatchable == null) {
       throw new BridgeStoreError(
         'WORKER_OFFLINE',
         `Bridge worker ${args.workerId} is offline`,
       );
     }
+    let { registration, readyToken } = dispatchable;
     if (
       (args.requireTenantBinding === true && registration.binding == null) ||
       (registration.binding != null &&
@@ -459,13 +559,18 @@ export class RedisBridgeStore {
         this.assertDispatchActive(args.signal, args.deadlineAtMs);
         assignment.incarnationId = registration.incarnationId;
         queued = await this.dispatchCommand(
-          () => this.enqueueForActiveIncarnation(assignment!, ttlSeconds),
+          () =>
+            this.enqueueForActiveIncarnation(
+              assignment!,
+              ttlSeconds,
+              readyToken,
+            ),
           args,
           'Bridge assignment enqueue',
         );
         if (queued) break;
         const replacement = await this.dispatchCommand(
-          () => this.registration(args.workerId),
+          () => this.dispatchableRegistration(args.workerId),
           args,
           'Bridge replacement registration read',
         );
@@ -477,14 +582,15 @@ export class RedisBridgeStore {
         }
         if (
           args.runtimeSessionId !== undefined &&
-          replacement.capabilities.statefulWorkspace !== true
+          replacement.registration.capabilities.statefulWorkspace !== true
         ) {
           throw new BridgeStoreError(
             'WORKER_MISMATCH',
             `Bridge worker ${args.workerId} does not provide a stateful workspace`,
           );
         }
-        registration = replacement;
+        registration = replacement.registration;
+        readyToken = replacement.readyToken;
       }
       if (!queued) {
         throw new BridgeStoreError(
@@ -1103,6 +1209,35 @@ export class RedisBridgeStore {
     return raw == null ? undefined : (JSON.parse(raw) as RegisteredBridgeWorker);
   }
 
+  private async dispatchableRegistration(
+    workerId: string,
+  ): Promise<
+    | { registration: RegisteredBridgeWorker; readyToken?: string }
+    | undefined
+  > {
+    const [raw, ready, generation, generationIncarnation] = await this.redis.mget(
+      workerKey(workerId),
+      workerReadyKey(workerId),
+      workerRegistrationGenerationKey(workerId),
+      workerRegistrationGenerationIncarnationKey(workerId),
+    );
+    if (raw == null) return undefined;
+    const registration = JSON.parse(raw) as RegisteredBridgeWorker;
+    if (registration.capabilities.requiresReadyConfirmation !== true) {
+      return { registration };
+    }
+    const registrationGeneration = Number(generation);
+    if (
+      !Number.isSafeInteger(registrationGeneration) ||
+      registrationGeneration < 1 ||
+      generationIncarnation !== registration.incarnationId ||
+      ready !== workerReadyToken(registration.incarnationId, registrationGeneration)
+    ) {
+      return undefined;
+    }
+    return { registration, readyToken: ready };
+  }
+
   private assertDispatchActive(
     signal: AbortSignal,
     deadlineAtMs: number,
@@ -1201,16 +1336,18 @@ export class RedisBridgeStore {
   private async enqueueForActiveIncarnation(
     assignment: StoredAssignment,
     ttlSeconds: number,
+    readyToken?: string,
   ): Promise<boolean> {
     const script = [
       'if redis.call(\'GET\', KEYS[1]) ~= ARGV[1] then return 0 end',
-      'if #KEYS == 6 and redis.call(\'EXISTS\', KEYS[6]) == 1 then return -1 end',
+      'if ARGV[7] ~= "" and redis.call(\'GET\', KEYS[6]) ~= ARGV[7] then return 0 end',
+      'if #KEYS == 7 and redis.call(\'EXISTS\', KEYS[7]) == 1 then return -1 end',
       'redis.call(\'SET\', KEYS[2], ARGV[2], \"EX\", ARGV[3])',
       'redis.call(\'RPUSH\', KEYS[3], ARGV[4])',
       'redis.call(\'EXPIRE\', KEYS[3], ARGV[3])',
       'redis.call(\'SET\', KEYS[4], ARGV[1], \"PX\", ARGV[5])',
       'redis.call(\'SET\', KEYS[5], "1", \"PXAT\", ARGV[6])',
-      'if #KEYS == 6 then redis.call(\'SET\', KEYS[6], ARGV[4]) end',
+      'if #KEYS == 7 then redis.call(\'SET\', KEYS[7], ARGV[4]) end',
       'return 1',
     ].join('\n');
     const keys = [
@@ -1219,6 +1356,7 @@ export class RedisBridgeStore {
       queueKey(assignment.workerId, assignment.incarnationId),
       lockIncarnationKey(assignment.workerId),
       assignmentDeadlineKey(assignment.assignmentId),
+      workerReadyKey(assignment.workerId),
     ];
     if (assignment.runtimeSessionId !== undefined) {
       keys.push(
@@ -1238,6 +1376,7 @@ export class RedisBridgeStore {
       assignment.assignmentId,
       String(ttlSeconds * 1000),
       String(Date.parse(assignment.expiresAt)),
+      readyToken ?? '',
     );
     if (Number(result) === -1) {
       throw new BridgeStoreError(

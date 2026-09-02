@@ -82,7 +82,7 @@ if credential then
   redis.call('DEL', KEYS[3])
   redis.call('DEL', ARGV[1] .. credential)
 end
-redis.call('DEL', KEYS[1], KEYS[3], KEYS[4], KEYS[5], KEYS[6])
+redis.call('DEL', KEYS[1], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7])
 if activeIncarnation then
   redis.call('SET', ARGV[2] .. activeIncarnation .. ':fenced', '1')
 end
@@ -446,13 +446,14 @@ export class RedisBridgePairingStore {
     // that linearizes afterward installs a distinct generation and code.
     await this.redis.eval(
       REVOKE_PAIRING_SCRIPT,
-      6,
+      7,
       workerPairingIndexKey(workerId),
       workerPairingGenerationKey(workerId),
       workerIdentityKey(workerId),
       workerStableIdentityKey(workerId),
       `${PREFIX}:worker:${encodeURIComponent(workerId)}`,
       `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation`,
+      `${PREFIX}:worker:${encodeURIComponent(workerId)}:ready`,
       `${PREFIX}:credential:`,
       `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:`,
     );

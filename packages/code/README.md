@@ -96,10 +96,48 @@ reports state loss instead of restarting it. The next assignment starts a new
 environment. Treat profile changes and Docker restarts as environment resets
 and preserve any needed workspace contents first.
 
-This first local profile supports inline request files. By-reference inputs and
-generated-file uploads require a worker-mediated file relay and are not yet
-supported; the runtime remains networkless rather than opening general egress
-to reach a file server.
+By-reference inputs and generated-file uploads remain disabled unless the
+worker-managed file relay is configured. Build the worker image, then point the
+relay at the deployment's public egress-gateway base URL:
+
+```bash
+docker build -t librechat-code-worker:local packages/code
+
+LIBRECHAT_CODE_FILE_RELAY_IMAGE=librechat-code-worker:local \
+LIBRECHAT_CODE_FILE_RELAY_UPSTREAM=https://code.example.com/egress \
+LIBRECHAT_CODE_EXECUTION_MANIFEST_PUBLIC_KEY='<base64 Ed25519 public key>' \
+librechat-code run
+```
+
+The URL is illustrative; it must be the externally reachable HTTPS base URL
+for the same Code API deployment's egress-gateway routes. Plain HTTP is accepted
+only for loopback and Docker Desktop development hosts. Enabling the relay also
+requires signed execution manifests. The worker creates a labeled internal
+Docker network for each worker identity, connects the runtime only to that
+network, and starts a separate hardened relay container on a labeled,
+worker-specific egress network. Reused networks are accepted only when their
+internal flag and ownership labels match the required profile. The relay
+publishes no host port, accepts only the file-object read, normalized list, and
+generated-object write routes, requires both its worker-derived token and the
+assignment's scoped egress grant, refuses redirects, and caps request headers,
+transfer size, duration, and concurrency. Its upstream is fixed at startup.
+Overlapping worker incarnations use separate relay containers; the newly
+registered incarnation removes stale relays only after Code API fences the old
+incarnation, and orderly shutdown removes its own relay. Relay-capable workers
+remain unavailable for dispatch until they activate and health-check the relay,
+then confirm readiness for the exact registration incarnation and generation.
+Each registration heartbeat revalidates the relay before renewing its
+shorter-lived readiness confirmation, so a stopped relay ages out without
+creating an availability gap during healthy heartbeats.
+Stopped staging containers are reclaimed on the next activation; running
+staging containers are reclaimed only after a conservative grace period.
+
+The trusted runner API can use this relay for file staging. User code still
+runs in NsJail's separate network namespace with no interfaces, so it cannot
+reach the relay or the public internet. Anyone with access to the Docker daemon
+remains inside the trusted worker boundary and can inspect container
+configuration and secrets.
+
 Direct NsJail shares the Docker Desktop VM kernel and is suitable for local or
 operator-trusted development. Use a separate VM or MicroVM boundary for
 internet-facing execution of code from untrusted users.

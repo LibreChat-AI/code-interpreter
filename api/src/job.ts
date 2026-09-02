@@ -57,6 +57,7 @@ export {
 } from './validation';
 
 const AUTO_LOAD_DIRKEEP_TIMEOUT_MS = 10000;
+const AUTO_LOAD_DIRKEEP_RETRIES = 2;
 
 /**
  * Bridges a `fetch` response body to a Node-stream Readable. The types at the
@@ -1131,6 +1132,9 @@ export class Job {
     return injectTraceHeaders({
       ...headers,
       [EGRESS_GRANT_HEADER]: this.egressGrantToken,
+      ...(config.file_relay_token
+        ? { 'X-LibreChat-Code-Relay-Token': config.file_relay_token }
+        : {}),
     });
   }
 
@@ -1143,8 +1147,11 @@ export class Job {
       .filter(f => !isDirkeep(f.name))
       .map(f => f.name);
 
-    const fetches = Array.from(sessionIds).map(sid => this.fetchSessionMarkers(sid));
-    const results = await Promise.all(fetches);
+    const results = await mapWithConcurrency(
+      Array.from(sessionIds),
+      config.prime_concurrency,
+      sid => this.fetchSessionMarkers(sid),
+    );
 
     let added = 0;
     let hitCap = false;
@@ -1166,7 +1173,7 @@ export class Job {
   /**
    * Fetches normalized objects for one inherited session and returns the
    * `.dirkeep` markers belonging to exactly that session. Guards against:
-   *   - non-OK responses (empty list, no throw)
+   *   - legacy 404 responses (no marker support) and transient backpressure
    *   - non-array JSON bodies
    *   - missing/malformed id/name/storage_session_id fields
    *   - MinIO prefix-list leakage (`abc` prefix also matches `abcdef/...`)
@@ -1178,20 +1185,43 @@ export class Job {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), AUTO_LOAD_DIRKEEP_TIMEOUT_MS);
     try {
-      const res = await fetch(
-        `${this.fileEgressBaseUrl()}/sessions/${encodeURIComponent(sid)}/objects?detail=normalized`,
-        {
-          headers: this.fileEgressHeaders(),
-          signal: controller.signal,
-        },
-      );
-      if (!res.ok) return [];
-      const data: unknown = await res.json();
-      if (!Array.isArray(data)) return [];
-      return data.filter(isNormalizedObjectForSession(sid));
+      for (let attempt = 0; attempt <= AUTO_LOAD_DIRKEEP_RETRIES; attempt += 1) {
+        const res = await fetch(
+          `${this.fileEgressBaseUrl()}/sessions/${encodeURIComponent(sid)}/objects?detail=normalized`,
+          {
+            headers: this.fileEgressHeaders(),
+            signal: controller.signal,
+          },
+        );
+        if (res.status === 503 && attempt < AUTO_LOAD_DIRKEEP_RETRIES) {
+          await res.body?.cancel().catch(() => {});
+          const retryAfterSeconds = Number(res.headers.get('retry-after'));
+          await sleep(
+            Number.isFinite(retryAfterSeconds)
+              ? Math.min(1000, Math.max(25, retryAfterSeconds * 1000))
+              : 100,
+            controller.signal,
+          );
+          continue;
+        }
+        if (res.status === 404) {
+          await res.body?.cancel().catch(() => {});
+          return [];
+        }
+        if (!res.ok) {
+          await res.body?.cancel().catch(() => {});
+          throw new Error(`HTTP error loading .dirkeep markers: ${res.status}`);
+        }
+        const data: unknown = await res.json();
+        if (!Array.isArray(data)) {
+          throw new Error('Invalid .dirkeep marker response');
+        }
+        return data.filter(isNormalizedObjectForSession(sid));
+      }
+      throw new Error('Exhausted .dirkeep marker retries');
     } catch (err) {
       this.log.warn({ sessionId: sid, err }, 'Failed to auto-load .dirkeep markers');
-      return [];
+      throw err;
     } finally {
       clearTimeout(timeout);
     }
