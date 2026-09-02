@@ -16,10 +16,14 @@ import { redisKeepAliveOptions } from '../src/redis-options';
  *   {"type":"source","environment":"example","region":"region-1","namespace":"codeapi","query_start_utc":"2026-01-01T00:00:00Z","query_end_utc":"2026-01-02T00:00:00Z"}
  *   {"session_id":"<21-character id>","expected_session_key":"<expected key>"}
  *
- * The apply path uses SET NX and never replaces an existing owner.
+ * The apply path uses SET NX and never replaces an existing owner. Both the
+ * `session:<id>` cache key and the durable `session-owner:<id>` record are
+ * restored, so recovered sessions stay deletable past SESSION_CACHE_TTL
+ * rather than stranding again a day later.
  */
 
 const DEFAULT_SESSION_CACHE_TTL_SECONDS = 86400;
+const DEFAULT_SESSION_OWNER_TTL_SECONDS = 90 * 86400;
 const MAX_RECOVERY_CONTEXT_LENGTH = 128;
 const MAX_RECOVERY_SESSION_KEY_LENGTH = 512;
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -78,6 +82,7 @@ interface Options extends RecoveryScope {
   apply: boolean;
   inputPath?: string;
   ttlSeconds: number;
+  ownerTtlSeconds: number;
 }
 
 function usage(): string {
@@ -97,8 +102,15 @@ Options:
                           SESSION_RECOVERY_REGION.
   --namespace <value>     Expected source namespace. Defaults to
                           SESSION_RECOVERY_NAMESPACE.
-  --ttl-seconds <number>  Redis TTL for restored keys. Defaults to
-                          SESSION_CACHE_TTL or ${DEFAULT_SESSION_CACHE_TTL_SECONDS}.
+  --ttl-seconds <number>  Redis TTL for restored session cache keys.
+                          Defaults to SESSION_CACHE_TTL or
+                          ${DEFAULT_SESSION_CACHE_TTL_SECONDS}.
+  --owner-ttl-seconds <number>
+                          Redis TTL for the durable session-owner records
+                          restored alongside them. Defaults to
+                          SESSION_OWNER_TTL or
+                          ${DEFAULT_SESSION_OWNER_TTL_SECONDS}, and is never
+                          shorter than --ttl-seconds.
   --help                  Show this help.
 
 Keep recovery manifests outside the repository because expected_session_key
@@ -154,6 +166,10 @@ export function parseOptions(args: string[], env: NodeJS.ProcessEnv = process.en
   let ttlSeconds = configuredTtl != null && configuredTtl !== ''
     ? parsePositiveInteger(configuredTtl, 'SESSION_CACHE_TTL')
     : DEFAULT_SESSION_CACHE_TTL_SECONDS;
+  const configuredOwnerTtl = env.SESSION_OWNER_TTL?.trim();
+  let ownerTtlSeconds = configuredOwnerTtl != null && configuredOwnerTtl !== ''
+    ? parsePositiveInteger(configuredOwnerTtl, 'SESSION_OWNER_TTL')
+    : DEFAULT_SESSION_OWNER_TTL_SECONDS;
   let environment = env.SESSION_RECOVERY_ENVIRONMENT;
   let region = env.SESSION_RECOVERY_REGION;
   let namespace = env.SESSION_RECOVERY_NAMESPACE;
@@ -189,6 +205,13 @@ export function parseOptions(args: string[], env: NodeJS.ProcessEnv = process.en
       );
       index += 1;
       break;
+    case '--owner-ttl-seconds':
+      ownerTtlSeconds = parsePositiveInteger(
+        optionValue(args, index, '--owner-ttl-seconds'),
+        '--owner-ttl-seconds',
+      );
+      index += 1;
+      break;
     case '--help':
       break;
     default:
@@ -203,6 +226,9 @@ export function parseOptions(args: string[], env: NodeJS.ProcessEnv = process.en
     region: parseRecoveryContext(region, 'Recovery region'),
     namespace: parseRecoveryContext(namespace, 'Recovery namespace'),
     ttlSeconds,
+    /* The durable record is what keeps a recovered session deletable
+     * beyond the cache TTL, so it can never be the shorter of the two. */
+    ownerTtlSeconds: Math.max(ownerTtlSeconds, ttlSeconds),
   };
 }
 
@@ -320,11 +346,45 @@ export function parseRecoveryManifest(
   return { source, records: [...bySessionId.values()] };
 }
 
+/**
+ * Restores the durable owner record for a session the caller has just
+ * confirmed (or restored) ownership of. Best effort by design: the record
+ * only widens what can be deleted later, so a race or a pre-existing
+ * entry is reported and never overwritten, and the outcome does not move
+ * a record between summary buckets.
+ */
+async function restoreOwnerRecord(
+  store: RecoveryStore,
+  record: RecoveryRecord,
+  ownerTtlSeconds: number,
+): Promise<void> {
+  const ownerKey = `session-owner:${record.session_id}`;
+  const result = await store.set(
+    ownerKey,
+    record.expected_session_key,
+    'EX',
+    ownerTtlSeconds,
+    'NX',
+  );
+  if (result === 'OK') {
+    return;
+  }
+  const existing = await store.get(ownerKey);
+  if (existing !== null && existing !== record.expected_session_key) {
+    // eslint-disable-next-line no-console
+    console.error(`Conflict: ${record.session_id} has a durable owner record for a different owner`);
+  }
+}
+
 export async function recoverSessionCache(
   records: RecoveryRecord[],
   store: RecoveryStore,
-  options: Pick<Options, 'apply' | 'ttlSeconds'>,
+  options: Pick<Options, 'apply' | 'ttlSeconds'> & { ownerTtlSeconds?: number },
 ): Promise<RecoverySummary> {
+  const ownerTtlSeconds = Math.max(
+    options.ownerTtlSeconds ?? DEFAULT_SESSION_OWNER_TTL_SECONDS,
+    options.ttlSeconds,
+  );
   const summary: RecoverySummary = {
     input: records.length,
     missing: 0,
@@ -339,6 +399,9 @@ export async function recoverSessionCache(
       const current = await store.get(redisKey);
       if (current === record.expected_session_key) {
         summary.matching += 1;
+        if (options.apply) {
+          await restoreOwnerRecord(store, record, ownerTtlSeconds);
+        }
         continue;
       }
       if (current !== null) {
@@ -362,12 +425,14 @@ export async function recoverSessionCache(
       );
       if (result === 'OK') {
         summary.restored += 1;
+        await restoreOwnerRecord(store, record, ownerTtlSeconds);
         continue;
       }
 
       const racedValue = await store.get(redisKey);
       if (racedValue === record.expected_session_key) {
         summary.matching += 1;
+        await restoreOwnerRecord(store, record, ownerTtlSeconds);
       } else if (racedValue === null) {
         summary.missing += 1;
         // eslint-disable-next-line no-console

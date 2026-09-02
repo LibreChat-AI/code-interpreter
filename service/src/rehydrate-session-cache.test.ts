@@ -25,6 +25,7 @@ const SOURCE = {
 
 class MemoryStore implements RecoveryStore {
   readonly values = new Map<string, string>();
+  readonly ttls = new Map<string, number>();
 
   async get(key: string): Promise<string | null> {
     return this.values.get(key) ?? null;
@@ -34,13 +35,14 @@ class MemoryStore implements RecoveryStore {
     key: string,
     value: string,
     _expiryMode: 'EX',
-    _ttlSeconds: number,
+    ttlSeconds: number,
     _condition: 'NX',
   ): Promise<'OK' | null> {
     if (this.values.has(key)) {
       return null;
     }
     this.values.set(key, value);
+    this.ttls.set(key, ttlSeconds);
     return 'OK';
   }
 }
@@ -154,6 +156,73 @@ describe('rehydrate-session-cache', () => {
 
   it('requires the recovery scope', () => {
     expect(() => parseOptions([], {})).toThrow('Recovery environment');
+  });
+
+  it('defaults the owner TTL past the cache TTL and never below it', () => {
+    expect(parseOptions([], {
+      SESSION_RECOVERY_ENVIRONMENT: 'configured-env',
+      SESSION_RECOVERY_REGION: 'configured-region',
+      SESSION_RECOVERY_NAMESPACE: 'configured-namespace',
+    })).toMatchObject({ ttlSeconds: 86400, ownerTtlSeconds: 90 * 86400 });
+
+    expect(parseOptions(['--owner-ttl-seconds', '604800'], {
+      SESSION_RECOVERY_ENVIRONMENT: 'configured-env',
+      SESSION_RECOVERY_REGION: 'configured-region',
+      SESSION_RECOVERY_NAMESPACE: 'configured-namespace',
+    })).toMatchObject({ ownerTtlSeconds: 604800 });
+
+    /* A shorter owner TTL would re-strand the session it just recovered. */
+    expect(parseOptions([
+      '--ttl-seconds', '86400',
+      '--owner-ttl-seconds', '600',
+    ], {
+      SESSION_RECOVERY_ENVIRONMENT: 'configured-env',
+      SESSION_RECOVERY_REGION: 'configured-region',
+      SESSION_RECOVERY_NAMESPACE: 'configured-namespace',
+    })).toMatchObject({ ttlSeconds: 86400, ownerTtlSeconds: 86400 });
+  });
+
+  it('restores the durable owner record alongside the cache key', async () => {
+    const store = new MemoryStore();
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(summary).toMatchObject({ restored: 1, conflicts: 0 });
+    expect(store.values.get(`session:${SESSION_ID}`)).toBe(SESSION_KEY);
+    expect(store.ttls.get(`session:${SESSION_ID}`)).toBe(86400);
+    expect(store.values.get(`session-owner:${SESSION_ID}`)).toBe(SESSION_KEY);
+    expect(store.ttls.get(`session-owner:${SESSION_ID}`)).toBe(7776000);
+  });
+
+  it('backfills the owner record for a session whose cache key is still live', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session:${SESSION_ID}`, SESSION_KEY);
+
+    const summary = await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(summary).toMatchObject({ matching: 1, restored: 0, conflicts: 0 });
+    expect(store.values.get(`session-owner:${SESSION_ID}`)).toBe(SESSION_KEY);
+  });
+
+  it('never replaces an existing owner record', async () => {
+    const store = new MemoryStore();
+    store.values.set(`session-owner:${SESSION_ID}`, 'tenant-id:user:someone-else');
+
+    await recoverSessionCache(
+      [{ session_id: SESSION_ID, expected_session_key: SESSION_KEY }],
+      store,
+      { apply: true, ttlSeconds: 86400, ownerTtlSeconds: 7776000 },
+    );
+
+    expect(store.values.get(`session-owner:${SESSION_ID}`)).toBe('tenant-id:user:someone-else');
   });
 
   it('does not write during a dry run', async () => {
