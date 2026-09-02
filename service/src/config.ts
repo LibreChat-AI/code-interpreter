@@ -336,6 +336,16 @@ export const env = {
   FETCH_MAX_REQUESTS: Number(process.env.FETCH_MAX_REQUESTS) || 120, // 120 requests per minute
   // Redis Key Cache Config
   SESSION_CACHE_TTL: Number(process.env.SESSION_CACHE_TTL) || 86400,
+  /** TTL for the durable `session-owner:<session_id>` record that backs
+   *  deletion after `SESSION_CACHE_TTL` has lapsed (see
+   *  `session-ownership.ts`). Sized to outlive a client's retention
+   *  window — LibreChat sweeps expired files at 30 days by default, and a
+   *  shorter value here reinstates the leak it exists to close. Clamped
+   *  so it can never be tighter than the cache TTL. */
+  SESSION_OWNER_TTL: Math.max(
+    Number(process.env.SESSION_OWNER_TTL) || 90 * 86400,
+    Number(process.env.SESSION_CACHE_TTL) || 86400,
+  ),
   /** Strict tenant isolation. When true, sessionKey resolution fails closed
    *  (500) on requests whose auth context lacks `tenantId`, instead of
    *  silently falling back to the `'legacy'` tenant prefix. Default OFF in

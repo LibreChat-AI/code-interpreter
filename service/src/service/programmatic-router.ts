@@ -40,6 +40,7 @@ import {
 } from '../sandbox-egress';
 import { findUnregisteredToolCall } from '../tool-scope';
 import { summarizeRequestedFiles } from '../execution-log';
+import { clearSessionOwnership, recordSessionOwnership } from '../session-ownership';
 import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-authorization';
 import {
   buildReplayExecutionState,
@@ -562,7 +563,7 @@ async function handleReplayInitial(
     code.includes('import matplotlib') || code.includes('import seaborn')
   );
 
-  await connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
+  await recordSessionOwnership(connection, session_id, sessionKey);
 
   const state = buildReplayExecutionState({
     executionId: execution_id,
@@ -605,7 +606,7 @@ async function handleReplayInitial(
         bytes: err.bytes,
         cap: err.cap,
       });
-      await connection.del(`session:${session_id}`).catch(() => {});
+      await clearSessionOwnership(connection, session_id).catch(() => {});
       ptcReplayStateOversize.inc();
       res.status(413).json({
         error: `Request too large: serialized execution state is ${err.bytes} bytes (max ${err.cap}). Reduce the size of "code", "tools", or "files".`,
@@ -1315,7 +1316,12 @@ async function handleBlocking(
   const execution_id = nanoid();
   const identity = getExecutionIdentity(req, userId);
 
-  connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
+  /* Awaited: a partial registration (cache key written, durable record
+   * refused — a Redis ACL scoped to `session:*` would do it) would let the
+   * job write files that become undeletable once `SESSION_CACHE_TTL`
+   * lapses. The caller turns a rejection into a 500 before anything is
+   * enqueued. */
+  await recordSessionOwnership(connection, session_id, sessionKey);
 
   const executionState: ExecutionState = {
     execution_id,
