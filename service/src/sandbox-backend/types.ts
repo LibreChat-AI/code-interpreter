@@ -39,6 +39,14 @@ export interface SandboxExecuteContext {
   canonicalUserId?: string;
   /** Trusted API-selected outbound worker. Presence requires a tenant-bound credential. */
   bridgeWorkerId?: string;
+  /** Stable identifier for this queued iteration, used to derive an idempotent
+   * stateless launch token. PTC replay reuses one executionId across every
+   * iteration, so the executionId alone cannot separate them; the request body
+   * can, but it is rebuilt with a fresh egress grant and manifest on every job
+   * attempt, so hashing it would break RunMicrovm idempotency when BullMQ
+   * reprocesses a stalled job. The queued job id is distinct per iteration and
+   * stable across attempts of the same job. */
+  queuedJobId?: string;
   /** Absent ⇒ stateless execution (no runtime session affinity). */
   runtimeSessionId?: string;
   runtimeSessionMode: t.RuntimeSessionMode;

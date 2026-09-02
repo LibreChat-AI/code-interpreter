@@ -303,43 +303,44 @@ describe('runtime session launch tokens', () => {
 });
 
 describe('statelessLaunchClientToken', () => {
-  const ptcIteration = (history: string): SandboxTransportRequest => ({
-    ...request(),
-    body: {
-      ...payloadBody(),
-      files: [{ id: history, storage_session_id: 'sess_store_1', name: '_ptc_history.json' }],
-    },
-  });
-
   test('is deterministic for an identical relaunch', () => {
-    const first = statelessLaunchClientToken('exec_42', config(), 420, request());
-    const second = statelessLaunchClientToken('exec_42', config(), 420, request());
-    expect(first).toBe(second);
+    expect(statelessLaunchClientToken('exec_42', config(), 420, 'job_1'))
+      .toBe(statelessLaunchClientToken('exec_42', config(), 420, 'job_1'));
   });
 
-  /* PTC replay reuses one executionId across iterations while the sandbox
-   * payload gains a new _ptc_history.json each round. A token derived from the
-   * executionId alone repeated, and AWS rejected the relaunch with "The
-   * provided clientToken was used with different request parameters". */
-  test('differs per replay iteration when the request body changes', () => {
-    const round1 = statelessLaunchClientToken('exec_42', config(), 420, ptcIteration('hist_1'));
-    const round2 = statelessLaunchClientToken('exec_42', config(), 420, ptcIteration('hist_2'));
+  /* PTC replay reuses one executionId across iterations, each enqueued as its
+   * own job. A token derived from the executionId alone repeated, and AWS
+   * rejected the relaunch with "The provided clientToken was used with
+   * different request parameters". */
+  test('differs per replay iteration', () => {
+    const round1 = statelessLaunchClientToken('exec_42', config(), 420, 'job_1');
+    const round2 = statelessLaunchClientToken('exec_42', config(), 420, 'job_2');
     expect(round1).not.toBe(round2);
     expect(round1).toMatch(/^exec-exec_42-[0-9a-f]{16}$/);
     expect(round2).toMatch(/^exec-exec_42-[0-9a-f]{16}$/);
   });
 
+  /* A replacement worker taking over a stalled job rebuilds the request with a
+   * fresh egress grant, sandbox session id and re-signed manifest. The token
+   * must not move with it, or RunMicrovm idempotency cannot recover a launch
+   * AWS already accepted and the orphaned VM burns capacity until it expires. */
+  test('is stable across attempts of the same queued job', () => {
+    const firstAttempt = statelessLaunchClientToken('exec_42', config(), 420, 'job_1');
+    const stalledRetry = statelessLaunchClientToken('exec_42', config(), 420, 'job_1');
+    expect(stalledRetry).toBe(firstAttempt);
+  });
+
   test('differs when launch configuration or duration changes', () => {
-    const base = statelessLaunchClientToken('exec_42', config(), 420, request());
-    expect(statelessLaunchClientToken('exec_42', config({ imageVersion: '4' }), 420, request()))
+    const base = statelessLaunchClientToken('exec_42', config(), 420, 'job_1');
+    expect(statelessLaunchClientToken('exec_42', config({ imageVersion: '4' }), 420, 'job_1'))
       .not.toBe(base);
-    expect(statelessLaunchClientToken('exec_42', config(), 421, request())).not.toBe(base);
+    expect(statelessLaunchClientToken('exec_42', config(), 421, 'job_1')).not.toBe(base);
   });
 
   test('stays within the AWS clientToken budget including the retry suffix', () => {
-    const token = statelessLaunchClientToken('exec_42', config(), 420, request());
+    const token = statelessLaunchClientToken('exec_42', config(), 420, 'job_1');
     expect(`${token}-r1`.length).toBeLessThanOrEqual(128);
-    expect(() => statelessLaunchClientToken('e'.repeat(200), config(), 420, request())).toThrow(
+    expect(() => statelessLaunchClientToken('e'.repeat(200), config(), 420, 'job_1')).toThrow(
       'Stateless launch clientToken exceeds the AWS length limit',
     );
   });
