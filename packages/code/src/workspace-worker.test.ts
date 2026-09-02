@@ -318,6 +318,118 @@ test('worker drains a completed cancellation poll before fulfilling workspace wo
   assert.match(String(settlements[0]?.error), /aborted/i);
 });
 
+test('worker drains a cancellation response body before fulfilling workspace work', async () => {
+  const settlements: Array<Record<string, unknown>> = [];
+  let finishExecution: (() => void) | undefined;
+  let markHeadersReceived: (() => void) | undefined;
+  const headersReceived = new Promise<void>((resolve) => {
+    markHeadersReceived = resolve;
+  });
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute(request) {
+        await new Promise<void>((resolve) => {
+          finishExecution = resolve;
+        });
+        return {
+          protocolVersion: 1,
+          operation: 'read_file',
+          workspaceId: request.workspaceId,
+          path: 'README.md',
+          content: '# cancelled',
+          startLine: 1,
+          endLine: 1,
+          truncated: false,
+        };
+      },
+    },
+    cancellationPollIntervalMs: 1,
+    fetchImpl: async (input, init) => {
+      if (String(input).endsWith('/cancellation')) {
+        const response = new Response(
+          new ReadableStream({
+            start(controller) {
+              let finished = false;
+              init?.signal?.addEventListener(
+                'abort',
+                () => {
+                  if (finished) return;
+                  finished = true;
+                  controller.error(new DOMException('aborted', 'AbortError'));
+                },
+                { once: true },
+              );
+              setTimeout(() => {
+                if (!init?.signal?.aborted && !finished) {
+                  finished = true;
+                  controller.enqueue(
+                    new TextEncoder().encode(
+                      JSON.stringify({ protocolVersion: 1, cancelled: true }),
+                    ),
+                  );
+                  controller.close();
+                }
+              }, 0);
+            },
+          }),
+          { headers: { 'Content-Type': 'application/json' } },
+        );
+        markHeadersReceived?.();
+        return response;
+      }
+      if (String(input).endsWith('/settle') && init?.body != null) {
+        settlements.push(
+          JSON.parse(String(init.body)) as Record<string, unknown>,
+        );
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  const completion = worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-workspace-cancelled-body',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    remainingMs: 5_000,
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'primary',
+      path: 'README.md',
+    },
+  });
+
+  await headersReceived;
+  finishExecution?.();
+  await completion;
+
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0]?.status, 'rejected');
+  assert.match(String(settlements[0]?.error), /aborted/i);
+});
+
 test('worker rejects workspace operations outside its advertised capability', async () => {
   let executions = 0;
   let settlement: Record<string, unknown> | undefined;

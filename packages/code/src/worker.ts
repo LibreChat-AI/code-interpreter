@@ -1094,7 +1094,9 @@ export class BridgeWorker {
       if (signal.aborted || executionController.signal.aborted) return;
       const pollController = new AbortController();
       const abortPoll = (): void => pollController.abort();
-      signal.addEventListener('abort', abortPoll, { once: true });
+      executionController.signal.addEventListener('abort', abortPoll, {
+        once: true,
+      });
       const timeout = setTimeout(
         abortPoll,
         Math.max(
@@ -1124,7 +1126,7 @@ export class BridgeWorker {
         }
       } finally {
         clearTimeout(timeout);
-        signal.removeEventListener('abort', abortPoll);
+        executionController.signal.removeEventListener('abort', abortPoll);
       }
     }
   }
