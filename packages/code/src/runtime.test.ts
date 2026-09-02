@@ -166,6 +166,25 @@ test('docker runtime supervisor propagates removal failures and forwards reset c
   assert.equal(receivedSignal, controller.signal);
 });
 
+test('docker runtime supervisor cleans up stateless containers after interrupted creation', async () => {
+  const calls: string[][] = [];
+  const client: ContainerRuntimeClient = {
+    async run(args) {
+      calls.push(args);
+      if (args[0] === 'container' && args[1] === 'inspect') {
+        throw new Error('No such container');
+      }
+      if (args[0] === 'run') throw new DOMException('aborted', 'AbortError');
+      if (args[0] === 'container' && args[1] === 'rm') return 'removed\n';
+      throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+    },
+  };
+  const supervisor = new DockerRuntimeSupervisor({ image: 'example/code-runtime:latest', client });
+
+  await assert.rejects(supervisor.acquire(assignment()), /aborted/);
+  assert.equal(calls.some(args => args[0] === 'container' && args[1] === 'rm'), true);
+});
+
 test('docker runtime supervisor ignores only confirmed missing-container removal', async () => {
   const client: ContainerRuntimeClient = {
     async run() {

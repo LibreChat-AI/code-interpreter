@@ -110,6 +110,7 @@ class DockerCliClient implements ContainerRuntimeClient {
       };
       process.stdout.on('data', (chunk: Buffer) => append(stdout, chunk));
       process.stderr.on('data', (chunk: Buffer) => append(stderr, chunk));
+      process.stdin.once('error', reject);
       process.once('error', reject);
       process.once('close', (code) => {
         if (code === 0) {
@@ -155,8 +156,9 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     const sessionId = assignmentSessionId(assignment);
     if (sessionId == null) throw new Error('Runtime assignment ID is required');
     const name = containerName(sessionId);
-    const created = await this.ensureContainer(name, sessionId, signal);
+    let created = false;
     try {
+      created = await this.ensureContainer(name, sessionId, signal);
       await this.waitForHealth(name, signal);
       return {
         sessionId,
@@ -164,7 +166,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
         release: assignment.runtimeSessionId == null ? async () => this.remove(name) : undefined,
       };
     } catch (error) {
-      if (created) await this.remove(name);
+      if (created || assignment.runtimeSessionId == null) await this.remove(name);
       throw error;
     }
   }
