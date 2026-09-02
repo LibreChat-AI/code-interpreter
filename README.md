@@ -102,6 +102,26 @@ privilege, keep hosts patched, and deploy responsibly. If you believe you
 have found a vulnerability, please report it privately rather than opening a
 public issue (see [CONTRIBUTING](CONTRIBUTING.md)).
 
+## Releases
+
+Deployments should pin a [tagged release](https://github.com/LibreChat-AI/code-interpreter/releases)
+rather than track `main`, which moves whenever an internal snapshot is merged:
+
+```bash
+git clone --branch v2.0.0 --depth 1 https://github.com/LibreChat-AI/code-interpreter.git
+```
+
+Every release attaches `codeapi-<chart version>.tgz`, the packaged Helm chart
+with its Redis and MinIO subcharts vendored:
+
+```bash
+helm install codeapi ./codeapi-0.3.0.tgz -f my-values.yaml
+```
+
+Versions are `vMAJOR.MINOR.PATCH`, with `-rcN` release candidates published as
+pre-releases. See [docs/RELEASING.md](docs/RELEASING.md) for how releases are
+cut.
+
 ## Local Development
 
 ```bash

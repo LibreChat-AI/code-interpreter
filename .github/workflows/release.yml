@@ -1,0 +1,252 @@
+# Cuts tagged releases for the public code-interpreter repo. Like ci.yml this
+# file is inert inside the monorepo — GitHub only runs workflows from the repo
+# root — and becomes a root workflow in the published repo.
+#
+# Two entry points feed one job:
+#
+#   * workflow_dispatch — pick a version in the Actions UI. The chart is
+#     packaged before the tag is created, so a packaging failure aborts while
+#     the release is still un-cut and the version is still free to reuse.
+#   * push of a v* tag — for tags cut locally with `git tag -a … && git push`.
+#     Tags this workflow pushes itself carry GITHUB_TOKEN, and GitHub does not
+#     re-trigger workflows for those, so the two paths never double-publish.
+#
+# `main` accepts no direct pushes (see CONTRIBUTING.md), but the branch
+# ruleset does not cover tags, so the job can create them. GITHUB_TOKEN
+# defaults to read-only in this repository; the explicit `contents: write`
+# below is what lets the tag push and the release upload through.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. v2.0.0 or v2.1.0-rc1. Must match helm/codeapi/Chart.yaml appVersion.'
+        required: true
+        type: string
+      draft:
+        description: 'Publish as a draft so the notes can be edited before going public'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # Full history and tags: resolving whether this release is the newest
+          # stable one compares it against every other tag in the repository.
+          fetch-depth: 0
+
+      - name: Resolve and validate version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_DRAFT: ${{ github.event.inputs.draft }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Releases describe what shipped to main. Dispatching from a topic
+            # branch would tag a commit that is not on the release line.
+            if [ "$REF_TYPE" != "branch" ] || [ "$REF_NAME" != "main" ]; then
+              echo "::error::Releases must be cut from main; this run is on '$REF_NAME'"
+              exit 1
+            fi
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="$REF_NAME"
+          fi
+
+          # A bare "2.0.0" typed into the dispatch box is accepted; everything
+          # downstream works with the v-prefixed form the tag actually uses.
+          case "$VERSION" in
+            v*) ;;
+            *) VERSION="v$VERSION" ;;
+          esac
+
+          if [[ ! "$VERSION" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[0-9]+)?$ ]]; then
+            echo "::error::Release tags must be v<major>.<minor>.<patch> or v<major>.<minor>.<patch>-rcN, for example v2.0.0 or v2.1.0-rc1 (got '$VERSION')"
+            exit 1
+          fi
+
+          # v2.1.0-rc1 -> 2.1.0. Release candidates carry the version they are
+          # candidates for, so they compare against the same appVersion.
+          BASE_VERSION="${VERSION%%-rc*}"
+          BASE_VERSION="${BASE_VERSION#v}"
+
+          read_chart_field() {
+            grep -m1 "^$1:" helm/codeapi/Chart.yaml \
+              | sed -E "s/^$1:[[:space:]]*//; s/[[:space:]]*#.*//; s/^[\"']//; s/[\"']\$//"
+          }
+          APP_VERSION="$(read_chart_field appVersion)"
+          CHART_VERSION="$(read_chart_field version)"
+
+          # The tag is the app version. Requiring the bump to have landed on
+          # main first keeps a deployed chart from reporting a version that no
+          # release ever carried.
+          if [ "$APP_VERSION" != "$BASE_VERSION" ]; then
+            echo "::error::Tag $VERSION does not match helm/codeapi/Chart.yaml appVersion ($APP_VERSION). Land the appVersion bump on main before releasing."
+            exit 1
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] \
+             && git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::Tag $VERSION already exists. Pick a new version, or delete the tag if it was cut in error."
+            exit 1
+          fi
+
+          case "$VERSION" in
+            *-rc*) PRERELEASE=true ;;
+            *) PRERELEASE=false ;;
+          esac
+
+          # `latest` moves only when this is the highest stable version, so
+          # re-cutting an older patch cannot drag it backwards. The tag under
+          # dispatch does not exist yet, hence adding it to the comparison.
+          LATEST=false
+          if [ "$PRERELEASE" = "false" ]; then
+            HIGHEST_STABLE="$(
+              {
+                git tag --list 'v[0-9]*'
+                printf '%s\n' "$VERSION"
+              } \
+                | grep -E '^v[0-9]+[.][0-9]+[.][0-9]+$' \
+                | sort -V \
+                | tail -n 1
+            )"
+            if [ "$HIGHEST_STABLE" = "$VERSION" ]; then
+              LATEST=true
+            fi
+          fi
+
+          DRAFT=false
+          if [ "$INPUT_DRAFT" = "true" ]; then
+            DRAFT=true
+          fi
+
+          {
+            echo "version=$VERSION"
+            echo "base_version=$BASE_VERSION"
+            echo "app_version=$APP_VERSION"
+            echo "chart_version=$CHART_VERSION"
+            echo "prerelease=$PRERELEASE"
+            echo "latest=$LATEST"
+            echo "draft=$DRAFT"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Releasing $VERSION (chart $CHART_VERSION, appVersion $APP_VERSION, prerelease=$PRERELEASE, latest=$LATEST, draft=$DRAFT)"
+
+      # helm is preinstalled on ubuntu-latest, the same way the chart tests in
+      # ci.yml depend on it.
+      - name: Package Helm chart
+        id: chart
+        run: |
+          set -euo pipefail
+
+          # Subcharts resolve through the Bitnami OCI mirror on Docker Hub,
+          # which rate-limits anonymous pulls. A transient 429 should cost a
+          # retry, not the release.
+          for attempt in 1 2 3; do
+            if helm dependency update helm/codeapi; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::helm dependency update failed after 3 attempts"
+              exit 1
+            fi
+            sleep $(( attempt * 15 ))
+          done
+
+          helm package helm/codeapi --destination dist
+
+          CHART_PATH="$(ls dist/codeapi-*.tgz)"
+          {
+            echo "path=$CHART_PATH"
+            echo "name=$(basename "$CHART_PATH")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$VERSION" -m "$VERSION"
+          git push origin "refs/tags/$VERSION"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+          CHART_VERSION: ${{ steps.version.outputs.chart_version }}
+          CHART_PATH: ${{ steps.chart.outputs.path }}
+          CHART_NAME: ${{ steps.chart.outputs.name }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          LATEST: ${{ steps.version.outputs.latest }}
+          DRAFT: ${{ steps.version.outputs.draft }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "::error::Release $VERSION already exists"
+            exit 1
+          fi
+
+          # Quoted heredoc so the markdown backticks stay literal; the
+          # placeholders are filled in afterwards.
+          cat > release-notes.md <<'NOTES'
+          Pin deployments to this tag instead of tracking `main`:
+
+          ```bash
+          git clone --branch __VERSION__ --depth 1 __REPO_URL__.git
+          ```
+
+          The attached `__CHART_NAME__` is the packaged Helm chart (chart `__CHART_VERSION__`, appVersion `__APP_VERSION__`) with its Redis and MinIO subcharts vendored, so it installs without adding any chart repositories:
+
+          ```bash
+          helm install codeapi ./__CHART_NAME__ -f my-values.yaml
+          ```
+
+          Chart configuration is documented in [helm/codeapi/README.md](__REPO_URL__/blob/__VERSION__/helm/codeapi/README.md).
+          NOTES
+
+          sed -i \
+            -e "s|__VERSION__|$VERSION|g" \
+            -e "s|__REPO_URL__|$REPO_URL|g" \
+            -e "s|__CHART_NAME__|$CHART_NAME|g" \
+            -e "s|__CHART_VERSION__|$CHART_VERSION|g" \
+            -e "s|__APP_VERSION__|$APP_VERSION|g" \
+            release-notes.md
+
+          # --generate-notes appends the merged-pull-request changelog below
+          # the body from --notes-file, categorised per .github/release.yml.
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --notes-file release-notes.md \
+            --generate-notes \
+            --verify-tag \
+            --prerelease="$PRERELEASE" \
+            --latest="$LATEST" \
+            --draft="$DRAFT" \
+            "$CHART_PATH#Helm chart ($CHART_NAME)"
