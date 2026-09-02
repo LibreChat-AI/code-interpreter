@@ -100,6 +100,7 @@ test('worker delegates runtime acquisition, release, and reset to its supervisor
     async reset(runtimeSessionId) {
       calls.push(`reset:${runtimeSessionId}`);
     },
+    async quarantine() {},
   };
   const worker = new BridgeWorker({
     codeApiUrl: 'https://code.example/v1',

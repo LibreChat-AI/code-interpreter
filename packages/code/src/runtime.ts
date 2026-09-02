@@ -11,7 +11,7 @@ export interface RuntimeLease {
 export interface RuntimeSupervisor {
   acquire(assignment: BridgeAssignment, signal?: AbortSignal): Promise<RuntimeLease>;
   reset(runtimeSessionId: string, signal?: AbortSignal): Promise<void>;
-  quarantine?(runtimeSessionId: string, reason: string, cause?: unknown): Promise<void>;
+  quarantine(runtimeSessionId: string, reason: string, cause?: unknown): Promise<void>;
 }
 
 export interface EndpointRuntimeSupervisorOptions {
@@ -68,4 +68,8 @@ export class EndpointRuntimeSupervisor implements RuntimeSupervisor {
   }
 
   async reset(_runtimeSessionId: string): Promise<void> {}
+
+  async quarantine(runtimeSessionId: string, _reason: string, _cause?: unknown): Promise<void> {
+    await this.reset(runtimeSessionId);
+  }
 }

@@ -590,7 +590,10 @@ export class BridgeWorker {
         assignment,
         executionController.signal,
       );
-      const sandboxExecuteUrl = `${runtimeLease.endpoint}/execute`;
+      if (executionController.signal.aborted) {
+        throw executionController.signal.reason ?? new DOMException('aborted', 'AbortError');
+      }
+      const sandboxExecuteUrl = `${runtimeLease.endpoint.replace(/\/+$/, '')}/execute`;
       const headers = {
         ...assignment.request.headers,
         ...(runtimeLease.sessionId
@@ -717,10 +720,13 @@ export class BridgeWorker {
         );
       }
     } finally {
-      await this.releaseRuntimeLease(runtimeLease, assignment);
       heartbeatController.abort();
-      await heartbeat;
-      signal?.removeEventListener('abort', abortExecution);
+      try {
+        await this.releaseRuntimeLease(runtimeLease, assignment);
+      } finally {
+        await heartbeat;
+        signal?.removeEventListener('abort', abortExecution);
+      }
     }
   }
 
@@ -760,7 +766,7 @@ export class BridgeWorker {
       return new BridgeWorkspaceQuarantinedError(message, cause);
     }
     try {
-      await this.runtimeSupervisor.quarantine?.(runtimeSessionId, message, cause);
+      await this.runtimeSupervisor.quarantine(runtimeSessionId, message, cause);
       return new BridgeWorkspaceQuarantinedError(message, cause);
     } catch (error) {
       return new BridgeWorkspaceQuarantinedError(
