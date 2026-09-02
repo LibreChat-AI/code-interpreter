@@ -249,7 +249,8 @@ test('search rejects multiline literal queries', async (t) => {
       workspaceId: 'primary',
       query: 'first\nsecond',
     }),
-    /invalid workspace search/i,
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
   );
 });
 
@@ -267,7 +268,8 @@ test('search rejects queries larger than its bounded preview', async (t) => {
       workspaceId: 'primary',
       query: 'a'.repeat(2001),
     }),
-    /invalid workspace search/i,
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
   );
 });
 
@@ -622,6 +624,13 @@ test('validates workspace results against the originating request', () => {
       ...result,
       nextStartLine: 2,
     }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(
+      { ...request, maxLines: 1 },
+      { ...result, content: 'first\nsecond' },
+    ),
     false,
   );
 });

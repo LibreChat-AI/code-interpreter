@@ -292,7 +292,11 @@ export function isWorkspaceToolRequest(
       request.query.length > 0 &&
       request.query.length <= BRIDGE_WORKSPACE_QUERY_MAX_LENGTH &&
       Buffer.from(request.query).toString('utf8') === request.query &&
+      new TextEncoder().encode(request.query).byteLength <=
+        BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH &&
       !request.query.includes('\0') &&
+      !request.query.includes('\n') &&
+      !request.query.includes('\r') &&
       (request.path === undefined ||
         isSafePortableRelativePath(request.path)) &&
       (request.maxResults === undefined ||
@@ -322,17 +326,28 @@ export function isWorkspaceToolResult(
   if (request.operation === 'read_file') {
     const startLine = request.startLine ?? 1;
     const maxLines = request.maxLines ?? 200;
+    const content = typeof result.content === 'string' ? result.content : null;
+    const reportedLineCount =
+      Number.isSafeInteger(result.endLine) && Number(result.endLine) >= startLine - 1
+        ? Number(result.endLine) - startLine + 1
+        : -1;
+    const actualLineCount =
+      content === null ? -1 : content.length === 0 ? reportedLineCount : content.split('\n').length;
     return (
       hasOnlyKeys(result, WORKSPACE_READ_RESULT_KEYS) &&
       result.path === request.path &&
       isSafePortableRelativePath(result.path) &&
-      typeof result.content === 'string' &&
-      new TextEncoder().encode(result.content).byteLength <=
+      content !== null &&
+      new TextEncoder().encode(content).byteLength <=
         BRIDGE_WORKSPACE_READ_MAX_BYTES &&
       result.startLine === startLine &&
       Number.isSafeInteger(result.endLine) &&
       Number(result.endLine) >= startLine - 1 &&
       Number(result.endLine) < startLine + maxLines &&
+      reportedLineCount >= 0 &&
+      reportedLineCount <= maxLines &&
+      (content.length !== 0 || reportedLineCount <= 1) &&
+      actualLineCount === reportedLineCount &&
       (result.truncated === true
         ? Number.isSafeInteger(result.nextStartLine) &&
           Number(result.nextStartLine) === Number(result.endLine) + 1

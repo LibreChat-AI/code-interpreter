@@ -48,7 +48,8 @@ export class BridgeStoreError extends Error {
       | 'WORKER_QUARANTINED'
       | 'WORKSPACE_QUARANTINED'
       | 'WORKER_MISMATCH'
-      | 'ASSIGNMENT_INVALID',
+      | 'ASSIGNMENT_INVALID'
+      | 'RESULT_INVALID',
     message: string,
   ) {
     super(message);
@@ -492,7 +493,7 @@ export class RedisBridgeStore {
       !isWorkspaceToolResult(args.request, settlement.result)
     ) {
       throw new BridgeStoreError(
-        'ASSIGNMENT_INVALID',
+        'RESULT_INVALID',
         'Bridge worker returned an invalid workspace tool result',
       );
     }

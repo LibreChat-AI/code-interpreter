@@ -5,13 +5,18 @@ import { afterEach, expect, test } from 'bun:test';
 import express, { json } from 'express';
 
 import { applyPrincipal } from '../auth/principal';
-import { createWorkspaceToolsRouter } from './router';
+import { BridgeStoreError } from '../bridge/store';
+import { bridgeStoreStatus, createWorkspaceToolsRouter } from './router';
 
 let server: Server | undefined;
 
 afterEach(() => {
   server?.close();
   server = undefined;
+});
+
+test('maps invalid worker results to an upstream failure', () => {
+  expect(bridgeStoreStatus(new BridgeStoreError('RESULT_INVALID', 'invalid worker result'))).toBe(502);
 });
 
 test('dispatches an authenticated workspace tool request to the principal-bound worker', async () => {

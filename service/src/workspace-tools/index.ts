@@ -6,7 +6,7 @@ import { executionLimiter } from '../middleware/limits';
 import { createWorkspaceToolsRouter } from './router';
 
 const router = Router();
-router.use(executionLimiter);
+router.use('/workspace-tools/execute', executionLimiter);
 router.use(
   createWorkspaceToolsRouter({
     store: bridgeStore,

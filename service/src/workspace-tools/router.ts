@@ -27,9 +27,10 @@ function asyncRoute(handler: (req: AuthenticatedRequest, res: Response) => Promi
   };
 }
 
-function bridgeStoreStatus(error: BridgeStoreError): number {
+export function bridgeStoreStatus(error: BridgeStoreError): number {
   if (error.code === 'WORKER_UNAUTHORIZED') return 403;
   if (error.code === 'ASSIGNMENT_INVALID') return 400;
+  if (error.code === 'RESULT_INVALID') return 502;
   if (error.code === 'ASSIGNMENT_EXPIRED') return 504;
   if (error.code === 'WORKER_OFFLINE' || error.code === 'WORKER_BUSY') {
     return 503;

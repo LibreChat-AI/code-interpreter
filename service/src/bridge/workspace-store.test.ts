@@ -154,6 +154,6 @@ test('rejects a fulfilled workspace settlement that violates the result contract
   });
 
   await expect(completion).rejects.toMatchObject({
-    code: 'ASSIGNMENT_INVALID',
+    code: 'RESULT_INVALID',
   });
 });
