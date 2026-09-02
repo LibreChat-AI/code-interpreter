@@ -54,3 +54,38 @@ test('bridge worker capabilities enforce registration limits', () => {
     false,
   );
 });
+
+test('bridge worker capabilities accept only bounded public workspace descriptors', () => {
+  const valid = {
+    statefulWorkspace: true,
+    sandboxProfile: 'nsjail',
+    runtimes: ['bash'],
+    workspaceTools: {
+      protocolVersion: 1,
+      operations: ['read_file', 'search_text'],
+      workspaces: [{ id: 'primary', name: 'LibreChat' }],
+    },
+  };
+
+  assert.equal(isValidBridgeWorkerCapabilities(valid), true);
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
+        workspaces: [{ id: 'primary', root: '/Users/operator/private' }],
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
+        workspaces: [{ id: '../escape' }],
+      },
+    }),
+    false,
+  );
+});
