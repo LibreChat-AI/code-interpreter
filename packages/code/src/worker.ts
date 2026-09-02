@@ -7,10 +7,12 @@ import {
 } from './protocol.js';
 import { EndpointRuntimeSupervisor } from './runtime.js';
 import { signBridgeRequest } from './identity.js';
+import { isWorkspaceToolRequest } from './workspace.js';
 
 import type {
   BridgeAssignment,
   BridgeLeaseResponse,
+  BridgeSandboxRequest,
   BridgeSettlement,
   BridgeSettlementResponse,
   BridgeWorkerCapabilities,
@@ -18,6 +20,7 @@ import type {
   BridgeWorkerRegistrationResponse,
 } from './protocol.js';
 import type { RuntimeLease, RuntimeSupervisor } from './runtime.js';
+import type { WorkspaceToolExecutor } from './workspace.js';
 
 export interface BridgeWorkerOptions {
   codeApiUrl: string;
@@ -28,6 +31,7 @@ export interface BridgeWorkerOptions {
   sandboxEndpoint?: string;
   runtimeSupervisor?: RuntimeSupervisor;
   capabilities: BridgeWorkerCapabilities;
+  workspaceTools?: WorkspaceToolExecutor;
   leaseWaitMs?: number;
   leaseTransportGraceMs?: number;
   registrationTransportTimeoutMs?: number;
@@ -114,6 +118,25 @@ function errorCode(value: object): string | undefined {
   return undefined;
 }
 
+function workspaceCapabilitiesMatch(
+  advertised: NonNullable<BridgeWorkerCapabilities['workspaceTools']>,
+  executor: NonNullable<BridgeWorkerCapabilities['workspaceTools']>,
+): boolean {
+  return (
+    advertised.protocolVersion === executor.protocolVersion &&
+    advertised.operations.length === executor.operations.length &&
+    advertised.operations.every(
+      (operation, index) => operation === executor.operations[index],
+    ) &&
+    advertised.workspaces.length === executor.workspaces.length &&
+    advertised.workspaces.every(
+      (workspace, index) =>
+        workspace.id === executor.workspaces[index]?.id &&
+        workspace.name === executor.workspaces[index]?.name,
+    )
+  );
+}
+
 export class BridgeWorkspaceQuarantinedError extends Error {
   constructor(
     message: string,
@@ -146,6 +169,20 @@ export class BridgeWorker {
     }
     if (options.runtimeSupervisor == null && !options.sandboxEndpoint?.trim()) {
       throw new BridgeProtocolError('Bridge worker requires a runtime supervisor');
+    }
+    if (
+      (options.workspaceTools == null) !==
+        (options.capabilities.workspaceTools == null) ||
+      (options.workspaceTools != null &&
+        options.capabilities.workspaceTools != null &&
+        !workspaceCapabilitiesMatch(
+          options.capabilities.workspaceTools,
+          options.workspaceTools.capabilities,
+        ))
+    ) {
+      throw new BridgeProtocolError(
+        'Workspace tool capabilities require a matching executor',
+      );
     }
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.codeApiUrl = normalizedBaseUrl(options.codeApiUrl);
@@ -622,56 +659,113 @@ export class BridgeWorker {
         credentialMaintenanceError = error;
         executionController.abort();
       });
-      runtimeLease = await this.runtimeSupervisor.acquire(
-        assignment,
-        executionController.signal,
-      );
-      if (executionController.signal.aborted) {
-        throw executionController.signal.reason ?? new DOMException('aborted', 'AbortError');
+      let payload: object = {};
+      if (assignment.executionKind === 'workspace_tool') {
+        if (this.options.workspaceTools == null) {
+          throw new BridgeProtocolError(
+            'Worker does not provide local workspace tools',
+          );
+        }
+        if (!isWorkspaceToolRequest(assignment.request)) {
+          throw new BridgeProtocolError('Invalid workspace tool request');
+        }
+        const workspaceRequest = assignment.request;
+        const advertised = this.options.workspaceTools.capabilities;
+        if (!advertised.operations.includes(workspaceRequest.operation)) {
+          throw new BridgeProtocolError(
+            'Workspace tool operation is not advertised',
+          );
+        }
+        if (
+          !advertised.workspaces.some(
+            (workspace) => workspace.id === workspaceRequest.workspaceId,
+          )
+        ) {
+          throw new BridgeProtocolError('Workspace is not advertised');
+        }
+        payload = await this.options.workspaceTools.execute(
+          workspaceRequest,
+          executionController.signal,
+        );
+        if (executionController.signal.aborted) {
+          throw (
+            executionController.signal.reason ??
+            new DOMException('aborted', 'AbortError')
+          );
+        }
+        if (Date.now() >= localDeadlineAtMs) {
+          throw new BridgeProtocolError(
+            'Bridge assignment expired during workspace execution',
+          );
+        }
+      } else {
+        runtimeLease = await this.runtimeSupervisor.acquire(
+          assignment,
+          executionController.signal,
+        );
+        if (executionController.signal.aborted) {
+          throw (
+            executionController.signal.reason ??
+            new DOMException('aborted', 'AbortError')
+          );
+        }
+        const sandboxRequest = assignment.request as BridgeSandboxRequest;
+        const headers = {
+          ...sandboxRequest.headers,
+          ...(runtimeLease.sessionId
+            ? { 'X-Runtime-Session-Id': runtimeLease.sessionId }
+            : {}),
+        };
+        const sandboxRequestBody = JSON.stringify(sandboxRequest.body);
+        if (Date.now() >= localDeadlineAtMs) {
+          throw new BridgeProtocolError(
+            'Bridge assignment expired before sandbox execution',
+          );
+        }
+        sandboxStarted = true;
+        const response = await this.executeRuntime(
+          runtimeLease,
+          sandboxRequestBody,
+          {
+            ...headers,
+            'Content-Type': 'application/json',
+          },
+          executionController.signal,
+        );
+        try {
+          payload = JSON.parse(response.body) as object;
+        } catch (error) {
+          if (response.status >= 200 && response.status < 300) throw error;
+        }
+        if (response.status < 200 || response.status >= 300) {
+          sandboxRejectedExecution =
+            response.status >= 400 &&
+            response.status < 500 &&
+            response.status !== 408 &&
+            response.status !== 429 &&
+            errorMessage(payload) !== 'session_workspace_dirty';
+          throw new BridgeProtocolError(
+            errorMessage(payload) ??
+              `Sandbox rejected execution with HTTP ${response.status}`,
+            response.status,
+          );
+        }
       }
-      const headers = {
-        ...assignment.request.headers,
-        ...(runtimeLease.sessionId
-          ? { 'X-Runtime-Session-Id': runtimeLease.sessionId }
-          : {}),
-      };
-      const sandboxRequestBody = JSON.stringify(assignment.request.body);
-      if (Date.now() >= localDeadlineAtMs) {
-        throw new BridgeProtocolError(
-          'Bridge assignment expired before sandbox execution',
+      cancellationController.abort();
+      await cancellationWatcher;
+      if (executionController.signal.aborted) {
+        throw (
+          executionController.signal.reason ??
+          new DOMException('aborted', 'AbortError')
         );
       }
-      sandboxStarted = true;
-      const response = await this.executeRuntime(
-        runtimeLease,
-        sandboxRequestBody,
-        {
-          ...headers,
-          'Content-Type': 'application/json',
-        },
-        executionController.signal,
-      );
-      let payload: object = {};
-      try {
-        payload = JSON.parse(response.body) as object;
-      } catch (error) {
-        if (response.status >= 200 && response.status < 300) throw error;
+      if (Date.now() >= localDeadlineAtMs) {
+        throw new BridgeProtocolError(
+          'Bridge assignment expired while draining cancellation',
+        );
       }
       if (credentialMaintenanceError != null) {
         throw credentialMaintenanceError;
-      }
-      if (response.status < 200 || response.status >= 300) {
-        sandboxRejectedExecution =
-          response.status >= 400 &&
-          response.status < 500 &&
-          response.status !== 408 &&
-          response.status !== 429 &&
-          errorMessage(payload) !== 'session_workspace_dirty';
-        throw new BridgeProtocolError(
-          errorMessage(payload) ??
-            `Sandbox rejected execution with HTTP ${response.status}`,
-          response.status,
-        );
       }
       if (heartbeatError != null) throw heartbeatError;
       settlement = {
@@ -1005,7 +1099,9 @@ export class BridgeWorker {
       if (signal.aborted || executionController.signal.aborted) return;
       const pollController = new AbortController();
       const abortPoll = (): void => pollController.abort();
-      signal.addEventListener('abort', abortPoll, { once: true });
+      executionController.signal.addEventListener('abort', abortPoll, {
+        once: true,
+      });
       const timeout = setTimeout(
         abortPoll,
         Math.max(
@@ -1028,14 +1124,14 @@ export class BridgeWorker {
           return;
         }
       } catch (error) {
-        if (signal.aborted) return;
         if (error instanceof BridgeProtocolError && error.status === 404) {
           executionController.abort();
           return;
         }
+        if (signal.aborted) return;
       } finally {
         clearTimeout(timeout);
-        signal.removeEventListener('abort', abortPoll);
+        executionController.signal.removeEventListener('abort', abortPoll);
       }
     }
   }

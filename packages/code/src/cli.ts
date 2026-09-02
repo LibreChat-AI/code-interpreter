@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
 import { startFileRelay } from './relay.js';
@@ -13,7 +13,9 @@ import {
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
 import { DockerRuntimeSupervisor, EndpointRuntimeSupervisor } from './runtime.js';
+import { LocalWorkspaceTools } from './workspace.js';
 import {
+  BRIDGE_WORKSPACE_NAME_MAX_LENGTH,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
 } from './protocol.js';
@@ -63,6 +65,14 @@ function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index >= 0) return args[index + 1];
   return args.find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1);
+}
+
+function defaultWorkspaceName(workerDirectory: string, workspaceId: string): string {
+  const directoryName = basename(resolve(workerDirectory));
+  return directoryName.trim().length > 0 &&
+    directoryName.length <= BRIDGE_WORKSPACE_NAME_MAX_LENGTH
+    ? directoryName
+    : workspaceId;
 }
 
 async function pair(args: string[]): Promise<void> {
@@ -117,7 +127,7 @@ async function relay(): Promise<void> {
   await handle.close();
 }
 
-async function run(runtimeSessionId?: string): Promise<void> {
+async function run(runtimeSessionId?: string, args: string[] = []): Promise<void> {
   const configuredWorkerId = process.env.LIBRECHAT_CODE_WORKER_ID?.trim();
   const configuredIdentityPath = process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
   const configuredToken = process.env.LIBRECHAT_CODE_WORKER_TOKEN?.trim();
@@ -187,6 +197,29 @@ async function run(runtimeSessionId?: string): Promise<void> {
     runtimeMode === 'docker-macos-nsjail' &&
     runtimeSessionId == null &&
     (fileRelayUpstream?.length ?? 0) > 0;
+  const workerDirectory =
+    runtimeSessionId == null
+      ? option(args, '--worker-dir') ??
+        process.env.LIBRECHAT_CODE_WORKER_DIR?.trim()
+      : undefined;
+  const workspaceId =
+    option(args, '--workspace-id') ??
+    process.env.LIBRECHAT_CODE_WORKSPACE_ID?.trim() ??
+    'primary';
+  const workspaceTools = workerDirectory
+    ? await LocalWorkspaceTools.create({
+        workspaces: [
+          {
+            id: workspaceId,
+            name:
+              option(args, '--workspace-name') ??
+              process.env.LIBRECHAT_CODE_WORKSPACE_NAME?.trim() ??
+              defaultWorkspaceName(workerDirectory, workspaceId),
+            root: workerDirectory,
+          },
+        ],
+      })
+    : undefined;
   const capabilities = {
     statefulWorkspace,
     sandboxProfile:
@@ -195,6 +228,7 @@ async function run(runtimeSessionId?: string): Promise<void> {
     runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
     policyDigest: createHash('sha256').update(policy).digest('hex'),
     ...(fileRelayEnabled ? { requiresReadyConfirmation: true } : {}),
+    ...(workspaceTools ? { workspaceTools: workspaceTools.capabilities } : {}),
   };
   if (!isValidBridgeWorkerCapabilities(capabilities)) {
     throw new Error(
@@ -330,6 +364,7 @@ async function run(runtimeSessionId?: string): Promise<void> {
               statefulWorkspace,
             }),
       capabilities,
+      workspaceTools,
       onIdentityChange:
         pairedIdentity && identityPath
           ? async (identity) => {
@@ -401,7 +436,7 @@ async function main(): Promise<void> {
   if (args[0] && args[0] !== 'run') {
     throw new Error(`Unknown command: ${args[0]}`);
   }
-  await run();
+  await run(undefined, args.slice(1));
 }
 main().catch((error: Error) => {
   process.stderr.write(`librechat-code: ${error.message}\n`);

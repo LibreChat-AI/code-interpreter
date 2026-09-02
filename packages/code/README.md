@@ -188,7 +188,7 @@ accepting another assignment. Reset or discard that session's local runner
 before restarting the worker; its workspace may contain mutations that Code
 API did not commit.
 
-## Local workspace tools (library preview)
+## Local workspace tools (bridge preview)
 
 `@librechat/code/workspace` provides the provider-neutral foundation for
 coding-agent access to repositories that already live on the worker machine.
@@ -207,9 +207,28 @@ and stops after a bounded global result count. The worker process still belongs
 inside the trusted BYOM boundary and should receive filesystem access only to
 roots the operator intentionally registers.
 
-This release exposes the library protocol only. The subsequent bridge-dispatch
-layer will route signed, deadline-bound workspace tool assignments to it; until
-that layer is configured, the CLI does not advertise or execute these tools.
+Register one repository already present on the worker machine with the
+Cursor-style worker-directory option:
+
+```bash
+librechat-code run --worker-dir /path/to/repository
+```
+
+The default public workspace ID is `primary` and the default display name is
+the directory basename. Operators can use `--workspace-id` and
+`--workspace-name`, or `LIBRECHAT_CODE_WORKER_DIR`,
+`LIBRECHAT_CODE_WORKSPACE_ID`, and `LIBRECHAT_CODE_WORKSPACE_NAME`, to set them
+explicitly. `rg` must be installed on the worker for `search_text`.
+
+The worker advertises these capabilities only when a directory is configured
+and executes matching assignments under the bridge's existing lease,
+deadline, cancellation, credential-refresh, and settlement fencing. The
+repository itself remains on the worker. As with Cursor's self-hosted agents,
+text deliberately selected by `read_file` or `search_text` crosses the outbound
+bridge so the remote agent/model can reason over it. Host paths are never part
+of that payload. The Code API workspace-tool endpoint is delivered as a
+dependent layer; deployments without it continue to use sandbox assignments
+unchanged.
 
 After discarding or resetting that session's local runner, acknowledge recovery
 with `librechat-code reset-workspace <runtime-session-id>`. The command uses the

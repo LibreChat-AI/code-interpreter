@@ -27,6 +27,14 @@ export interface LocalWorkspaceToolsOptions {
   workspaces: LocalWorkspaceConfig[];
 }
 
+export interface WorkspaceToolExecutor {
+  capabilities: BridgeWorkspaceToolCapabilities;
+  execute(
+    request: WorkspaceToolRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceToolResult>;
+}
+
 export interface WorkspaceReadFileRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'read_file';
@@ -535,7 +543,7 @@ async function searchWorkspace(
   };
 }
 
-export class LocalWorkspaceTools {
+export class LocalWorkspaceTools implements WorkspaceToolExecutor {
   readonly capabilities: BridgeWorkspaceToolCapabilities;
 
   private constructor(
