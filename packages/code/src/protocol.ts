@@ -203,6 +203,35 @@ export interface BridgeRejectedSettlement {
   incarnationId: string;
   status: 'rejected';
   error: string;
+  errorCode?: WorkspaceToolErrorCode;
+}
+
+export type WorkspaceToolErrorCode =
+  | 'INVALID_PATH'
+  | 'INVALID_REQUEST'
+  | 'READ_LIMIT_EXCEEDED'
+  | 'REGISTRATION_INVALID'
+  | 'EXECUTION_ABORTED'
+  | 'SEARCH_TIMEOUT'
+  | 'SEARCH_UNAVAILABLE';
+
+const WORKSPACE_TOOL_ERROR_CODES = new Set<WorkspaceToolErrorCode>([
+  'INVALID_PATH',
+  'INVALID_REQUEST',
+  'READ_LIMIT_EXCEEDED',
+  'REGISTRATION_INVALID',
+  'EXECUTION_ABORTED',
+  'SEARCH_TIMEOUT',
+  'SEARCH_UNAVAILABLE',
+]);
+
+export function isWorkspaceToolErrorCode(
+  value: unknown,
+): value is WorkspaceToolErrorCode {
+  return (
+    typeof value === 'string' &&
+    WORKSPACE_TOOL_ERROR_CODES.has(value as WorkspaceToolErrorCode)
+  );
 }
 
 export type BridgeSettlement<TResult = object> =
@@ -370,7 +399,8 @@ export function isWorkspaceToolResult(
       actualLineCount === reportedLineCount &&
       (result.truncated === true
         ? Number.isSafeInteger(result.nextStartLine) &&
-          Number(result.nextStartLine) === Number(result.endLine) + 1
+          Number(result.nextStartLine) === Number(result.endLine) + 1 &&
+          Number(result.nextStartLine) > startLine
         : result.nextStartLine === undefined)
     );
   }

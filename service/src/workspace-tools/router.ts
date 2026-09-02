@@ -6,6 +6,7 @@ import type { RedisBridgeStore } from '../bridge/store';
 
 import { getPrincipalOrReject } from '../auth/principal';
 import { BridgeStoreError } from '../bridge/store';
+import { checkServiceShutDown } from '../lifecycle';
 import { isWorkspaceToolRequest } from '../../../packages/code/src/protocol';
 import {
   CODEAPI_BRIDGE_WORKER_HEADER,
@@ -19,6 +20,7 @@ interface WorkspaceToolsRouterOptions {
   configuredWorkerId: string;
   dynamicWorkers: boolean;
   timeoutMs?: number;
+  isShuttingDown?: () => boolean;
 }
 
 function asyncRoute(handler: (req: AuthenticatedRequest, res: Response) => Promise<void>): RequestHandler {
@@ -46,6 +48,10 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
     asyncRoute(async (req, res) => {
       const principal = getPrincipalOrReject(req, res);
       if (!principal) return;
+      if ((options.isShuttingDown ?? checkServiceShutDown)()) {
+        res.status(503).json({ error: 'Service is shutting down' });
+        return;
+      }
       if (!isWorkspaceToolRequest(req.body)) {
         res.status(400).json({
           error: 'Invalid workspace tool request',
@@ -94,9 +100,12 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
           signal: controller.signal,
         });
         if (settlement.status === 'rejected') {
-          res.status(422).json({
+          let status = 422;
+          if (settlement.errorCode === 'SEARCH_TIMEOUT') status = 504;
+          if (settlement.errorCode === 'SEARCH_UNAVAILABLE') status = 503;
+          res.status(status).json({
             error: settlement.error,
-            code: 'WORKSPACE_TOOL_REJECTED',
+            code: settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED',
           });
           return;
         }

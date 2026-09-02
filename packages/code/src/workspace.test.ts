@@ -676,6 +676,16 @@ test('validates workspace results against the originating request', () => {
   assert.equal(
     isWorkspaceToolResult(request, {
       ...result,
+      content: '',
+      endLine: 0,
+      truncated: true,
+      nextStartLine: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
       nextStartLine: 2,
     }),
     false,

@@ -10,6 +10,7 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
+  isWorkspaceToolErrorCode,
 } from '../../../packages/code/src/protocol';
 import { BridgePairingError, RedisBridgePairingStore } from './pairing';
 import { BridgeStoreError, RedisBridgeStore } from './store';
@@ -113,7 +114,12 @@ function isSettlement(value: unknown): value is CodeBridgeSettlement {
     return false;
   }
   if (value.status === 'rejected') {
-    return typeof value.error === 'string' && value.error.length <= 4096;
+    return (
+      typeof value.error === 'string' &&
+      value.error.length <= 4096 &&
+      (value.errorCode === undefined ||
+        isWorkspaceToolErrorCode(value.errorCode))
+    );
   }
   return (
     value.status === 'fulfilled' &&

@@ -2,8 +2,64 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BridgeWorker } from './worker.js';
+import { WorkspaceToolError } from './workspace.js';
 
 const incarnationId = 'incarnation-00000001';
+
+test('worker preserves bounded workspace rejection codes', async () => {
+  let settlement: Record<string, unknown> | undefined;
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['search_text' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        throw new WorkspaceToolError(
+          'Workspace search timed out',
+          'SEARCH_TIMEOUT',
+        );
+      },
+    },
+    fetchImpl: async (_input, init) => {
+      settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-workspace-timeout',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'search_text',
+      workspaceId: 'primary',
+      query: 'needle',
+    },
+  });
+
+  assert.equal(settlement?.status, 'rejected');
+  assert.equal(settlement?.errorCode, 'SEARCH_TIMEOUT');
+});
 
 test('worker executes a workspace tool assignment locally without acquiring a sandbox', async () => {
   const requests: Array<{ url: string; init?: RequestInit }> = [];

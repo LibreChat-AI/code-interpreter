@@ -25,6 +25,7 @@ import type {
   WorkspaceSearchTextRequest,
   WorkspaceSearchTextResult,
   WorkspaceToolRequest,
+  WorkspaceToolErrorCode,
   WorkspaceToolResult,
 } from './protocol.js';
 
@@ -109,14 +110,7 @@ function sliceWithoutSplittingSurrogates(
 export class WorkspaceToolError extends Error {
   constructor(
     message: string,
-    public readonly code:
-      | 'INVALID_PATH'
-      | 'INVALID_REQUEST'
-      | 'READ_LIMIT_EXCEEDED'
-      | 'REGISTRATION_INVALID'
-      | 'EXECUTION_ABORTED'
-      | 'SEARCH_TIMEOUT'
-      | 'SEARCH_UNAVAILABLE',
+    public readonly code: WorkspaceToolErrorCode,
   ) {
     super(message);
     this.name = 'WorkspaceToolError';
