@@ -781,6 +781,149 @@ test('worker retains quarantine when a mutation executor fails ambiguously', asy
   assert.deepEqual(lifecycle, ['arm', 'execute', 'quarantine']);
 });
 
+test('worker retains quarantine when a mutation executor returns an invalid result', async () => {
+  const lifecycle: string[] = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    workspaces: [{ id: 'primary', operations: ['write_file' as const] }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        lifecycle.push('execute');
+        return { malformed: true } as never;
+      },
+    },
+    workspaceMutationQuarantine: mutationQuarantine(
+      () => lifecycle.push('quarantine'),
+      () => lifecycle.push('arm'),
+      () => lifecycle.push('clear'),
+    ),
+    fetchImpl: async () => {
+      lifecycle.push('settle');
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'assignment-workspace-write-invalid-result',
+      workerId: 'vm-1',
+      incarnationId,
+      generation: 4,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 5_000).toISOString(),
+      executionKind: 'workspace_tool',
+      request: {
+        protocolVersion: 1,
+        operation: 'write_file',
+        workspaceId: 'primary',
+        path: 'notes.txt',
+        content: 'written',
+      },
+    }),
+    BridgeWorkspaceQuarantinedError,
+  );
+  assert.deepEqual(lifecycle, ['arm', 'execute', 'quarantine']);
+});
+
+test('worker heartbeats through the marker armed by its active mutation', async () => {
+  let availabilityChecks = 0;
+  let registrations = 0;
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    workspaces: [{ id: 'primary', operations: ['write_file' as const] }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute(request) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return {
+          protocolVersion: 1,
+          operation: 'write_file',
+          workspaceId: request.workspaceId,
+          path: 'notes.txt',
+          bytesWritten: 7,
+          created: true,
+        };
+      },
+    },
+    workspaceMutationQuarantine: {
+      async assertAvailable() {
+        availabilityChecks += 1;
+      },
+      async arm() {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      },
+      async clear() {},
+      async quarantine() {},
+    },
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('/register')) {
+        registrations += 1;
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          incarnationId,
+          registeredAt: new Date().toISOString(),
+          leaseTtlMs: 50,
+          supportedWorkspaceToolOperations: ['write_file'],
+        });
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.register();
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-workspace-write-heartbeat',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      content: 'written',
+    },
+  });
+
+  assert.ok(registrations >= 2);
+  assert.equal(availabilityChecks, 1);
+});
+
 test('worker stops when cancellation races a completed workspace mutation', async () => {
   const controller = new AbortController();
   let settlementAttempts = 0;

@@ -1026,6 +1026,47 @@ test('workspace edits revalidate source after restoring temporary metadata', asy
   assert.equal(await readFile(target, 'utf8'), 'concurrent update');
 });
 
+test('workspace edits honor cancellation immediately before atomic replacement', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = join(root, 'notes.txt');
+  await writeFile(target, 'before');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const controller = new AbortController();
+  const probe = await open(target, 'r');
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+    sync(): Promise<void>;
+  };
+  await probe.close();
+  const originalSync = fileHandlePrototype.sync;
+  let syncCalls = 0;
+  t.mock.method(fileHandlePrototype, 'sync', async function (this: FileHandle) {
+    await originalSync.call(this);
+    syncCalls += 1;
+    if (syncCalls === 1) controller.abort();
+  });
+
+  await assert.rejects(
+    tools.execute(
+      {
+        protocolVersion: 1,
+        operation: 'edit_file',
+        workspaceId: 'primary',
+        path: 'notes.txt',
+        oldText: 'before',
+        newText: 'after',
+      },
+      controller.signal,
+    ),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'EXECUTION_ABORTED',
+  );
+  assert.equal(await readFile(target, 'utf8'), 'before');
+});
+
 test('workspace mutations accept filesystem-equivalent directory casing', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+
+import type { FileHandle } from 'node:fs/promises';
 
 import {
   clearWorkspaceMutationQuarantine,
@@ -81,6 +83,13 @@ test('default mutation quarantine paths are stable and worker scoped', () => {
       codeApiUrl: 'https://code.example/v1/',
     }),
   );
+  assert.equal(
+    defaultWorkspaceQuarantinePath(options),
+    defaultWorkspaceQuarantinePath({
+      ...options,
+      codeApiUrl: 'https://CODE.EXAMPLE:443/v1',
+    }),
+  );
   assert.notEqual(
     defaultWorkspaceQuarantinePath(options),
     defaultWorkspaceQuarantinePath({ ...options, workspaceId: 'secondary' }),
@@ -129,7 +138,7 @@ test('paired identity is persisted atomically with owner-only permissions', asyn
   }
 });
 
-test('workspace mutation quarantine persists until explicitly cleared', async () => {
+test('workspace mutation quarantine persists until explicitly cleared', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'librechat-code-quarantine-'));
   const path = join(directory, 'state', 'quarantine.json');
   const record = {
@@ -140,9 +149,21 @@ test('workspace mutation quarantine persists until explicitly cleared', async ()
     reason: 'ambiguous settlement delivery',
   };
   try {
+    const probe = await open(directory, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      sync(): Promise<void>;
+    };
+    await probe.close();
+    const originalSync = fileHandlePrototype.sync;
+    let syncCalls = 0;
+    t.mock.method(fileHandlePrototype, 'sync', async function (this: FileHandle) {
+      await originalSync.call(this);
+      syncCalls += 1;
+    });
     await saveWorkspaceMutationQuarantine(path, record);
     assert.deepEqual(await loadWorkspaceMutationQuarantine(path), record);
     assert.equal((await stat(path)).mode & 0o777, 0o600);
+    assert.equal(syncCalls, process.platform === 'win32' ? 1 : 2);
     await clearWorkspaceMutationQuarantine(path);
     assert.equal(await loadWorkspaceMutationQuarantine(path), undefined);
     await writeFile(path, '{bad json', 'utf8');

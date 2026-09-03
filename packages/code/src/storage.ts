@@ -41,6 +41,23 @@ function workspaceStorageName(value: string): string {
   return `id-${createHash('sha256').update(value).digest('hex')}`;
 }
 
+function canonicalDeploymentUrl(value: string): string {
+  const url = new URL(value);
+  url.hash = '';
+  url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  return url.toString();
+}
+
+async function syncParentDirectory(path: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  const directory = await open(dirname(path), 'r');
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
 export interface DefaultWorkspacePathOptions {
   codeApiUrl: string;
   securityIdentity: string;
@@ -95,7 +112,7 @@ export function defaultWorkspaceQuarantinePath(
     'librechat',
     'code',
     'quarantines',
-    workspaceStorageName(options.codeApiUrl.replace(/\/+$/, '')),
+    workspaceStorageName(canonicalDeploymentUrl(options.codeApiUrl)),
     workspaceStorageName(options.workerId),
     `${workspaceStorageName(options.workspaceId)}.json`,
   );
@@ -165,6 +182,7 @@ export async function saveWorkspaceMutationQuarantine(
     }
     await rename(temporaryPath, path);
     await chmod(path, 0o600);
+    await syncParentDirectory(path);
   } catch (error) {
     await rm(temporaryPath, { force: true });
     throw error;

@@ -311,6 +311,7 @@ async function commitVerifiedEdit(
   expected: { dev: bigint | number; ino: bigint | number; content: Buffer },
   temporary: string,
   installTarget: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   let handle: FileHandle | undefined;
   try {
@@ -343,6 +344,7 @@ async function commitVerifiedEdit(
         'EDIT_CONFLICT',
       );
     }
+    throwIfAborted(signal);
     await rename(temporary, installTarget);
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
@@ -493,6 +495,7 @@ async function atomicWriteConfinedFile(
         expected,
         temporary,
         installTarget,
+        signal,
       );
       return { created: false };
     }
