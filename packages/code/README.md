@@ -191,9 +191,11 @@ Likewise, if a local `write_file` or `edit_file` completes but its fulfilled
 settlement cannot be acknowledged, the worker exits before accepting more
 workspace operations and writes a deployment/worker/workspace-scoped
 quarantine marker that survives process restarts. The marker is armed before
-each mutation and removed only after Code API accepts its settlement. The worker
-refuses to register writable workspace tools while that marker exists. Inspect
-or restore the registered directory, then explicitly clear the marker with
+each mutation with exclusive, incarnation-owned creation and removed only after
+Code API accepts its settlement. Overlapping workers cannot replace or clear
+one another's marker. The worker refuses to register writable workspace tools
+while that marker exists. Inspect or restore the registered directory, then
+explicitly clear the marker with
 `librechat-code clear-workspace-quarantine --worker-dir <same-directory>`
 before restarting it. Use `--default-workspace --workspace-id <id>` instead for
 an application-owned default directory. `LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE`
@@ -228,9 +230,11 @@ operator intentionally registers.
 Writes are limited to 1 MiB of UTF-8 text and require an existing directory
 inside the registered root. They reject traversal, symlink targets, and
 non-regular files, and commit through an owner-only temporary file followed by
-an atomic rename. Edits replace text only when the requested old text occurs
-exactly once and reject if the file changes before commit. These operations do
-not create directories or execute commands.
+an atomic rename. The worker syncs the containing directory and verifies that
+the installed inode still contains the requested bytes before reporting
+success. Edits replace text only when the requested old text occurs exactly
+once and reject if the file changes before commit. These operations do not
+create directories or execute commands.
 
 Register one directory already present on the worker machine with the
 worker-directory option:

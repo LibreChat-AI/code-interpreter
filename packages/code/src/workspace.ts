@@ -159,15 +159,42 @@ async function syncWorkspaceDirectory(path: string): Promise<void> {
   }
 }
 
-async function confirmInstalledMutation(canonicalParent: string): Promise<void> {
+async function confirmInstalledMutation(
+  root: string,
+  installTarget: string,
+  expected: { dev: bigint | number; ino: bigint | number; content: Buffer },
+): Promise<void> {
+  let handle: FileHandle | undefined;
   try {
-    await syncWorkspaceDirectory(canonicalParent);
+    await syncWorkspaceDirectory(dirname(installTarget));
+    handle = await open(
+      installTarget,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const [openedStat, canonicalPath] = await Promise.all([
+      handle.stat(),
+      realpath(installTarget),
+    ]);
+    const canonicalStat = await stat(canonicalPath);
+    if (
+      !openedStat.isFile() ||
+      !isWithinRoot(root, canonicalPath) ||
+      openedStat.dev !== canonicalStat.dev ||
+      openedStat.ino !== canonicalStat.ino ||
+      openedStat.dev !== expected.dev ||
+      openedStat.ino !== expected.ino ||
+      !(await readBoundedEditFile(handle)).equals(expected.content)
+    ) {
+      throw new Error('installed workspace mutation changed');
+    }
   } catch {
     throw new WorkspaceToolError(
       'Workspace mutation durability could not be confirmed',
       'WRITE_UNAVAILABLE',
       true,
     );
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 
@@ -339,6 +366,7 @@ async function commitVerifiedEdit(
   expected: { dev: bigint | number; ino: bigint | number; content: Buffer },
   temporary: string,
   installTarget: string,
+  staged: { dev: bigint | number; ino: bigint | number; content: Buffer },
   signal?: AbortSignal,
 ): Promise<void> {
   let handle: FileHandle | undefined;
@@ -374,7 +402,7 @@ async function commitVerifiedEdit(
     }
     throwIfAborted(signal);
     await rename(temporary, installTarget);
-    await confirmInstalledMutation(dirname(installTarget));
+    await confirmInstalledMutation(root, installTarget, staged);
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
@@ -450,6 +478,7 @@ async function atomicWriteConfinedFile(
   );
   const installTarget = resolve(canonicalParent, basename(candidate));
   let handle: FileHandle | undefined;
+  let staged: { dev: bigint | number; ino: bigint | number; content: Buffer };
   try {
     handle = await open(
       temporary,
@@ -478,8 +507,12 @@ async function atomicWriteConfinedFile(
       await handle.chmod(Number(existing.mode) & 0o777);
       await handle.sync();
     }
-    await handle.close();
-    handle = undefined;
+    const stagedStat = await handle.stat();
+    staged = { dev: stagedStat.dev, ino: stagedStat.ino, content };
+    if (process.platform === 'win32') {
+      await handle.close();
+      handle = undefined;
+    }
 
     let current: Awaited<ReturnType<typeof lstat>> | undefined;
     try {
@@ -524,13 +557,14 @@ async function atomicWriteConfinedFile(
         expected,
         temporary,
         installTarget,
+        staged,
         signal,
       );
       return { created: false };
     }
     throwIfAborted(signal);
     await rename(temporary, installTarget);
-    await confirmInstalledMutation(canonicalParent);
+    await confirmInstalledMutation(root, installTarget, staged);
     return { created: existing == null };
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;

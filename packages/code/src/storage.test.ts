@@ -179,3 +179,37 @@ test('workspace mutation quarantine persists until explicitly cleared', async (t
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('workspace mutation quarantine cannot be replaced or cleared by another owner', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'librechat-code-quarantine-'));
+  const path = join(directory, 'quarantine.json');
+  const first = {
+    version: 1 as const,
+    workerId: 'vm-1',
+    workspaceId: 'primary',
+    ownerId: 'incarnation-1',
+    quarantinedAt: new Date().toISOString(),
+    reason: 'mutation pending settlement',
+  };
+  try {
+    await saveWorkspaceMutationQuarantine(path, first);
+    await assert.rejects(
+      saveWorkspaceMutationQuarantine(path, {
+        ...first,
+        ownerId: 'incarnation-2',
+      }),
+      (error: unknown) =>
+        (error as NodeJS.ErrnoException).code === 'EEXIST',
+    );
+    assert.deepEqual(await loadWorkspaceMutationQuarantine(path), first);
+    await assert.rejects(
+      clearWorkspaceMutationQuarantine(path, 'incarnation-2'),
+      /owned by another worker incarnation/i,
+    );
+    assert.deepEqual(await loadWorkspaceMutationQuarantine(path), first);
+    await clearWorkspaceMutationQuarantine(path, 'incarnation-1');
+    assert.equal(await loadWorkspaceMutationQuarantine(path), undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

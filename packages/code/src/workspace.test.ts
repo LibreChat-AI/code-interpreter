@@ -7,10 +7,12 @@ import {
   mkdir,
   open,
   readFile,
+  readdir,
   realpath,
   rm,
   stat,
   symlink,
+  unlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -923,6 +925,55 @@ test('workspace mutations report uncertain commit when directory sync fails', as
       error.mutationMayHaveCommitted,
   );
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'possibly committed');
+});
+
+test('workspace mutations reject a replaced staging inode after installation', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Open-file replacement semantics differ on Windows');
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const probe = await open(root, 'r');
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+    stat(): ReturnType<FileHandle['stat']>;
+  };
+  await probe.close();
+  const originalStat = fileHandlePrototype.stat;
+  let replaced = false;
+  t.mock.method(fileHandlePrototype, 'stat', async function (this: FileHandle) {
+    const metadata = await originalStat.call(this);
+    if (!replaced && metadata.isFile()) {
+      const [temporary] = (await readdir(root)).filter((entry) =>
+        entry.startsWith('.librechat-code-'),
+      );
+      if (temporary != null) {
+        replaced = true;
+        await unlink(join(root, temporary));
+        await writeFile(join(root, temporary), 'attacker-controlled');
+      }
+    }
+    return metadata;
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      content: 'requested',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'WRITE_UNAVAILABLE' &&
+      error.mutationMayHaveCommitted,
+  );
+  assert.equal(replaced, true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'attacker-controlled');
 });
 
 test('exact edits reject missing or repeated text without changing the file', async (t) => {

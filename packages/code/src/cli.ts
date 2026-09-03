@@ -8,6 +8,7 @@ import { pairBridgeWorker } from './pairing.js';
 import { startFileRelay } from './relay.js';
 import { DockerFileRelaySupervisor } from './relay-runtime.js';
 import {
+  assertWorkspaceMutationQuarantineOwner,
   clearWorkspaceMutationQuarantine,
   defaultBridgeIdentityPath,
   defaultWorkspaceQuarantinePath,
@@ -470,21 +471,22 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
                 version: 1,
                 workerId,
                 workspaceId,
+                ownerId: incarnationId,
                 quarantinedAt: new Date().toISOString(),
                 reason,
               });
             },
             async clear() {
-              await clearWorkspaceMutationQuarantine(mutationQuarantinePath);
+              await clearWorkspaceMutationQuarantine(
+                mutationQuarantinePath,
+                incarnationId,
+              );
             },
-            async quarantine(reason) {
-              await saveWorkspaceMutationQuarantine(mutationQuarantinePath, {
-                version: 1,
-                workerId,
-                workspaceId,
-                quarantinedAt: new Date().toISOString(),
-                reason,
-              });
+            async quarantine() {
+              await assertWorkspaceMutationQuarantineOwner(
+                mutationQuarantinePath,
+                incarnationId,
+              );
             },
           }
         : undefined,

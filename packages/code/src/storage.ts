@@ -100,6 +100,7 @@ export interface WorkspaceMutationQuarantineRecord {
   version: 1;
   workerId: string;
   workspaceId: string;
+  ownerId?: string;
   quarantinedAt: string;
   reason: string;
 }
@@ -189,6 +190,7 @@ function isWorkspaceMutationQuarantineRecord(
     value.version === 1 &&
     typeof value.workerId === 'string' &&
     typeof value.workspaceId === 'string' &&
+    (value.ownerId == null || typeof value.ownerId === 'string') &&
     typeof value.quarantinedAt === 'string' &&
     Number.isFinite(Date.parse(value.quarantinedAt)) &&
     typeof value.reason === 'string' &&
@@ -201,22 +203,14 @@ export async function saveWorkspaceMutationQuarantine(
   record: WorkspaceMutationQuarantineRecord,
 ): Promise<void> {
   await ensureDurableDirectory(dirname(path));
-  const temporaryPath = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+  const file = await open(path, 'wx', 0o600);
   try {
-    const file = await open(temporaryPath, 'wx', 0o600);
-    try {
-      await file.writeFile(`${JSON.stringify(record, null, 2)}\n`, 'utf8');
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    await rename(temporaryPath, path);
-    await chmod(path, 0o600);
-    await syncParentDirectory(path);
-  } catch (error) {
-    await rm(temporaryPath, { force: true });
-    throw error;
+    await file.writeFile(`${JSON.stringify(record, null, 2)}\n`, 'utf8');
+    await file.sync();
+  } finally {
+    await file.close();
   }
+  await syncParentDirectory(path);
 }
 
 export async function loadWorkspaceMutationQuarantine(
@@ -249,7 +243,16 @@ export async function loadWorkspaceMutationQuarantine(
 
 export async function clearWorkspaceMutationQuarantine(
   path: string,
+  ownerId?: string,
 ): Promise<void> {
+  if (ownerId != null) {
+    const record = await loadWorkspaceMutationQuarantine(path);
+    if (record == null || record.ownerId !== ownerId) {
+      throw new BridgeProtocolError(
+        'Workspace quarantine is owned by another worker incarnation',
+      );
+    }
+  }
   try {
     await lstat(path);
   } catch (error) {
@@ -258,6 +261,18 @@ export async function clearWorkspaceMutationQuarantine(
   }
   await rm(path, { force: true });
   await syncParentDirectory(path);
+}
+
+export async function assertWorkspaceMutationQuarantineOwner(
+  path: string,
+  ownerId: string,
+): Promise<void> {
+  const record = await loadWorkspaceMutationQuarantine(path);
+  if (record == null || record.ownerId !== ownerId) {
+    throw new BridgeProtocolError(
+      'Workspace quarantine is owned by another worker incarnation',
+    );
+  }
 }
 
 export async function loadBridgeIdentity(
