@@ -967,7 +967,10 @@ export class BridgeWorker {
       ) {
         workspaceMutationGuardError = error;
       }
-      if (workspaceMutationApplied) {
+      if (
+        workspaceMutationApplied ||
+        (workspaceMutationArmed && !(error instanceof WorkspaceToolError))
+      ) {
         ambiguousWorkspaceMutationError = error;
       }
       if (
