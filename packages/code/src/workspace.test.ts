@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
@@ -752,6 +752,134 @@ test('advertises workspace IDs and names without exposing host roots', async (t)
     workspaces: [{ id: 'primary', name: 'LibreChat' }],
   });
   assert.equal(JSON.stringify(tools.capabilities).includes(root), false);
+});
+
+test('workspace mutations are disabled by default', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      content: 'blocked',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'WRITE_DISABLED',
+  );
+});
+
+test('writable workspaces create, replace, and exactly edit files', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', name: 'Writable', root, writable: true }],
+  });
+
+  assert.deepEqual(tools.capabilities, {
+    protocolVersion: 1,
+    operations: [
+      'read_file',
+      'search_text',
+      'list_files',
+      'write_file',
+      'edit_file',
+    ],
+    workspaces: [
+      {
+        id: 'primary',
+        name: 'Writable',
+        operations: [
+          'read_file',
+          'search_text',
+          'list_files',
+          'write_file',
+          'edit_file',
+        ],
+      },
+    ],
+  });
+  await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    content: 'hello world',
+  });
+  const edit = await tools.execute({
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    oldText: 'world',
+    newText: 'BYOM',
+  });
+  assert.deepEqual(edit, {
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    replacements: 1,
+    bytesWritten: 10,
+  });
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'hello BYOM');
+});
+
+test('exact edits reject missing or repeated text without changing the file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'notes.txt'), 'same same');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  for (const oldText of ['missing', 'same']) {
+    await assert.rejects(
+      tools.execute({
+        protocolVersion: 1,
+        operation: 'edit_file',
+        workspaceId: 'primary',
+        path: 'notes.txt',
+        oldText,
+        newText: 'changed',
+      }),
+      (error: unknown) =>
+        error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
+    );
+  }
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'same same');
+});
+
+test('writes reject symlink targets and missing parent directories', async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, 'root');
+  await mkdir(root);
+  await writeFile(join(parent, 'outside.txt'), 'outside');
+  await symlink(join(parent, 'outside.txt'), join(root, 'link.txt'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  for (const path of ['link.txt', 'missing/notes.txt']) {
+    await assert.rejects(
+      tools.execute({
+        protocolVersion: 1,
+        operation: 'write_file',
+        workspaceId: 'primary',
+        path,
+        content: 'blocked',
+      }),
+      (error: unknown) =>
+        error instanceof WorkspaceToolError && error.code === 'INVALID_PATH',
+    );
+  }
+  assert.equal(await readFile(join(parent, 'outside.txt'), 'utf8'), 'outside');
 });
 
 test('rejects unbounded file read parameters before reading the file', async (t) => {

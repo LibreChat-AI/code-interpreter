@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { lstat, open, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
 
@@ -9,6 +10,7 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   BRIDGE_WORKSPACE_READ_MAX_BYTES,
   BRIDGE_WORKSPACE_READ_MAX_LINES,
+  BRIDGE_WORKSPACE_WRITE_MAX_BYTES,
   BRIDGE_WORKSPACE_LIST_MAX_RESULTS,
   BRIDGE_WORKSPACE_SEARCH_MAX_RESULTS,
   BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH,
@@ -23,11 +25,15 @@ import type {
   BridgeWorkspaceToolCapabilities,
   WorkspaceReadFileRequest,
   WorkspaceReadFileResult,
+  WorkspaceEditFileRequest,
+  WorkspaceEditFileResult,
   WorkspaceListFilesRequest,
   WorkspaceListFilesResult,
   WorkspaceSearchMatch,
   WorkspaceSearchTextRequest,
   WorkspaceSearchTextResult,
+  WorkspaceWriteFileRequest,
+  WorkspaceWriteFileResult,
   WorkspaceToolRequest,
   WorkspaceToolErrorCode,
   WorkspaceToolResult,
@@ -37,11 +43,15 @@ export { isWorkspaceToolRequest, isWorkspaceToolResult };
 export type {
   WorkspaceReadFileRequest,
   WorkspaceReadFileResult,
+  WorkspaceEditFileRequest,
+  WorkspaceEditFileResult,
   WorkspaceListFilesRequest,
   WorkspaceListFilesResult,
   WorkspaceSearchMatch,
   WorkspaceSearchTextRequest,
   WorkspaceSearchTextResult,
+  WorkspaceWriteFileRequest,
+  WorkspaceWriteFileResult,
   WorkspaceToolRequest,
   WorkspaceToolResult,
 };
@@ -50,6 +60,8 @@ export interface LocalWorkspaceConfig {
   id: string;
   name?: string;
   root: string;
+  /** Mutating operations are never advertised unless explicitly enabled. */
+  writable?: boolean;
 }
 
 export interface LocalWorkspaceToolsOptions {
@@ -68,6 +80,13 @@ const MAX_SEARCH_CANDIDATE_BYTES = 1024 * 1024;
 const MAX_SEARCH_CANDIDATES = 20_000;
 const SEARCH_TIMEOUT_MS = 10_000;
 const LIST_TIMEOUT_MS = 10_000;
+
+const READ_OPERATIONS = [
+  'read_file',
+  'search_text',
+  'list_files',
+] as const;
+const WRITE_OPERATIONS = ['write_file', 'edit_file'] as const;
 
 function isUtf8ScalarString(value: string): boolean {
   return Buffer.from(value).toString('utf8') === value;
@@ -220,6 +239,222 @@ async function readConfinedFile(
     );
   }
   return decoded;
+}
+
+interface WorkspaceRoot {
+  root: string;
+  writable: boolean;
+}
+
+async function atomicWriteConfinedFile(
+  root: string,
+  requestedPath: string,
+  content: Buffer,
+  expected?: { dev: bigint | number; ino: bigint | number },
+): Promise<{ created: boolean }> {
+  if (content.byteLength > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
+    throw new WorkspaceToolError(
+      'Workspace file exceeds write limit',
+      'WRITE_LIMIT_EXCEEDED',
+    );
+  }
+  const candidate = resolveWorkspacePath(root, requestedPath);
+  const parent = dirname(candidate);
+  let canonicalParent: string;
+  try {
+    canonicalParent = await realpath(parent);
+    if (
+      !isWithinRoot(root, canonicalParent) ||
+      !(await stat(canonicalParent)).isDirectory()
+    ) {
+      throw new Error('invalid parent');
+    }
+  } catch {
+    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  }
+
+  let existing: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    existing = await lstat(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    }
+  }
+  if (existing?.isSymbolicLink() || (existing != null && !existing.isFile())) {
+    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  }
+  if (
+    expected != null &&
+    (existing == null ||
+      existing.dev !== expected.dev ||
+      existing.ino !== expected.ino)
+  ) {
+    throw new WorkspaceToolError(
+      'Workspace file changed before edit could be committed',
+      'EDIT_CONFLICT',
+    );
+  }
+
+  const temporary = resolve(
+    canonicalParent,
+    `.librechat-code-${randomBytes(18).toString('hex')}.tmp`,
+  );
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(
+      temporary,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      existing == null ? 0o600 : Number(existing.mode) & 0o777,
+    );
+    let offset = 0;
+    while (offset < content.byteLength) {
+      const { bytesWritten } = await handle.write(
+        content,
+        offset,
+        content.byteLength - offset,
+        offset,
+      );
+      if (bytesWritten < 1) throw new Error('short workspace write');
+      offset += bytesWritten;
+    }
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+
+    const currentParent = await realpath(parent);
+    if (currentParent !== canonicalParent) {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    }
+    let current: Awaited<ReturnType<typeof lstat>> | undefined;
+    try {
+      current = await lstat(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (
+      current?.isSymbolicLink() ||
+      (expected == null
+        ? existing == null
+          ? current != null
+          : current == null ||
+            current.dev !== existing.dev ||
+            current.ino !== existing.ino
+        : current == null ||
+          current.dev !== expected.dev ||
+          current.ino !== expected.ino)
+    ) {
+      throw new WorkspaceToolError(
+        'Workspace file changed before write could be committed',
+        'EDIT_CONFLICT',
+      );
+    }
+    await rename(temporary, candidate);
+    return { created: existing == null };
+  } catch (error) {
+    if (error instanceof WorkspaceToolError) throw error;
+    throw new WorkspaceToolError('Workspace write failed', 'INVALID_PATH');
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
+async function writeWorkspaceFile(
+  root: string,
+  request: WorkspaceWriteFileRequest,
+): Promise<WorkspaceWriteFileResult> {
+  const content = Buffer.from(request.content, 'utf8');
+  const { created } = await atomicWriteConfinedFile(
+    root,
+    request.path,
+    content,
+  );
+  return {
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    operation: 'write_file',
+    workspaceId: request.workspaceId,
+    path: request.path,
+    created,
+    bytesWritten: content.byteLength,
+  };
+}
+
+async function editWorkspaceFile(
+  root: string,
+  request: WorkspaceEditFileRequest,
+): Promise<WorkspaceEditFileResult> {
+  const candidate = resolveWorkspacePath(root, request.path);
+  let opened: FileHandle | undefined;
+  try {
+    opened = await open(
+      candidate,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const [openedStat, canonicalPath] = await Promise.all([
+      opened.stat(),
+      realpath(candidate),
+    ]);
+    const canonicalStat = await stat(canonicalPath);
+    if (
+      !openedStat.isFile() ||
+      !isWithinRoot(root, canonicalPath) ||
+      openedStat.dev !== canonicalStat.dev ||
+      openedStat.ino !== canonicalStat.ino ||
+      openedStat.size > BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+    ) {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    }
+    const original = await opened.readFile();
+    const hasBom =
+      original[0] === 0xef && original[1] === 0xbb && original[2] === 0xbf;
+    const body = hasBom ? original.subarray(3) : original;
+    const text = body.toString('utf8');
+    if (!Buffer.from(text, 'utf8').equals(body)) {
+      throw new WorkspaceToolError(
+        'Workspace file is not UTF-8 text',
+        'INVALID_REQUEST',
+      );
+    }
+    const first = text.indexOf(request.oldText);
+    if (
+      first < 0 ||
+      text.indexOf(request.oldText, first + request.oldText.length) >= 0
+    ) {
+      throw new WorkspaceToolError(
+        'Workspace edit must match exactly once',
+        'EDIT_CONFLICT',
+      );
+    }
+    const updatedText =
+      text.slice(0, first) +
+      request.newText +
+      text.slice(first + request.oldText.length);
+    const updatedBody = Buffer.from(updatedText, 'utf8');
+    const updated = hasBom
+      ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), updatedBody])
+      : updatedBody;
+    await atomicWriteConfinedFile(root, request.path, updated, {
+      dev: openedStat.dev,
+      ino: openedStat.ino,
+    });
+    return {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'edit_file',
+      workspaceId: request.workspaceId,
+      path: request.path,
+      replacements: 1,
+      bytesWritten: updated.byteLength,
+    };
+  } catch (error) {
+    if (error instanceof WorkspaceToolError) throw error;
+    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  } finally {
+    await opened?.close().catch(() => undefined);
+  }
 }
 
 interface SearchCandidates {
@@ -801,12 +1036,13 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
   readonly capabilities: BridgeWorkspaceToolCapabilities;
 
   private constructor(
-    private readonly roots: ReadonlyMap<string, string>,
+    private readonly roots: ReadonlyMap<string, WorkspaceRoot>,
+    operations: BridgeWorkspaceToolCapabilities['operations'],
     workspaces: BridgeWorkspaceDescriptor[],
   ) {
     this.capabilities = {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
-      operations: ['read_file', 'search_text', 'list_files'],
+      operations,
       workspaces,
     };
   }
@@ -814,16 +1050,31 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
   static async create(
     options: LocalWorkspaceToolsOptions,
   ): Promise<LocalWorkspaceTools> {
-    const roots = new Map<string, string>();
+    const roots = new Map<string, WorkspaceRoot>();
+    const anyWritable = options.workspaces.some(
+      (workspace) => workspace.writable === true,
+    );
+    const operations: BridgeWorkspaceToolCapabilities['operations'] = [
+      ...READ_OPERATIONS,
+      ...(anyWritable ? WRITE_OPERATIONS : []),
+    ];
     const workspaces: BridgeWorkspaceDescriptor[] = options.workspaces.map(
       (workspace) => ({
         id: workspace.id,
         ...(workspace.name !== undefined ? { name: workspace.name } : {}),
+        ...(anyWritable
+          ? {
+              operations: [
+                ...READ_OPERATIONS,
+                ...(workspace.writable === true ? WRITE_OPERATIONS : []),
+              ],
+            }
+          : {}),
       }),
     );
     const capabilities: BridgeWorkspaceToolCapabilities = {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
-      operations: ['read_file', 'search_text', 'list_files'],
+      operations,
       workspaces,
     };
     if (!isValidBridgeWorkspaceToolCapabilities(capabilities)) {
@@ -843,9 +1094,12 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
           'REGISTRATION_INVALID',
         );
       }
-      roots.set(workspace.id, canonicalRoot);
+      roots.set(workspace.id, {
+        root: canonicalRoot,
+        writable: workspace.writable === true,
+      });
     }
-    return new LocalWorkspaceTools(roots, workspaces);
+    return new LocalWorkspaceTools(roots, operations, workspaces);
   }
 
   async execute(
@@ -864,9 +1118,28 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
         'INVALID_REQUEST',
       );
     }
-    const root = this.roots.get(request.workspaceId);
-    if (!root) {
+    const workspace = this.roots.get(request.workspaceId);
+    if (!workspace) {
       throw new WorkspaceToolError('Unknown workspace', 'INVALID_REQUEST');
+    }
+    const { root } = workspace;
+
+    if (request.operation === 'write_file' || request.operation === 'edit_file') {
+      if (!workspace.writable) {
+        throw new WorkspaceToolError(
+          'Workspace mutations are disabled by the worker',
+          'WRITE_DISABLED',
+        );
+      }
+      if (signal?.aborted) {
+        throw new WorkspaceToolError(
+          'Workspace tool execution aborted',
+          'EXECUTION_ABORTED',
+        );
+      }
+      return request.operation === 'write_file'
+        ? writeWorkspaceFile(root, request)
+        : editWorkspaceFile(root, request);
     }
 
     if (request.operation === 'search_text') {

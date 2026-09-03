@@ -122,6 +122,14 @@ leave Code API, and are bounded to 1 MiB/500 lines for reads, 200 matches for
 searches, or 500 relative paths for file listings. Absolute paths, traversal,
 backslashes, symlink escapes, unexpected fields, and host roots are rejected.
 
+Workspace mutation remains disabled unless the operator starts the worker with
+`--allow-workspace-writes` (or
+`LIBRECHAT_CODE_ALLOW_WORKSPACE_WRITES=true`). That adds bounded `write_file`
+and exact-match `edit_file` operations. Writes are limited to 1 MiB of UTF-8
+text, require an existing in-workspace parent directory, reject symlinks, and
+commit atomically. The worker capability is an enforcement boundary; LibreChat
+should still route every mutation through its configurable tool-approval hooks.
+
 The workspace root can be an existing project, a Git repository, or an empty
 directory; Git is not required. This boundary keeps that directory local to the
 operator's machine, but selected file contents, search matches, relative file
@@ -129,9 +137,9 @@ listings, and later tool results necessarily cross the outbound bridge to Code
 API and the model.
 Treat them as explicit tool outputs, apply the same retention and audit policy
 as chat content, and do not register a directory containing secrets. The
-default operations are read-only; future mutation and shell operations must be
-gated by LibreChat's tool-approval hooks in addition to worker capability
-checks.
+default operations are read-only. Shell execution remains a separate future
+capability because it requires a sandboxed process boundary in addition to
+LibreChat's tool-approval hooks and worker capability checks.
 
 Stateful deployments must also set `LIBRECHAT_CODE_STATEFUL_WORKSPACE=true`
 and route the CLI's `{runtimeSessionId}` endpoint template to an isolated,

@@ -58,7 +58,7 @@ test('CLI trims an environment-configured worker directory', async (t) => {
   assert.doesNotMatch(result.stderr, /invalid workspace registration/i);
 });
 
-test('CLI falls back to the workspace ID when the directory basename is invalid', async (t) => {
+test('CLI advertises explicitly enabled writes without exposing the workspace root', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-cli-'));
   const workspaceRoot = join(root, '   ');
   await mkdir(workspaceRoot);
@@ -76,7 +76,11 @@ test('CLI falls back to the workspace ID when the directory basename is invalid'
         unknown
       >;
       if (request.url?.endsWith('/bridge/workers/register')) {
-        resolveRegistration?.(body);
+        const operations = (
+          (body.capabilities as Record<string, unknown>)
+            .workspaceTools as { operations: string[] }
+        ).operations;
+        if (operations.includes('write_file')) resolveRegistration?.(body);
         response.setHeader('Content-Type', 'application/json');
         response.end(
           JSON.stringify({
@@ -85,6 +89,13 @@ test('CLI falls back to the workspace ID when the directory basename is invalid'
             incarnationId: body.incarnationId,
             registeredAt: new Date().toISOString(),
             leaseTtlMs: 60_000,
+            supportedWorkspaceToolOperations: [
+              'read_file',
+              'search_text',
+              'list_files',
+              'write_file',
+              'edit_file',
+            ],
           }),
         );
         return;
@@ -109,6 +120,7 @@ test('CLI falls back to the workspace ID when the directory basename is invalid'
       workspaceRoot,
       '--workspace-id',
       'root-workspace',
+      '--allow-workspace-writes',
     ],
     {
       env: {
@@ -137,10 +149,29 @@ test('CLI falls back to the workspace ID when the directory basename is invalid'
     (body.capabilities as Record<string, unknown>).workspaceTools,
     {
       protocolVersion: 1,
-      operations: ['read_file', 'search_text'],
-      workspaces: [{ id: 'root-workspace', name: 'root-workspace' }],
+      operations: [
+        'read_file',
+        'search_text',
+        'list_files',
+        'write_file',
+        'edit_file',
+      ],
+      workspaces: [
+        {
+          id: 'root-workspace',
+          name: 'root-workspace',
+          operations: [
+            'read_file',
+            'search_text',
+            'list_files',
+            'write_file',
+            'edit_file',
+          ],
+        },
+      ],
     },
   );
+  assert.equal(JSON.stringify(body).includes(workspaceRoot), false);
 });
 
 test('CLI explicitly creates and registers an application-owned default workspace', async () => {

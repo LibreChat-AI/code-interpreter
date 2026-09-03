@@ -196,7 +196,10 @@ may be an existing project, a Git repository, or a newly created empty
 directory; Git is optional.
 `LocalWorkspaceTools` registers opaque workspace IDs with optional display
 names and exposes bounded `read_file`, literal `search_text`, and deterministic
-`list_files` operations.
+`list_files` operations. Workspace mutation is disabled by default. Operators
+can explicitly add confined `write_file` and exact-match `edit_file` operations
+with `--allow-workspace-writes` or
+`LIBRECHAT_CODE_ALLOW_WORKSPACE_WRITES=true`.
 Only IDs, names, protocol version, and supported operations appear in worker
 capabilities; absolute host paths remain local to the worker process.
 
@@ -210,6 +213,13 @@ a shell, with configuration and symlink following disabled. Both operations
 stop after bounded global result counts. The worker process still belongs inside
 the trusted BYOM boundary and should receive filesystem access only to roots the
 operator intentionally registers.
+
+Writes are limited to 1 MiB of UTF-8 text and require an existing directory
+inside the registered root. They reject traversal, symlink targets, and
+non-regular files, and commit through an owner-only temporary file followed by
+an atomic rename. Edits replace text only when the requested old text occurs
+exactly once and reject if the file changes before commit. These operations do
+not create directories or execute commands.
 
 Register one directory already present on the worker machine with the
 worker-directory option:
@@ -231,10 +241,9 @@ and workspace IDs so distinct IDs cannot alias on case-insensitive filesystems.
 The deployment and paired bridge identity are also part of the namespace, so
 re-pairing or switching Code API deployments cannot expose the previous
 identity's files. It persists across worker restarts. The current workspace
-tools are read-only, so an empty directory must be populated by a local process
-until write-capable coding tools are enabled. The worker never registers its
-process working directory implicitly, and `--default-workspace` cannot be
-combined with `--worker-dir`.
+tools are read-only unless writes are explicitly enabled. The worker never
+registers its process working directory implicitly, and `--default-workspace`
+cannot be combined with `--worker-dir`.
 
 The default public workspace ID is `primary` and the default display name is
 the directory basename. Operators can use `--workspace-id` and
@@ -243,6 +252,12 @@ the directory basename. Operators can use `--workspace-id` and
 explicitly. `rg` must be installed on the worker for `search_text` and
 `list_files`. `LIBRECHAT_CODE_DEFAULT_WORKSPACE=true` is the environment
 equivalent of `--default-workspace`.
+
+The write flag is an operator capability boundary, not an approval bypass.
+LibreChat should allow read, search, and list operations by default and route
+write and edit operations through its configurable tool-approval hooks before
+dispatch. A worker that was started without write capability rejects mutations
+even if a remote caller tries to send one.
 
 The worker advertises these capabilities only when a directory is configured
 and executes matching assignments under the bridge's existing lease,

@@ -111,6 +111,92 @@ test('worker re-registers list_files after the Code API advertises support', asy
   ]);
 });
 
+test('worker promotes only operations understood by an older Code API', async () => {
+  const registrations: Array<{
+    operations: string[];
+    workspaces: Array<Record<string, unknown>>;
+  }> = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: [
+      'read_file' as const,
+      'search_text' as const,
+      'list_files' as const,
+      'write_file' as const,
+      'edit_file' as const,
+    ],
+    workspaces: [
+      {
+        id: 'primary',
+        operations: [
+          'read_file' as const,
+          'search_text' as const,
+          'list_files' as const,
+          'write_file' as const,
+          'edit_file' as const,
+        ],
+      },
+    ],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        throw new Error('not executed');
+      },
+    },
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        capabilities: {
+          workspaceTools: {
+            operations: string[];
+            workspaces: Array<Record<string, unknown>>;
+          };
+        };
+      };
+      registrations.push(body.capabilities.workspaceTools);
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+        supportedWorkspaceToolOperations: [
+          'read_file',
+          'search_text',
+          'list_files',
+        ],
+      });
+    },
+  });
+
+  await worker.register();
+
+  assert.deepEqual(registrations, [
+    {
+      protocolVersion: 1,
+      operations: ['read_file', 'search_text'],
+      workspaces: [{ id: 'primary' }],
+    },
+    {
+      protocolVersion: 1,
+      operations: ['read_file', 'search_text', 'list_files'],
+      workspaces: [{ id: 'primary' }],
+    },
+  ]);
+});
+
 test('worker retains a compatible registration when list_files promotion times out', async () => {
   let registrationRequests = 0;
   const worker = new BridgeWorker({
@@ -829,8 +915,10 @@ test('worker rejects workspace operations outside its advertised capability', as
   let settlement: Record<string, unknown> | undefined;
   const workspaceCapabilities = {
     protocolVersion: 1 as const,
-    operations: ['read_file' as const],
-    workspaces: [{ id: 'primary' }],
+    operations: ['read_file' as const, 'search_text' as const],
+    workspaces: [
+      { id: 'primary', operations: ['read_file' as const] },
+    ],
   };
   const worker = new BridgeWorker({
     codeApiUrl: 'https://code.example/v1',

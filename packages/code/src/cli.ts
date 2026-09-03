@@ -219,6 +219,11 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     (args.includes('--default-workspace') ||
       process.env.LIBRECHAT_CODE_DEFAULT_WORKSPACE?.trim().toLowerCase() ===
         'true');
+  const allowWorkspaceWrites =
+    runtimeSessionId == null &&
+    (args.includes('--allow-workspace-writes') ||
+      process.env.LIBRECHAT_CODE_ALLOW_WORKSPACE_WRITES?.trim().toLowerCase() ===
+        'true');
   if (explicitWorkerDirectory && useDefaultWorkspace) {
     throw new Error(
       '--worker-dir and --default-workspace cannot be used together',
@@ -251,6 +256,7 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
                 ? workspaceId
                 : defaultWorkspaceName(workerDirectory, workspaceId)),
             root: workerDirectory,
+            writable: allowWorkspaceWrites,
           },
         ],
       })

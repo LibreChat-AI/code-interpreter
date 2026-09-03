@@ -148,3 +148,81 @@ test('workspace file listing accepts only bounded portable requests and results'
     false,
   );
 });
+
+test('workspace mutations accept bounded UTF-8 requests and exact result shapes', () => {
+  const writeRequest = {
+    protocolVersion: 1 as const,
+    operation: 'write_file' as const,
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    content: 'hello',
+  };
+  assert.equal(isWorkspaceToolRequest(writeRequest), true);
+  assert.equal(
+    isWorkspaceToolRequest({
+      ...writeRequest,
+      content: 'x'.repeat(1024 * 1024 + 1),
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(writeRequest, {
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      created: true,
+      bytesWritten: 5,
+    }),
+    true,
+  );
+
+  const editRequest = {
+    protocolVersion: 1 as const,
+    operation: 'edit_file' as const,
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    oldText: 'hello',
+    newText: 'goodbye',
+  };
+  assert.equal(isWorkspaceToolRequest(editRequest), true);
+  assert.equal(isWorkspaceToolRequest({ ...editRequest, oldText: '' }), false);
+  assert.equal(
+    isWorkspaceToolResult(editRequest, {
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      replacements: 1,
+      bytesWritten: 7,
+    }),
+    true,
+  );
+});
+
+test('workspace capabilities allow per-workspace operation restrictions', () => {
+  const capabilities = {
+    statefulWorkspace: true,
+    sandboxProfile: 'nsjail',
+    runtimes: ['bash'],
+    workspaceTools: {
+      protocolVersion: 1,
+      operations: ['read_file', 'write_file'],
+      workspaces: [
+        { id: 'readonly', operations: ['read_file'] },
+        { id: 'writable', operations: ['read_file', 'write_file'] },
+      ],
+    },
+  };
+  assert.equal(isValidBridgeWorkerCapabilities(capabilities), true);
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...capabilities,
+      workspaceTools: {
+        ...capabilities.workspaceTools,
+        workspaces: [{ id: 'invalid', operations: ['edit_file'] }],
+      },
+    }),
+    false,
+  );
+});

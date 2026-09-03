@@ -132,7 +132,14 @@ function workspaceCapabilitiesMatch(
     advertised.workspaces.every(
       (workspace, index) =>
         workspace.id === executor.workspaces[index]?.id &&
-        workspace.name === executor.workspaces[index]?.name,
+        workspace.name === executor.workspaces[index]?.name &&
+        workspace.operations?.length ===
+          executor.workspaces[index]?.operations?.length &&
+        (workspace.operations?.every(
+          (operation, operationIndex) =>
+            operation ===
+            executor.workspaces[index]?.operations?.[operationIndex],
+        ) ?? executor.workspaces[index]?.operations == null),
     )
   );
 }
@@ -143,12 +150,19 @@ function registrationCompatibleCapabilities(
   const workspaceTools = capabilities.workspaceTools;
   if (
     workspaceTools == null ||
-    !workspaceTools.operations.includes('list_files')
+    (workspaceTools.operations.every(
+      (operation) =>
+        operation === 'read_file' || operation === 'search_text',
+    ) &&
+      workspaceTools.workspaces.every(
+        (workspace) => workspace.operations == null,
+      ))
   ) {
     return capabilities;
   }
   const operations = workspaceTools.operations.filter(
-    (operation) => operation !== 'list_files',
+    (operation) =>
+      operation === 'read_file' || operation === 'search_text',
   );
   if (operations.length === 0) {
     const { workspaceTools: _workspaceTools, ...compatible } = capabilities;
@@ -156,21 +170,41 @@ function registrationCompatibleCapabilities(
   }
   return {
     ...capabilities,
-    workspaceTools: { ...workspaceTools, operations },
+    workspaceTools: {
+      ...workspaceTools,
+      operations,
+      workspaces: workspaceTools.workspaces.map(({ operations: _, ...workspace }) =>
+        workspace,
+      ),
+    },
   };
 }
 
-function supportsDesiredWorkspaceTools(
+function supportedWorkspaceCapabilities(
   registration: BridgeWorkerRegistrationResponse,
   capabilities: BridgeWorkerCapabilities,
-): boolean {
-  const desired = capabilities.workspaceTools?.operations;
+): BridgeWorkerCapabilities | undefined {
+  const desired = capabilities.workspaceTools;
   const supported = registration.supportedWorkspaceToolOperations;
-  return (
-    desired != null &&
-    Array.isArray(supported) &&
-    desired.every((operation) => supported.includes(operation))
+  if (desired == null || !Array.isArray(supported)) return undefined;
+  const operations = desired.operations.filter((operation) =>
+    supported.includes(operation),
   );
+  if (operations.length === 0) return undefined;
+  const supportsEntireProtocol =
+    operations.length === desired.operations.length;
+  return {
+    ...capabilities,
+    workspaceTools: {
+      ...desired,
+      operations,
+      workspaces: supportsEntireProtocol
+        ? desired.workspaces
+        : desired.workspaces.map(({ operations: _, ...workspace }) =>
+            workspace,
+          ),
+    },
+  };
 }
 
 export class BridgeWorkspaceQuarantinedError extends Error {
@@ -284,11 +318,19 @@ export class BridgeWorker {
         this.registrationCapabilities = this.compatibleCapabilities;
         registration = await register(this.registrationCapabilities);
       }
+      const supportedCapabilities = supportedWorkspaceCapabilities(
+        registration,
+        this.options.capabilities,
+      );
       if (
-        this.registrationCapabilities !== this.options.capabilities &&
-        supportsDesiredWorkspaceTools(registration, this.options.capabilities)
+        supportedCapabilities?.workspaceTools != null &&
+        (this.registrationCapabilities.workspaceTools == null ||
+          !workspaceCapabilitiesMatch(
+            this.registrationCapabilities.workspaceTools,
+            supportedCapabilities.workspaceTools,
+          ))
       ) {
-        this.registrationCapabilities = this.options.capabilities;
+        this.registrationCapabilities = supportedCapabilities;
         try {
           registration = await register(this.registrationCapabilities);
         } catch (error) {
@@ -744,12 +786,19 @@ export class BridgeWorker {
             'Workspace tool operation is not advertised',
           );
         }
-        if (
-          !advertised.workspaces.some(
-            (workspace) => workspace.id === workspaceRequest.workspaceId,
-          )
-        ) {
+        const workspace = advertised.workspaces.find(
+          (candidate) => candidate.id === workspaceRequest.workspaceId,
+        );
+        if (workspace == null) {
           throw new BridgeProtocolError('Workspace is not advertised');
+        }
+        if (
+          workspace.operations != null &&
+          !workspace.operations.includes(workspaceRequest.operation)
+        ) {
+          throw new BridgeProtocolError(
+            'Workspace tool operation is not advertised for workspace',
+          );
         }
         payload = await this.options.workspaceTools.execute(
           workspaceRequest,
