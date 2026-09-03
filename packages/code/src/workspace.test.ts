@@ -5,6 +5,7 @@ import {
   chown,
   mkdtemp,
   mkdir,
+  open,
   readFile,
   realpath,
   rm,
@@ -16,6 +17,8 @@ import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
+
+import type { FileHandle } from 'node:fs/promises';
 
 import {
   isWorkspaceToolResult,
@@ -977,6 +980,50 @@ test('workspace mutations preserve existing file ownership', async (t) => {
   const metadata = await stat(target);
   assert.equal(metadata.uid, process.getuid());
   assert.equal(metadata.gid, alternateGroup);
+});
+
+test('workspace edits revalidate source after restoring temporary metadata', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX temporary-file mode observation is unavailable');
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = join(root, 'notes.txt');
+  const original = `before-${'x'.repeat(512 * 1024)}`;
+  await writeFile(target, original);
+  await chmod(target, 0o664);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  const probe = await open(target, 'r');
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+    chmod(mode: number): Promise<void>;
+  };
+  await probe.close();
+  const originalChmod = fileHandlePrototype.chmod;
+  t.mock.method(fileHandlePrototype, 'chmod', async function (
+    this: FileHandle,
+    mode: number,
+  ) {
+    await originalChmod.call(this, mode);
+    await writeFile(target, 'concurrent update');
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      oldText: 'before',
+      newText: 'after',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
+  );
+  assert.equal(await readFile(target, 'utf8'), 'concurrent update');
 });
 
 test('workspace mutations accept filesystem-equivalent directory casing', async (t) => {

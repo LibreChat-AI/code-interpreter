@@ -430,6 +430,15 @@ async function atomicWriteConfinedFile(
       offset += bytesWritten;
     }
     await handle.sync();
+    if (existing != null) {
+      if (process.platform !== 'win32') {
+        await handle.chown(Number(existing.uid), Number(existing.gid));
+      }
+      await handle.chmod(Number(existing.mode) & 0o777);
+      await handle.sync();
+    }
+    await handle.close();
+    handle = undefined;
 
     let current: Awaited<ReturnType<typeof lstat>> | undefined;
     try {
@@ -470,16 +479,6 @@ async function atomicWriteConfinedFile(
     ) {
       throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
     }
-    throwIfAborted(signal);
-    if (existing != null) {
-      if (process.platform !== 'win32') {
-        await handle.chown(Number(existing.uid), Number(existing.gid));
-      }
-      await handle.chmod(Number(existing.mode) & 0o777);
-      await handle.sync();
-    }
-    await handle.close();
-    handle = undefined;
     throwIfAborted(signal);
     await rename(temporary, installTarget);
     return { created: existing == null };
