@@ -305,10 +305,12 @@ async function readBoundedEditFile(handle: FileHandle): Promise<Buffer> {
   return content.subarray(0, bytesRead);
 }
 
-async function verifyEditSource(
+async function commitVerifiedEdit(
   root: string,
   candidate: string,
   expected: { dev: bigint | number; ino: bigint | number; content: Buffer },
+  temporary: string,
+  installTarget: string,
 ): Promise<void> {
   let handle: FileHandle | undefined;
   try {
@@ -341,8 +343,16 @@ async function verifyEditSource(
         'EDIT_CONFLICT',
       );
     }
+    await rename(temporary, installTarget);
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR' && code !== 'ELOOP') {
+      throw new WorkspaceToolError(
+        'Workspace storage is unavailable',
+        'WRITE_UNAVAILABLE',
+      );
+    }
     throw new WorkspaceToolError(
       'Workspace file changed before edit could be committed',
       'EDIT_CONFLICT',
@@ -463,9 +473,6 @@ async function atomicWriteConfinedFile(
         'EDIT_CONFLICT',
       );
     }
-    if (expected != null) {
-      await verifyEditSource(root, candidate, expected);
-    }
     const [currentParent, currentParentIdentity] = await Promise.all([
       realpath(parent),
       verifyDirectoryPathHasNoSymlinks(root, parent),
@@ -478,6 +485,16 @@ async function atomicWriteConfinedFile(
       currentParentIdentity.ino !== parentIdentity.ino
     ) {
       throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    }
+    if (expected != null) {
+      await commitVerifiedEdit(
+        root,
+        candidate,
+        expected,
+        temporary,
+        installTarget,
+      );
+      return { created: false };
     }
     throwIfAborted(signal);
     await rename(temporary, installTarget);
@@ -597,7 +614,7 @@ async function editWorkspaceFile(
     };
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
-    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    throw classifyWritePathValidationError(error);
   } finally {
     await opened?.close().catch(() => undefined);
   }

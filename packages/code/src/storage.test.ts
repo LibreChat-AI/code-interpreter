@@ -1,15 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  clearWorkspaceMutationQuarantine,
   defaultBridgeIdentityPath,
+  defaultWorkspaceQuarantinePath,
   defaultWorkspacePath,
   ensurePrivateWorkspaceDirectory,
   loadBridgeIdentity,
+  loadWorkspaceMutationQuarantine,
   saveBridgeIdentity,
+  saveWorkspaceMutationQuarantine,
 } from './storage.js';
 
 test('default identity paths do not collide after worker ID sanitization', () => {
@@ -63,6 +67,30 @@ test('default workspace paths are stable and collision resistant', () => {
   );
 });
 
+test('default mutation quarantine paths are stable and worker scoped', () => {
+  const options = {
+    codeApiUrl: 'https://code.example/v1',
+    workerId: 'vm-1',
+    workspaceId: 'primary',
+    homeDirectory: '/home/tester',
+  };
+  assert.equal(
+    defaultWorkspaceQuarantinePath(options),
+    defaultWorkspaceQuarantinePath({
+      ...options,
+      codeApiUrl: 'https://code.example/v1/',
+    }),
+  );
+  assert.notEqual(
+    defaultWorkspaceQuarantinePath(options),
+    defaultWorkspaceQuarantinePath({ ...options, workspaceId: 'secondary' }),
+  );
+  assert.notEqual(
+    defaultWorkspaceQuarantinePath(options),
+    defaultWorkspaceQuarantinePath({ ...options, workerId: 'vm-2' }),
+  );
+});
+
 test('default workspace directories are created with owner-only permissions', async () => {
   const directory = await mkdtemp(
     join(tmpdir(), 'librechat-code-workspace-home-'),
@@ -96,6 +124,32 @@ test('paired identity is persisted atomically with owner-only permissions', asyn
 
     assert.deepEqual(await loadBridgeIdentity(path), identity);
     assert.equal((await stat(path)).mode & 0o777, 0o600);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('workspace mutation quarantine persists until explicitly cleared', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'librechat-code-quarantine-'));
+  const path = join(directory, 'state', 'quarantine.json');
+  const record = {
+    version: 1 as const,
+    workerId: 'vm-1',
+    workspaceId: 'primary',
+    quarantinedAt: new Date().toISOString(),
+    reason: 'ambiguous settlement delivery',
+  };
+  try {
+    await saveWorkspaceMutationQuarantine(path, record);
+    assert.deepEqual(await loadWorkspaceMutationQuarantine(path), record);
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    await clearWorkspaceMutationQuarantine(path);
+    assert.equal(await loadWorkspaceMutationQuarantine(path), undefined);
+    await writeFile(path, '{bad json', 'utf8');
+    await assert.rejects(
+      loadWorkspaceMutationQuarantine(path),
+      /invalid workspace quarantine file/i,
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

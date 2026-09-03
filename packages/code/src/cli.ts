@@ -7,20 +7,45 @@ import { pairBridgeWorker } from './pairing.js';
 import { startFileRelay } from './relay.js';
 import { DockerFileRelaySupervisor } from './relay-runtime.js';
 import {
+  clearWorkspaceMutationQuarantine,
   defaultBridgeIdentityPath,
+  defaultWorkspaceQuarantinePath,
   defaultWorkspacePath,
   ensurePrivateWorkspaceDirectory,
   loadBridgeIdentity,
+  loadWorkspaceMutationQuarantine,
   saveBridgeIdentity,
+  saveWorkspaceMutationQuarantine,
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
 import { DockerRuntimeSupervisor, EndpointRuntimeSupervisor } from './runtime.js';
 import { LocalWorkspaceTools } from './workspace.js';
 import {
   BRIDGE_WORKSPACE_NAME_MAX_LENGTH,
+  BridgeProtocolError,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
 } from './protocol.js';
+
+function workspaceSecurityIdentity(
+  pairedPublicKey: string | undefined,
+  configuredToken: string | undefined,
+): string {
+  return (
+    pairedPublicKey ?? required('LIBRECHAT_CODE_WORKER_TOKEN', configuredToken)
+  );
+}
+
+function workspaceQuarantinePath(options: {
+  codeApiUrl: string;
+  workerId: string;
+  workspaceId: string;
+}): string {
+  return (
+    process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim() ||
+    defaultWorkspaceQuarantinePath(options)
+  );
+}
 
 function required(name: string, value = process.env[name]): string {
   const normalized = value?.trim();
@@ -234,13 +259,21 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     (useDefaultWorkspace
       ? defaultWorkspacePath({
           codeApiUrl,
-          securityIdentity:
-            pairedIdentity?.publicKey ??
-            required('LIBRECHAT_CODE_WORKER_TOKEN', configuredToken),
+          securityIdentity: workspaceSecurityIdentity(
+            pairedIdentity?.publicKey,
+            configuredToken,
+          ),
           workerId,
           workspaceId,
         })
       : undefined);
+  const mutationQuarantinePath = allowWorkspaceWrites
+    ? workspaceQuarantinePath({
+        codeApiUrl,
+        workerId,
+        workspaceId,
+      })
+    : undefined;
   if (useDefaultWorkspace && workerDirectory) {
     await ensurePrivateWorkspaceDirectory(workerDirectory);
   }
@@ -406,6 +439,43 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
             }),
       capabilities,
       workspaceTools,
+      workspaceMutationQuarantine: mutationQuarantinePath
+        ? {
+            async assertAvailable() {
+              const record = await loadWorkspaceMutationQuarantine(
+                mutationQuarantinePath,
+              );
+              if (record != null) {
+                throw new BridgeProtocolError(
+                  `Workspace mutations are quarantined since ${record.quarantinedAt}: ${record.reason}. Inspect or restore the workspace, then run librechat-code clear-workspace-quarantine`,
+                  undefined,
+                  'WORKER_QUARANTINED',
+                );
+              }
+            },
+            async arm(reason) {
+              await saveWorkspaceMutationQuarantine(mutationQuarantinePath, {
+                version: 1,
+                workerId,
+                workspaceId,
+                quarantinedAt: new Date().toISOString(),
+                reason,
+              });
+            },
+            async clear() {
+              await clearWorkspaceMutationQuarantine(mutationQuarantinePath);
+            },
+            async quarantine(reason) {
+              await saveWorkspaceMutationQuarantine(mutationQuarantinePath, {
+                version: 1,
+                workerId,
+                workspaceId,
+                quarantinedAt: new Date().toISOString(),
+                reason,
+              });
+            },
+          }
+        : undefined,
       onIdentityChange:
         pairedIdentity && identityPath
           ? async (identity) => {
@@ -454,6 +524,41 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
   }
 }
 
+async function clearMutationQuarantine(args: string[]): Promise<void> {
+  const configuredWorkerId = process.env.LIBRECHAT_CODE_WORKER_ID?.trim();
+  const configuredIdentityPath = process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
+  const configuredToken = process.env.LIBRECHAT_CODE_WORKER_TOKEN?.trim();
+  const identityPath =
+    configuredIdentityPath ??
+    (configuredWorkerId && !configuredToken
+      ? defaultBridgeIdentityPath(configuredWorkerId)
+      : undefined);
+  const pairedIdentity = identityPath
+    ? await loadBridgeIdentity(identityPath)
+    : undefined;
+  const workerId = required(
+    'LIBRECHAT_CODE_WORKER_ID',
+    configuredWorkerId ?? pairedIdentity?.workerId,
+  );
+  const codeApiUrl = required(
+    'LIBRECHAT_CODE_URL',
+    process.env.LIBRECHAT_CODE_URL ?? pairedIdentity?.codeApiUrl,
+  );
+  const workspaceId =
+    option(args, '--workspace-id') ??
+    process.env.LIBRECHAT_CODE_WORKSPACE_ID?.trim() ??
+    'primary';
+  const path = workspaceQuarantinePath({
+    codeApiUrl,
+    workerId,
+    workspaceId,
+  });
+  await clearWorkspaceMutationQuarantine(path);
+  process.stdout.write(
+    `librechat-code: cleared workspace mutation quarantine for ${workspaceId}\n`,
+  );
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === 'relay') {
@@ -472,6 +577,10 @@ async function main(): Promise<void> {
       );
     }
     await run(runtimeSessionId);
+    return;
+  }
+  if (args[0] === 'clear-workspace-quarantine') {
+    await clearMutationQuarantine(args.slice(1));
     return;
   }
   if (args[0] && args[0] !== 'run') {

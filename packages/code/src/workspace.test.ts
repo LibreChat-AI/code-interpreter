@@ -1081,6 +1081,19 @@ test('workspace mutations classify operational write failures as unavailable', a
         error instanceof WorkspaceToolError &&
         error.code === 'WRITE_UNAVAILABLE',
     );
+    await assert.rejects(
+      tools.execute({
+        protocolVersion: 1,
+        operation: 'edit_file',
+        workspaceId: 'primary',
+        path: 'locked/notes.txt',
+        oldText: 'before',
+        newText: 'after',
+      }),
+      (error: unknown) =>
+        error instanceof WorkspaceToolError &&
+        error.code === 'WRITE_UNAVAILABLE',
+    );
   } finally {
     await chmod(locked, 0o700);
   }

@@ -32,6 +32,7 @@ export interface BridgeWorkerOptions {
   runtimeSupervisor?: RuntimeSupervisor;
   capabilities: BridgeWorkerCapabilities;
   workspaceTools?: WorkspaceToolExecutor;
+  workspaceMutationQuarantine?: WorkspaceMutationQuarantine;
   leaseWaitMs?: number;
   leaseTransportGraceMs?: number;
   registrationTransportTimeoutMs?: number;
@@ -52,6 +53,13 @@ export interface BridgeWorkerOptions {
     registration: BridgeWorkerRegistrationResponse,
   ) => void | Promise<void>;
   incarnationId?: string;
+}
+
+export interface WorkspaceMutationQuarantine {
+  assertAvailable(): Promise<void>;
+  arm(reason: string): Promise<void>;
+  clear(): Promise<void>;
+  quarantine(reason: string, cause?: unknown): Promise<void>;
 }
 
 export interface BridgeWorkerIdentity {
@@ -269,6 +277,16 @@ export class BridgeWorker {
         'Workspace tool capabilities require a matching executor',
       );
     }
+    if (
+      options.capabilities.workspaceTools?.operations.some(
+        (operation) => operation === 'write_file' || operation === 'edit_file',
+      ) === true &&
+      options.workspaceMutationQuarantine == null
+    ) {
+      throw new BridgeProtocolError(
+        'Workspace mutation capabilities require durable quarantine storage',
+      );
+    }
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.codeApiUrl = normalizedBaseUrl(options.codeApiUrl);
     this.runtimeSupervisor =
@@ -288,6 +306,21 @@ export class BridgeWorker {
   async register(
     signal?: AbortSignal,
   ): Promise<BridgeWorkerRegistrationResponse> {
+    try {
+      await this.options.workspaceMutationQuarantine?.assertAvailable();
+    } catch (error) {
+      if (
+        error instanceof BridgeProtocolError &&
+        error.code === 'WORKER_QUARANTINED'
+      ) {
+        throw error;
+      }
+      throw new BridgeProtocolError(
+        'Workspace mutation quarantine state could not be verified',
+        undefined,
+        'WORKER_QUARANTINED',
+      );
+    }
     const registrationController = new AbortController();
     const abortRegistration = (): void => registrationController.abort();
     if (signal?.aborted) {
@@ -770,8 +803,10 @@ export class BridgeWorker {
     let settlement: BridgeSettlement;
     let ambiguousSandboxError: unknown;
     let ambiguousWorkspaceMutationError: unknown;
+    let workspaceMutationGuardError: BridgeWorkspaceQuarantinedError | undefined;
     let sandboxRejectedExecution = false;
     let sandboxStarted = false;
+    let workspaceMutationArmed = false;
     let workspaceMutationApplied = false;
     let runtimeLease: RuntimeLease | undefined;
     try {
@@ -815,13 +850,27 @@ export class BridgeWorker {
             'Workspace tool operation is not advertised for workspace',
           );
         }
+        const isMutation =
+          workspaceRequest.operation === 'write_file' ||
+          workspaceRequest.operation === 'edit_file';
+        if (isMutation) {
+          try {
+            await this.options.workspaceMutationQuarantine!.arm(
+              `Workspace mutation ${workspaceRequest.operation} is pending settlement`,
+            );
+            workspaceMutationArmed = true;
+          } catch (error) {
+            throw new BridgeWorkspaceQuarantinedError(
+              'Workspace mutation quarantine could not be armed before execution',
+              error,
+            );
+          }
+        }
         payload = await this.options.workspaceTools.execute(
           workspaceRequest,
           executionController.signal,
         );
-        workspaceMutationApplied =
-          workspaceRequest.operation === 'write_file' ||
-          workspaceRequest.operation === 'edit_file';
+        workspaceMutationApplied = isMutation;
         if (executionController.signal.aborted) {
           throw (
             executionController.signal.reason ??
@@ -912,6 +961,12 @@ export class BridgeWorker {
         result: payload,
       };
     } catch (error) {
+      if (
+        error instanceof BridgeWorkspaceQuarantinedError &&
+        !workspaceMutationArmed
+      ) {
+        workspaceMutationGuardError = error;
+      }
       if (workspaceMutationApplied) {
         ambiguousWorkspaceMutationError = error;
       }
@@ -946,6 +1001,7 @@ export class BridgeWorker {
     credentialController.abort();
     await credentialMaintenance;
     try {
+      if (workspaceMutationGuardError != null) throw workspaceMutationGuardError;
       if (ambiguousWorkspaceMutationError != null) {
         throw await this.quarantineWorkspace(
           undefined,
@@ -994,6 +1050,16 @@ export class BridgeWorker {
           signal,
           workspaceMutationApplied,
         );
+      }
+      if (workspaceMutationArmed) {
+        try {
+          await this.options.workspaceMutationQuarantine!.clear();
+        } catch (error) {
+          throw new BridgeWorkspaceQuarantinedError(
+            'Workspace mutation settled, but durable quarantine could not be cleared',
+            error,
+          );
+        }
       }
     } finally {
       heartbeatController.abort();
@@ -1061,7 +1127,18 @@ export class BridgeWorker {
     cause?: unknown,
   ): Promise<BridgeWorkspaceQuarantinedError> {
     if (runtimeSessionId == null) {
-      return new BridgeWorkspaceQuarantinedError(message, cause);
+      try {
+        await this.options.workspaceMutationQuarantine?.quarantine(
+          message,
+          cause,
+        );
+        return new BridgeWorkspaceQuarantinedError(message, cause);
+      } catch (error) {
+        return new BridgeWorkspaceQuarantinedError(
+          `${message}; durable workspace mutation quarantine could not be confirmed`,
+          error,
+        );
+      }
     }
     try {
       await this.runtimeSupervisor.quarantine(runtimeSessionId, message, cause);

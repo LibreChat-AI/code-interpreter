@@ -49,6 +49,21 @@ export interface DefaultWorkspacePathOptions {
   homeDirectory?: string;
 }
 
+export interface WorkspaceMutationQuarantineRecord {
+  version: 1;
+  workerId: string;
+  workspaceId: string;
+  quarantinedAt: string;
+  reason: string;
+}
+
+export interface DefaultWorkspaceQuarantinePathOptions {
+  codeApiUrl: string;
+  workerId: string;
+  workspaceId: string;
+  homeDirectory?: string;
+}
+
 export function defaultWorkspacePath({
   codeApiUrl,
   securityIdentity,
@@ -67,6 +82,22 @@ export function defaultWorkspacePath({
     workspaceStorageName(deploymentIdentity),
     workspaceStorageName(workerId),
     workspaceStorageName(workspaceId),
+  );
+}
+
+export function defaultWorkspaceQuarantinePath(
+  options: DefaultWorkspaceQuarantinePathOptions,
+): string {
+  return join(
+    options.homeDirectory ?? homedir(),
+    '.local',
+    'state',
+    'librechat',
+    'code',
+    'quarantines',
+    workspaceStorageName(options.codeApiUrl.replace(/\/+$/, '')),
+    workspaceStorageName(options.workerId),
+    `${workspaceStorageName(options.workspaceId)}.json`,
   );
 }
 
@@ -101,6 +132,77 @@ export async function saveBridgeIdentity(
     await rm(temporaryPath, { force: true });
     throw error;
   }
+}
+
+function isWorkspaceMutationQuarantineRecord(
+  value: unknown,
+): value is WorkspaceMutationQuarantineRecord {
+  return (
+    isRecord(value) &&
+    value.version === 1 &&
+    typeof value.workerId === 'string' &&
+    typeof value.workspaceId === 'string' &&
+    typeof value.quarantinedAt === 'string' &&
+    Number.isFinite(Date.parse(value.quarantinedAt)) &&
+    typeof value.reason === 'string' &&
+    value.reason.length > 0
+  );
+}
+
+export async function saveWorkspaceMutationQuarantine(
+  path: string,
+  record: WorkspaceMutationQuarantineRecord,
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporaryPath = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+  try {
+    const file = await open(temporaryPath, 'wx', 0o600);
+    try {
+      await file.writeFile(`${JSON.stringify(record, null, 2)}\n`, 'utf8');
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    await rename(temporaryPath, path);
+    await chmod(path, 0o600);
+  } catch (error) {
+    await rm(temporaryPath, { force: true });
+    throw error;
+  }
+}
+
+export async function loadWorkspaceMutationQuarantine(
+  path: string,
+): Promise<WorkspaceMutationQuarantineRecord | undefined> {
+  let content: string;
+  try {
+    content = await readFile(path, 'utf8');
+  } catch (error) {
+    if (
+      isRecord(error) &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return undefined;
+    }
+    throw error;
+  }
+  let record: unknown;
+  try {
+    record = JSON.parse(content) as unknown;
+  } catch {
+    throw new BridgeProtocolError(`Invalid workspace quarantine file: ${path}`);
+  }
+  if (!isWorkspaceMutationQuarantineRecord(record)) {
+    throw new BridgeProtocolError(`Invalid workspace quarantine file: ${path}`);
+  }
+  return record;
+}
+
+export async function clearWorkspaceMutationQuarantine(
+  path: string,
+): Promise<void> {
+  await rm(path, { force: true });
 }
 
 export async function loadBridgeIdentity(

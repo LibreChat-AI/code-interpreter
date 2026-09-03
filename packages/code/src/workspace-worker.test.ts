@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { BridgeProtocolError } from './protocol.js';
 import { BridgeWorker, BridgeWorkspaceQuarantinedError } from './worker.js';
 import { WorkspaceToolError } from './workspace.js';
 
@@ -46,6 +47,25 @@ function listWorkspaceExecutor() {
         paths: [],
         truncated: false,
       };
+    },
+  };
+}
+
+function mutationQuarantine(
+  onQuarantine?: (reason: string) => void,
+  onArm?: (reason: string) => void,
+  onClear?: () => void,
+) {
+  return {
+    async assertAvailable() {},
+    async arm(reason: string) {
+      onArm?.(reason);
+    },
+    async clear() {
+      onClear?.();
+    },
+    async quarantine(reason: string) {
+      onQuarantine?.(reason);
     },
   };
 }
@@ -156,6 +176,7 @@ test('worker promotes only operations understood by an older Code API', async ()
         throw new Error('not executed');
       },
     },
+    workspaceMutationQuarantine: mutationQuarantine(),
     fetchImpl: async (_input, init) => {
       const body = JSON.parse(String(init?.body)) as {
         capabilities: {
@@ -250,6 +271,7 @@ test('worker retains per-workspace restrictions during partial mutation promotio
         throw new Error('not executed');
       },
     },
+    workspaceMutationQuarantine: mutationQuarantine(),
     fetchImpl: async (_input, init) => {
       const body = JSON.parse(String(init?.body)) as {
         capabilities: {
@@ -486,6 +508,9 @@ test('worker executes a workspace tool assignment locally without acquiring a sa
 });
 
 test('worker stops after Code API rejects a fulfilled workspace mutation', async () => {
+  let quarantinedReason: string | undefined;
+  let armed = 0;
+  let cleared = 0;
   const workspaceCapabilities = {
     protocolVersion: 1 as const,
     operations: ['write_file' as const],
@@ -516,6 +541,17 @@ test('worker stops after Code API rejects a fulfilled workspace mutation', async
         };
       },
     },
+    workspaceMutationQuarantine: mutationQuarantine(
+      (reason) => {
+        quarantinedReason = reason;
+      },
+      () => {
+        armed += 1;
+      },
+      () => {
+        cleared += 1;
+      },
+    ),
     fetchImpl: async () =>
       Response.json({ error: 'assignment was fenced' }, { status: 409 }),
   });
@@ -540,9 +576,17 @@ test('worker stops after Code API rejects a fulfilled workspace mutation', async
     }),
     BridgeWorkspaceQuarantinedError,
   );
+  assert.match(
+    quarantinedReason ?? '',
+    /rejected a fulfilled workspace mutation/i,
+  );
+  assert.equal(armed, 1);
+  assert.equal(cleared, 0);
 });
 
 test('worker stops after a fulfilled workspace mutation settlement remains ambiguous', async () => {
+  let quarantinedReason: string | undefined;
+  let cleared = 0;
   const workspaceCapabilities = {
     protocolVersion: 1 as const,
     operations: ['edit_file' as const],
@@ -573,6 +617,15 @@ test('worker stops after a fulfilled workspace mutation settlement remains ambig
         };
       },
     },
+    workspaceMutationQuarantine: mutationQuarantine(
+      (reason) => {
+        quarantinedReason = reason;
+      },
+      undefined,
+      () => {
+        cleared += 1;
+      },
+    ),
     fetchImpl: async () => {
       throw new TypeError('connection reset');
     },
@@ -599,6 +652,73 @@ test('worker stops after a fulfilled workspace mutation settlement remains ambig
     }),
     BridgeWorkspaceQuarantinedError,
   );
+  assert.match(quarantinedReason ?? '', /ambiguous workspace mutation/i);
+  assert.equal(cleared, 0);
+});
+
+test('worker clears its pre-armed quarantine only after mutation settlement is accepted', async () => {
+  const lifecycle: string[] = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    workspaces: [{ id: 'primary', operations: ['write_file' as const] }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute(request) {
+        lifecycle.push('execute');
+        return {
+          protocolVersion: 1,
+          operation: 'write_file',
+          workspaceId: request.workspaceId,
+          path: 'notes.txt',
+          bytesWritten: 7,
+          created: true,
+        };
+      },
+    },
+    workspaceMutationQuarantine: mutationQuarantine(
+      undefined,
+      () => lifecycle.push('arm'),
+      () => lifecycle.push('clear'),
+    ),
+    fetchImpl: async () => {
+      lifecycle.push('settle');
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-workspace-write-success',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      content: 'written',
+    },
+  });
+
+  assert.deepEqual(lifecycle, ['arm', 'execute', 'settle', 'clear']);
 });
 
 test('worker stops when cancellation races a completed workspace mutation', async () => {
@@ -635,6 +755,7 @@ test('worker stops when cancellation races a completed workspace mutation', asyn
         };
       },
     },
+    workspaceMutationQuarantine: mutationQuarantine(),
     fetchImpl: async () => {
       settlementAttempts += 1;
       return Response.json({ protocolVersion: 1, accepted: true });
@@ -665,6 +786,121 @@ test('worker stops when cancellation races a completed workspace mutation', asyn
     BridgeWorkspaceQuarantinedError,
   );
   assert.equal(settlementAttempts, 0);
+});
+
+test('worker refuses registration while durable mutation quarantine is active', async () => {
+  let registrations = 0;
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    workspaces: [{ id: 'primary', operations: ['write_file' as const] }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        throw new Error('not executed');
+      },
+    },
+    workspaceMutationQuarantine: {
+      async assertAvailable() {
+        throw new BridgeProtocolError(
+          'workspace quarantined',
+          undefined,
+          'WORKER_QUARANTINED',
+        );
+      },
+      async arm() {},
+      async clear() {},
+      async quarantine() {},
+    },
+    fetchImpl: async () => {
+      registrations += 1;
+      return registrationResponse(true);
+    },
+  });
+
+  await assert.rejects(worker.register(), (error: unknown) => {
+    assert.equal((error as BridgeProtocolError).code, 'WORKER_QUARANTINED');
+    return true;
+  });
+  assert.equal(registrations, 0);
+});
+
+test('worker never executes a mutation when durable quarantine cannot be armed', async () => {
+  let executions = 0;
+  let requests = 0;
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    workspaces: [{ id: 'primary', operations: ['write_file' as const] }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        executions += 1;
+        throw new Error('not executed');
+      },
+    },
+    workspaceMutationQuarantine: {
+      async assertAvailable() {},
+      async arm() {
+        throw new Error('disk unavailable');
+      },
+      async clear() {},
+      async quarantine() {},
+    },
+    fetchImpl: async () => {
+      requests += 1;
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'assignment-workspace-write-unarmed',
+      workerId: 'vm-1',
+      incarnationId,
+      generation: 4,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 5_000).toISOString(),
+      executionKind: 'workspace_tool',
+      request: {
+        protocolVersion: 1,
+        operation: 'write_file',
+        workspaceId: 'primary',
+        path: 'notes.txt',
+        content: 'written',
+      },
+    }),
+    BridgeWorkspaceQuarantinedError,
+  );
+  assert.equal(executions, 0);
+  assert.equal(requests, 0);
 });
 
 test('worker refuses to advertise workspace tools without a matching executor', () => {
