@@ -91,6 +91,11 @@ export interface WorkspaceToolExecutor {
  * confinement; this package deliberately never falls back to a host shell.
  */
 export interface WorkspaceCommandSandbox {
+  /**
+   * True only when every thrown WorkspaceToolError proves no command-side
+   * mutation committed unless mutationMayHaveCommitted is explicitly set.
+   */
+  mutationFailuresAreAtomic?: true;
   execute(
     request: WorkspaceExecuteCommandRequest,
     signal?: AbortSignal,
@@ -1448,16 +1453,18 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
   }
 }
 
-/**
- * Composes ordinary workspace tools with an explicitly supplied sandboxed
- * command boundary. Command failures are intentionally not declared atomic:
- * callers must retain their durable mutation quarantine until settlement.
- */
+/** Composes ordinary workspace tools with an explicitly supplied sandboxed command boundary. */
 export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
   readonly capabilities: BridgeWorkspaceToolCapabilities;
+  readonly mutationFailuresAreAtomic?: true;
   private readonly commandWorkspaces: ReadonlySet<string>;
 
   constructor(private readonly options: SandboxWorkspaceToolsOptions) {
+    this.mutationFailuresAreAtomic =
+      options.workspaceTools.mutationFailuresAreAtomic === true &&
+      options.commandSandbox.mutationFailuresAreAtomic === true
+        ? true
+        : undefined;
     const base = options.workspaceTools.capabilities;
     const registeredIds = new Set(base.workspaces.map(({ id }) => id));
     const commandWorkspaces = new Set(options.commandWorkspaces);
@@ -1516,7 +1523,15 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
     try {
       result = await this.options.commandSandbox.execute(request, signal);
     } catch (error) {
-      if (error instanceof WorkspaceToolError) throw error;
+      if (error instanceof WorkspaceToolError) {
+        if (
+          this.options.commandSandbox.mutationFailuresAreAtomic === true ||
+          error.mutationMayHaveCommitted
+        ) {
+          throw error;
+        }
+        throw new WorkspaceToolError(error.message, error.code, true);
+      }
       throw new WorkspaceToolError(
         'Sandboxed command execution unavailable',
         'COMMAND_UNAVAILABLE',

@@ -62,6 +62,55 @@ test('CLI trims an environment-configured worker directory', async (t) => {
   assert.doesNotMatch(result.stderr, /invalid workspace registration/i);
 });
 
+test('CLI refuses workspace commands without its Docker sandbox profile', async (t) => {
+  const workspaceRoot = await mkdtemp(
+    join(tmpdir(), 'librechat-code-command-workspace-'),
+  );
+  t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+  const endpoint = spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL('./cli.js', import.meta.url)),
+      'run',
+      '--worker-dir',
+      workspaceRoot,
+      '--allow-workspace-commands',
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+      },
+    },
+  );
+  assert.notEqual(endpoint.status, 0);
+  assert.match(endpoint.stderr, /require.*docker-nsjail runtime supervisor/i);
+
+  const noWorkspace = spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL('./cli.js', import.meta.url)),
+      'run',
+      '--allow-workspace-commands',
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_RUNTIME_SUPERVISOR: 'docker',
+      },
+    },
+  );
+  assert.notEqual(noWorkspace.status, 0);
+  assert.match(noWorkspace.stderr, /require.*registered directory/i);
+});
+
 test('CLI advertises explicitly enabled writes without exposing the workspace root', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-cli-'));
   const workspaceRoot = join(root, '   ');

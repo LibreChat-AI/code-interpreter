@@ -149,6 +149,16 @@ validates bounded results, and treats an unknown command failure as an uncertain
 mutation. The built-in CLI remains command-disabled until its supported NsJail
 adapter can safely map a registered directory without changing host ownership.
 
+The supported `docker-nsjail` adapter enables that mapping only with
+`--allow-workspace-commands` (or
+`LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS=true`) and a registered worker/default
+directory. It mounts only the canonical workspace, keeps the runner port
+unpublished, authenticates its dedicated command route with an ephemeral
+container capability, and runs Bash inside the existing NsJail profile. Direct
+endpoint mode is rejected. This deployment permission does not replace the
+per-call approval decision: LibreChat must apply its configurable tool-approval
+hooks before dispatching `execute_command`.
+
 Stateful deployments must also set `LIBRECHAT_CODE_STATEFUL_WORKSPACE=true`
 and route the CLI's `{runtimeSessionId}` endpoint template to an isolated,
 persistent local runner per session. A single sandbox endpoint is stateless and

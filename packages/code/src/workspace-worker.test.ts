@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { BridgeProtocolError } from './protocol.js';
 import { BridgeWorker, BridgeWorkspaceQuarantinedError } from './worker.js';
-import { WorkspaceToolError } from './workspace.js';
+import { SandboxWorkspaceTools, WorkspaceToolError } from './workspace.js';
 
 const incarnationId = 'incarnation-00000001';
 
@@ -1050,6 +1050,71 @@ test('worker clears quarantine after an atomic executor rejection is settled', a
       workspaceId: 'primary',
       path: 'missing/outside.txt',
       content: 'blocked',
+    },
+  });
+  assert.deepEqual(lifecycle, ['arm', 'execute', 'settle', 'clear']);
+});
+
+test('worker clears quarantine after a composed command is cleanly rejected', async () => {
+  const lifecycle: string[] = [];
+  const baseCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const],
+    workspaces: [{ id: 'primary', operations: ['read_file' as const] }],
+  };
+  const workspaceTools = new SandboxWorkspaceTools({
+    workspaceTools: {
+      capabilities: baseCapabilities,
+      mutationFailuresAreAtomic: true,
+      async execute() { throw new Error('base executor must not run'); },
+    },
+    commandWorkspaces: ['primary'],
+    commandSandbox: {
+      mutationFailuresAreAtomic: true,
+      async execute() {
+        lifecycle.push('execute');
+        throw new WorkspaceToolError('Sandboxed command request was rejected', 'INVALID_REQUEST');
+      },
+    },
+  });
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceTools.capabilities,
+    },
+    workspaceTools,
+    workspaceMutationQuarantine: mutationQuarantine(
+      () => lifecycle.push('quarantine'),
+      () => lifecycle.push('arm'),
+      () => lifecycle.push('clear'),
+    ),
+    fetchImpl: async () => {
+      lifecycle.push('settle');
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-command-clean-rejection',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'execute_command',
+      workspaceId: 'primary',
+      command: 'pwd',
     },
   });
   assert.deepEqual(lifecycle, ['arm', 'execute', 'settle', 'clear']);
