@@ -101,8 +101,18 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
         });
         if (settlement.status === 'rejected') {
           let status = 422;
-          if (settlement.errorCode === 'SEARCH_TIMEOUT') status = 504;
-          if (settlement.errorCode === 'SEARCH_UNAVAILABLE') status = 503;
+          if (
+            settlement.errorCode === 'SEARCH_TIMEOUT' ||
+            settlement.errorCode === 'LIST_TIMEOUT'
+          ) {
+            status = 504;
+          }
+          if (
+            settlement.errorCode === 'SEARCH_UNAVAILABLE' ||
+            settlement.errorCode === 'LIST_UNAVAILABLE'
+          ) {
+            status = 503;
+          }
           res.status(status).json({
             error: settlement.error,
             code: settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED',

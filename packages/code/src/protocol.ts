@@ -11,10 +11,14 @@ export const BRIDGE_WORKSPACE_READ_MAX_BYTES = 1024 * 1024;
 export const BRIDGE_WORKSPACE_READ_MAX_LINES = 500;
 export const BRIDGE_WORKSPACE_SEARCH_MAX_RESULTS = 200;
 export const BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH = 2000;
+export const BRIDGE_WORKSPACE_LIST_MAX_RESULTS = 500;
 
 export type BridgeProtocolVersion = typeof BRIDGE_PROTOCOL_VERSION;
 
-export type BridgeWorkspaceToolOperation = 'read_file' | 'search_text';
+export type BridgeWorkspaceToolOperation =
+  | 'read_file'
+  | 'search_text'
+  | 'list_files';
 
 export interface BridgeWorkspaceDescriptor {
   id: string;
@@ -72,12 +76,30 @@ export interface WorkspaceSearchTextResult {
   truncated: boolean;
 }
 
+export interface WorkspaceListFilesRequest {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'list_files';
+  workspaceId: string;
+  path?: string;
+  maxResults?: number;
+}
+
+export interface WorkspaceListFilesResult {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'list_files';
+  workspaceId: string;
+  paths: string[];
+  truncated: boolean;
+}
+
 export type WorkspaceToolRequest =
   | WorkspaceReadFileRequest
-  | WorkspaceSearchTextRequest;
+  | WorkspaceSearchTextRequest
+  | WorkspaceListFilesRequest;
 export type WorkspaceToolResult =
   | WorkspaceReadFileResult
-  | WorkspaceSearchTextResult;
+  | WorkspaceSearchTextResult
+  | WorkspaceListFilesResult;
 
 const WORKSPACE_READ_REQUEST_KEYS = new Set([
   'protocolVersion',
@@ -92,6 +114,13 @@ const WORKSPACE_SEARCH_REQUEST_KEYS = new Set([
   'operation',
   'workspaceId',
   'query',
+  'path',
+  'maxResults',
+]);
+const WORKSPACE_LIST_REQUEST_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
   'path',
   'maxResults',
 ]);
@@ -111,6 +140,13 @@ const WORKSPACE_SEARCH_RESULT_KEYS = new Set([
   'operation',
   'workspaceId',
   'matches',
+  'truncated',
+]);
+const WORKSPACE_LIST_RESULT_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'paths',
   'truncated',
 ]);
 const WORKSPACE_SEARCH_MATCH_KEYS = new Set([
@@ -144,6 +180,8 @@ export interface BridgeWorkerRegistrationResponse {
   registrationGeneration?: number;
   registeredAt: string;
   leaseTtlMs: number;
+  /** Operations this Code API can dispatch after the worker advertises them. */
+  supportedWorkspaceToolOperations?: BridgeWorkspaceToolOperation[];
 }
 
 export interface BridgePairingRedemption {
@@ -212,6 +250,8 @@ export type WorkspaceToolErrorCode =
   | 'READ_LIMIT_EXCEEDED'
   | 'REGISTRATION_INVALID'
   | 'EXECUTION_ABORTED'
+  | 'LIST_TIMEOUT'
+  | 'LIST_UNAVAILABLE'
   | 'SEARCH_TIMEOUT'
   | 'SEARCH_UNAVAILABLE';
 
@@ -221,6 +261,8 @@ const WORKSPACE_TOOL_ERROR_CODES = new Set<WorkspaceToolErrorCode>([
   'READ_LIMIT_EXCEEDED',
   'REGISTRATION_INVALID',
   'EXECUTION_ABORTED',
+  'LIST_TIMEOUT',
+  'LIST_UNAVAILABLE',
   'SEARCH_TIMEOUT',
   'SEARCH_UNAVAILABLE',
 ]);
@@ -266,7 +308,7 @@ export function isValidBridgeWorkerId(workerId: string): boolean {
   return BRIDGE_WORKER_ID_PATTERN.test(workerId);
 }
 
-function isSafePortableRelativePath(value: unknown): value is string {
+export function isSafePortableRelativePath(value: unknown): value is string {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
@@ -354,6 +396,17 @@ export function isWorkspaceToolRequest(
           Number(request.maxResults) <= BRIDGE_WORKSPACE_SEARCH_MAX_RESULTS))
     );
   }
+  if (request.operation === 'list_files') {
+    return (
+      hasOnlyKeys(request, WORKSPACE_LIST_REQUEST_KEYS) &&
+      (request.path === undefined ||
+        isSafePortableRelativePath(request.path)) &&
+      (request.maxResults === undefined ||
+        (Number.isSafeInteger(request.maxResults) &&
+          Number(request.maxResults) >= 1 &&
+          Number(request.maxResults) <= BRIDGE_WORKSPACE_LIST_MAX_RESULTS))
+    );
+  }
   return false;
 }
 
@@ -405,6 +458,30 @@ export function isWorkspaceToolResult(
     );
   }
 
+  if (request.operation === 'list_files') {
+    const maxResults = request.maxResults ?? 100;
+    if (
+      !hasOnlyKeys(result, WORKSPACE_LIST_RESULT_KEYS) ||
+      !Array.isArray(result.paths) ||
+      result.paths.length > maxResults
+    ) {
+      return false;
+    }
+    const normalizedPaths = new Set<string>();
+    for (const path of result.paths) {
+      if (
+        !isSafePortableRelativePath(path) ||
+        !isWithinRequestedPath(path, request.path)
+      ) {
+        return false;
+      }
+      const normalizedPath = normalizePortableRelativePath(path);
+      if (normalizedPaths.has(normalizedPath)) return false;
+      normalizedPaths.add(normalizedPath);
+    }
+    return true;
+  }
+
   if (!Array.isArray(result.matches)) return false;
   const maxResults = request.maxResults ?? 50;
   return (
@@ -438,9 +515,12 @@ export function isValidBridgeWorkspaceToolCapabilities(
     capabilities.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
     !Array.isArray(capabilities.operations) ||
     capabilities.operations.length < 1 ||
-    capabilities.operations.length > 2 ||
+    capabilities.operations.length > 3 ||
     !capabilities.operations.every(
-      (operation) => operation === 'read_file' || operation === 'search_text',
+      (operation) =>
+        operation === 'read_file' ||
+        operation === 'search_text' ||
+        operation === 'list_files',
     ) ||
     new Set(capabilities.operations).size !== capabilities.operations.length ||
     !Array.isArray(capabilities.workspaces) ||

@@ -6,6 +6,146 @@ import { WorkspaceToolError } from './workspace.js';
 
 const incarnationId = 'incarnation-00000001';
 
+const listWorkspaceCapabilities = {
+  protocolVersion: 1 as const,
+  operations: [
+    'read_file' as const,
+    'search_text' as const,
+    'list_files' as const,
+  ],
+  workspaces: [{ id: 'primary' }],
+};
+
+function registrationResponse(supportsList: boolean): Response {
+  return Response.json({
+    protocolVersion: 1,
+    workerId: 'vm-1',
+    incarnationId,
+    registeredAt: new Date().toISOString(),
+    leaseTtlMs: 60_000,
+    ...(supportsList
+      ? {
+          supportedWorkspaceToolOperations: [
+            'read_file',
+            'search_text',
+            'list_files',
+          ],
+        }
+      : {}),
+  });
+}
+
+function listWorkspaceExecutor() {
+  return {
+    capabilities: listWorkspaceCapabilities,
+    async execute() {
+      return {
+        protocolVersion: 1 as const,
+        operation: 'list_files' as const,
+        workspaceId: 'primary',
+        paths: [],
+        truncated: false,
+      };
+    },
+  };
+}
+
+test('worker keeps v1 registration compatible until list_files support is advertised', async () => {
+  const registrations: string[][] = [];
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: listWorkspaceCapabilities,
+    },
+    workspaceTools: listWorkspaceExecutor(),
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        capabilities: { workspaceTools?: { operations: string[] } };
+      };
+      registrations.push(body.capabilities.workspaceTools?.operations ?? []);
+      return registrationResponse(false);
+    },
+  });
+
+  await worker.register();
+
+  assert.deepEqual(registrations, [['read_file', 'search_text']]);
+});
+
+test('worker re-registers list_files after the Code API advertises support', async () => {
+  const registrations: string[][] = [];
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: listWorkspaceCapabilities,
+    },
+    workspaceTools: listWorkspaceExecutor(),
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        capabilities: { workspaceTools?: { operations: string[] } };
+      };
+      registrations.push(body.capabilities.workspaceTools?.operations ?? []);
+      return registrationResponse(true);
+    },
+  });
+
+  await worker.register();
+
+  assert.deepEqual(registrations, [
+    ['read_file', 'search_text'],
+    ['read_file', 'search_text', 'list_files'],
+  ]);
+});
+
+test('worker retains a compatible registration when list_files promotion times out', async () => {
+  let registrationRequests = 0;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    registrationTransportTimeoutMs: 20,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: listWorkspaceCapabilities,
+    },
+    workspaceTools: listWorkspaceExecutor(),
+    fetchImpl: async (_input, init) => {
+      registrationRequests += 1;
+      if (registrationRequests === 1) return registrationResponse(true);
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason ?? new Error('aborted')),
+          { once: true },
+        );
+      });
+    },
+  });
+
+  const registration = await worker.register();
+
+  assert.equal(registration.workerId, 'vm-1');
+  assert.equal(registrationRequests, 2);
+});
+
 test('worker preserves bounded workspace rejection codes', async () => {
   let settlement: Record<string, unknown> | undefined;
   const workspaceCapabilities = {

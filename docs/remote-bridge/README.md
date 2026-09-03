@@ -118,14 +118,15 @@ The endpoint uses the same authenticated principal-bound worker selection,
 tenant fence, lease deadline, cancellation, and settlement lifecycle as remote
 sandbox execution. Requests must name a workspace and operation advertised by
 that worker. Results are validated against the originating request before they
-leave Code API, and are bounded to 1 MiB/500 lines for reads or 200 matches for
-searches. Absolute paths, traversal, backslashes, symlink escapes, unexpected
-fields, and host roots are rejected.
+leave Code API, and are bounded to 1 MiB/500 lines for reads, 200 matches for
+searches, or 500 relative paths for file listings. Absolute paths, traversal,
+backslashes, symlink escapes, unexpected fields, and host roots are rejected.
 
 The workspace root can be an existing project, a Git repository, or an empty
 directory; Git is not required. This boundary keeps that directory local to the
-operator's machine, but the selected file contents, search matches, and later
-tool results necessarily cross the outbound bridge to Code API and the model.
+operator's machine, but selected file contents, search matches, relative file
+listings, and later tool results necessarily cross the outbound bridge to Code
+API and the model.
 Treat them as explicit tool outputs, apply the same retention and audit policy
 as chat content, and do not register a directory containing secrets. The
 default operations are read-only; future mutation and shell operations must be

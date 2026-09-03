@@ -137,6 +137,42 @@ function workspaceCapabilitiesMatch(
   );
 }
 
+function registrationCompatibleCapabilities(
+  capabilities: BridgeWorkerCapabilities,
+): BridgeWorkerCapabilities {
+  const workspaceTools = capabilities.workspaceTools;
+  if (
+    workspaceTools == null ||
+    !workspaceTools.operations.includes('list_files')
+  ) {
+    return capabilities;
+  }
+  const operations = workspaceTools.operations.filter(
+    (operation) => operation !== 'list_files',
+  );
+  if (operations.length === 0) {
+    const { workspaceTools: _workspaceTools, ...compatible } = capabilities;
+    return compatible;
+  }
+  return {
+    ...capabilities,
+    workspaceTools: { ...workspaceTools, operations },
+  };
+}
+
+function supportsDesiredWorkspaceTools(
+  registration: BridgeWorkerRegistrationResponse,
+  capabilities: BridgeWorkerCapabilities,
+): boolean {
+  const desired = capabilities.workspaceTools?.operations;
+  const supported = registration.supportedWorkspaceToolOperations;
+  return (
+    desired != null &&
+    Array.isArray(supported) &&
+    desired.every((operation) => supported.includes(operation))
+  );
+}
+
 export class BridgeWorkspaceQuarantinedError extends Error {
   constructor(
     message: string,
@@ -152,6 +188,8 @@ export class BridgeWorker {
   private readonly codeApiUrl: string;
   private readonly runtimeSupervisor: RuntimeSupervisor;
   private readonly incarnationId: string;
+  private readonly compatibleCapabilities: BridgeWorkerCapabilities;
+  private registrationCapabilities: BridgeWorkerCapabilities;
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
   private serverClockOffsetMs = MAX_PROOF_CLOCK_SKEW_MS;
@@ -194,6 +232,10 @@ export class BridgeWorker {
       });
     this.incarnationId =
       options.incarnationId ?? randomBytes(18).toString('base64url');
+    this.compatibleCapabilities = registrationCompatibleCapabilities(
+      options.capabilities,
+    );
+    this.registrationCapabilities = this.compatibleCapabilities;
   }
 
   async register(
@@ -218,16 +260,42 @@ export class BridgeWorker {
     const registrationStartedAtMs = Date.now();
     let registration: BridgeWorkerRegistrationResponse;
     try {
-      registration = await this.request<BridgeWorkerRegistrationResponse>(
-        `${this.codeApiUrl}/bridge/workers/register`,
-        {
-          protocolVersion: BRIDGE_PROTOCOL_VERSION,
-          workerId: this.options.workerId,
-          incarnationId: this.incarnationId,
-          capabilities: this.options.capabilities,
-        },
-        registrationController.signal,
-      );
+      const register = (capabilities: BridgeWorkerCapabilities) =>
+        this.request<BridgeWorkerRegistrationResponse>(
+          `${this.codeApiUrl}/bridge/workers/register`,
+          {
+            protocolVersion: BRIDGE_PROTOCOL_VERSION,
+            workerId: this.options.workerId,
+            incarnationId: this.incarnationId,
+            capabilities,
+          },
+          registrationController.signal,
+        );
+      try {
+        registration = await register(this.registrationCapabilities);
+      } catch (error) {
+        if (
+          !(error instanceof BridgeProtocolError) ||
+          error.status !== 400 ||
+          this.registrationCapabilities === this.compatibleCapabilities
+        ) {
+          throw error;
+        }
+        this.registrationCapabilities = this.compatibleCapabilities;
+        registration = await register(this.registrationCapabilities);
+      }
+      if (
+        this.registrationCapabilities !== this.options.capabilities &&
+        supportsDesiredWorkspaceTools(registration, this.options.capabilities)
+      ) {
+        this.registrationCapabilities = this.options.capabilities;
+        try {
+          registration = await register(this.registrationCapabilities);
+        } catch (error) {
+          this.registrationCapabilities = this.compatibleCapabilities;
+          if (signal?.aborted) throw error;
+        }
+      }
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abortRegistration);
