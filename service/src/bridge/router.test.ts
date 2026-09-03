@@ -285,6 +285,7 @@ describe('paired bridge HTTP API', () => {
         'list_files',
         'write_file',
         'edit_file',
+        'execute_command',
       ],
     });
 

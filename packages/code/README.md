@@ -216,6 +216,12 @@ with `--allow-workspace-writes` or
 Only IDs, names, protocol version, and supported operations appear in worker
 capabilities; absolute host paths remain local to the worker process.
 
+The protocol also defines a bounded `execute_command` request and result for a
+sandbox-backed executor. Commands are treated as workspace mutations and cannot
+be advertised without durable quarantine storage. `LocalWorkspaceTools` never
+runs them in the worker host process; the CLI does not advertise command support
+until a sandbox runtime executor is configured.
+
 Reads reject absolute paths, traversal, escaping symlinks, non-regular files,
 and files larger than 1 MiB. The opened file is checked against its canonical
 in-workspace inode before it is read. Text search uses `rg` only to enumerate a

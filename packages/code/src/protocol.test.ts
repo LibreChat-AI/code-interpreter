@@ -200,6 +200,77 @@ test('workspace mutations accept bounded UTF-8 requests and exact result shapes'
   );
 });
 
+test('workspace commands require bounded sandbox inputs and outputs', () => {
+  const request = {
+    protocolVersion: 1 as const,
+    operation: 'execute_command' as const,
+    workspaceId: 'primary',
+    command: 'npm test',
+    cwd: 'packages/code',
+    timeoutMs: 60_000,
+    maxOutputBytes: 1024,
+  };
+  assert.equal(isWorkspaceToolRequest(request), true);
+  assert.equal(isWorkspaceToolRequest({ ...request, command: '   ' }), false);
+  assert.equal(
+    isWorkspaceToolRequest({ ...request, command: `echo\0secret` }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolRequest({ ...request, cwd: '../outside' }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolRequest({ ...request, timeoutMs: 300_001 }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolRequest({ ...request, maxOutputBytes: 1024 * 1024 + 1 }),
+    false,
+  );
+
+  const result = {
+    protocolVersion: 1 as const,
+    operation: 'execute_command' as const,
+    workspaceId: 'primary',
+    exitCode: 0,
+    stdout: 'ok\n',
+    stderr: '',
+    truncated: false,
+    timedOut: false,
+  };
+  assert.equal(isWorkspaceToolResult(request, result), true);
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      stdout: 'x'.repeat(1025),
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      exitCode: null,
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      exitCode: null,
+      timedOut: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      hostCwd: '/Users/operator/project',
+    }),
+    false,
+  );
+});
+
 test('workspace capabilities allow per-workspace operation restrictions', () => {
   const capabilities = {
     statefulWorkspace: true,

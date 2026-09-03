@@ -27,6 +27,8 @@ import type {
   WorkspaceReadFileResult,
   WorkspaceEditFileRequest,
   WorkspaceEditFileResult,
+  WorkspaceExecuteCommandRequest,
+  WorkspaceExecuteCommandResult,
   WorkspaceListFilesRequest,
   WorkspaceListFilesResult,
   WorkspaceSearchMatch,
@@ -45,6 +47,8 @@ export type {
   WorkspaceReadFileResult,
   WorkspaceEditFileRequest,
   WorkspaceEditFileResult,
+  WorkspaceExecuteCommandRequest,
+  WorkspaceExecuteCommandResult,
   WorkspaceListFilesRequest,
   WorkspaceListFilesResult,
   WorkspaceSearchMatch,
@@ -1378,6 +1382,12 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     }
     if (request.operation === 'list_files') {
       return listWorkspaceFiles(root, request, signal);
+    }
+    if (request.operation === 'execute_command') {
+      throw new WorkspaceToolError(
+        'Command execution requires a sandbox runtime executor',
+        'COMMAND_DISABLED',
+      );
     }
 
     const startLine = request.startLine ?? 1;
