@@ -148,7 +148,8 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
     2>/dev/null || true
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh
+COPY api/src/hosted-app-launcher.sh /usr/local/bin/codeapi-hosted-app-launcher
+RUN chmod +x ./entrypoint.sh /usr/local/bin/codeapi-hosted-app-launcher
 
 # ============================================================================
 # Stage 2b: AWS Lambda MicroVM container base image
@@ -187,6 +188,17 @@ ENV PORT=2000 \
 
 EXPOSE 2000/tcp
 ENTRYPOINT ["/sandbox_api/entrypoint.sh"]
+
+# Dedicated resident-process host. This image deliberately keeps the runner
+# control listener on 8080 and exposes one fixed user-app port separately.
+# `/execute` is disabled when hosted-app mode is enabled; the control plane
+# restores a checkpoint and starts the app through `/api/v2/hosted-app/start`.
+FROM lambda-microvm-runner AS lambda-microvm-app-host
+
+ENV SANDBOX_HOSTED_APPS_ENABLED=true \
+    SANDBOX_HOSTED_APP_PORT=3000
+
+EXPOSE 3000/tcp
 
 # ============================================================================
 # Stage 3: Build the Rust launcher binary (Fedora for libkrun ABI)

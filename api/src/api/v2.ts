@@ -32,6 +32,10 @@ import {
   pruneInputCache,
   storeCachedInputs,
 } from '../session-inputs';
+import {
+  HostedAppError,
+  hostedAppSupervisor,
+} from '../hosted-app';
 
 const router = express.Router();
 const SYNTHETIC_PRINCIPAL_SOURCE = 'synthetic_test';
@@ -388,6 +392,16 @@ router.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+/* A hosted-app image is a dedicated process host, not an execution runner.
+ * Keeping `/execute` structurally unavailable prevents a resident app and an
+ * NsJail job from sharing the pinned session UID/workspace concurrently. */
+router.use('/execute', (_req: Request, res: Response, next: NextFunction) => {
+  if (config.hosted_apps_enabled) {
+    return res.status(404).json({ message: 'Not Found' });
+  }
+  next();
+});
+
 /** Replay PTC payloads (user code + tool definitions + inlined
  * `_ptc_history.json` + pyplot assets) can far exceed Express's default
  * ~100kb body limit. The parser is installed *here* rather than globally
@@ -677,15 +691,92 @@ router.get('/session/checkpoint', (req: Request, res: Response, next: NextFuncti
   if (failure) {
     return res.status(failure.status).json(failure.body);
   }
-  return streamSessionCheckpoint(res).catch(next);
+  const checkpoint = (): Promise<void> => streamSessionCheckpoint(res);
+  return (config.hosted_apps_enabled
+    ? hostedAppSupervisor.withQuiescedWorkspace(checkpoint)
+    : checkpoint()
+  ).catch(error => hostedAppFailure(error, res, next));
 });
 router.post('/session/restore', (req: Request, res: Response, next: NextFunction) => {
   const failure = bindSessionFromHeader(req);
   if (failure) {
     return res.status(failure.status).json(failure.body);
   }
-  return restoreSessionCheckpoint(req, res).catch(next);
+  const restore = (): Promise<void> => restoreSessionCheckpoint(req, res);
+  return (config.hosted_apps_enabled
+    ? hostedAppSupervisor.withQuiescedWorkspace(restore)
+    : restore()
+  ).catch(error => hostedAppFailure(error, res, next));
 });
+
+function requireHostedAppTarget(
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+): Response | void {
+  if (!config.hosted_apps_enabled) {
+    return res.status(404).json({ message: 'Not Found' });
+  }
+  next();
+}
+
+function hostedAppFailure(
+  error: unknown,
+  res: Response,
+  next: NextFunction,
+): Response | void {
+  if (error instanceof HostedAppError) {
+    return res.status(error.status).json({ error: error.code, message: error.message });
+  }
+  next(error);
+}
+
+/* Dedicated Lambda MicroVM resident-server adapter. The control plane first
+ * restores an immutable session checkpoint into this VM, then starts exactly
+ * one foreground process. Preview traffic uses a separate AWS token restricted
+ * to `hosted_app_port`; these control routes stay on the runner port. */
+router.post(
+  '/hosted-app/start',
+  requireHostedAppTarget,
+  express.json({ limit: '64kb' }),
+  (req: Request, res: Response, next: NextFunction) => {
+    const failure = bindSessionFromHeader(req);
+    if (failure) return res.status(failure.status).json(failure.body);
+    return hostedAppSupervisor.start(req.body)
+      .then(status => res.status(200).json(status))
+      .catch(error => hostedAppFailure(error, res, next));
+  },
+);
+
+router.get(
+  '/hosted-app/status',
+  requireHostedAppTarget,
+  (req: Request, res: Response) => {
+    const failure = bindSessionFromHeader(req);
+    if (failure) return res.status(failure.status).json(failure.body);
+    const status = hostedAppSupervisor.status();
+    if (!status) {
+      return res.status(404).json({
+        error: 'hosted_app_not_running',
+        message: 'No hosted app has been started',
+      });
+    }
+    return res.status(200).json(status);
+  },
+);
+
+router.post(
+  '/hosted-app/stop',
+  requireHostedAppTarget,
+  express.json({ limit: '1kb' }),
+  (req: Request, res: Response, next: NextFunction) => {
+    const failure = bindSessionFromHeader(req);
+    if (failure) return res.status(failure.status).json(failure.body);
+    return hostedAppSupervisor.stop()
+      .then(status => status ? res.status(200).json(status) : res.status(204).send())
+      .catch(error => hostedAppFailure(error, res, next));
+  },
+);
 /**
  * Input delivery for backends whose sandbox cannot reach the file server.
  *
