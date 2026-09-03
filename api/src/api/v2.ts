@@ -691,7 +691,11 @@ router.get('/session/checkpoint', (req: Request, res: Response, next: NextFuncti
   if (failure) {
     return res.status(failure.status).json(failure.body);
   }
-  return streamSessionCheckpoint(res).catch(next);
+  const checkpoint = (): Promise<void> => streamSessionCheckpoint(res);
+  return (config.hosted_apps_enabled
+    ? hostedAppSupervisor.withQuiescedWorkspace(checkpoint)
+    : checkpoint()
+  ).catch(error => hostedAppFailure(error, res, next));
 });
 router.post('/session/restore', (req: Request, res: Response, next: NextFunction) => {
   const failure = bindSessionFromHeader(req);
@@ -700,7 +704,7 @@ router.post('/session/restore', (req: Request, res: Response, next: NextFunction
   }
   const restore = (): Promise<void> => restoreSessionCheckpoint(req, res);
   return (config.hosted_apps_enabled
-    ? hostedAppSupervisor.withWorkspaceMutation(restore)
+    ? hostedAppSupervisor.withQuiescedWorkspace(restore)
     : restore()
   ).catch(error => hostedAppFailure(error, res, next));
 });
@@ -770,7 +774,7 @@ router.post(
     if (failure) return res.status(failure.status).json(failure.body);
     return hostedAppSupervisor.stop()
       .then(status => status ? res.status(200).json(status) : res.status(204).send())
-      .catch(next);
+      .catch(error => hostedAppFailure(error, res, next));
   },
 );
 /**

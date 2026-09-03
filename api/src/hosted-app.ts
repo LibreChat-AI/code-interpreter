@@ -6,9 +6,9 @@ import * as path from 'node:path';
 import type { Readable } from 'node:stream';
 import { promisify } from 'node:util';
 import { config } from './config';
-import { filterExtraEnvVars } from './job';
+import { aggregateBashExtras, filterExtraEnvVars } from './job';
 import { logger } from './logger';
-import { getLatestRuntimeMatchingLanguageVersion, type Runtime } from './runtime';
+import { getLatestRuntimeMatchingLanguageVersion, getRuntimes, type Runtime } from './runtime';
 import { getBoundSessionWorkspace, type SessionWorkspace } from './session-workspace';
 import { ValidationError, validateFilePath } from './validation';
 
@@ -94,7 +94,12 @@ type ResolveRuntime = typeof getLatestRuntimeMatchingLanguageVersion;
 export interface HostedAppDependencies {
   getSession: () => SessionWorkspace | undefined;
   resolveRuntime: ResolveRuntime;
-  prepareRuntimeWorkspace: (workspaceDir: string, runtime: Runtime) => Promise<void>;
+  listRuntimes: () => Runtime[];
+  prepareRuntimeWorkspace: (
+    workspaceDir: string,
+    runtime: Runtime,
+    nodeModulesPath?: string,
+  ) => Promise<void>;
   spawnApp: SpawnApp;
   prepareCgroup: () => Promise<void>;
   killCgroup: () => Promise<void>;
@@ -107,8 +112,9 @@ export interface HostedAppDependencies {
 export async function prepareHostedAppRuntimeWorkspace(
   workspaceDir: string,
   runtime: Runtime,
+  nodeModulesPath?: string,
 ): Promise<void> {
-  const packageModules = path.join(runtime.pkgdir, 'node_modules');
+  const packageModules = nodeModulesPath ?? path.join(runtime.pkgdir, 'node_modules');
   const packageStat = await fsp.stat(packageModules).catch(error => {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw error;
@@ -432,6 +438,7 @@ export class HostedAppSupervisor {
   constructor(private readonly deps: HostedAppDependencies = {
     getSession: getBoundSessionWorkspace,
     resolveRuntime: getLatestRuntimeMatchingLanguageVersion,
+    listRuntimes: getRuntimes,
     prepareRuntimeWorkspace: prepareHostedAppRuntimeWorkspace,
     spawnApp: (command, args, options) => spawn(command, args, options) as unknown as HostedAppChild,
     prepareCgroup: prepareHostedAppCgroup,
@@ -451,20 +458,31 @@ export class HostedAppSupervisor {
   }
 
   async stop(): Promise<HostedAppStatus | undefined> {
-    return this.serialize(() => this.stopImpl());
+    return this.serialize(async () => {
+      try {
+        return await this.stopImpl();
+      } catch (error) {
+        logger.error({ err: error }, 'Hosted-app stop cleanup failed');
+        throw new HostedAppError(
+          'hosted_app_cleanup_failed',
+          'the hosted app could not be stopped safely',
+          503,
+        );
+      }
+    });
   }
 
   async shutdown(): Promise<void> {
     await this.stop();
   }
 
-  async withWorkspaceMutation<T>(operation: () => Promise<T>): Promise<T> {
+  async withQuiescedWorkspace<T>(operation: () => Promise<T>): Promise<T> {
     return this.serialize(async () => {
       const state = this.active?.status.state;
       if (state === 'starting' || state === 'running' || state === 'stopping') {
         throw new HostedAppError(
           'hosted_app_workspace_busy',
-          'the hosted app must be stopped before replacing its workspace',
+          'the hosted app must be stopped before accessing its workspace',
           409,
         );
       }
@@ -552,7 +570,14 @@ export class HostedAppSupervisor {
       this.revisionSpecs.set(revisionKey, specKey);
     }
     await this.stopImpl();
-    await this.deps.prepareRuntimeWorkspace(ownership.dir, runtime);
+    const runtimeEnv = { ...runtime.env_vars };
+    let nodeModulesPath: string | undefined;
+    if (runtime.language === 'bash') {
+      const linkTarget: { nodeModulesPath?: string } = {};
+      aggregateBashExtras(runtime.pkgdir, runtimeEnv, this.deps.listRuntimes(), linkTarget);
+      nodeModulesPath = linkTarget.nodeModulesPath;
+    }
+    await this.deps.prepareRuntimeWorkspace(ownership.dir, runtime, nodeModulesPath);
     /* The previous process shared this workspace UID and could have changed a
      * validated path before it exited. Re-resolve after the process/cgroup are
      * gone; the preflight above exists to avoid stopping it for ordinary
@@ -590,7 +615,7 @@ export class HostedAppSupervisor {
     }
     const env: NodeJS.ProcessEnv = {
       ...callerEnv,
-      ...runtime.env_vars,
+      ...runtimeEnv,
       HOME: ownership.dir,
       HOST: '0.0.0.0',
       PORT: String(config.hosted_app_port),

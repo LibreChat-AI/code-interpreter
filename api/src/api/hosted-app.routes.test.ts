@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test
 import express from 'express';
 import type { Server } from 'node:http';
 import { config } from '../config';
+import { HostedAppError, hostedAppSupervisor } from '../hosted-app';
 import { resetSessionWorkspaceStateForTests } from '../session-workspace';
 import v2Router from './v2';
 
@@ -84,5 +85,31 @@ describe('hosted-app route isolation', () => {
       error: 'hosted_app_not_running',
       message: 'No hosted app has been started',
     });
+  });
+
+  test('checkpoint creation uses the hosted-app workspace gate', async () => {
+    config.hosted_apps_enabled = true;
+    config.session_workspace_enabled = true;
+    const original = hostedAppSupervisor.withQuiescedWorkspace;
+    hostedAppSupervisor.withQuiescedWorkspace = async () => {
+      throw new HostedAppError(
+        'hosted_app_workspace_busy',
+        'the hosted app must be stopped before accessing its workspace',
+        409,
+      );
+    };
+
+    try {
+      const response = await fetch(`${baseUrl}/api/v2/session/checkpoint`, {
+        headers: { 'X-Runtime-Session-Id': 'rt_hosted_checkpoint' },
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: 'hosted_app_workspace_busy',
+        message: 'the hosted app must be stopped before accessing its workspace',
+      });
+    } finally {
+      hostedAppSupervisor.withQuiescedWorkspace = original;
+    }
   });
 });

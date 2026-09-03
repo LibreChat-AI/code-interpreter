@@ -102,6 +102,7 @@ function dependencies(
     guardError?: Error;
     killCgroup?: () => Promise<void>;
     runtime?: Runtime;
+    runtimes?: Runtime[];
   } = {},
 ): {
   deps: HostedAppDependencies;
@@ -110,19 +111,24 @@ function dependencies(
   cgroupKills: string[];
   kills: Array<{ pid: number; signal: NodeJS.Signals }>;
   children: FakeChild[];
+  preparations: Array<{ runtime: Runtime; nodeModulesPath?: string }>;
 } {
   const spawns: Array<{ command: string; args: readonly string[]; options: SpawnOptions }> = [];
   const guards: number[] = [];
   const cgroupKills: string[] = [];
   const kills: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const children: FakeChild[] = [];
+  const preparations: Array<{ runtime: Runtime; nodeModulesPath?: string }> = [];
   const getSession = () => ({
     ownership: async () => ({ dir: root, uid: 200123, gid: 200123 }),
   } as SessionWorkspace);
   const deps: HostedAppDependencies = {
     getSession,
     resolveRuntime: () => options.runtime === undefined ? fakeRuntime() : options.runtime,
-    prepareRuntimeWorkspace: async () => {},
+    listRuntimes: () => options.runtimes ?? [options.runtime ?? fakeRuntime()],
+    prepareRuntimeWorkspace: async (_workspaceDir, runtime, nodeModulesPath) => {
+      preparations.push({ runtime, nodeModulesPath });
+    },
     spawnApp: ((command: string, args: readonly string[], spawnOptions: SpawnOptions) => {
       spawns.push({ command, args, options: spawnOptions });
       const child = fakeChild(4242 + children.length);
@@ -146,7 +152,7 @@ function dependencies(
     },
     now: () => new Date('2026-08-21T12:00:00.000Z'),
   };
-  return { deps, spawns, guards, cgroupKills, kills, children };
+  return { deps, spawns, guards, cgroupKills, kills, children, preparations };
 }
 
 describe('HostedAppSupervisor', () => {
@@ -200,6 +206,37 @@ describe('HostedAppSupervisor', () => {
     });
     expect(launch.options.env).not.toHaveProperty('port');
     expect(launch.options.env).not.toHaveProperty('LD_PRELOAD');
+    await supervisor.shutdown();
+  });
+
+  test('gives Bash hosted apps access to curated packaged runtimes', async () => {
+    const root = await workspace();
+    const bash = {
+      ...fakeRuntime(),
+      language: 'bash',
+      pkgdir: '/pkgs/bash/5',
+      env_vars: { PATH: '/pkgs/bash/5/bin:/usr/bin' },
+    };
+    const node = {
+      ...fakeRuntime(),
+      env_vars: {
+        PATH: '/pkgs/node/22/bin:/usr/bin',
+        NODE_PATH: '/pkgs/node/22/node_modules',
+      },
+    };
+    const fixture = dependencies(root, { runtime: bash, runtimes: [bash, node] });
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+
+    await supervisor.start(request({ language: 'bash', version: '>=5' }));
+
+    expect(fixture.spawns[0].options.env).toMatchObject({
+      PATH: '/pkgs/node/22/bin:/pkgs/bash/5/bin:/usr/bin',
+      NODE_PATH: '/pkgs/node/22/node_modules',
+    });
+    expect(fixture.preparations).toEqual([{
+      runtime: bash,
+      nodeModulesPath: '/pkgs/node/22/node_modules',
+    }]);
     await supervisor.shutdown();
   });
 
@@ -303,14 +340,14 @@ describe('HostedAppSupervisor', () => {
     expect(supervisor.status()?.state).toBe('failed');
   });
 
-  test('serializes workspace mutation and rejects it while an app is running', async () => {
+  test('serializes quiesced workspace access and rejects it while an app is running', async () => {
     const root = await workspace();
     const fixture = dependencies(root);
     const supervisor = new HostedAppSupervisor(fixture.deps);
     await supervisor.start(request());
     let mutated = false;
 
-    const error = await supervisor.withWorkspaceMutation(async () => {
+    const error = await supervisor.withQuiescedWorkspace(async () => {
       mutated = true;
     }).catch(value => value);
 
@@ -372,6 +409,26 @@ describe('HostedAppSupervisor', () => {
     expect(stopped).toBe(true);
   });
 
+  test('classifies a stop cleanup failure as a retryable server error', async () => {
+    const root = await workspace();
+    let permitCleanup = false;
+    const fixture = dependencies(root, {
+      killCgroup: async () => {
+        if (!permitCleanup) throw new Error('cgroup remains populated');
+      },
+    });
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    await supervisor.start(request());
+
+    const error = await supervisor.stop().catch(value => value);
+    expect(error).toBeInstanceOf(HostedAppError);
+    expect(error.code).toBe('hosted_app_cleanup_failed');
+    expect(error.status).toBe(503);
+
+    permitCleanup = true;
+    await supervisor.shutdown();
+  });
+
   test('fails workspace mutation closed until a failed app cgroup is drained', async () => {
     const root = await workspace();
     let permitCleanup = false;
@@ -386,7 +443,7 @@ describe('HostedAppSupervisor', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     let mutated = false;
 
-    const error = await supervisor.withWorkspaceMutation(async () => {
+    const error = await supervisor.withQuiescedWorkspace(async () => {
       mutated = true;
     }).catch(value => value);
     expect(error).toBeInstanceOf(HostedAppError);
@@ -394,7 +451,7 @@ describe('HostedAppSupervisor', () => {
     expect(mutated).toBe(false);
 
     permitCleanup = true;
-    await supervisor.withWorkspaceMutation(async () => { mutated = true; });
+    await supervisor.withQuiescedWorkspace(async () => { mutated = true; });
     expect(mutated).toBe(true);
   });
 
