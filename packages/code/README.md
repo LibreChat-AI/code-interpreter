@@ -222,6 +222,15 @@ be advertised without durable quarantine storage. `LocalWorkspaceTools` never
 runs them in the worker host process; the CLI does not advertise command support
 until a sandbox runtime executor is configured.
 
+`SandboxWorkspaceTools` is the composition boundary for that runtime. It adds
+`execute_command` only to workspace IDs explicitly backed by a
+`WorkspaceCommandSandbox`, delegates every file operation to the confined local
+executor, and validates the sandbox's complete result before returning it. It
+does not include a shell fallback. Invalid responses and unknown sandbox errors
+are reported as potentially committed mutations so the worker's durable
+quarantine remains armed. A concrete runtime adapter must prove its mount and
+identity behavior before the CLI can enable this composition.
+
 Reads reject absolute paths, traversal, escaping symlinks, non-regular files,
 and files larger than 1 MiB. The opened file is checked against its canonical
 in-workspace inode before it is read. Text search uses `rg` only to enumerate a

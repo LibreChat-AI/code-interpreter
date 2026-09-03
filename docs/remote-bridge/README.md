@@ -142,6 +142,13 @@ default operations are read-only. The bridge protocol reserves a bounded
 advertise it. A later layer must bind it to a sandboxed process boundary and
 LibreChat's tool-approval hooks before it becomes dispatchable.
 
+The package exposes `SandboxWorkspaceTools` for composing that boundary without
+ever invoking a host shell. It requires an explicit sandbox implementation and
+an allowlist of workspace IDs, preserves per-workspace operation restrictions,
+validates bounded results, and treats an unknown command failure as an uncertain
+mutation. The built-in CLI remains command-disabled until its supported NsJail
+adapter can safely map a registered directory without changing host ownership.
+
 Stateful deployments must also set `LIBRECHAT_CODE_STATEFUL_WORKSPACE=true`
 and route the CLI's `{runtimeSessionId}` endpoint template to an isolated,
 persistent local runner per session. A single sandbox endpoint is stateless and

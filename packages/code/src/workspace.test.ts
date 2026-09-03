@@ -25,6 +25,7 @@ import type { FileHandle } from 'node:fs/promises';
 import {
   isWorkspaceToolResult,
   LocalWorkspaceTools,
+  SandboxWorkspaceTools,
   WorkspaceToolError,
 } from './workspace.js';
 
@@ -1543,4 +1544,139 @@ test('validates search result paths against the requested scope', () => {
     }),
     false,
   );
+});
+
+test('composes sandboxed commands without exposing them on unconfigured workspaces', async (t) => {
+  const first = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  const second = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => Promise.all([
+    rm(first, { recursive: true, force: true }),
+    rm(second, { recursive: true, force: true }),
+  ]));
+  await writeFile(join(first, 'README.md'), 'first');
+  const local = await LocalWorkspaceTools.create({
+    workspaces: [
+      { id: 'sandboxed', root: first, writable: true },
+      { id: 'read-only', root: second },
+    ],
+  });
+  const requests: object[] = [];
+  const tools = new SandboxWorkspaceTools({
+    workspaceTools: local,
+    commandWorkspaces: ['sandboxed'],
+    commandSandbox: {
+      async execute(request) {
+        requests.push(request);
+        return {
+          protocolVersion: 1,
+          operation: 'execute_command',
+          workspaceId: request.workspaceId,
+          exitCode: 0,
+          stdout: 'ok\n',
+          stderr: '',
+          truncated: false,
+          timedOut: false,
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(tools.capabilities.operations, [
+    'read_file',
+    'search_text',
+    'list_files',
+    'write_file',
+    'edit_file',
+    'execute_command',
+  ]);
+  assert.deepEqual(
+    tools.capabilities.workspaces.find(({ id }) => id === 'sandboxed')?.operations,
+    tools.capabilities.operations,
+  );
+  assert.deepEqual(
+    tools.capabilities.workspaces.find(({ id }) => id === 'read-only')?.operations,
+    ['read_file', 'search_text', 'list_files'],
+  );
+  const command = {
+    protocolVersion: 1 as const,
+    operation: 'execute_command' as const,
+    workspaceId: 'sandboxed',
+    command: 'pwd',
+  };
+  assert.deepEqual(await tools.execute(command), {
+    protocolVersion: 1,
+    operation: 'execute_command',
+    workspaceId: 'sandboxed',
+    exitCode: 0,
+    stdout: 'ok\n',
+    stderr: '',
+    truncated: false,
+    timedOut: false,
+  });
+  assert.deepEqual(requests, [command]);
+  assert.equal(
+    (await tools.execute({
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'sandboxed',
+      path: 'README.md',
+    })).operation,
+    'read_file',
+  );
+  await assert.rejects(
+    tools.execute({ ...command, workspaceId: 'read-only' }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'COMMAND_DISABLED',
+  );
+});
+
+test('fails closed on invalid or failed sandbox command results', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const local = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+  const request = {
+    protocolVersion: 1 as const,
+    operation: 'execute_command' as const,
+    workspaceId: 'primary',
+    command: 'pwd',
+  };
+  for (const execute of [
+    async () => ({ ...request, exitCode: 0, stdout: 'ok', stderr: '' }),
+    async () => { throw new Error('container details'); },
+  ]) {
+    const tools = new SandboxWorkspaceTools({
+      workspaceTools: local,
+      commandWorkspaces: ['primary'],
+      commandSandbox: { execute },
+    });
+    await assert.rejects(
+      tools.execute(request),
+      (error: unknown) =>
+        error instanceof WorkspaceToolError &&
+        error.code === 'COMMAND_UNAVAILABLE' &&
+        error.mutationMayHaveCommitted === true &&
+        !error.message.includes('container details'),
+    );
+  }
+});
+
+test('rejects empty, duplicate, and unknown sandbox workspace registration', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const local = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+  for (const commandWorkspaces of [[], ['primary', 'primary'], ['unknown']]) {
+    assert.throws(
+      () => new SandboxWorkspaceTools({
+        workspaceTools: local,
+        commandWorkspaces,
+        commandSandbox: { async execute() { return {}; } },
+      }),
+      (error: unknown) =>
+        error instanceof WorkspaceToolError && error.code === 'REGISTRATION_INVALID',
+    );
+  }
 });
