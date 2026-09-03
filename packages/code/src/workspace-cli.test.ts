@@ -62,7 +62,7 @@ test('CLI trims an environment-configured worker directory', async (t) => {
   assert.doesNotMatch(result.stderr, /invalid workspace registration/i);
 });
 
-test('CLI refuses workspace commands without its Docker sandbox profile', async (t) => {
+test('CLI supports native SRT by default and validates explicit runtime mode', async (t) => {
   const workspaceRoot = await mkdtemp(
     join(tmpdir(), 'librechat-code-command-workspace-'),
   );
@@ -83,11 +83,15 @@ test('CLI refuses workspace commands without its Docker sandbox profile', async 
         LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
         LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
         LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_COMMAND_SANDBOX: 'runtime',
       },
     },
   );
   assert.notEqual(endpoint.status, 0);
-  assert.match(endpoint.stderr, /require.*docker-nsjail runtime supervisor/i);
+  assert.match(
+    endpoint.stderr,
+    /runtime command sandbox requires.*docker-nsjail/i,
+  );
 
   const noWorkspace = spawnSync(
     process.execPath,
@@ -198,6 +202,10 @@ test('CLI advertises explicitly enabled writes without exposing the workspace ro
   child.kill();
   await once(child, 'exit');
 
+  assert.equal(
+    (body.capabilities as Record<string, unknown>).sandboxProfile,
+    'nsjail',
+  );
   assert.deepEqual(
     (body.capabilities as Record<string, unknown>).workspaceTools,
     {
