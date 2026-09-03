@@ -230,6 +230,28 @@ describe('HostedAppSupervisor', () => {
     await supervisor.shutdown();
   });
 
+  test('preserves revision immutability after stop and replacement', async () => {
+    const root = await workspace();
+    const fixture = dependencies(root);
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    await supervisor.start(request());
+    await supervisor.stop();
+
+    const afterStop = await supervisor.start(request({ args: ['changed'] })).catch(value => value);
+    expect(afterStop).toBeInstanceOf(HostedAppError);
+    expect(afterStop.code).toBe('hosted_app_revision_conflict');
+
+    await supervisor.start(request());
+    await supervisor.start(request({ revision: 'rev-2' }));
+    const afterReplacement = await supervisor.start(
+      request({ args: ['changed'] }),
+    ).catch(value => value);
+    expect(afterReplacement).toBeInstanceOf(HostedAppError);
+    expect(afterReplacement.code).toBe('hosted_app_revision_conflict');
+    expect(fixture.spawns).toHaveLength(3);
+    await supervisor.shutdown();
+  });
+
   test('stops the old process group before launching a new revision', async () => {
     const root = await workspace();
     const fixture = dependencies(root);
@@ -348,6 +370,32 @@ describe('HostedAppSupervisor', () => {
     releaseCleanup();
     await stopping;
     expect(stopped).toBe(true);
+  });
+
+  test('fails workspace mutation closed until a failed app cgroup is drained', async () => {
+    const root = await workspace();
+    let permitCleanup = false;
+    const fixture = dependencies(root, {
+      killCgroup: async () => {
+        if (!permitCleanup) throw new Error('cgroup remains populated');
+      },
+    });
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    await supervisor.start(request());
+    fixture.children[0].emit('exit', 1, null);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    let mutated = false;
+
+    const error = await supervisor.withWorkspaceMutation(async () => {
+      mutated = true;
+    }).catch(value => value);
+    expect(error).toBeInstanceOf(HostedAppError);
+    expect(error.code).toBe('hosted_app_cleanup_failed');
+    expect(mutated).toBe(false);
+
+    permitCleanup = true;
+    await supervisor.withWorkspaceMutation(async () => { mutated = true; });
+    expect(mutated).toBe(true);
   });
 
   test('skips queued exit cleanup after a replacement becomes active', async () => {

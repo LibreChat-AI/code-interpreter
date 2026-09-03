@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as net from 'node:net';
 import * as path from 'node:path';
@@ -25,6 +26,7 @@ const MAX_ARG_BYTES = 4096;
 const MAX_ENV_VARS = 64;
 const MAX_ENV_VALUE_BYTES = 4096;
 const MAX_ENV_BYTES = 32 * 1024;
+const MAX_TRACKED_APP_REVISIONS = 1024;
 const PROBE_INTERVAL_MS = 100;
 
 export interface HostedAppStartRequest {
@@ -75,6 +77,7 @@ export class HostedAppError extends Error {
 interface ActiveHostedApp {
   request: NormalizedHostedAppRequest;
   specKey: string;
+  cgroupDrained: boolean;
   process?: HostedAppChild;
   status: HostedAppStatus;
 }
@@ -264,10 +267,11 @@ function normalizeHostedAppRequest(value: unknown): NormalizedHostedAppRequest {
 }
 
 function canonicalSpecKey(request: NormalizedHostedAppRequest): string {
-  return JSON.stringify({
+  const canonical = JSON.stringify({
     ...request,
     env: Object.fromEntries(Object.entries(request.env).sort(([a], [b]) => a.localeCompare(b))),
   });
+  return createHash('sha256').update(canonical).digest('hex');
 }
 
 function isInside(root: string, candidate: string): boolean {
@@ -422,6 +426,7 @@ function publicStatus(active: ActiveHostedApp): HostedAppStatus {
 
 export class HostedAppSupervisor {
   private active: ActiveHostedApp | undefined;
+  private readonly revisionSpecs = new Map<string, string>();
   private transition: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: HostedAppDependencies = {
@@ -463,6 +468,22 @@ export class HostedAppSupervisor {
           409,
         );
       }
+      if (this.active && !this.active.cgroupDrained) {
+        try {
+          await this.deps.killCgroup();
+          this.active.cgroupDrained = true;
+        } catch (error) {
+          logger.error(
+            { err: error, appId: this.active.request.app_id },
+            'Hosted-app cgroup cleanup failed before workspace mutation',
+          );
+          throw new HostedAppError(
+            'hosted_app_cleanup_failed',
+            'the hosted app workspace is not safe to replace',
+            503,
+          );
+        }
+      }
       return operation();
     });
   }
@@ -482,20 +503,17 @@ export class HostedAppSupervisor {
   private async startImpl(rawRequest: unknown): Promise<HostedAppStatus> {
     const request = normalizeHostedAppRequest(rawRequest);
     const specKey = canonicalSpecKey(request);
-    if (this.active?.status.state === 'running' && this.active.specKey === specKey) {
-      return publicStatus(this.active);
-    }
-    if (
-      this.active
-      && this.active.request.app_id === request.app_id
-      && this.active.request.revision === request.revision
-      && this.active.specKey !== specKey
-    ) {
+    const revisionKey = `${request.app_id}\0${request.revision}`;
+    const rememberedSpec = this.revisionSpecs.get(revisionKey);
+    if (rememberedSpec !== undefined && rememberedSpec !== specKey) {
       throw new HostedAppError(
         'hosted_app_revision_conflict',
         'an app revision is immutable; use a new revision for changed launch settings',
         409,
       );
+    }
+    if (this.active?.status.state === 'running' && this.active.specKey === specKey) {
+      return publicStatus(this.active);
     }
     const session = this.deps.getSession();
     if (!session) {
@@ -523,6 +541,16 @@ export class HostedAppSupervisor {
 
     const ownership = await session.ownership();
     await resolveWorkspacePaths(ownership.dir, request);
+    if (rememberedSpec === undefined) {
+      if (this.revisionSpecs.size >= MAX_TRACKED_APP_REVISIONS) {
+        throw new HostedAppError(
+          'hosted_app_revision_limit',
+          'the hosted app revision limit for this runtime session was reached',
+          409,
+        );
+      }
+      this.revisionSpecs.set(revisionKey, specKey);
+    }
     await this.stopImpl();
     await this.deps.prepareRuntimeWorkspace(ownership.dir, runtime);
     /* The previous process shared this workspace UID and could have changed a
@@ -551,7 +579,7 @@ export class HostedAppSupervisor {
       stdout: '',
       stderr: '',
     };
-    const active: ActiveHostedApp = { request, specKey, status };
+    const active: ActiveHostedApp = { request, specKey, cgroupDrained: false, status };
     this.active = active;
 
     const callerEnv = filterExtraEnvVars(request.env);
@@ -625,6 +653,7 @@ export class HostedAppSupervisor {
         void this.serialize(async () => {
           if (this.active !== active || active.status.state === 'stopped') return;
           await this.deps.killCgroup();
+          active.cgroupDrained = true;
         }).catch(error => {
           logger.error(
             { err: error, appId: active.request.app_id },
@@ -678,6 +707,7 @@ export class HostedAppSupervisor {
     const child = active.process;
     if (!child?.pid) {
       await this.deps.killCgroup();
+      active.cgroupDrained = true;
       active.status.state = 'stopped';
       active.status.exited_at ??= this.deps.now().toISOString();
       if (!preserveActive) this.active = undefined;
@@ -704,6 +734,7 @@ export class HostedAppSupervisor {
     /* Always sweep the cgroup: the tracked parent may have exited cleanly
      * while a daemonized descendant stayed alive in a different process group. */
     await this.deps.killCgroup();
+    active.cgroupDrained = true;
     active.status.state = 'stopped';
     active.status.exited_at ??= this.deps.now().toISOString();
     const status = publicStatus(active);
