@@ -504,12 +504,6 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
           allowedDomains: commandAllowedDomains,
         })
       : undefined;
-  try {
-    await nativeCommandSandbox?.prepare();
-  } catch (error) {
-    await fileRelaySupervisor?.stop().catch(() => undefined);
-    throw error;
-  }
   if (allowWorkspaceCommands && workspaceTools) {
     workspaceTools = new SandboxWorkspaceTools({
       workspaceTools,
@@ -545,9 +539,16 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     ...(workspaceTools ? { workspaceTools: workspaceTools.capabilities } : {}),
   };
   if (!isValidBridgeWorkerCapabilities(capabilities)) {
+    await fileRelaySupervisor?.stop().catch(() => undefined);
     throw new Error(
       'LIBRECHAT_CODE_SANDBOX_PROFILE or LIBRECHAT_CODE_RUNTIMES is invalid',
     );
+  }
+  try {
+    await nativeCommandSandbox?.prepare();
+  } catch (error) {
+    await fileRelaySupervisor?.stop().catch(() => undefined);
+    throw error;
   }
   try {
     const worker = new BridgeWorker({

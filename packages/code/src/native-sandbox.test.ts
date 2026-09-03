@@ -76,6 +76,7 @@ test('initializes SRT with a default-deny network and scrubbed worker credential
       PATH: '/usr/bin',
       Path: '/windows/system32',
       LANG: 'en_US.UTF-8',
+      lc_api_token: 'lowercase-secret',
       LIBRECHAT_CODE_WORKER_TOKEN: 'secret',
       AWS_SECRET_ACCESS_KEY: 'secret',
     },
@@ -99,9 +100,53 @@ test('initializes SRT with a default-deny network and scrubbed worker credential
   assert.ok(denied?.includes('LIBRECHAT_CODE_WORKER_TOKEN'));
   assert.ok(denied?.includes('AWS_SECRET_ACCESS_KEY'));
   assert.ok(!denied?.includes('PATH'));
-  assert.ok(!denied?.includes('Path'));
+  assert.ok(denied?.includes('Path'));
+  assert.ok(denied?.includes('lc_api_token'));
   await sandbox.close();
   assert.equal(fake.reset, true);
+});
+
+test('filters environment names case-insensitively only on Windows', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    platform: 'win32',
+    environment: {
+      PATH: '/usr/bin',
+      Path: 'C:\\Windows\\System32',
+      LC_API_TOKEN: 'secret',
+      librechat_code_worker_token: 'secret',
+    },
+    manager: fake.manager,
+  });
+
+  await sandbox.prepare();
+  const denied = fake.config?.credentials?.envVars?.map(({ name }) => name);
+  assert.ok(!denied?.includes('PATH'));
+  assert.ok(!denied?.includes('Path'));
+  assert.ok(!denied?.includes('LC_API_TOKEN'));
+  assert.ok(denied?.includes('librechat_code_worker_token'));
+});
+
+test('fails closed when the configured POSIX shell is unavailable', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    platform: 'linux',
+    shellPath: join(root, 'missing-bash'),
+    manager: fakeManager().manager,
+  });
+
+  await assert.rejects(
+    sandbox.prepare(),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'COMMAND_UNAVAILABLE' &&
+      /shell is unavailable/i.test(error.message),
+  );
 });
 
 test('fails closed when SRT dependencies are unavailable', async (t) => {

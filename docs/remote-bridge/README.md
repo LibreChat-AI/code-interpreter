@@ -157,6 +157,9 @@ credentials, and denies network egress by default. Startup fails closed when
 the platform dependencies are unavailable; there is no unsandboxed fallback.
 Use `LIBRECHAT_CODE_COMMAND_ALLOWED_DOMAINS` for an explicit comma-separated
 egress allowlist.
+Linux hosts must provide Bash at `/bin/bash`, `bubblewrap`, `socat`, and
+`ripgrep`; macOS uses system facilities. Windows requires SRT's one-time
+restricted-account setup.
 
 The optional `docker-nsjail` adapter enables a stronger container boundary with
 `--allow-workspace-commands` (or

@@ -78,7 +78,7 @@ policy. This matches the personal-machine SRT trust model; use the Docker/NsJail
 backend or a dedicated VM boundary when hard teardown of adversarial process
 trees is required.
 
-Linux hosts need `bubblewrap`, `socat`, and `ripgrep`; macOS uses system
+Linux hosts need Bash at `/bin/bash`, `bubblewrap`, `socat`, and `ripgrep`; macOS uses system
 facilities. Follow SRT's one-time restricted-account setup when using Windows.
 An operator may allow explicit egress destinations with the comma-separated
 `LIBRECHAT_CODE_COMMAND_ALLOWED_DOMAINS` setting. Treat that as a security

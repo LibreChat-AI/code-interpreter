@@ -10,7 +10,8 @@ import {
   resolve,
   sep,
 } from 'node:path';
-import { realpath, stat } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { access, realpath, stat } from 'node:fs/promises';
 
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 
@@ -80,6 +81,8 @@ export interface NativeSrtWorkspaceCommandSandboxOptions {
   spawnCommand?: SpawnCommand;
   homeDirectory?: string;
   platform?: NodeJS.Platform;
+  /** Trusted shell path used by SRT on POSIX hosts. */
+  shellPath?: string;
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -117,10 +120,13 @@ function boundedUtf8(buffer: Buffer, budget: number): string {
   return '';
 }
 
-function safeEnvironmentNames(environment: NodeJS.ProcessEnv): string[] {
+function safeEnvironmentNames(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): string[] {
   return Object.keys(environment)
     .filter((name) => {
-      const normalized = name.toUpperCase();
+      const normalized = platform === 'win32' ? name.toUpperCase() : name;
       return (
         normalized.startsWith('LIBRECHAT_CODE_') ||
         (!SAFE_CHILD_ENV_NAMES.has(normalized) && !normalized.startsWith('LC_'))
@@ -199,6 +205,16 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         'COMMAND_UNAVAILABLE',
       );
     }
+    if (this.platform !== 'win32') {
+      try {
+        await access(this.options.shellPath ?? '/bin/bash', fsConstants.X_OK);
+      } catch {
+        throw new WorkspaceToolError(
+          `Native sandbox shell is unavailable: ${this.options.shellPath ?? '/bin/bash'}`,
+          'COMMAND_UNAVAILABLE',
+        );
+      }
+    }
     const config: SandboxRuntimeConfig = {
       network: {
         allowedDomains: [...(this.options.allowedDomains ?? [])],
@@ -219,7 +235,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           path,
           mode: 'deny' as const,
         })),
-        envVars: safeEnvironmentNames(this.environment).map((name) => ({
+        envVars: safeEnvironmentNames(this.environment, this.platform).map((name) => ({
           name,
           mode: 'deny' as const,
         })),
@@ -272,7 +288,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     try {
       wrapped = await this.manager.wrapWithSandboxArgv(
         request.command,
-        this.platform === 'win32' ? undefined : '/bin/bash',
+        this.platform === 'win32'
+          ? undefined
+          : this.options.shellPath ?? '/bin/bash',
         undefined,
         signal,
         cwd,
