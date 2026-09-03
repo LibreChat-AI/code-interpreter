@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
@@ -880,6 +889,50 @@ test('writes reject symlink targets and missing parent directories', async (t) =
     );
   }
   assert.equal(await readFile(join(parent, 'outside.txt'), 'utf8'), 'outside');
+});
+
+test('workspace mutations preserve existing file permissions', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = join(root, 'notes.txt');
+  await writeFile(target, 'before');
+  await chmod(target, 0o664);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    content: 'after',
+  });
+
+  assert.equal((await stat(target)).mode & 0o777, 0o664);
+});
+
+test('workspace edits bound descriptor reads to the write limit', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'large.txt'), 'x'.repeat(1024 * 1024 + 1));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'large.txt',
+      oldText: 'x',
+      newText: 'y',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'WRITE_LIMIT_EXCEEDED',
+  );
 });
 
 test('rejects unbounded file read parameters before reading the file', async (t) => {

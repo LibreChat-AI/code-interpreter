@@ -246,12 +246,91 @@ interface WorkspaceRoot {
   writable: boolean;
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw new WorkspaceToolError(
+    'Workspace tool execution aborted',
+    'EXECUTION_ABORTED',
+  );
+}
+
+async function readBoundedEditFile(handle: FileHandle): Promise<Buffer> {
+  const content = Buffer.allocUnsafe(BRIDGE_WORKSPACE_WRITE_MAX_BYTES + 1);
+  let bytesRead = 0;
+  while (bytesRead < content.byteLength) {
+    const result = await handle.read(
+      content,
+      bytesRead,
+      content.byteLength - bytesRead,
+      bytesRead,
+    );
+    if (result.bytesRead === 0) break;
+    bytesRead += result.bytesRead;
+  }
+  if (bytesRead > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
+    throw new WorkspaceToolError(
+      'Workspace file exceeds write limit',
+      'WRITE_LIMIT_EXCEEDED',
+    );
+  }
+  return content.subarray(0, bytesRead);
+}
+
+async function verifyEditSource(
+  root: string,
+  candidate: string,
+  expected: { dev: bigint | number; ino: bigint | number; content: Buffer },
+): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(
+      candidate,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const [openedStat, canonicalPath] = await Promise.all([
+      handle.stat(),
+      realpath(candidate),
+    ]);
+    const canonicalStat = await stat(canonicalPath);
+    if (
+      !openedStat.isFile() ||
+      !isWithinRoot(root, canonicalPath) ||
+      openedStat.dev !== canonicalStat.dev ||
+      openedStat.ino !== canonicalStat.ino ||
+      openedStat.dev !== expected.dev ||
+      openedStat.ino !== expected.ino
+    ) {
+      throw new WorkspaceToolError(
+        'Workspace file changed before edit could be committed',
+        'EDIT_CONFLICT',
+      );
+    }
+    const current = await readBoundedEditFile(handle);
+    if (!current.equals(expected.content)) {
+      throw new WorkspaceToolError(
+        'Workspace file changed before edit could be committed',
+        'EDIT_CONFLICT',
+      );
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceToolError) throw error;
+    throw new WorkspaceToolError(
+      'Workspace file changed before edit could be committed',
+      'EDIT_CONFLICT',
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 async function atomicWriteConfinedFile(
   root: string,
   requestedPath: string,
   content: Buffer,
-  expected?: { dev: bigint | number; ino: bigint | number },
+  signal?: AbortSignal,
+  expected?: { dev: bigint | number; ino: bigint | number; content: Buffer },
 ): Promise<{ created: boolean }> {
+  throwIfAborted(signal);
   if (content.byteLength > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
     throw new WorkspaceToolError(
       'Workspace file exceeds write limit',
@@ -310,6 +389,9 @@ async function atomicWriteConfinedFile(
         constants.O_NOFOLLOW,
       existing == null ? 0o600 : Number(existing.mode) & 0o777,
     );
+    if (existing != null) {
+      await handle.chmod(Number(existing.mode) & 0o777);
+    }
     let offset = 0;
     while (offset < content.byteLength) {
       const { bytesWritten } = await handle.write(
@@ -352,6 +434,10 @@ async function atomicWriteConfinedFile(
         'EDIT_CONFLICT',
       );
     }
+    if (expected != null) {
+      await verifyEditSource(root, candidate, expected);
+    }
+    throwIfAborted(signal);
     await rename(temporary, candidate);
     return { created: existing == null };
   } catch (error) {
@@ -366,12 +452,14 @@ async function atomicWriteConfinedFile(
 async function writeWorkspaceFile(
   root: string,
   request: WorkspaceWriteFileRequest,
+  signal?: AbortSignal,
 ): Promise<WorkspaceWriteFileResult> {
   const content = Buffer.from(request.content, 'utf8');
   const { created } = await atomicWriteConfinedFile(
     root,
     request.path,
     content,
+    signal,
   );
   return {
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -386,6 +474,7 @@ async function writeWorkspaceFile(
 async function editWorkspaceFile(
   root: string,
   request: WorkspaceEditFileRequest,
+  signal?: AbortSignal,
 ): Promise<WorkspaceEditFileResult> {
   const candidate = resolveWorkspacePath(root, request.path);
   let opened: FileHandle | undefined;
@@ -403,12 +492,17 @@ async function editWorkspaceFile(
       !openedStat.isFile() ||
       !isWithinRoot(root, canonicalPath) ||
       openedStat.dev !== canonicalStat.dev ||
-      openedStat.ino !== canonicalStat.ino ||
-      openedStat.size > BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+      openedStat.ino !== canonicalStat.ino
     ) {
       throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
     }
-    const original = await opened.readFile();
+    if (openedStat.size > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
+      throw new WorkspaceToolError(
+        'Workspace file exceeds write limit',
+        'WRITE_LIMIT_EXCEEDED',
+      );
+    }
+    const original = await readBoundedEditFile(opened);
     const hasBom =
       original[0] === 0xef && original[1] === 0xbb && original[2] === 0xbf;
     const body = hasBom ? original.subarray(3) : original;
@@ -437,10 +531,17 @@ async function editWorkspaceFile(
     const updated = hasBom
       ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), updatedBody])
       : updatedBody;
-    await atomicWriteConfinedFile(root, request.path, updated, {
-      dev: openedStat.dev,
-      ino: openedStat.ino,
-    });
+    await atomicWriteConfinedFile(
+      root,
+      request.path,
+      updated,
+      signal,
+      {
+        dev: openedStat.dev,
+        ino: openedStat.ino,
+        content: original,
+      },
+    );
     return {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       operation: 'edit_file',
@@ -1138,8 +1239,8 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
         );
       }
       return request.operation === 'write_file'
-        ? writeWorkspaceFile(root, request)
-        : editWorkspaceFile(root, request);
+        ? writeWorkspaceFile(root, request, signal)
+        : editWorkspaceFile(root, request, signal);
     }
 
     if (request.operation === 'search_text') {
