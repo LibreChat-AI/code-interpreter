@@ -110,6 +110,8 @@ export interface WorkspaceWriteFileRequest {
   workspaceId: string;
   path: string;
   content: string;
+  /** False requires an atomic create and refuses to replace an existing file. */
+  overwrite?: boolean;
 }
 
 export interface WorkspaceWriteFileResult {
@@ -208,6 +210,7 @@ const WORKSPACE_WRITE_REQUEST_KEYS = new Set([
   'workspaceId',
   'path',
   'content',
+  'overwrite',
 ]);
 const WORKSPACE_EDIT_REQUEST_KEYS = new Set([
   'protocolVersion',
@@ -557,7 +560,9 @@ export function isWorkspaceToolRequest(
       typeof request.content === 'string' &&
       Buffer.from(request.content).toString('utf8') === request.content &&
       new TextEncoder().encode(request.content).byteLength <=
-        BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+        BRIDGE_WORKSPACE_WRITE_MAX_BYTES &&
+      (request.overwrite === undefined ||
+        typeof request.overwrite === 'boolean')
     );
   }
   if (request.operation === 'edit_file') {
@@ -681,6 +686,7 @@ export function isWorkspaceToolResult(
       hasOnlyKeys(result, WORKSPACE_WRITE_RESULT_KEYS) &&
       result.path === request.path &&
       typeof result.created === 'boolean' &&
+      (request.overwrite !== false || result.created === true) &&
       Number.isSafeInteger(result.bytesWritten) &&
       Number(result.bytesWritten) ===
         new TextEncoder().encode(request.content).byteLength

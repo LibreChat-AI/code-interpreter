@@ -847,6 +847,76 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'hello BYOM');
 });
 
+test('workspace writes can require an atomic create without replacement', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'existing.txt'), 'preserve me');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'existing.txt',
+      content: 'replace me',
+      overwrite: false,
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
+  );
+  assert.equal(await readFile(join(root, 'existing.txt'), 'utf8'), 'preserve me');
+
+  const created = await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'created.txt',
+    content: 'new file',
+    overwrite: false,
+  });
+  assert.deepEqual(created, {
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'created.txt',
+    created: true,
+    bytesWritten: 8,
+  });
+  assert.equal(await readFile(join(root, 'created.txt'), 'utf8'), 'new file');
+
+  const competingWrites = await Promise.allSettled([
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'raced.txt',
+      content: 'first',
+      overwrite: false,
+    }),
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'raced.txt',
+      content: 'second',
+      overwrite: false,
+    }),
+  ]);
+  assert.equal(
+    competingWrites.filter((result) => result.status === 'fulfilled').length,
+    1,
+  );
+  const rejected = competingWrites.find(
+    (result): result is PromiseRejectedResult => result.status === 'rejected',
+  );
+  assert.ok(rejected?.reason instanceof WorkspaceToolError);
+  assert.equal(rejected.reason.code, 'EDIT_CONFLICT');
+  assert.match(await readFile(join(root, 'raced.txt'), 'utf8'), /^(first|second)$/);
+});
+
 test('workspace mutations sync the containing directory after replacement', async (t) => {
   if (process.platform === 'win32') {
     t.skip('Directory fsync is unavailable on Windows');

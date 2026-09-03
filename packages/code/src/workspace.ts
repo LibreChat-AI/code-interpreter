@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { link, lstat, open, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
@@ -455,6 +455,7 @@ async function atomicWriteConfinedFile(
   content: Buffer,
   signal?: AbortSignal,
   expected?: { dev: bigint | number; ino: bigint | number; content: Buffer },
+  allowOverwrite = true,
 ): Promise<{ created: boolean }> {
   throwIfAborted(signal);
   if (content.byteLength > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
@@ -487,6 +488,12 @@ async function atomicWriteConfinedFile(
   }
   if (existing?.isSymbolicLink() || (existing != null && !existing.isFile())) {
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  }
+  if (!allowOverwrite && existing != null) {
+    throw new WorkspaceToolError(
+      'Workspace file already exists',
+      'EDIT_CONFLICT',
+    );
   }
   if (
     expected != null &&
@@ -591,7 +598,21 @@ async function atomicWriteConfinedFile(
       return { created: false };
     }
     throwIfAborted(signal);
-    await rename(temporary, installTarget);
+    if (allowOverwrite) {
+      await rename(temporary, installTarget);
+    } else {
+      try {
+        await link(temporary, installTarget);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new WorkspaceToolError(
+            'Workspace file already exists',
+            'EDIT_CONFLICT',
+          );
+        }
+        throw error;
+      }
+    }
     await confirmInstalledMutation(root, installTarget, staged);
     return { created: existing == null };
   } catch (error) {
@@ -617,6 +638,8 @@ async function writeWorkspaceFile(
     request.path,
     content,
     signal,
+    undefined,
+    request.overwrite !== false,
   );
   return {
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
