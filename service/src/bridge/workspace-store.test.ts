@@ -106,6 +106,43 @@ test('rejects a workspace tool that the selected worker did not advertise', asyn
   expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
 });
 
+test('rejects an operation omitted from the selected workspace capability', async () => {
+  await store.register({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    workerId: 'workspace-worker',
+    incarnationId,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operations: ['read_file', 'write_file'],
+        workspaces: [
+          { id: 'readonly', operations: ['read_file'] },
+          { id: 'writable', operations: ['read_file', 'write_file'] },
+        ],
+      },
+    },
+  });
+
+  await expect(
+    store.dispatchWorkspaceTool({
+      workerId: 'workspace-worker',
+      request: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operation: 'write_file',
+        workspaceId: 'readonly',
+        path: 'notes.txt',
+        content: 'blocked',
+      },
+      deadlineAtMs: Date.now() + 1_000,
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+  expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
+});
+
 test('rejects a fulfilled workspace settlement that violates the result contract', async () => {
   await store.register({
     protocolVersion: BRIDGE_PROTOCOL_VERSION,

@@ -283,6 +283,8 @@ describe('paired bridge HTTP API', () => {
         'read_file',
         'search_text',
         'list_files',
+        'write_file',
+        'edit_file',
       ],
     });
 

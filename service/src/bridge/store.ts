@@ -73,12 +73,15 @@ function supportsWorkspaceTool(
   request: WorkspaceToolRequest,
 ): boolean {
   const capabilities = registration.capabilities.workspaceTools;
+  const workspace = capabilities?.workspaces.find(
+    (candidate) => candidate.id === request.workspaceId,
+  );
   return (
     capabilities != null &&
     capabilities.operations.includes(request.operation) &&
-    capabilities.workspaces.some(
-      (workspace) => workspace.id === request.workspaceId,
-    )
+    workspace != null &&
+    (workspace.operations == null ||
+      workspace.operations.includes(request.operation))
   );
 }
 

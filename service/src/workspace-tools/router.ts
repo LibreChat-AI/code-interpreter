@@ -113,6 +113,10 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
           ) {
             status = 503;
           }
+          if (settlement.errorCode === 'WRITE_DISABLED') status = 403;
+          if (settlement.errorCode === 'WRITE_LIMIT_EXCEEDED') status = 413;
+          if (settlement.errorCode === 'WRITE_UNAVAILABLE') status = 503;
+          if (settlement.errorCode === 'EDIT_CONFLICT') status = 409;
           res.status(status).json({
             error: settlement.error,
             code: settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED',
