@@ -669,9 +669,11 @@ function bindSessionFromHeader(req: Request): SessionBindFailure | null {
   return null;
 }
 
-/* Express 4 (pinned) does NOT auto-forward rejected route-handler promises, so
- * `.catch(next)` is required or a rejection (e.g. session.ownership()) hangs the
- * request and surfaces as an unhandled rejection instead of a 5xx. */
+/* `.catch(next)` hands rejections (e.g. session.ownership()) to the error
+ * middleware so they surface as a 5xx. Express 5 auto-forwards rejected
+ * route-handler promises too, so this is now belt-and-braces; it was strictly
+ * required under the previously pinned Express 4, where a rejection instead
+ * hung the request and surfaced as an unhandled rejection. */
 router.get('/session/checkpoint', (req: Request, res: Response, next: NextFunction) => {
   const failure = bindSessionFromHeader(req);
   if (failure) {
