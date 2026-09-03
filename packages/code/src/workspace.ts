@@ -85,6 +85,25 @@ export interface WorkspaceToolExecutor {
   ): Promise<WorkspaceToolResult>;
 }
 
+/**
+ * Sandboxed command boundary used by {@link SandboxWorkspaceTools}. The
+ * implementation is responsible for process, filesystem, and network
+ * confinement; this package deliberately never falls back to a host shell.
+ */
+export interface WorkspaceCommandSandbox {
+  execute(
+    request: WorkspaceExecuteCommandRequest,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
+}
+
+export interface SandboxWorkspaceToolsOptions {
+  workspaceTools: WorkspaceToolExecutor;
+  commandSandbox: WorkspaceCommandSandbox;
+  /** Workspace IDs whose sandbox is configured and may run commands. */
+  commandWorkspaces: string[];
+}
+
 const MAX_SEARCH_CANDIDATE_BYTES = 1024 * 1024;
 const MAX_SEARCH_CANDIDATES = 20_000;
 const SEARCH_TIMEOUT_MS = 10_000;
@@ -1426,5 +1445,91 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       truncated,
       ...(truncated ? { nextStartLine: endLine + 1 } : {}),
     };
+  }
+}
+
+/**
+ * Composes ordinary workspace tools with an explicitly supplied sandboxed
+ * command boundary. Command failures are intentionally not declared atomic:
+ * callers must retain their durable mutation quarantine until settlement.
+ */
+export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
+  readonly capabilities: BridgeWorkspaceToolCapabilities;
+  private readonly commandWorkspaces: ReadonlySet<string>;
+
+  constructor(private readonly options: SandboxWorkspaceToolsOptions) {
+    const base = options.workspaceTools.capabilities;
+    const registeredIds = new Set(base.workspaces.map(({ id }) => id));
+    const commandWorkspaces = new Set(options.commandWorkspaces);
+    if (
+      commandWorkspaces.size === 0 ||
+      commandWorkspaces.size !== options.commandWorkspaces.length ||
+      [...commandWorkspaces].some((id) => !registeredIds.has(id))
+    ) {
+      throw new WorkspaceToolError(
+        'Invalid sandbox workspace registration',
+        'REGISTRATION_INVALID',
+      );
+    }
+    this.commandWorkspaces = commandWorkspaces;
+    this.capabilities = {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operations: [...new Set([...base.operations, 'execute_command' as const])],
+      workspaces: base.workspaces.map((workspace) => ({
+        ...workspace,
+        operations: [
+          ...(workspace.operations ?? base.operations),
+          ...(commandWorkspaces.has(workspace.id)
+            ? (['execute_command'] as const)
+            : []),
+        ],
+      })),
+    };
+    if (!isValidBridgeWorkspaceToolCapabilities(this.capabilities)) {
+      throw new WorkspaceToolError(
+        'Invalid sandbox workspace registration',
+        'REGISTRATION_INVALID',
+      );
+    }
+  }
+
+  async execute(
+    request: WorkspaceToolRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceToolResult> {
+    if (request.operation !== 'execute_command') {
+      return this.options.workspaceTools.execute(request, signal);
+    }
+    if (!this.commandWorkspaces.has(request.workspaceId)) {
+      throw new WorkspaceToolError(
+        'Command execution is disabled for this workspace',
+        'COMMAND_DISABLED',
+      );
+    }
+    if (signal?.aborted) {
+      throw new WorkspaceToolError(
+        'Workspace command execution aborted',
+        'EXECUTION_ABORTED',
+      );
+    }
+    let result: unknown;
+    try {
+      result = await this.options.commandSandbox.execute(request, signal);
+    } catch (error) {
+      if (error instanceof WorkspaceToolError) throw error;
+      throw new WorkspaceToolError(
+        'Sandboxed command execution unavailable',
+        'COMMAND_UNAVAILABLE',
+        true,
+      );
+    }
+    if (!isWorkspaceToolResult(request, result)) {
+      throw new WorkspaceToolError(
+        'Sandboxed command returned an invalid result',
+        'COMMAND_UNAVAILABLE',
+        true,
+      );
+    }
+    return result;
   }
 }
