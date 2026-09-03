@@ -984,6 +984,7 @@ test('workspace edit previews are non-mutating and fence the commit revision', a
   });
   assert.equal(preview.operation, 'preview_edit');
   assert.equal(preview.content, 'prefix SECRET suffix');
+  assert.equal(preview.hasUtf8Bom, false);
   assert.match(preview.baseSha256, /^[a-f0-9]{64}$/);
   assert.equal(await readFile(join(root, 'preview.txt'), 'utf8'), 'prefix SEC suffix');
 
@@ -1002,6 +1003,29 @@ test('workspace edit previews are non-mutating and fence the commit revision', a
       error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
   );
   assert.equal(await readFile(join(root, 'preview.txt'), 'utf8'), 'changed SEC suffix');
+});
+
+test('workspace edit previews strip a UTF-8 BOM while retaining its byte count', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'bom.txt'), Buffer.from('\ufeffbefore', 'utf8'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  const preview = await tools.execute({
+    protocolVersion: 1,
+    operation: 'preview_edit',
+    workspaceId: 'primary',
+    path: 'bom.txt',
+    oldText: 'before',
+    newText: 'after',
+  });
+  assert.equal(preview.operation, 'preview_edit');
+  assert.equal(preview.content, 'after');
+  assert.equal(preview.hasUtf8Bom, true);
+  assert.equal(preview.bytesWritten, 8);
+  assert.equal(await readFile(join(root, 'bom.txt'), 'utf8'), '\ufeffbefore');
 });
 
 test('workspace mutations sync the containing directory after replacement', async (t) => {

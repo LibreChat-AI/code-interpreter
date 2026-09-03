@@ -192,6 +192,7 @@ export interface WorkspacePreviewEditResult {
   workspaceId: string;
   path: string;
   content: string;
+  hasUtf8Bom: boolean;
   baseSha256: string;
   replacements: number;
   bytesWritten: number;
@@ -346,6 +347,7 @@ const WORKSPACE_PREVIEW_EDIT_RESULT_KEYS = new Set([
   'workspaceId',
   'path',
   'content',
+  'hasUtf8Bom',
   'baseSha256',
   'replacements',
   'bytesWritten',
@@ -848,12 +850,14 @@ export function isWorkspaceToolResult(
       result.path === request.path &&
       content !== null &&
       Buffer.from(content).toString('utf8') === content &&
+      typeof result.hasUtf8Bom === 'boolean' &&
       typeof result.baseSha256 === 'string' &&
       /^[a-f0-9]{64}$/.test(result.baseSha256) &&
       result.replacements === replacements &&
       Number.isSafeInteger(result.bytesWritten) &&
       Number(result.bytesWritten) ===
-        new TextEncoder().encode(content).byteLength &&
+        new TextEncoder().encode(content).byteLength +
+          (result.hasUtf8Bom ? 3 : 0) &&
       Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES
     );
   }

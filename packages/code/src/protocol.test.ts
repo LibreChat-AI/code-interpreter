@@ -340,6 +340,7 @@ test('workspace mutations accept bounded UTF-8 requests and exact result shapes'
       workspaceId: 'primary',
       path: 'notes.txt',
       content: 'goodbye BYOM',
+      hasUtf8Bom: false,
       baseSha256: 'a'.repeat(64),
       replacements: 2,
       bytesWritten: 12,

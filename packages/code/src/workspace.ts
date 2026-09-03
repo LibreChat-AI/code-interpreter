@@ -787,15 +787,31 @@ function applyWorkspaceEdits(
 async function previewWorkspaceEdit(
   root: string,
   request: WorkspacePreviewEditRequest,
+  signal?: AbortSignal,
 ): Promise<WorkspacePreviewEditResult> {
   const original = await readConfinedFileBuffer(root, request.path);
+  if (signal?.aborted) {
+    throw new WorkspaceToolError(
+      'Workspace tool execution aborted',
+      'EXECUTION_ABORTED',
+    );
+  }
   const { updated, replacements } = applyWorkspaceEdits(original, request);
+  if (signal?.aborted) {
+    throw new WorkspaceToolError(
+      'Workspace tool execution aborted',
+      'EXECUTION_ABORTED',
+    );
+  }
+  const hasUtf8Bom =
+    updated[0] === 0xef && updated[1] === 0xbb && updated[2] === 0xbf;
   return {
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
     operation: 'preview_edit',
     workspaceId: request.workspaceId,
     path: request.path,
-    content: updated.toString('utf8'),
+    content: decodeWorkspaceText(updated),
+    hasUtf8Bom,
     baseSha256: createHash('sha256').update(original).digest('hex'),
     replacements,
     bytesWritten: updated.byteLength,
@@ -1503,7 +1519,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
         return writeWorkspaceFile(root, request, signal);
       }
       return request.operation === 'preview_edit'
-        ? previewWorkspaceEdit(root, request)
+        ? previewWorkspaceEdit(root, request, signal)
         : editWorkspaceFile(root, request, signal);
     }
 
