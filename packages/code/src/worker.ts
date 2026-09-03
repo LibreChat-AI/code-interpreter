@@ -193,16 +193,29 @@ function supportedWorkspaceCapabilities(
   if (operations.length === 0) return undefined;
   const supportsEntireProtocol =
     operations.length === desired.operations.length;
+  const supportsWorkspaceRestrictions =
+    supportsEntireProtocol ||
+    operations.some(
+      (operation) => operation === 'write_file' || operation === 'edit_file',
+    );
+  const workspaces = supportsWorkspaceRestrictions
+    ? desired.workspaces.flatMap((workspace) => {
+        if (workspace.operations == null) return [workspace];
+        const workspaceOperations = workspace.operations.filter((operation) =>
+          operations.includes(operation),
+        );
+        return workspaceOperations.length === 0
+          ? []
+          : [{ ...workspace, operations: workspaceOperations }];
+      })
+    : desired.workspaces.map(({ operations: _, ...workspace }) => workspace);
+  if (workspaces.length === 0) return undefined;
   return {
     ...capabilities,
     workspaceTools: {
       ...desired,
       operations,
-      workspaces: supportsEntireProtocol
-        ? desired.workspaces
-        : desired.workspaces.map(({ operations: _, ...workspace }) =>
-            workspace,
-          ),
+      workspaces,
     },
   };
 }

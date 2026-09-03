@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import {
   chmod,
+  chown,
   mkdtemp,
   mkdir,
   readFile,
@@ -862,6 +863,21 @@ test('exact edits reject missing or repeated text without changing the file', as
     );
   }
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'same same');
+
+  await writeFile(join(root, 'notes.txt'), 'aaa');
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      oldText: 'aa',
+      newText: 'changed',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
+  );
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'aaa');
 });
 
 test('writes reject symlink targets and missing parent directories', async (t) => {
@@ -871,11 +887,17 @@ test('writes reject symlink targets and missing parent directories', async (t) =
   await mkdir(root);
   await writeFile(join(parent, 'outside.txt'), 'outside');
   await symlink(join(parent, 'outside.txt'), join(root, 'link.txt'));
+  await mkdir(join(root, 'real-directory'));
+  await symlink(join(root, 'real-directory'), join(root, 'directory-link'));
   const tools = await LocalWorkspaceTools.create({
     workspaces: [{ id: 'primary', root, writable: true }],
   });
 
-  for (const path of ['link.txt', 'missing/notes.txt']) {
+  for (const path of [
+    'link.txt',
+    'missing/notes.txt',
+    'directory-link/notes.txt',
+  ]) {
     await assert.rejects(
       tools.execute({
         protocolVersion: 1,
@@ -910,6 +932,50 @@ test('workspace mutations preserve existing file permissions', async (t) => {
   });
 
   assert.equal((await stat(target)).mode & 0o777, 0o664);
+});
+
+test('workspace mutations preserve existing file ownership', async (t) => {
+  if (
+    process.platform === 'win32' ||
+    process.getuid == null ||
+    process.getgid == null ||
+    process.getgroups == null
+  ) {
+    t.skip('POSIX ownership is unavailable');
+    return;
+  }
+  const alternateGroup = process
+    .getgroups()
+    .find((group) => group !== process.getgid?.());
+  if (alternateGroup == null) {
+    t.skip('No alternate group is available');
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = join(root, 'notes.txt');
+  await writeFile(target, 'before');
+  try {
+    await chown(target, process.getuid(), alternateGroup);
+  } catch {
+    t.skip('The current user cannot assign an alternate group');
+    return;
+  }
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    content: 'after',
+  });
+
+  const metadata = await stat(target);
+  assert.equal(metadata.uid, process.getuid());
+  assert.equal(metadata.gid, alternateGroup);
 });
 
 test('workspace edits bound descriptor reads to the write limit', async (t) => {

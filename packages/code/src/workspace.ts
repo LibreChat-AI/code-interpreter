@@ -340,11 +340,15 @@ async function atomicWriteConfinedFile(
   const candidate = resolveWorkspacePath(root, requestedPath);
   const parent = dirname(candidate);
   let canonicalParent: string;
+  let parentIdentity: Awaited<ReturnType<typeof lstat>>;
   try {
     canonicalParent = await realpath(parent);
+    parentIdentity = await lstat(parent);
     if (
+      canonicalParent !== parent ||
       !isWithinRoot(root, canonicalParent) ||
-      !(await stat(canonicalParent)).isDirectory()
+      parentIdentity.isSymbolicLink() ||
+      !parentIdentity.isDirectory()
     ) {
       throw new Error('invalid parent');
     }
@@ -390,6 +394,9 @@ async function atomicWriteConfinedFile(
       existing == null ? 0o600 : Number(existing.mode) & 0o777,
     );
     if (existing != null) {
+      if (process.platform !== 'win32') {
+        await handle.chown(Number(existing.uid), Number(existing.gid));
+      }
       await handle.chmod(Number(existing.mode) & 0o777);
     }
     let offset = 0;
@@ -407,10 +414,6 @@ async function atomicWriteConfinedFile(
     await handle.close();
     handle = undefined;
 
-    const currentParent = await realpath(parent);
-    if (currentParent !== canonicalParent) {
-      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
-    }
     let current: Awaited<ReturnType<typeof lstat>> | undefined;
     try {
       current = await lstat(candidate);
@@ -436,6 +439,19 @@ async function atomicWriteConfinedFile(
     }
     if (expected != null) {
       await verifyEditSource(root, candidate, expected);
+    }
+    const [currentParent, currentParentIdentity] = await Promise.all([
+      realpath(parent),
+      lstat(parent),
+    ]);
+    if (
+      currentParent !== canonicalParent ||
+      currentParentIdentity.isSymbolicLink() ||
+      !currentParentIdentity.isDirectory() ||
+      currentParentIdentity.dev !== parentIdentity.dev ||
+      currentParentIdentity.ino !== parentIdentity.ino
+    ) {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
     }
     throwIfAborted(signal);
     await rename(temporary, candidate);
@@ -516,7 +532,7 @@ async function editWorkspaceFile(
     const first = text.indexOf(request.oldText);
     if (
       first < 0 ||
-      text.indexOf(request.oldText, first + request.oldText.length) >= 0
+      text.indexOf(request.oldText, first + 1) >= 0
     ) {
       throw new WorkspaceToolError(
         'Workspace edit must match exactly once',

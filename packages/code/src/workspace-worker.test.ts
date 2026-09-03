@@ -197,6 +197,108 @@ test('worker promotes only operations understood by an older Code API', async ()
   ]);
 });
 
+test('worker retains per-workspace restrictions during partial mutation promotion', async () => {
+  const registrations: Array<{
+    operations: string[];
+    workspaces: Array<Record<string, unknown>>;
+  }> = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: [
+      'read_file' as const,
+      'search_text' as const,
+      'list_files' as const,
+      'write_file' as const,
+      'edit_file' as const,
+    ],
+    workspaces: [
+      {
+        id: 'readonly',
+        operations: [
+          'read_file' as const,
+          'search_text' as const,
+          'list_files' as const,
+        ],
+      },
+      {
+        id: 'writable',
+        operations: [
+          'read_file' as const,
+          'search_text' as const,
+          'list_files' as const,
+          'write_file' as const,
+          'edit_file' as const,
+        ],
+      },
+    ],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        throw new Error('not executed');
+      },
+    },
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        capabilities: {
+          workspaceTools: {
+            operations: string[];
+            workspaces: Array<Record<string, unknown>>;
+          };
+        };
+      };
+      registrations.push(body.capabilities.workspaceTools);
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+        supportedWorkspaceToolOperations: [
+          'read_file',
+          'search_text',
+          'list_files',
+          'write_file',
+        ],
+      });
+    },
+  });
+
+  await worker.register();
+
+  assert.deepEqual(registrations[1], {
+    protocolVersion: 1,
+    operations: ['read_file', 'search_text', 'list_files', 'write_file'],
+    workspaces: [
+      {
+        id: 'readonly',
+        operations: ['read_file', 'search_text', 'list_files'],
+      },
+      {
+        id: 'writable',
+        operations: [
+          'read_file',
+          'search_text',
+          'list_files',
+          'write_file',
+        ],
+      },
+    ],
+  });
+});
+
 test('worker retains a compatible registration when list_files promotion times out', async () => {
   let registrationRequests = 0;
   const worker = new BridgeWorker({
