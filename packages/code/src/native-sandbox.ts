@@ -321,6 +321,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             shell: false,
             windowsHide: true,
           });
+          child.stdin.end();
         } catch {
           reject(
             new WorkspaceToolError(
@@ -421,7 +422,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             protocolVersion: BRIDGE_PROTOCOL_VERSION,
             operation: 'execute_command',
             workspaceId: request.workspaceId,
-            exitCode: timedOut || childSignal ? null : (code ?? 1),
+            exitCode:
+              timedOut || childSignal ? null : this.protocolExitCode(code),
             ...(childSignal ? { signal: childSignal } : {}),
             stdout: stdoutValue,
             stderr: stderrValue,
@@ -444,6 +446,12 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     } catch {
       // The command group has already exited.
     }
+  }
+
+  private protocolExitCode(code: number | null): number {
+    return Number.isSafeInteger(code) && code != null && code >= 0 && code <= 255
+      ? code
+      : 1;
   }
 
   async close(): Promise<void> {

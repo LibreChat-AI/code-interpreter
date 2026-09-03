@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import {
   access,
   mkdtemp,
@@ -9,9 +10,11 @@ import {
 } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 import { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
 import { WorkspaceToolError } from './workspace.js';
@@ -227,4 +230,46 @@ test('reports cancellation after command start as a potentially committed mutati
       error.code === 'EXECUTION_ABORTED' &&
       error.mutationMayHaveCommitted === true,
   );
+});
+
+test('closes stdin immediately when the command protocol provides no input', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fakeManager().manager,
+  });
+
+  const result = await sandbox.execute({
+    ...request,
+    command: 'cat',
+    timeoutMs: 250,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.timedOut, false);
+});
+
+test('maps platform-native exit statuses into the bridge protocol range', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const spawnCommand = () => {
+    const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      pid: undefined,
+      kill: () => true,
+    });
+    queueMicrotask(() => child.emit('close', 300, null));
+    return child;
+  };
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fakeManager().manager,
+    spawnCommand,
+  });
+
+  const result = await sandbox.execute(request);
+  assert.equal(result.exitCode, 1);
 });

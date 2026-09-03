@@ -504,7 +504,12 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
           allowedDomains: commandAllowedDomains,
         })
       : undefined;
-  await nativeCommandSandbox?.prepare();
+  try {
+    await nativeCommandSandbox?.prepare();
+  } catch (error) {
+    await fileRelaySupervisor?.stop().catch(() => undefined);
+    throw error;
+  }
   if (allowWorkspaceCommands && workspaceTools) {
     workspaceTools = new SandboxWorkspaceTools({
       workspaceTools,

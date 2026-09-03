@@ -7,7 +7,7 @@ RUN npm run build
 
 FROM node:24-alpine
 ENV NODE_ENV=production
-RUN apk add --no-cache ripgrep \
+RUN apk add --no-cache bubblewrap ripgrep socat \
   && addgroup -S librechat-code \
   && adduser -S librechat-code -G librechat-code
 WORKDIR /app
