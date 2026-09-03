@@ -6,6 +6,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -976,6 +977,66 @@ test('workspace mutations preserve existing file ownership', async (t) => {
   const metadata = await stat(target);
   assert.equal(metadata.uid, process.getuid());
   assert.equal(metadata.gid, alternateGroup);
+});
+
+test('workspace mutations accept filesystem-equivalent directory casing', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'MixedCase'));
+  try {
+    await realpath(join(root, 'mixedcase'));
+  } catch {
+    t.skip('The test filesystem is case-sensitive');
+    return;
+  }
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'mixedcase/notes.txt',
+    content: 'written',
+  });
+
+  assert.equal(
+    await readFile(join(root, 'MixedCase', 'notes.txt'), 'utf8'),
+    'written',
+  );
+});
+
+test('workspace mutations classify operational write failures as unavailable', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX directory permissions are unavailable');
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const locked = join(root, 'locked');
+  await mkdir(locked);
+  await writeFile(join(locked, 'notes.txt'), 'before');
+  await chmod(locked, 0o000);
+  try {
+    await assert.rejects(
+      tools.execute({
+        protocolVersion: 1,
+        operation: 'write_file',
+        workspaceId: 'primary',
+        path: 'locked/notes.txt',
+        content: 'blocked',
+      }),
+      (error: unknown) =>
+        error instanceof WorkspaceToolError &&
+        error.code === 'WRITE_UNAVAILABLE',
+    );
+  } finally {
+    await chmod(locked, 0o700);
+  }
 });
 
 test('workspace edits bound descriptor reads to the write limit', async (t) => {

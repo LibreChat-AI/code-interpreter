@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, realpath, rename, stat, unlink } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
 
@@ -246,6 +246,35 @@ interface WorkspaceRoot {
   writable: boolean;
 }
 
+async function verifyDirectoryPathHasNoSymlinks(
+  root: string,
+  directory: string,
+): Promise<Awaited<ReturnType<typeof lstat>>> {
+  const relativeDirectory = relative(root, directory);
+  let current = root;
+  let currentIdentity = await lstat(root);
+  for (const segment of relativeDirectory.split(sep).filter(Boolean)) {
+    current = resolve(current, segment);
+    currentIdentity = await lstat(current);
+    if (currentIdentity.isSymbolicLink() || !currentIdentity.isDirectory()) {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    }
+  }
+  return currentIdentity;
+}
+
+function classifyWritePathValidationError(error: unknown): WorkspaceToolError {
+  if (error instanceof WorkspaceToolError) return error;
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') {
+    return new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  }
+  return new WorkspaceToolError(
+    'Workspace storage is unavailable',
+    'WRITE_UNAVAILABLE',
+  );
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return;
   throw new WorkspaceToolError(
@@ -343,17 +372,12 @@ async function atomicWriteConfinedFile(
   let parentIdentity: Awaited<ReturnType<typeof lstat>>;
   try {
     canonicalParent = await realpath(parent);
-    parentIdentity = await lstat(parent);
-    if (
-      canonicalParent !== parent ||
-      !isWithinRoot(root, canonicalParent) ||
-      parentIdentity.isSymbolicLink() ||
-      !parentIdentity.isDirectory()
-    ) {
-      throw new Error('invalid parent');
+    parentIdentity = await verifyDirectoryPathHasNoSymlinks(root, parent);
+    if (!isWithinRoot(root, canonicalParent) || !parentIdentity.isDirectory()) {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
     }
-  } catch {
-    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  } catch (error) {
+    throw classifyWritePathValidationError(error);
   }
 
   let existing: Awaited<ReturnType<typeof lstat>> | undefined;
@@ -361,7 +385,7 @@ async function atomicWriteConfinedFile(
     existing = await lstat(candidate);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+      throw classifyWritePathValidationError(error);
     }
   }
   if (existing?.isSymbolicLink() || (existing != null && !existing.isFile())) {
@@ -383,6 +407,7 @@ async function atomicWriteConfinedFile(
     canonicalParent,
     `.librechat-code-${randomBytes(18).toString('hex')}.tmp`,
   );
+  const installTarget = resolve(canonicalParent, basename(candidate));
   let handle: FileHandle | undefined;
   try {
     handle = await open(
@@ -391,14 +416,8 @@ async function atomicWriteConfinedFile(
         constants.O_CREAT |
         constants.O_EXCL |
         constants.O_NOFOLLOW,
-      existing == null ? 0o600 : Number(existing.mode) & 0o777,
+      0o600,
     );
-    if (existing != null) {
-      if (process.platform !== 'win32') {
-        await handle.chown(Number(existing.uid), Number(existing.gid));
-      }
-      await handle.chmod(Number(existing.mode) & 0o777);
-    }
     let offset = 0;
     while (offset < content.byteLength) {
       const { bytesWritten } = await handle.write(
@@ -411,8 +430,6 @@ async function atomicWriteConfinedFile(
       offset += bytesWritten;
     }
     await handle.sync();
-    await handle.close();
-    handle = undefined;
 
     let current: Awaited<ReturnType<typeof lstat>> | undefined;
     try {
@@ -442,7 +459,7 @@ async function atomicWriteConfinedFile(
     }
     const [currentParent, currentParentIdentity] = await Promise.all([
       realpath(parent),
-      lstat(parent),
+      verifyDirectoryPathHasNoSymlinks(root, parent),
     ]);
     if (
       currentParent !== canonicalParent ||
@@ -454,11 +471,24 @@ async function atomicWriteConfinedFile(
       throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
     }
     throwIfAborted(signal);
-    await rename(temporary, candidate);
+    if (existing != null) {
+      if (process.platform !== 'win32') {
+        await handle.chown(Number(existing.uid), Number(existing.gid));
+      }
+      await handle.chmod(Number(existing.mode) & 0o777);
+      await handle.sync();
+    }
+    await handle.close();
+    handle = undefined;
+    throwIfAborted(signal);
+    await rename(temporary, installTarget);
     return { created: existing == null };
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
-    throw new WorkspaceToolError('Workspace write failed', 'INVALID_PATH');
+    throw new WorkspaceToolError(
+      'Workspace storage is unavailable',
+      'WRITE_UNAVAILABLE',
+    );
   } finally {
     await handle?.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);

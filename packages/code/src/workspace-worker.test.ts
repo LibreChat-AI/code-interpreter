@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BridgeWorker } from './worker.js';
+import { BridgeWorker, BridgeWorkspaceQuarantinedError } from './worker.js';
 import { WorkspaceToolError } from './workspace.js';
 
 const incarnationId = 'incarnation-00000001';
@@ -483,6 +483,188 @@ test('worker executes a workspace tool assignment locally without acquiring a sa
       truncated: false,
     },
   });
+});
+
+test('worker stops after Code API rejects a fulfilled workspace mutation', async () => {
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    workspaces: [{ id: 'primary', operations: ['write_file' as const] }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute(request) {
+        return {
+          protocolVersion: 1,
+          operation: 'write_file',
+          workspaceId: request.workspaceId,
+          path: 'notes.txt',
+          bytesWritten: 7,
+          created: true,
+        };
+      },
+    },
+    fetchImpl: async () =>
+      Response.json({ error: 'assignment was fenced' }, { status: 409 }),
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'assignment-workspace-write-rejected',
+      workerId: 'vm-1',
+      incarnationId,
+      generation: 4,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 5_000).toISOString(),
+      executionKind: 'workspace_tool',
+      request: {
+        protocolVersion: 1,
+        operation: 'write_file',
+        workspaceId: 'primary',
+        path: 'notes.txt',
+        content: 'written',
+      },
+    }),
+    BridgeWorkspaceQuarantinedError,
+  );
+});
+
+test('worker stops after a fulfilled workspace mutation settlement remains ambiguous', async () => {
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['edit_file' as const],
+    workspaces: [{ id: 'primary', operations: ['edit_file' as const] }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute(request) {
+        return {
+          protocolVersion: 1,
+          operation: 'edit_file',
+          workspaceId: request.workspaceId,
+          path: 'notes.txt',
+          bytesWritten: 6,
+          replacements: 1,
+        };
+      },
+    },
+    fetchImpl: async () => {
+      throw new TypeError('connection reset');
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'assignment-workspace-edit-ambiguous',
+      workerId: 'vm-1',
+      incarnationId,
+      generation: 4,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 50).toISOString(),
+      executionKind: 'workspace_tool',
+      request: {
+        protocolVersion: 1,
+        operation: 'edit_file',
+        workspaceId: 'primary',
+        path: 'notes.txt',
+        oldText: 'before',
+        newText: 'after',
+      },
+    }),
+    BridgeWorkspaceQuarantinedError,
+  );
+});
+
+test('worker stops when cancellation races a completed workspace mutation', async () => {
+  const controller = new AbortController();
+  let settlementAttempts = 0;
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    workspaces: [{ id: 'primary', operations: ['write_file' as const] }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute(request) {
+        controller.abort(new Error('shutdown'));
+        return {
+          protocolVersion: 1,
+          operation: 'write_file',
+          workspaceId: request.workspaceId,
+          path: 'notes.txt',
+          bytesWritten: 7,
+          created: true,
+        };
+      },
+    },
+    fetchImpl: async () => {
+      settlementAttempts += 1;
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle(
+      {
+        protocolVersion: 1,
+        assignmentId: 'assignment-workspace-write-cancelled',
+        workerId: 'vm-1',
+        incarnationId,
+        generation: 4,
+        leaseToken: 'lease-token-that-is-long-enough-for-testing',
+        expiresAt: new Date(Date.now() + 5_000).toISOString(),
+        executionKind: 'workspace_tool',
+        request: {
+          protocolVersion: 1,
+          operation: 'write_file',
+          workspaceId: 'primary',
+          path: 'notes.txt',
+          content: 'written',
+        },
+      },
+      controller.signal,
+    ),
+    BridgeWorkspaceQuarantinedError,
+  );
+  assert.equal(settlementAttempts, 0);
 });
 
 test('worker refuses to advertise workspace tools without a matching executor', () => {

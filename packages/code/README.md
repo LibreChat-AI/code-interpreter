@@ -187,6 +187,10 @@ stateful result remains ambiguous, it exits with a quarantine error instead of
 accepting another assignment. Reset or discard that session's local runner
 before restarting the worker; its workspace may contain mutations that Code
 API did not commit.
+Likewise, if a local `write_file` or `edit_file` completes but its fulfilled
+settlement cannot be acknowledged, the worker exits before accepting more
+workspace operations. Inspect or restore that registered directory before
+restarting it.
 
 ## Local workspace tools (bridge preview)
 

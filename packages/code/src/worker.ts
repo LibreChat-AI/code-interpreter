@@ -769,8 +769,10 @@ export class BridgeWorker {
     let credentialMaintenance: Promise<void> | undefined;
     let settlement: BridgeSettlement;
     let ambiguousSandboxError: unknown;
+    let ambiguousWorkspaceMutationError: unknown;
     let sandboxRejectedExecution = false;
     let sandboxStarted = false;
+    let workspaceMutationApplied = false;
     let runtimeLease: RuntimeLease | undefined;
     try {
       credentialMaintenance = this.maintainCredential(
@@ -817,6 +819,9 @@ export class BridgeWorker {
           workspaceRequest,
           executionController.signal,
         );
+        workspaceMutationApplied =
+          workspaceRequest.operation === 'write_file' ||
+          workspaceRequest.operation === 'edit_file';
         if (executionController.signal.aborted) {
           throw (
             executionController.signal.reason ??
@@ -907,6 +912,9 @@ export class BridgeWorker {
         result: payload,
       };
     } catch (error) {
+      if (workspaceMutationApplied) {
+        ambiguousWorkspaceMutationError = error;
+      }
       if (
         assignment.runtimeSessionId != null &&
         sandboxStarted &&
@@ -938,6 +946,13 @@ export class BridgeWorker {
     credentialController.abort();
     await credentialMaintenance;
     try {
+      if (ambiguousWorkspaceMutationError != null) {
+        throw await this.quarantineWorkspace(
+          undefined,
+          'Worker stopped after a workspace mutation completed without a fulfilled settlement',
+          ambiguousWorkspaceMutationError,
+        );
+      }
       if (ambiguousSandboxError != null) {
         throw await this.quarantineWorkspace(
           assignment.runtimeSessionId,
@@ -977,6 +992,7 @@ export class BridgeWorker {
           settlement,
           localDeadlineAtMs,
           signal,
+          workspaceMutationApplied,
         );
       }
     } finally {
@@ -1138,12 +1154,22 @@ export class BridgeWorker {
     settlement: BridgeSettlement,
     deadlineAtMs: number,
     signal?: AbortSignal,
+    workspaceMutationApplied = false,
   ): Promise<void> {
+    const fulfilledWorkspaceMutation =
+      workspaceMutationApplied &&
+      settlement.status === 'fulfilled' &&
+      assignment.executionKind === 'workspace_tool' &&
+      isWorkspaceToolRequest(assignment.request) &&
+      (assignment.request.operation === 'write_file' ||
+        assignment.request.operation === 'edit_file');
     if (signal?.aborted === true) {
-      if (assignment.runtimeSessionId != null) {
+      if (assignment.runtimeSessionId != null || fulfilledWorkspaceMutation) {
         throw await this.quarantineWorkspace(
           assignment.runtimeSessionId,
-          `Stateful workspace ${assignment.runtimeSessionId} was quarantined before settlement during shutdown`,
+          assignment.runtimeSessionId != null
+            ? `Stateful workspace ${assignment.runtimeSessionId} was quarantined before settlement during shutdown`
+            : 'Worker stopped after a workspace mutation could not be settled during shutdown',
           signal.reason,
         );
       }
@@ -1179,12 +1205,15 @@ export class BridgeWorker {
             error.status !== 429
           ) {
             if (
-              assignment.runtimeSessionId != null &&
+              (assignment.runtimeSessionId != null ||
+                fulfilledWorkspaceMutation) &&
               settlement.status === 'fulfilled'
             ) {
               throw await this.quarantineWorkspace(
                 assignment.runtimeSessionId,
-                `Stateful workspace ${assignment.runtimeSessionId} was quarantined after Code API rejected its fulfilled settlement`,
+                assignment.runtimeSessionId != null
+                  ? `Stateful workspace ${assignment.runtimeSessionId} was quarantined after Code API rejected its fulfilled settlement`
+                  : 'Worker stopped after Code API rejected a fulfilled workspace mutation settlement',
                 error,
               );
             }
@@ -1203,12 +1232,14 @@ export class BridgeWorker {
       signal?.removeEventListener('abort', abortSettlement);
     }
     if (
-      assignment.runtimeSessionId != null &&
+      (assignment.runtimeSessionId != null || fulfilledWorkspaceMutation) &&
       settlement.status === 'fulfilled'
     ) {
       throw await this.quarantineWorkspace(
         assignment.runtimeSessionId,
-        `Stateful workspace ${assignment.runtimeSessionId} was quarantined after ambiguous settlement delivery`,
+        assignment.runtimeSessionId != null
+          ? `Stateful workspace ${assignment.runtimeSessionId} was quarantined after ambiguous settlement delivery`
+          : 'Worker stopped after ambiguous workspace mutation settlement delivery',
         lastError,
       );
     }
