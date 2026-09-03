@@ -177,14 +177,26 @@ function registrationCompatibleCapabilities(
     const { workspaceTools: _workspaceTools, ...compatible } = capabilities;
     return compatible;
   }
+  const workspaces = workspaceTools.workspaces.flatMap((workspace) => {
+    if (
+      workspace.operations != null &&
+      !operations.every((operation) => workspace.operations?.includes(operation))
+    ) {
+      return [];
+    }
+    const { operations: _operations, ...compatibleWorkspace } = workspace;
+    return [compatibleWorkspace];
+  });
+  if (workspaces.length === 0) {
+    const { workspaceTools: _workspaceTools, ...compatible } = capabilities;
+    return compatible;
+  }
   return {
     ...capabilities,
     workspaceTools: {
       ...workspaceTools,
       operations,
-      workspaces: workspaceTools.workspaces.map(({ operations: _, ...workspace }) =>
-        workspace,
-      ),
+      workspaces,
     },
   };
 }
@@ -237,6 +249,7 @@ export class BridgeWorker {
   private readonly incarnationId: string;
   private readonly compatibleCapabilities: BridgeWorkerCapabilities;
   private registrationCapabilities: BridgeWorkerCapabilities;
+  private activeCapabilities: BridgeWorkerCapabilities;
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
   private mutationGuardArmed = false;
@@ -294,6 +307,7 @@ export class BridgeWorker {
       options.capabilities,
     );
     this.registrationCapabilities = this.compatibleCapabilities;
+    this.activeCapabilities = options.capabilities;
   }
 
   async register(
@@ -400,6 +414,7 @@ export class BridgeWorker {
       this.serverClockOffsetMs = registeredAtMs - registrationStartedAtMs;
     }
     this.registrationTtlMs = registration.leaseTtlMs;
+    this.activeCapabilities = this.registrationCapabilities;
     await this.options.onRegistered?.(registration);
     if (this.options.capabilities.requiresReadyConfirmation === true) {
       await this.confirmReady(registration, signal);
@@ -832,7 +847,12 @@ export class BridgeWorker {
           throw new BridgeProtocolError('Invalid workspace tool request');
         }
         const workspaceRequest = assignment.request;
-        const advertised = this.options.workspaceTools.capabilities;
+        const advertised = this.activeCapabilities.workspaceTools;
+        if (advertised == null) {
+          throw new BridgeProtocolError(
+            'Workspace tools are not advertised to this Code API',
+          );
+        }
         if (!advertised.operations.includes(workspaceRequest.operation)) {
           throw new BridgeProtocolError(
             'Workspace tool operation is not advertised',
@@ -981,7 +1001,8 @@ export class BridgeWorker {
         (workspaceMutationArmed &&
           !(
             error instanceof WorkspaceToolError &&
-            this.options.workspaceTools?.mutationFailuresAreAtomic === true
+            this.options.workspaceTools?.mutationFailuresAreAtomic === true &&
+            !error.mutationMayHaveCommitted
           ))
       ) {
         ambiguousWorkspaceMutationError = error;

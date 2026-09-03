@@ -844,6 +844,87 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'hello BYOM');
 });
 
+test('workspace mutations sync the containing directory after replacement', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Directory fsync is unavailable on Windows');
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const probe = await open(root, 'r');
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+    sync(): Promise<void>;
+  };
+  await probe.close();
+  const originalSync = fileHandlePrototype.sync;
+  let syncCalls = 0;
+  t.mock.method(fileHandlePrototype, 'sync', async function (this: FileHandle) {
+    await originalSync.call(this);
+    syncCalls += 1;
+  });
+
+  await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    content: 'before',
+  });
+  assert.equal(syncCalls, 2);
+
+  await tools.execute({
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    oldText: 'before',
+    newText: 'after',
+  });
+  assert.equal(syncCalls, 5);
+});
+
+test('workspace mutations report uncertain commit when directory sync fails', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Directory fsync is unavailable on Windows');
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const probe = await open(root, 'r');
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+    sync(): Promise<void>;
+  };
+  await probe.close();
+  const originalSync = fileHandlePrototype.sync;
+  let syncCalls = 0;
+  t.mock.method(fileHandlePrototype, 'sync', async function (this: FileHandle) {
+    syncCalls += 1;
+    if (syncCalls === 2) throw new Error('directory sync failed');
+    await originalSync.call(this);
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      content: 'possibly committed',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'WRITE_UNAVAILABLE' &&
+      error.mutationMayHaveCommitted,
+  );
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'possibly committed');
+});
+
 test('exact edits reject missing or repeated text without changing the file', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));

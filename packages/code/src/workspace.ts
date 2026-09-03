@@ -70,7 +70,10 @@ export interface LocalWorkspaceToolsOptions {
 
 export interface WorkspaceToolExecutor {
   capabilities: BridgeWorkspaceToolCapabilities;
-  /** True only when every thrown mutation error proves no mutation committed. */
+  /**
+   * True only when every thrown mutation error proves no mutation committed,
+   * unless the error explicitly reports mutationMayHaveCommitted.
+   */
   mutationFailuresAreAtomic?: true;
   execute(
     request: WorkspaceToolRequest,
@@ -139,9 +142,32 @@ export class WorkspaceToolError extends Error {
   constructor(
     message: string,
     public readonly code: WorkspaceToolErrorCode,
+    public readonly mutationMayHaveCommitted = false,
   ) {
     super(message);
     this.name = 'WorkspaceToolError';
+  }
+}
+
+async function syncWorkspaceDirectory(path: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  const directory = await open(path, 'r');
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
+async function confirmInstalledMutation(canonicalParent: string): Promise<void> {
+  try {
+    await syncWorkspaceDirectory(canonicalParent);
+  } catch {
+    throw new WorkspaceToolError(
+      'Workspace mutation durability could not be confirmed',
+      'WRITE_UNAVAILABLE',
+      true,
+    );
   }
 }
 
@@ -348,6 +374,7 @@ async function commitVerifiedEdit(
     }
     throwIfAborted(signal);
     await rename(temporary, installTarget);
+    await confirmInstalledMutation(dirname(installTarget));
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
@@ -503,6 +530,7 @@ async function atomicWriteConfinedFile(
     }
     throwIfAborted(signal);
     await rename(temporary, installTarget);
+    await confirmInstalledMutation(canonicalParent);
     return { created: existing == null };
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
