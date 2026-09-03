@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { open, realpath, stat } from 'node:fs/promises';
+import { lstat, open, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
@@ -542,6 +542,15 @@ async function listWorkspaceFiles(
   }
   const canonicalListPath = relative(root, canonicalTarget) || '.';
   const portableCanonicalListPath = canonicalListPath.split(sep).join('/');
+  let canonicalTargetIsDirectory = false;
+  try {
+    canonicalTargetIsDirectory = (
+      await withinListDeadline(stat(canonicalTarget), signal, deadline)
+    ).isDirectory();
+  } catch (error) {
+    if (error instanceof WorkspaceToolError) throw error;
+    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  }
   const normalizedRequestedResultPath = request.path
     ?.split('/')
     .filter((segment) => segment.length > 0 && segment !== '.')
@@ -553,19 +562,27 @@ async function listWorkspaceFiles(
   let pending: Buffer = Buffer.alloc(0);
   let stoppedForLimit = false;
   await new Promise<void>((resolvePromise, reject) => {
+    const args = [
+      '--files',
+      '--no-config',
+      '--no-follow',
+      '--no-messages',
+      '--sort',
+      'path',
+      '--null',
+    ];
+    if (portableCanonicalListPath !== '.') {
+      args.push(
+        '--glob',
+        canonicalTargetIsDirectory
+          ? `${portableCanonicalListPath}/**`
+          : portableCanonicalListPath,
+      );
+    }
+    args.push('--', '.');
     const child = spawn(
       'rg',
-      [
-        '--files',
-        '--no-config',
-        '--no-follow',
-        '--no-messages',
-        '--sort',
-        'path',
-        '--null',
-        '--',
-        canonicalListPath,
-      ],
+      args,
       { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] },
     );
     let aborted = false;
@@ -680,6 +697,24 @@ async function listWorkspaceFiles(
       continue;
     }
     if (!isWithinRoot(root, canonicalPath)) {
+      continue;
+    }
+    const reportedPath = resolveWorkspacePath(root, candidate.resultPath);
+    try {
+      const reportedPathStat = await withinListDeadline(
+        lstat(reportedPath),
+        signal,
+        deadline,
+      );
+      if (reportedPathStat.isSymbolicLink()) continue;
+      const canonicalReportedPath = await withinListDeadline(
+        realpath(reportedPath),
+        signal,
+        deadline,
+      );
+      if (canonicalReportedPath !== canonicalPath) continue;
+    } catch (error) {
+      if (error instanceof WorkspaceToolError) throw error;
       continue;
     }
     let regularFile = false;

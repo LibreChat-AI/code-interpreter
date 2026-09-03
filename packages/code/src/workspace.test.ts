@@ -283,6 +283,47 @@ test('listing ignores ripgrep config that follows escaping symlinks', async (t) 
   assert.deepEqual(result.paths, ['safe.txt']);
 });
 
+test('listing preserves ignore rules for an explicitly requested subtree', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'vendor'));
+  await writeFile(join(root, 'vendor', 'dependency.js'), 'ignored');
+  await writeFile(join(root, '.ignore'), 'vendor/\n');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+    path: 'vendor',
+  });
+
+  if (result.operation !== 'list_files') assert.fail('expected list result');
+  assert.deepEqual(result.paths, []);
+});
+
+test('listing excludes an explicitly requested symlink file alias', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'target.txt'), 'target');
+  await symlink(join(root, 'target.txt'), join(root, 'alias.txt'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+    path: 'alias.txt',
+  });
+
+  if (result.operation !== 'list_files') assert.fail('expected list result');
+  assert.deepEqual(result.paths, []);
+});
+
 test('listing skips filenames the portable protocol cannot represent', async (t) => {
   if (sep === '\\') return;
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
