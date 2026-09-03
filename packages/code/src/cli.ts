@@ -641,8 +641,11 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     }
     await worker.run(controller.signal);
   } finally {
-    await nativeCommandSandbox?.close();
-    await fileRelaySupervisor?.stop();
+    try {
+      await nativeCommandSandbox?.close();
+    } finally {
+      await fileRelaySupervisor?.stop();
+    }
   }
 }
 

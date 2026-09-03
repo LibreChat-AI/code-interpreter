@@ -67,7 +67,16 @@ Code API connection. Each command and its descendants run inside SRT with:
 - `LIBRECHAT_CODE_*` and nonessential inherited environment variables removed;
 - network egress denied by default, local binding denied, and Unix sockets
   denied; and
-- bounded time and aggregate output, followed by process-tree termination.
+- bounded time and aggregate output, with best-effort process-group termination
+  on cancellation, timeout, and completion.
+
+SRT restrictions remain inherited by descendants. Windows additionally uses a
+kill-on-close Job Object. Native macOS does not provide an equivalent hard
+process-lifetime boundary: a deliberately daemonized descendant can outlive
+the command while remaining confined to the approved workspace and network
+policy. This matches the personal-machine SRT trust model; use the Docker/NsJail
+backend or a dedicated VM boundary when hard teardown of adversarial process
+trees is required.
 
 Linux hosts need `bubblewrap`, `socat`, and `ripgrep`; macOS uses system
 facilities. Follow SRT's one-time restricted-account setup when using Windows.
