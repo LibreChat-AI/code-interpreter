@@ -27,6 +27,7 @@ const savedConfig = {
   start: config.hosted_app_start_timeout_ms,
   stop: config.hosted_app_stop_timeout_ms,
   logs: config.hosted_app_log_max_bytes,
+  packages: config.packages_directory,
 };
 
 let roots: string[] = [];
@@ -43,6 +44,7 @@ afterEach(async () => {
   config.hosted_app_start_timeout_ms = savedConfig.start;
   config.hosted_app_stop_timeout_ms = savedConfig.stop;
   config.hosted_app_log_max_bytes = savedConfig.logs;
+  config.packages_directory = savedConfig.packages;
   await Promise.all(roots.map(root => fsp.rm(root, { recursive: true, force: true })));
   roots = [];
 });
@@ -298,9 +300,11 @@ describe('HostedAppSupervisor', () => {
 
   test('links bundled JavaScript packages into the hosted workspace', async () => {
     const root = await workspace();
-    const packageRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'hosted-app-packages-'));
-    roots.push(packageRoot);
-    await fsp.mkdir(path.join(packageRoot, 'node_modules'));
+    const packages = await fsp.mkdtemp(path.join(os.tmpdir(), 'hosted-app-packages-'));
+    roots.push(packages);
+    config.packages_directory = packages;
+    const packageRoot = path.join(packages, 'node', '22');
+    await fsp.mkdir(path.join(packageRoot, 'node_modules'), { recursive: true });
     const runtime = { ...fakeRuntime(), pkgdir: packageRoot };
 
     await prepareHostedAppRuntimeWorkspace(root, runtime);
@@ -308,6 +312,67 @@ describe('HostedAppSupervisor', () => {
     expect(await fsp.realpath(path.join(root, 'node_modules'))).toBe(
       await fsp.realpath(path.join(packageRoot, 'node_modules')),
     );
+  });
+
+  test('refreshes a supervisor-managed package link for a new runtime', async () => {
+    const root = await workspace();
+    const packages = await fsp.mkdtemp(path.join(os.tmpdir(), 'hosted-app-packages-'));
+    roots.push(packages);
+    config.packages_directory = packages;
+    const firstRoot = path.join(packages, 'node', '22');
+    const secondRoot = path.join(packages, 'bun', '1');
+    await fsp.mkdir(path.join(firstRoot, 'node_modules'), { recursive: true });
+    await fsp.mkdir(path.join(secondRoot, 'node_modules'), { recursive: true });
+
+    await prepareHostedAppRuntimeWorkspace(root, { ...fakeRuntime(), pkgdir: firstRoot });
+    await prepareHostedAppRuntimeWorkspace(root, { ...fakeRuntime(), pkgdir: secondRoot });
+
+    expect(await fsp.realpath(path.join(root, 'node_modules'))).toBe(
+      await fsp.realpath(path.join(secondRoot, 'node_modules')),
+    );
+  });
+
+  test('waits for confirmed cgroup cleanup before completing stop', async () => {
+    const root = await workspace();
+    let releaseCleanup!: () => void;
+    const cleanupBlocked = new Promise<void>(resolve => { releaseCleanup = resolve; });
+    const fixture = dependencies(root, { killCgroup: () => cleanupBlocked });
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    await supervisor.start(request());
+
+    let stopped = false;
+    const stopping = supervisor.stop().then(() => { stopped = true; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(stopped).toBe(false);
+
+    releaseCleanup();
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+
+  test('skips queued exit cleanup after a replacement becomes active', async () => {
+    const root = await workspace();
+    const fixture = dependencies(root);
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    await supervisor.start(request());
+    let releaseOwnership!: (value: { dir: string; uid: number; gid: number }) => void;
+    const ownershipBlocked = new Promise<{ dir: string; uid: number; gid: number }>(
+      resolve => { releaseOwnership = resolve; },
+    );
+    fixture.deps.getSession = () => ({
+      ownership: () => ownershipBlocked,
+    } as SessionWorkspace);
+
+    const replacement = supervisor.start(request({ revision: 'rev-2' }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    fixture.children[0].emit('exit', 1, null);
+    releaseOwnership({ dir: root, uid: 200123, gid: 200123 });
+
+    expect((await replacement).revision).toBe('rev-2');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(supervisor.status()?.state).toBe('running');
+    expect(fixture.cgroupKills).toHaveLength(1);
+    await supervisor.shutdown();
   });
 
   test('fails closed before spawning when the network guard cannot be installed', async () => {

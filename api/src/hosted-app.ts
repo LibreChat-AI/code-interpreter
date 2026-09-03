@@ -113,11 +113,20 @@ export async function prepareHostedAppRuntimeWorkspace(
   if (!packageStat?.isDirectory()) return;
 
   const workspaceModules = path.join(workspaceDir, 'node_modules');
+  let workspaceModulesStat: Awaited<ReturnType<typeof fsp.lstat>> | undefined;
   try {
-    await fsp.lstat(workspaceModules);
-    return;
+    workspaceModulesStat = await fsp.lstat(workspaceModules);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  if (workspaceModulesStat && !workspaceModulesStat.isSymbolicLink()) return;
+  if (workspaceModulesStat?.isSymbolicLink()) {
+    const linkTarget = await fsp.readlink(workspaceModules);
+    const resolvedTarget = path.resolve(workspaceDir, linkTarget);
+    const packageRoot = path.resolve(config.packages_directory);
+    if (!isInside(packageRoot, resolvedTarget)) return;
+    if (resolvedTarget === packageModules) return;
+    await fsp.unlink(workspaceModules);
   }
   try {
     await fsp.symlink(packageModules, workspaceModules, 'dir');
@@ -352,12 +361,6 @@ export async function prepareHostedAppCgroup(): Promise<void> {
    * revision replacement. Fail closed on kernels that do not expose it. */
   await fsp.access(path.join(HOSTED_APP_CGROUP, 'cgroup.kill'));
   await killHostedAppCgroup();
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const events = await fsp.readFile(path.join(HOSTED_APP_CGROUP, 'cgroup.events'), 'utf8');
-    if (/^populated 0$/m.test(events)) break;
-    if (attempt === 19) throw new Error('hosted-app cgroup did not become empty');
-    await new Promise(resolve => setTimeout(resolve, 25));
-  }
   await fsp.writeFile(path.join(HOSTED_APP_CGROUP, 'memory.max'), String(
     config.hosted_app_memory_max_bytes,
   ));
@@ -371,7 +374,20 @@ export async function killHostedAppCgroup(): Promise<void> {
   try {
     await fsp.writeFile(path.join(HOSTED_APP_CGROUP, 'cgroup.kill'), '1');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  const deadline = Date.now() + config.hosted_app_stop_timeout_ms;
+  while (true) {
+    const events = await fsp.readFile(
+      path.join(HOSTED_APP_CGROUP, 'cgroup.events'),
+      'utf8',
+    );
+    if (/^populated 0$/m.test(events)) return;
+    if (Date.now() >= deadline) {
+      throw new Error('hosted-app cgroup did not become empty');
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
   }
 }
 
@@ -507,8 +523,8 @@ export class HostedAppSupervisor {
 
     const ownership = await session.ownership();
     await resolveWorkspacePaths(ownership.dir, request);
-    await this.deps.prepareRuntimeWorkspace(ownership.dir, runtime);
     await this.stopImpl();
+    await this.deps.prepareRuntimeWorkspace(ownership.dir, runtime);
     /* The previous process shared this workspace UID and could have changed a
      * validated path before it exited. Re-resolve after the process/cgroup are
      * gone; the preflight above exists to avoid stopping it for ordinary
@@ -607,7 +623,7 @@ export class HostedAppSupervisor {
        * has entered this shared cgroup. */
       if (active.status.state !== 'stopped') {
         void this.serialize(async () => {
-          if (active.status.state === 'stopped') return;
+          if (this.active !== active || active.status.state === 'stopped') return;
           await this.deps.killCgroup();
         }).catch(error => {
           logger.error(
@@ -662,6 +678,8 @@ export class HostedAppSupervisor {
     const child = active.process;
     if (!child?.pid) {
       await this.deps.killCgroup();
+      active.status.state = 'stopped';
+      active.status.exited_at ??= this.deps.now().toISOString();
       if (!preserveActive) this.active = undefined;
       return publicStatus(active);
     }
