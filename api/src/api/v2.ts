@@ -698,7 +698,11 @@ router.post('/session/restore', (req: Request, res: Response, next: NextFunction
   if (failure) {
     return res.status(failure.status).json(failure.body);
   }
-  return restoreSessionCheckpoint(req, res).catch(next);
+  const restore = (): Promise<void> => restoreSessionCheckpoint(req, res);
+  return (config.hosted_apps_enabled
+    ? hostedAppSupervisor.withWorkspaceMutation(restore)
+    : restore()
+  ).catch(error => hostedAppFailure(error, res, next));
 });
 
 function requireHostedAppTarget(

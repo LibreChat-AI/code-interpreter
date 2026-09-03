@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { config } from './config';
 import { filterExtraEnvVars } from './job';
 import { logger } from './logger';
-import { getLatestRuntimeMatchingLanguageVersion } from './runtime';
+import { getLatestRuntimeMatchingLanguageVersion, type Runtime } from './runtime';
 import { getBoundSessionWorkspace, type SessionWorkspace } from './session-workspace';
 import { ValidationError, validateFilePath } from './validation';
 
@@ -91,6 +91,7 @@ type ResolveRuntime = typeof getLatestRuntimeMatchingLanguageVersion;
 export interface HostedAppDependencies {
   getSession: () => SessionWorkspace | undefined;
   resolveRuntime: ResolveRuntime;
+  prepareRuntimeWorkspace: (workspaceDir: string, runtime: Runtime) => Promise<void>;
   spawnApp: SpawnApp;
   prepareCgroup: () => Promise<void>;
   killCgroup: () => Promise<void>;
@@ -98,6 +99,31 @@ export interface HostedAppDependencies {
   probePort: (port: number) => Promise<boolean>;
   killProcessGroup: (pid: number, signal: NodeJS.Signals) => void;
   now: () => Date;
+}
+
+export async function prepareHostedAppRuntimeWorkspace(
+  workspaceDir: string,
+  runtime: Runtime,
+): Promise<void> {
+  const packageModules = path.join(runtime.pkgdir, 'node_modules');
+  const packageStat = await fsp.stat(packageModules).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  });
+  if (!packageStat?.isDirectory()) return;
+
+  const workspaceModules = path.join(workspaceDir, 'node_modules');
+  try {
+    await fsp.lstat(workspaceModules);
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  try {
+    await fsp.symlink(packageModules, workspaceModules, 'dir');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
 }
 
 function byteLength(value: string): number {
@@ -385,6 +411,7 @@ export class HostedAppSupervisor {
   constructor(private readonly deps: HostedAppDependencies = {
     getSession: getBoundSessionWorkspace,
     resolveRuntime: getLatestRuntimeMatchingLanguageVersion,
+    prepareRuntimeWorkspace: prepareHostedAppRuntimeWorkspace,
     spawnApp: (command, args, options) => spawn(command, args, options) as unknown as HostedAppChild,
     prepareCgroup: prepareHostedAppCgroup,
     killCgroup: killHostedAppCgroup,
@@ -408,6 +435,20 @@ export class HostedAppSupervisor {
 
   async shutdown(): Promise<void> {
     await this.stop();
+  }
+
+  async withWorkspaceMutation<T>(operation: () => Promise<T>): Promise<T> {
+    return this.serialize(async () => {
+      const state = this.active?.status.state;
+      if (state === 'starting' || state === 'running' || state === 'stopping') {
+        throw new HostedAppError(
+          'hosted_app_workspace_busy',
+          'the hosted app must be stopped before replacing its workspace',
+          409,
+        );
+      }
+      return operation();
+    });
   }
 
   private async serialize<T>(operation: () => Promise<T>): Promise<T> {
@@ -440,8 +481,6 @@ export class HostedAppSupervisor {
         409,
       );
     }
-    await this.stopImpl();
-
     const session = this.deps.getSession();
     if (!session) {
       throw new HostedAppError(
@@ -467,6 +506,13 @@ export class HostedAppSupervisor {
     }
 
     const ownership = await session.ownership();
+    await resolveWorkspacePaths(ownership.dir, request);
+    await this.deps.prepareRuntimeWorkspace(ownership.dir, runtime);
+    await this.stopImpl();
+    /* The previous process shared this workspace UID and could have changed a
+     * validated path before it exited. Re-resolve after the process/cgroup are
+     * gone; the preflight above exists to avoid stopping it for ordinary
+     * configuration errors, while this check is authoritative for launch. */
     const workspace = await resolveWorkspacePaths(ownership.dir, request);
     try {
       await this.deps.prepareCgroup();
@@ -583,7 +629,17 @@ export class HostedAppSupervisor {
           502,
         );
       }
-      if (await this.deps.probePort(config.hosted_app_port)) {
+      const ready = await this.deps.probePort(config.hosted_app_port);
+      if (active.process !== child || active.status.state === 'failed') {
+        await this.stopImpl(true);
+        active.status.state = 'failed';
+        throw new HostedAppError(
+          'hosted_app_start_failed',
+          active.status.message ?? 'hosted app exited before becoming ready',
+          502,
+        );
+      }
+      if (ready) {
         active.status.state = 'running';
         logger.info(
           { appId: request.app_id, revision: request.revision, pid: child.pid },

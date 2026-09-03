@@ -10,6 +10,7 @@ import type { SessionWorkspace } from './session-workspace';
 import {
   HostedAppError,
   HostedAppSupervisor,
+  prepareHostedAppRuntimeWorkspace,
   type HostedAppDependencies,
   type HostedAppStartRequest,
 } from './hosted-app';
@@ -95,8 +96,10 @@ function dependencies(
   root: string,
   options: {
     probe?: boolean;
+    probePort?: () => Promise<boolean>;
     guardError?: Error;
     killCgroup?: () => Promise<void>;
+    runtime?: Runtime;
   } = {},
 ): {
   deps: HostedAppDependencies;
@@ -116,7 +119,8 @@ function dependencies(
   } as SessionWorkspace);
   const deps: HostedAppDependencies = {
     getSession,
-    resolveRuntime: () => fakeRuntime(),
+    resolveRuntime: () => options.runtime === undefined ? fakeRuntime() : options.runtime,
+    prepareRuntimeWorkspace: async () => {},
     spawnApp: ((command: string, args: readonly string[], spawnOptions: SpawnOptions) => {
       spawns.push({ command, args, options: spawnOptions });
       const child = fakeChild(4242 + children.length);
@@ -132,7 +136,7 @@ function dependencies(
       guards.push(uid);
       if (options.guardError) throw options.guardError;
     },
-    probePort: async () => options.probe ?? true,
+    probePort: options.probePort ?? (async () => options.probe ?? true),
     killProcessGroup: (pid, signal) => {
       kills.push({ pid, signal });
       const child = children.find(candidate => candidate.pid === pid);
@@ -237,6 +241,73 @@ describe('HostedAppSupervisor', () => {
     expect(fixture.cgroupKills.length).toBeGreaterThan(0);
     expect(fixture.spawns).toHaveLength(2);
     await supervisor.shutdown();
+  });
+
+  test('validates a replacement before stopping the running revision', async () => {
+    const root = await workspace();
+    const fixture = dependencies(root);
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    await supervisor.start(request());
+    fixture.deps.resolveRuntime = () => undefined;
+
+    const error = await supervisor.start(request({ revision: 'rev-2' })).catch(value => value);
+
+    expect(error).toBeInstanceOf(HostedAppError);
+    expect(error.code).toBe('hosted_app_runtime_not_found');
+    expect(supervisor.status()?.state).toBe('running');
+    expect(fixture.kills).toEqual([]);
+    await supervisor.shutdown();
+  });
+
+  test('does not report running when the child exits during its readiness probe', async () => {
+    const root = await workspace();
+    let finishProbe!: (ready: boolean) => void;
+    const probe = new Promise<boolean>(resolve => { finishProbe = resolve; });
+    const fixture = dependencies(root, { probePort: () => probe });
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    const started = supervisor.start(request());
+    while (fixture.children.length === 0) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+
+    fixture.children[0].emit('exit', 1, null);
+    finishProbe(true);
+    const error = await started.catch(value => value);
+
+    expect(error).toBeInstanceOf(HostedAppError);
+    expect(error.code).toBe('hosted_app_start_failed');
+    expect(supervisor.status()?.state).toBe('failed');
+  });
+
+  test('serializes workspace mutation and rejects it while an app is running', async () => {
+    const root = await workspace();
+    const fixture = dependencies(root);
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    await supervisor.start(request());
+    let mutated = false;
+
+    const error = await supervisor.withWorkspaceMutation(async () => {
+      mutated = true;
+    }).catch(value => value);
+
+    expect(error).toBeInstanceOf(HostedAppError);
+    expect(error.code).toBe('hosted_app_workspace_busy');
+    expect(mutated).toBe(false);
+    await supervisor.shutdown();
+  });
+
+  test('links bundled JavaScript packages into the hosted workspace', async () => {
+    const root = await workspace();
+    const packageRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'hosted-app-packages-'));
+    roots.push(packageRoot);
+    await fsp.mkdir(path.join(packageRoot, 'node_modules'));
+    const runtime = { ...fakeRuntime(), pkgdir: packageRoot };
+
+    await prepareHostedAppRuntimeWorkspace(root, runtime);
+
+    expect(await fsp.realpath(path.join(root, 'node_modules'))).toBe(
+      await fsp.realpath(path.join(packageRoot, 'node_modules')),
+    );
   });
 
   test('fails closed before spawning when the network guard cannot be installed', async () => {
