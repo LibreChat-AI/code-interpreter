@@ -460,17 +460,26 @@ export function isWorkspaceToolResult(
 
   if (request.operation === 'list_files') {
     const maxResults = request.maxResults ?? 100;
-    return (
-      hasOnlyKeys(result, WORKSPACE_LIST_RESULT_KEYS) &&
-      Array.isArray(result.paths) &&
-      result.paths.length <= maxResults &&
-      new Set(result.paths).size === result.paths.length &&
-      result.paths.every(
-        (path) =>
-          isSafePortableRelativePath(path) &&
-          isWithinRequestedPath(path, request.path),
-      )
-    );
+    if (
+      !hasOnlyKeys(result, WORKSPACE_LIST_RESULT_KEYS) ||
+      !Array.isArray(result.paths) ||
+      result.paths.length > maxResults
+    ) {
+      return false;
+    }
+    const normalizedPaths = new Set<string>();
+    for (const path of result.paths) {
+      if (
+        !isSafePortableRelativePath(path) ||
+        !isWithinRequestedPath(path, request.path)
+      ) {
+        return false;
+      }
+      const normalizedPath = normalizePortableRelativePath(path);
+      if (normalizedPaths.has(normalizedPath)) return false;
+      normalizedPaths.add(normalizedPath);
+    }
+    return true;
   }
 
   if (!Array.isArray(result.matches)) return false;

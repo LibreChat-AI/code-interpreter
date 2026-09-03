@@ -550,7 +550,7 @@ async function listWorkspaceFiles(
 
   const candidates: Array<{ filesystemPath: string; resultPath: string }> = [];
   let truncated = false;
-  let pending = '';
+  let pending: Buffer = Buffer.alloc(0);
   let stoppedForLimit = false;
   await new Promise<void>((resolvePromise, reject) => {
     const child = spawn(
@@ -584,8 +584,14 @@ async function listWorkspaceFiles(
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
     };
-    const consumePath = (path: string) => {
-      if (!path || stoppedForLimit) return;
+    const consumePath = (rawPath: Buffer) => {
+      if (rawPath.length === 0 || stoppedForLimit) return;
+      let path: string;
+      try {
+        path = new TextDecoder('utf-8', { fatal: true }).decode(rawPath);
+      } catch {
+        return;
+      }
       if (candidates.length === maxResults + BRIDGE_WORKSPACE_LIST_MAX_RESULTS) {
         truncated = true;
         stoppedForLimit = true;
@@ -609,14 +615,13 @@ async function listWorkspaceFiles(
       candidates.push({ filesystemPath: normalizedPath, resultPath });
     };
 
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      pending += chunk;
-      let delimiter = pending.indexOf('\0');
+    child.stdout.on('data', (chunk: Buffer) => {
+      pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
+      let delimiter = pending.indexOf(0);
       while (delimiter >= 0) {
-        consumePath(pending.slice(0, delimiter));
-        pending = pending.slice(delimiter + 1);
-        delimiter = pending.indexOf('\0');
+        consumePath(pending.subarray(0, delimiter));
+        pending = pending.subarray(delimiter + 1);
+        delimiter = pending.indexOf(0);
       }
     });
     child.once('error', () => {

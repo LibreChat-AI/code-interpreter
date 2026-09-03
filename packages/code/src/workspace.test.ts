@@ -303,6 +303,37 @@ test('listing skips filenames the portable protocol cannot represent', async (t)
   assert.deepEqual(result.paths, ['safe.txt']);
 });
 
+test('listing rejects invalid UTF-8 bytes instead of aliasing a valid filename', async (t) => {
+  if (sep === '\\') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const invalidPath = Buffer.concat([
+    Buffer.from(`${root}${sep}`),
+    Buffer.from([0xff]),
+    Buffer.from('.txt'),
+  ]);
+  try {
+    await writeFile(invalidPath, 'invalid');
+  } catch {
+    t.skip('filesystem does not support non-UTF-8 filenames');
+    return;
+  }
+  await writeFile(join(root, '\ufffd.txt'), 'valid but ignored');
+  await writeFile(join(root, '.ignore'), '\ufffd.txt\n');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+  });
+
+  if (result.operation !== 'list_files') assert.fail('expected list result');
+  assert.equal(result.paths.includes('\ufffd.txt'), false);
+});
+
 test('listing excludes a non-regular explicit target', async (t) => {
   if (sep === '\\') return;
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));

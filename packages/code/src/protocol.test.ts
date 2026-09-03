@@ -136,6 +136,13 @@ test('workspace file listing accepts only bounded portable requests and results'
   assert.equal(
     isWorkspaceToolResult(request, {
       ...result,
+      paths: ['src/app.ts', 'src/./app.ts'],
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
       root: '/private/workspace',
     }),
     false,
