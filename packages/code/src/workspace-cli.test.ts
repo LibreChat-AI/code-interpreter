@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { access, mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, realpath, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
+  defaultWorkspaceQuarantinePath,
   defaultWorkspacePath,
   saveWorkspaceMutationQuarantine,
 } from './storage.js';
@@ -248,7 +249,7 @@ test('CLI refuses quarantined mutation registration until an operator clears it'
         workspace,
         '--allow-workspace-writes',
       ],
-      { encoding: 'utf8', env },
+      { encoding: 'utf8', env, timeout: 2_000 },
     );
     assert.notEqual(blocked.status, 0);
     assert.match(blocked.stderr, /workspace mutations are quarantined/i);
@@ -258,6 +259,66 @@ test('CLI refuses quarantined mutation registration until an operator clears it'
       [
         fileURLToPath(new URL('./cli.js', import.meta.url)),
         'clear-workspace-quarantine',
+      ],
+      { encoding: 'utf8', env },
+    );
+    assert.equal(cleared.status, 0, cleared.stderr);
+    await assert.rejects(access(quarantine));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('CLI cannot bypass quarantine by renaming the same physical workspace', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'librechat-code-cli-root-'));
+  const workspace = join(directory, 'workspace');
+  await mkdir(workspace);
+  const quarantine = defaultWorkspaceQuarantinePath({
+    codeApiUrl: 'http://127.0.0.1:1/v1',
+    workerId: 'engineering-vm',
+    workspaceRoot: await realpath(workspace),
+    homeDirectory: directory,
+  });
+  try {
+    await saveWorkspaceMutationQuarantine(quarantine, {
+      version: 1,
+      workerId: 'engineering-vm',
+      workspaceId: 'original-name',
+      quarantinedAt: new Date().toISOString(),
+      reason: 'ambiguous settlement delivery',
+    });
+    const env = {
+      ...process.env,
+      HOME: directory,
+      LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+      LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+      LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+    };
+    const blocked = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('./cli.js', import.meta.url)),
+        'run',
+        '--worker-dir',
+        workspace,
+        '--workspace-id',
+        'renamed-workspace',
+        '--allow-workspace-writes',
+      ],
+      { encoding: 'utf8', env, timeout: 2_000 },
+    );
+    assert.notEqual(blocked.status, 0);
+    assert.match(blocked.stderr, /workspace mutations are quarantined/i);
+
+    const cleared = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('./cli.js', import.meta.url)),
+        'clear-workspace-quarantine',
+        '--worker-dir',
+        workspace,
+        '--workspace-id',
+        'renamed-workspace',
       ],
       { encoding: 'utf8', env },
     );

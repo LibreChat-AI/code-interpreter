@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import { BRIDGE_PROTOCOL_VERSION, BridgeProtocolError } from './protocol.js';
 
@@ -58,6 +58,36 @@ async function syncParentDirectory(path: string): Promise<void> {
   }
 }
 
+function isMissingPathError(error: unknown): boolean {
+  return isRecord(error) && 'code' in error && error.code === 'ENOENT';
+}
+
+async function ensureDurableDirectory(path: string): Promise<void> {
+  const missing: string[] = [];
+  let current = path;
+  while (true) {
+    try {
+      const metadata = await lstat(current);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new BridgeProtocolError(
+          `Workspace quarantine parent must be a directory: ${current}`,
+        );
+      }
+      break;
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+      missing.push(current);
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      current = parent;
+    }
+  }
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  for (const created of missing.reverse()) {
+    await syncParentDirectory(created);
+  }
+}
+
 export interface DefaultWorkspacePathOptions {
   codeApiUrl: string;
   securityIdentity: string;
@@ -77,7 +107,7 @@ export interface WorkspaceMutationQuarantineRecord {
 export interface DefaultWorkspaceQuarantinePathOptions {
   codeApiUrl: string;
   workerId: string;
-  workspaceId: string;
+  workspaceRoot: string;
   homeDirectory?: string;
 }
 
@@ -114,7 +144,7 @@ export function defaultWorkspaceQuarantinePath(
     'quarantines',
     workspaceStorageName(canonicalDeploymentUrl(options.codeApiUrl)),
     workspaceStorageName(options.workerId),
-    `${workspaceStorageName(options.workspaceId)}.json`,
+    `${workspaceStorageName(resolve(options.workspaceRoot))}.json`,
   );
 }
 
@@ -170,7 +200,7 @@ export async function saveWorkspaceMutationQuarantine(
   path: string,
   record: WorkspaceMutationQuarantineRecord,
 ): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await ensureDurableDirectory(dirname(path));
   const temporaryPath = `${path}.${randomBytes(8).toString('hex')}.tmp`;
   try {
     const file = await open(temporaryPath, 'wx', 0o600);
@@ -220,7 +250,14 @@ export async function loadWorkspaceMutationQuarantine(
 export async function clearWorkspaceMutationQuarantine(
   path: string,
 ): Promise<void> {
+  try {
+    await lstat(path);
+  } catch (error) {
+    if (isMissingPathError(error)) return;
+    throw error;
+  }
   await rm(path, { force: true });
+  await syncParentDirectory(path);
 }
 
 export async function loadBridgeIdentity(

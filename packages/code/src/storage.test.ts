@@ -73,7 +73,7 @@ test('default mutation quarantine paths are stable and worker scoped', () => {
   const options = {
     codeApiUrl: 'https://code.example/v1',
     workerId: 'vm-1',
-    workspaceId: 'primary',
+    workspaceRoot: '/srv/workspaces/project',
     homeDirectory: '/home/tester',
   };
   assert.equal(
@@ -92,7 +92,10 @@ test('default mutation quarantine paths are stable and worker scoped', () => {
   );
   assert.notEqual(
     defaultWorkspaceQuarantinePath(options),
-    defaultWorkspaceQuarantinePath({ ...options, workspaceId: 'secondary' }),
+    defaultWorkspaceQuarantinePath({
+      ...options,
+      workspaceRoot: '/srv/workspaces/secondary',
+    }),
   );
   assert.notEqual(
     defaultWorkspaceQuarantinePath(options),
@@ -163,8 +166,9 @@ test('workspace mutation quarantine persists until explicitly cleared', async (t
     await saveWorkspaceMutationQuarantine(path, record);
     assert.deepEqual(await loadWorkspaceMutationQuarantine(path), record);
     assert.equal((await stat(path)).mode & 0o777, 0o600);
-    assert.equal(syncCalls, process.platform === 'win32' ? 1 : 2);
+    assert.equal(syncCalls, process.platform === 'win32' ? 1 : 3);
     await clearWorkspaceMutationQuarantine(path);
+    assert.equal(syncCalls, process.platform === 'win32' ? 1 : 4);
     assert.equal(await loadWorkspaceMutationQuarantine(path), undefined);
     await writeFile(path, '{bad json', 'utf8');
     await assert.rejects(

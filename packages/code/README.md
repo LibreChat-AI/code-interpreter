@@ -194,9 +194,10 @@ quarantine marker that survives process restarts. The marker is armed before
 each mutation and removed only after Code API accepts its settlement. The worker
 refuses to register writable workspace tools while that marker exists. Inspect
 or restore the registered directory, then explicitly clear the marker with
-`librechat-code clear-workspace-quarantine [--workspace-id <id>]` before
-restarting it. `LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE` may override the
-marker path for managed deployments.
+`librechat-code clear-workspace-quarantine --worker-dir <same-directory>`
+before restarting it. Use `--default-workspace --workspace-id <id>` instead for
+an application-owned default directory. `LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE`
+may override the marker path for managed deployments.
 
 ## Local workspace tools (bridge preview)
 

@@ -70,6 +70,8 @@ export interface LocalWorkspaceToolsOptions {
 
 export interface WorkspaceToolExecutor {
   capabilities: BridgeWorkspaceToolCapabilities;
+  /** True only when every thrown mutation error proves no mutation committed. */
+  mutationFailuresAreAtomic?: true;
   execute(
     request: WorkspaceToolRequest,
     signal?: AbortSignal,
@@ -1200,6 +1202,7 @@ async function withinListDeadline<T>(
 
 export class LocalWorkspaceTools implements WorkspaceToolExecutor {
   readonly capabilities: BridgeWorkspaceToolCapabilities;
+  readonly mutationFailuresAreAtomic = true as const;
 
   private constructor(
     private readonly roots: ReadonlyMap<string, WorkspaceRoot>,

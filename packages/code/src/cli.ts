@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
@@ -39,12 +40,14 @@ function workspaceSecurityIdentity(
 function workspaceQuarantinePath(options: {
   codeApiUrl: string;
   workerId: string;
-  workspaceId: string;
+  workspaceRoot?: string;
 }): string {
-  return (
-    process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim() ||
-    defaultWorkspaceQuarantinePath(options)
-  );
+  const override = process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim();
+  if (override) return override;
+  return defaultWorkspaceQuarantinePath({
+    ...options,
+    workspaceRoot: required('workspace directory', options.workspaceRoot),
+  });
 }
 
 function required(name: string, value = process.env[name]): string {
@@ -267,16 +270,25 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
           workspaceId,
         })
       : undefined);
-  const mutationQuarantinePath = allowWorkspaceWrites
-    ? workspaceQuarantinePath({
-        codeApiUrl,
-        workerId,
-        workspaceId,
-      })
-    : undefined;
   if (useDefaultWorkspace && workerDirectory) {
     await ensurePrivateWorkspaceDirectory(workerDirectory);
   }
+  let canonicalWorkerDirectory: string | undefined;
+  if (workerDirectory) {
+    try {
+      canonicalWorkerDirectory = await realpath(workerDirectory);
+    } catch {
+      throw new Error('Invalid workspace registration');
+    }
+  }
+  const mutationQuarantinePath =
+    allowWorkspaceWrites && canonicalWorkerDirectory
+      ? workspaceQuarantinePath({
+          codeApiUrl,
+          workerId,
+          workspaceRoot: canonicalWorkerDirectory,
+        })
+      : undefined;
   const workspaceTools = workerDirectory
     ? await LocalWorkspaceTools.create({
         workspaces: [
@@ -548,10 +560,37 @@ async function clearMutationQuarantine(args: string[]): Promise<void> {
     option(args, '--workspace-id') ??
     process.env.LIBRECHAT_CODE_WORKSPACE_ID?.trim() ??
     'primary';
+  const explicitWorkerDirectory = nonEmpty(
+    option(args, '--worker-dir') ?? process.env.LIBRECHAT_CODE_WORKER_DIR?.trim(),
+  );
+  const useDefaultWorkspace =
+    args.includes('--default-workspace') ||
+    process.env.LIBRECHAT_CODE_DEFAULT_WORKSPACE?.trim().toLowerCase() ===
+      'true';
+  if (explicitWorkerDirectory && useDefaultWorkspace) {
+    throw new Error(
+      '--worker-dir and --default-workspace cannot be used together',
+    );
+  }
+  const workerDirectory =
+    explicitWorkerDirectory ??
+    (useDefaultWorkspace
+      ? defaultWorkspacePath({
+          codeApiUrl,
+          securityIdentity: workspaceSecurityIdentity(
+            pairedIdentity?.publicKey,
+            configuredToken,
+          ),
+          workerId,
+          workspaceId,
+        })
+      : undefined);
   const path = workspaceQuarantinePath({
     codeApiUrl,
     workerId,
-    workspaceId,
+    workspaceRoot: workerDirectory
+      ? await realpath(workerDirectory)
+      : undefined,
   });
   await clearWorkspaceMutationQuarantine(path);
   process.stdout.write(

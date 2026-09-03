@@ -200,24 +200,15 @@ function supportedWorkspaceCapabilities(
     supported.includes(operation),
   );
   if (operations.length === 0) return undefined;
-  const supportsEntireProtocol =
-    operations.length === desired.operations.length;
-  const supportsWorkspaceRestrictions =
-    supportsEntireProtocol ||
-    operations.some(
-      (operation) => operation === 'write_file' || operation === 'edit_file',
+  const workspaces = desired.workspaces.flatMap((workspace) => {
+    if (workspace.operations == null) return [workspace];
+    const workspaceOperations = workspace.operations.filter((operation) =>
+      operations.includes(operation),
     );
-  const workspaces = supportsWorkspaceRestrictions
-    ? desired.workspaces.flatMap((workspace) => {
-        if (workspace.operations == null) return [workspace];
-        const workspaceOperations = workspace.operations.filter((operation) =>
-          operations.includes(operation),
-        );
-        return workspaceOperations.length === 0
-          ? []
-          : [{ ...workspace, operations: workspaceOperations }];
-      })
-    : desired.workspaces.map(({ operations: _, ...workspace }) => workspace);
+    return workspaceOperations.length === 0
+      ? []
+      : [{ ...workspace, operations: workspaceOperations }];
+  });
   if (workspaces.length === 0) return undefined;
   return {
     ...capabilities,
@@ -987,7 +978,11 @@ export class BridgeWorker {
       }
       if (
         workspaceMutationApplied ||
-        (workspaceMutationArmed && !(error instanceof WorkspaceToolError))
+        (workspaceMutationArmed &&
+          !(
+            error instanceof WorkspaceToolError &&
+            this.options.workspaceTools?.mutationFailuresAreAtomic === true
+          ))
       ) {
         ambiguousWorkspaceMutationError = error;
       }
