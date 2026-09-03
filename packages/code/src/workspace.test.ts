@@ -334,6 +334,27 @@ test('listing rejects invalid UTF-8 bytes instead of aliasing a valid filename',
   assert.equal(result.paths.includes('\ufffd.txt'), false);
 });
 
+test('listing preserves a leading UTF-8 BOM in a filename', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, '\ufefffoo.txt'), 'bom filename');
+  await writeFile(join(root, 'foo.txt'), 'ignored sibling');
+  await writeFile(join(root, '.ignore'), 'foo.txt\n');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+  });
+
+  if (result.operation !== 'list_files') assert.fail('expected list result');
+  assert.equal(result.paths.includes('\ufefffoo.txt'), true);
+  assert.equal(result.paths.includes('foo.txt'), false);
+});
+
 test('listing excludes a non-regular explicit target', async (t) => {
   if (sep === '\\') return;
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));

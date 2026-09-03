@@ -584,14 +584,19 @@ async function listWorkspaceFiles(
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
     };
+    const pathDecoder = new TextDecoder('utf-8', {
+      fatal: true,
+      ignoreBOM: true,
+    });
     const consumePath = (rawPath: Buffer) => {
       if (rawPath.length === 0 || stoppedForLimit) return;
       let path: string;
       try {
-        path = new TextDecoder('utf-8', { fatal: true }).decode(rawPath);
+        path = pathDecoder.decode(rawPath);
       } catch {
         return;
       }
+      if (!Buffer.from(path).equals(rawPath)) return;
       if (candidates.length === maxResults + BRIDGE_WORKSPACE_LIST_MAX_RESULTS) {
         truncated = true;
         stoppedForLimit = true;
