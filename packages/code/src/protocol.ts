@@ -9,6 +9,7 @@ export const BRIDGE_WORKSPACE_PATH_MAX_LENGTH = 4096;
 export const BRIDGE_WORKSPACE_QUERY_MAX_LENGTH = 4096;
 export const BRIDGE_WORKSPACE_READ_MAX_BYTES = 1024 * 1024;
 export const BRIDGE_WORKSPACE_WRITE_MAX_BYTES = 1024 * 1024;
+export const BRIDGE_WORKSPACE_EDIT_MAX_EDITS = 100;
 export const BRIDGE_WORKSPACE_READ_MAX_LINES = 500;
 export const BRIDGE_WORKSPACE_SEARCH_MAX_RESULTS = 200;
 export const BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH = 2000;
@@ -132,6 +133,15 @@ export interface WorkspaceEditFileRequest {
   operation: 'edit_file';
   workspaceId: string;
   path: string;
+  /** Legacy single-edit form. Mutually exclusive with edits. */
+  oldText?: string;
+  /** Legacy single-edit form. Mutually exclusive with edits. */
+  newText?: string;
+  /** Ordered exact replacements applied atomically as one file mutation. */
+  edits?: WorkspaceTextEdit[];
+}
+
+export interface WorkspaceTextEdit {
   oldText: string;
   newText: string;
 }
@@ -141,7 +151,7 @@ export interface WorkspaceEditFileResult {
   operation: 'edit_file';
   workspaceId: string;
   path: string;
-  replacements: 1;
+  replacements: number;
   bytesWritten: number;
 }
 
@@ -223,7 +233,9 @@ const WORKSPACE_EDIT_REQUEST_KEYS = new Set([
   'path',
   'oldText',
   'newText',
+  'edits',
 ]);
+const WORKSPACE_TEXT_EDIT_KEYS = new Set(['oldText', 'newText']);
 const WORKSPACE_COMMAND_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
@@ -496,6 +508,55 @@ function isWithinRequestedPath(candidate: string, requested?: string): boolean {
   );
 }
 
+function isValidWorkspaceEditRequest(request: Record<string, unknown>): boolean {
+  const hasBatch = request.edits !== undefined;
+  if (hasBatch && (request.oldText !== undefined || request.newText !== undefined)) {
+    return false;
+  }
+  const edits = hasBatch
+    ? request.edits
+    : [{ oldText: request.oldText, newText: request.newText }];
+  if (
+    !Array.isArray(edits) ||
+    edits.length < 1 ||
+    edits.length > BRIDGE_WORKSPACE_EDIT_MAX_EDITS
+  ) {
+    return false;
+  }
+  let totalBytes = 0;
+  for (const edit of edits) {
+    if (
+      typeof edit !== 'object' ||
+      edit === null ||
+      !hasOnlyKeys(edit as Record<string, unknown>, WORKSPACE_TEXT_EDIT_KEYS)
+    ) {
+      return false;
+    }
+    const candidate = edit as Record<string, unknown>;
+    if (
+      typeof candidate.oldText !== 'string' ||
+      candidate.oldText.length === 0 ||
+      Buffer.from(candidate.oldText).toString('utf8') !== candidate.oldText ||
+      typeof candidate.newText !== 'string' ||
+      Buffer.from(candidate.newText).toString('utf8') !== candidate.newText
+    ) {
+      return false;
+    }
+    const oldBytes = new TextEncoder().encode(candidate.oldText).byteLength;
+    const newBytes = new TextEncoder().encode(candidate.newText).byteLength;
+    totalBytes += oldBytes + newBytes;
+    if (
+      (hasBatch && totalBytes > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) ||
+      (!hasBatch &&
+        (oldBytes > BRIDGE_WORKSPACE_WRITE_MAX_BYTES ||
+          newBytes > BRIDGE_WORKSPACE_WRITE_MAX_BYTES))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function hasOnlyKeys(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
@@ -575,15 +636,7 @@ export function isWorkspaceToolRequest(
     return (
       hasOnlyKeys(request, WORKSPACE_EDIT_REQUEST_KEYS) &&
       isSafePortableRelativePath(request.path) &&
-      typeof request.oldText === 'string' &&
-      request.oldText.length > 0 &&
-      Buffer.from(request.oldText).toString('utf8') === request.oldText &&
-      new TextEncoder().encode(request.oldText).byteLength <=
-        BRIDGE_WORKSPACE_WRITE_MAX_BYTES &&
-      typeof request.newText === 'string' &&
-      Buffer.from(request.newText).toString('utf8') === request.newText &&
-      new TextEncoder().encode(request.newText).byteLength <=
-        BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+      isValidWorkspaceEditRequest(request)
     );
   }
   if (request.operation === 'execute_command') {
@@ -700,10 +753,11 @@ export function isWorkspaceToolResult(
   }
 
   if (request.operation === 'edit_file') {
+    const replacements = request.edits?.length ?? 1;
     return (
       hasOnlyKeys(result, WORKSPACE_EDIT_RESULT_KEYS) &&
       result.path === request.path &&
-      result.replacements === 1 &&
+      result.replacements === replacements &&
       Number.isSafeInteger(result.bytesWritten) &&
       Number(result.bytesWritten) >= 0 &&
       Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES

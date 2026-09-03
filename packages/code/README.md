@@ -275,6 +275,9 @@ with `--allow-workspace-writes` or
 `overwrite: false` to require an atomic create that returns `EDIT_CONFLICT` if
 the target already exists. Code API dispatches that mode only after the worker
 and server negotiate `create` in `writeFileModes`.
+`edit_file` accepts either the legacy `oldText`/`newText` pair or an ordered
+`edits` array; every exact replacement is validated before the updated file is
+installed as one atomic mutation.
 Only IDs, names, protocol version, supported operations, and negotiated write
 modes appear in worker capabilities; absolute host paths remain local to the
 worker process.

@@ -235,6 +235,47 @@ test('workspace mutations accept bounded UTF-8 requests and exact result shapes'
     }),
     true,
   );
+  const batchEditRequest = {
+    protocolVersion: 1 as const,
+    operation: 'edit_file' as const,
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    edits: [
+      { oldText: 'hello', newText: 'goodbye' },
+      { oldText: 'world', newText: 'BYOM' },
+    ],
+  };
+  assert.equal(isWorkspaceToolRequest(batchEditRequest), true);
+  assert.equal(
+    isWorkspaceToolRequest({ ...batchEditRequest, oldText: 'mixed' }),
+    false,
+  );
+  assert.equal(isWorkspaceToolRequest({ ...batchEditRequest, edits: [] }), false);
+  assert.equal(
+    isWorkspaceToolRequest({
+      ...batchEditRequest,
+      edits: Array.from({ length: 101 }, () => ({ oldText: 'a', newText: 'b' })),
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolRequest({
+      ...batchEditRequest,
+      edits: [{ oldText: 'a'.repeat(600_000), newText: 'b'.repeat(600_000) }],
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(batchEditRequest, {
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      replacements: 2,
+      bytesWritten: 12,
+    }),
+    true,
+  );
 });
 
 test('workspace commands require bounded sandbox inputs and outputs', () => {
