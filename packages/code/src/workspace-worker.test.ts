@@ -1469,6 +1469,39 @@ test('worker refuses to advertise workspace tools without a matching executor', 
   );
 });
 
+test('worker requires durable quarantine before advertising command execution', () => {
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['execute_command' as const],
+    workspaces: [
+      { id: 'primary', operations: ['execute_command' as const] },
+    ],
+  };
+  assert.throws(
+    () =>
+      new BridgeWorker({
+        codeApiUrl: 'https://code.example/v1',
+        token: 'worker-secret',
+        workerId: 'vm-1',
+        incarnationId,
+        sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+        capabilities: {
+          statefulWorkspace: true,
+          sandboxProfile: 'nsjail',
+          runtimes: ['bash'],
+          workspaceTools: workspaceCapabilities,
+        },
+        workspaceTools: {
+          capabilities: workspaceCapabilities,
+          async execute() {
+            throw new Error('not executed');
+          },
+        },
+      }),
+    /durable quarantine storage/i,
+  );
+});
+
 test('worker compares workspace capabilities structurally', () => {
   assert.doesNotThrow(
     () =>

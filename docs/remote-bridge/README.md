@@ -137,9 +137,10 @@ listings, and later tool results necessarily cross the outbound bridge to Code
 API and the model.
 Treat them as explicit tool outputs, apply the same retention and audit policy
 as chat content, and do not register a directory containing secrets. The
-default operations are read-only. Shell execution remains a separate future
-capability because it requires a sandboxed process boundary in addition to
-LibreChat's tool-approval hooks and worker capability checks.
+default operations are read-only. The bridge protocol reserves a bounded
+`execute_command` operation, but the local filesystem executor and CLI do not
+advertise it. A later layer must bind it to a sandboxed process boundary and
+LibreChat's tool-approval hooks before it becomes dispatchable.
 
 Stateful deployments must also set `LIBRECHAT_CODE_STATEFUL_WORKSPACE=true`
 and route the CLI's `{runtimeSessionId}` endpoint template to an isolated,

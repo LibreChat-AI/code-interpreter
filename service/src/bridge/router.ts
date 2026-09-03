@@ -385,6 +385,7 @@ router.post(
           'list_files',
           'write_file',
           'edit_file',
+          'execute_command',
         ],
       });
     } catch (error) {

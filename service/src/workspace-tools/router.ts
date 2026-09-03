@@ -103,17 +103,20 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
           let status = 422;
           if (
             settlement.errorCode === 'SEARCH_TIMEOUT' ||
-            settlement.errorCode === 'LIST_TIMEOUT'
+            settlement.errorCode === 'LIST_TIMEOUT' ||
+            settlement.errorCode === 'COMMAND_TIMEOUT'
           ) {
             status = 504;
           }
           if (
             settlement.errorCode === 'SEARCH_UNAVAILABLE' ||
-            settlement.errorCode === 'LIST_UNAVAILABLE'
+            settlement.errorCode === 'LIST_UNAVAILABLE' ||
+            settlement.errorCode === 'COMMAND_UNAVAILABLE'
           ) {
             status = 503;
           }
           if (settlement.errorCode === 'WRITE_DISABLED') status = 403;
+          if (settlement.errorCode === 'COMMAND_DISABLED') status = 403;
           if (settlement.errorCode === 'WRITE_LIMIT_EXCEEDED') status = 413;
           if (settlement.errorCode === 'WRITE_UNAVAILABLE') status = 503;
           if (settlement.errorCode === 'EDIT_CONFLICT') status = 409;

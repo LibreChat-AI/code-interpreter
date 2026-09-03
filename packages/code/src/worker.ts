@@ -285,7 +285,10 @@ export class BridgeWorker {
     }
     if (
       options.capabilities.workspaceTools?.operations.some(
-        (operation) => operation === 'write_file' || operation === 'edit_file',
+        (operation) =>
+          operation === 'write_file' ||
+          operation === 'edit_file' ||
+          operation === 'execute_command',
       ) === true &&
       options.workspaceMutationQuarantine == null
     ) {
@@ -874,7 +877,8 @@ export class BridgeWorker {
         }
         const isMutation =
           workspaceRequest.operation === 'write_file' ||
-          workspaceRequest.operation === 'edit_file';
+          workspaceRequest.operation === 'edit_file' ||
+          workspaceRequest.operation === 'execute_command';
         if (isMutation) {
           this.mutationGuardArmed = true;
           try {
@@ -1277,7 +1281,8 @@ export class BridgeWorker {
       assignment.executionKind === 'workspace_tool' &&
       isWorkspaceToolRequest(assignment.request) &&
       (assignment.request.operation === 'write_file' ||
-        assignment.request.operation === 'edit_file');
+        assignment.request.operation === 'edit_file' ||
+        assignment.request.operation === 'execute_command');
     if (signal?.aborted === true) {
       if (assignment.runtimeSessionId != null || fulfilledWorkspaceMutation) {
         throw await this.quarantineWorkspace(
