@@ -28,6 +28,7 @@ export type BridgeWorkspaceToolOperation =
   | 'search_text'
   | 'list_files'
   | 'write_file'
+  | 'preview_edit'
   | 'edit_file'
   | 'execute_command';
 
@@ -136,6 +137,8 @@ interface WorkspaceEditFileRequestBase {
   operation: 'edit_file';
   workspaceId: string;
   path: string;
+  /** Refuses the mutation unless current file bytes match this preview revision. */
+  expectedBaseSha256?: string;
 }
 
 export interface WorkspaceSingleEditFileRequest
@@ -173,6 +176,27 @@ export interface WorkspaceEditFileResult {
   bytesWritten: number;
 }
 
+export interface WorkspacePreviewEditRequest {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'preview_edit';
+  workspaceId: string;
+  path: string;
+  oldText?: string;
+  newText?: string;
+  edits?: WorkspaceTextEdit[];
+}
+
+export interface WorkspacePreviewEditResult {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'preview_edit';
+  workspaceId: string;
+  path: string;
+  content: string;
+  baseSha256: string;
+  replacements: number;
+  bytesWritten: number;
+}
+
 export interface WorkspaceExecuteCommandRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'execute_command';
@@ -203,6 +227,7 @@ export type WorkspaceToolRequest =
   | WorkspaceSearchTextRequest
   | WorkspaceListFilesRequest
   | WorkspaceWriteFileRequest
+  | WorkspacePreviewEditRequest
   | WorkspaceEditFileRequest
   | WorkspaceExecuteCommandRequest;
 export type WorkspaceToolResult =
@@ -210,6 +235,7 @@ export type WorkspaceToolResult =
   | WorkspaceSearchTextResult
   | WorkspaceListFilesResult
   | WorkspaceWriteFileResult
+  | WorkspacePreviewEditResult
   | WorkspaceEditFileResult
   | WorkspaceExecuteCommandResult;
 
@@ -245,6 +271,16 @@ const WORKSPACE_WRITE_REQUEST_KEYS = new Set([
   'overwrite',
 ]);
 const WORKSPACE_EDIT_REQUEST_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'path',
+  'oldText',
+  'newText',
+  'edits',
+  'expectedBaseSha256',
+]);
+const WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
@@ -301,6 +337,16 @@ const WORKSPACE_EDIT_RESULT_KEYS = new Set([
   'operation',
   'workspaceId',
   'path',
+  'replacements',
+  'bytesWritten',
+]);
+const WORKSPACE_PREVIEW_EDIT_RESULT_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'path',
+  'content',
+  'baseSha256',
   'replacements',
   'bytesWritten',
 ]);
@@ -652,10 +698,20 @@ export function isWorkspaceToolRequest(
         typeof request.overwrite === 'boolean')
     );
   }
+  if (request.operation === 'preview_edit') {
+    return (
+      hasOnlyKeys(request, WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS) &&
+      isSafePortableRelativePath(request.path) &&
+      isValidWorkspaceEditRequest(request)
+    );
+  }
   if (request.operation === 'edit_file') {
     return (
       hasOnlyKeys(request, WORKSPACE_EDIT_REQUEST_KEYS) &&
       isSafePortableRelativePath(request.path) &&
+      (request.expectedBaseSha256 === undefined ||
+        (typeof request.expectedBaseSha256 === 'string' &&
+          /^[a-f0-9]{64}$/.test(request.expectedBaseSha256))) &&
       isValidWorkspaceEditRequest(request)
     );
   }
@@ -784,6 +840,24 @@ export function isWorkspaceToolResult(
     );
   }
 
+  if (request.operation === 'preview_edit') {
+    const replacements = request.edits?.length ?? 1;
+    const content = typeof result.content === 'string' ? result.content : null;
+    return (
+      hasOnlyKeys(result, WORKSPACE_PREVIEW_EDIT_RESULT_KEYS) &&
+      result.path === request.path &&
+      content !== null &&
+      Buffer.from(content).toString('utf8') === content &&
+      typeof result.baseSha256 === 'string' &&
+      /^[a-f0-9]{64}$/.test(result.baseSha256) &&
+      result.replacements === replacements &&
+      Number.isSafeInteger(result.bytesWritten) &&
+      Number(result.bytesWritten) ===
+        new TextEncoder().encode(content).byteLength &&
+      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+    );
+  }
+
   if (request.operation === 'execute_command') {
     const stdout = typeof result.stdout === 'string' ? result.stdout : null;
     const stderr = typeof result.stderr === 'string' ? result.stderr : null;
@@ -847,13 +921,14 @@ export function isValidBridgeWorkspaceToolCapabilities(
     capabilities.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
     !Array.isArray(capabilities.operations) ||
     capabilities.operations.length < 1 ||
-    capabilities.operations.length > 6 ||
+    capabilities.operations.length > 7 ||
     !capabilities.operations.every(
       (operation) =>
         operation === 'read_file' ||
         operation === 'search_text' ||
         operation === 'list_files' ||
         operation === 'write_file' ||
+        operation === 'preview_edit' ||
         operation === 'edit_file' ||
         operation === 'execute_command',
     ) ||

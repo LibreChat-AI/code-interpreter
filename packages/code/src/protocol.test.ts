@@ -328,6 +328,38 @@ test('workspace mutations accept bounded UTF-8 requests and exact result shapes'
     }),
     true,
   );
+  const previewRequest = {
+    ...batchEditRequest,
+    operation: 'preview_edit' as const,
+  };
+  assert.equal(isWorkspaceToolRequest(previewRequest), true);
+  assert.equal(
+    isWorkspaceToolResult(previewRequest, {
+      protocolVersion: 1,
+      operation: 'preview_edit',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      content: 'goodbye BYOM',
+      baseSha256: 'a'.repeat(64),
+      replacements: 2,
+      bytesWritten: 12,
+    }),
+    true,
+  );
+  assert.equal(
+    isWorkspaceToolRequest({
+      ...editRequest,
+      expectedBaseSha256: 'b'.repeat(64),
+    }),
+    true,
+  );
+  assert.equal(
+    isWorkspaceToolRequest({
+      ...editRequest,
+      expectedBaseSha256: 'not-a-sha',
+    }),
+    false,
+  );
 });
 
 test('workspace commands require bounded sandbox inputs and outputs', () => {

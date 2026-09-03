@@ -151,6 +151,7 @@ test('CLI advertises explicitly enabled writes without exposing the workspace ro
               'search_text',
               'list_files',
               'write_file',
+              'preview_edit',
               'edit_file',
             ],
           }),
@@ -215,6 +216,7 @@ test('CLI advertises explicitly enabled writes without exposing the workspace ro
         'search_text',
         'list_files',
         'write_file',
+        'preview_edit',
         'edit_file',
       ],
       workspaces: [
@@ -226,6 +228,7 @@ test('CLI advertises explicitly enabled writes without exposing the workspace ro
             'search_text',
             'list_files',
             'write_file',
+            'preview_edit',
             'edit_file',
           ],
         },
