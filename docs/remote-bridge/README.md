@@ -86,6 +86,52 @@ locally, proves possession on every request, and rotates its short-lived
 credential before expiry. `CODEAPI_BRIDGE_AUTH_MODE=static` remains available
 for non-hardened development compatibility only.
 
+To expose an existing checkout as a worker-local workspace, start the CLI with
+an explicit directory and logical ID:
+
+```bash
+librechat-code run \
+  --worker-dir /srv/checkouts/librechat \
+  --workspace-id primary \
+  --workspace-name LibreChat
+```
+
+The worker advertises only the workspace ID, optional display name, and
+supported operations. Its host path is never registered with Code API. An
+authenticated caller can execute the initial read-only operations through:
+
+```bash
+curl -fsS https://code.example.com/v1/workspace-tools/execute \
+  -H "Authorization: Bearer $LIBRECHAT_JWT" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "protocolVersion":1,
+    "operation":"read_file",
+    "workspaceId":"primary",
+    "path":"README.md",
+    "startLine":1,
+    "maxLines":200
+  }'
+```
+
+The endpoint uses the same authenticated principal-bound worker selection,
+tenant fence, lease deadline, cancellation, and settlement lifecycle as remote
+sandbox execution. Requests must name a workspace and operation advertised by
+that worker. Results are validated against the originating request before they
+leave Code API, and are bounded to 1 MiB/500 lines for reads or 200 matches for
+searches. Absolute paths, traversal, backslashes, symlink escapes, unexpected
+fields, and host roots are rejected.
+
+The workspace root can be an existing project, a Git repository, or an empty
+directory; Git is not required. This boundary keeps that directory local to the
+operator's machine, but the selected file contents, search matches, and later
+tool results necessarily cross the outbound bridge to Code API and the model.
+Treat them as explicit tool outputs, apply the same retention and audit policy
+as chat content, and do not register a directory containing secrets. The
+default operations are read-only; future mutation and shell operations must be
+gated by LibreChat's tool-approval hooks in addition to worker capability
+checks.
+
 Stateful deployments must also set `LIBRECHAT_CODE_STATEFUL_WORKSPACE=true`
 and route the CLI's `{runtimeSessionId}` endpoint template to an isolated,
 persistent local runner per session. A single sandbox endpoint is stateless and

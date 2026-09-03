@@ -7,7 +7,7 @@ import {
 } from './protocol.js';
 import { EndpointRuntimeSupervisor } from './runtime.js';
 import { signBridgeRequest } from './identity.js';
-import { isWorkspaceToolRequest } from './workspace.js';
+import { isWorkspaceToolRequest, WorkspaceToolError } from './workspace.js';
 
 import type {
   BridgeAssignment,
@@ -790,6 +790,10 @@ export class BridgeWorker {
         leaseToken: assignment.leaseToken,
         incarnationId: this.incarnationId,
         status: 'rejected',
+        ...(assignment.executionKind === 'workspace_tool' &&
+        error instanceof WorkspaceToolError
+          ? { errorCode: error.code }
+          : {}),
         error:
           (error instanceof Error
             ? error.message

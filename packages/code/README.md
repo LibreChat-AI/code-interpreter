@@ -191,7 +191,9 @@ API did not commit.
 ## Local workspace tools (bridge preview)
 
 `@librechat/code/workspace` provides the provider-neutral foundation for
-coding-agent access to repositories that already live on the worker machine.
+coding-agent access to workspace directories on the worker machine. A workspace
+may be an existing project, a Git repository, or a newly created empty
+directory; Git is optional.
 `LocalWorkspaceTools` registers opaque workspace IDs with optional display
 names and exposes bounded `read_file` and literal `search_text` operations.
 Only IDs, names, protocol version, and supported operations appear in worker
@@ -207,11 +209,11 @@ and stops after a bounded global result count. The worker process still belongs
 inside the trusted BYOM boundary and should receive filesystem access only to
 roots the operator intentionally registers.
 
-Register one repository already present on the worker machine with the
-Cursor-style worker-directory option:
+Register one directory already present on the worker machine with the
+worker-directory option:
 
 ```bash
-librechat-code run --worker-dir /path/to/repository
+librechat-code run --worker-dir /path/to/workspace
 ```
 
 The default public workspace ID is `primary` and the default display name is
@@ -223,7 +225,7 @@ explicitly. `rg` must be installed on the worker for `search_text`.
 The worker advertises these capabilities only when a directory is configured
 and executes matching assignments under the bridge's existing lease,
 deadline, cancellation, credential-refresh, and settlement fencing. The
-repository itself remains on the worker. As with Cursor's self-hosted agents,
+workspace itself remains on the worker. As with Cursor's self-hosted agents,
 text deliberately selected by `read_file` or `search_text` crosses the outbound
 bridge so the remote agent/model can reason over it. Host paths are never part
 of that payload. The Code API workspace-tool endpoint is delivered as a

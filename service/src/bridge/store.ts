@@ -6,9 +6,15 @@ import type {
   BridgeAssignment,
   BridgeSettlement,
   BridgeWorkerRegistration,
+  WorkspaceToolRequest,
+  WorkspaceToolResult,
 } from '../../../packages/code/src/protocol';
 
-import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  isWorkspaceToolRequest,
+  isWorkspaceToolResult,
+} from '../../../packages/code/src/protocol';
 import type { BridgeWorkerBinding } from './pairing';
 
 const PREFIX = 'codeapi:bridge:v1';
@@ -24,6 +30,10 @@ export type CodeBridgeSettlement = BridgeSettlement<
     run?: t.ExecuteResponse['run'];
   }
 >;
+export type CodeBridgeWorkspaceSettlement = BridgeSettlement<WorkspaceToolResult>;
+type AnyCodeBridgeSettlement =
+  | CodeBridgeSettlement
+  | CodeBridgeWorkspaceSettlement;
 
 export class BridgeStoreError extends Error {
   constructor(
@@ -37,7 +47,9 @@ export class BridgeStoreError extends Error {
       | 'WORKER_FENCED'
       | 'WORKER_QUARANTINED'
       | 'WORKSPACE_QUARANTINED'
-      | 'WORKER_MISMATCH',
+      | 'WORKER_MISMATCH'
+      | 'ASSIGNMENT_INVALID'
+      | 'RESULT_INVALID',
     message: string,
   ) {
     super(message);
@@ -54,6 +66,20 @@ export interface RegisteredBridgeWorker extends BridgeWorkerRegistration {
   binding?: BridgeWorkerBinding;
   credentialId?: string;
   identityId?: string;
+}
+
+function supportsWorkspaceTool(
+  registration: RegisteredBridgeWorker,
+  request: WorkspaceToolRequest,
+): boolean {
+  const capabilities = registration.capabilities.workspaceTools;
+  return (
+    capabilities != null &&
+    capabilities.operations.includes(request.operation) &&
+    capabilities.workspaces.some(
+      (workspace) => workspace.id === request.workspaceId,
+    )
+  );
 }
 
 function workerKey(workerId: string): string {
@@ -442,12 +468,45 @@ export class RedisBridgeStore {
     }
   }
 
+  async dispatchWorkspaceTool(args: {
+    workerId: string;
+    tenantId?: string;
+    requireTenantBinding?: boolean;
+    request: WorkspaceToolRequest;
+    deadlineAtMs: number;
+    signal: AbortSignal;
+  }): Promise<CodeBridgeWorkspaceSettlement> {
+    if (!isWorkspaceToolRequest(args.request)) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_INVALID',
+        'Invalid workspace tool request',
+      );
+    }
+    const settlement = (await this.dispatch({
+      ...args,
+      body: {} as t.PayloadBody,
+      headers: {},
+      workspaceRequest: args.request,
+    })) as unknown as CodeBridgeWorkspaceSettlement;
+    if (
+      settlement.status === 'fulfilled' &&
+      !isWorkspaceToolResult(args.request, settlement.result)
+    ) {
+      throw new BridgeStoreError(
+        'RESULT_INVALID',
+        'Bridge worker returned an invalid workspace tool result',
+      );
+    }
+    return settlement;
+  }
+
   async dispatch(args: {
     workerId: string;
     tenantId?: string;
     requireTenantBinding?: boolean;
     body: t.PayloadBody;
     headers: Record<string, string>;
+    workspaceRequest?: WorkspaceToolRequest;
     runtimeSessionId?: string;
     deadlineAtMs: number;
     signal: AbortSignal;
@@ -487,6 +546,15 @@ export class RedisBridgeStore {
       throw new BridgeStoreError(
         'WORKER_MISMATCH',
         `Bridge worker ${args.workerId} does not provide a stateful workspace`,
+      );
+    }
+    if (
+      args.workspaceRequest != null &&
+      !supportsWorkspaceTool(registration, args.workspaceRequest)
+    ) {
+      throw new BridgeStoreError(
+        'WORKER_MISMATCH',
+        `Bridge worker ${args.workerId} does not advertise the requested workspace tool`,
       );
     }
     if (
@@ -549,10 +617,17 @@ export class RedisBridgeStore {
           : {}),
         expiresAt: new Date(args.deadlineAtMs).toISOString(),
         runtimeSessionId: args.runtimeSessionId,
-        request: {
-          body: args.body,
-          headers: args.headers,
-        },
+        ...(args.workspaceRequest != null
+          ? {
+              executionKind: 'workspace_tool' as const,
+              request: args.workspaceRequest,
+            }
+          : {
+              request: {
+                body: args.body,
+                headers: args.headers,
+              },
+            }),
       };
       let queued = false;
       for (let attempt = 0; attempt < 8 && !queued; attempt += 1) {
@@ -587,6 +662,15 @@ export class RedisBridgeStore {
           throw new BridgeStoreError(
             'WORKER_MISMATCH',
             `Bridge worker ${args.workerId} does not provide a stateful workspace`,
+          );
+        }
+        if (
+          args.workspaceRequest != null &&
+          !supportsWorkspaceTool(replacement.registration, args.workspaceRequest)
+        ) {
+          throw new BridgeStoreError(
+            'WORKER_MISMATCH',
+            `Bridge worker ${args.workerId} no longer advertises the requested workspace tool`,
           );
         }
         registration = replacement.registration;
@@ -948,7 +1032,7 @@ export class RedisBridgeStore {
   async settle(
     workerId: string,
     assignmentId: string,
-    settlement: CodeBridgeSettlement,
+    settlement: AnyCodeBridgeSettlement,
     signal?: AbortSignal,
     identityId?: string,
   ): Promise<void> {
@@ -1430,7 +1514,7 @@ export class RedisBridgeStore {
 
   private async commitPendingWorkspace(
     assignment: StoredAssignment,
-    settlement: CodeBridgeSettlement,
+    settlement: AnyCodeBridgeSettlement,
     deadlineAtMs: number,
     signal: AbortSignal,
   ): Promise<void> {

@@ -6,7 +6,11 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { LocalWorkspaceTools, WorkspaceToolError } from './workspace.js';
+import {
+  isWorkspaceToolResult,
+  LocalWorkspaceTools,
+  WorkspaceToolError,
+} from './workspace.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -67,7 +71,7 @@ test('rejects traversal outside a registered workspace without leaking its host 
     }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /invalid workspace path/i);
+      assert.match(error.message, /invalid workspace/i);
       assert.equal(error.message.includes(parent), false);
       return true;
     },
@@ -210,6 +214,35 @@ test('search does not read an explicitly targeted escaping symlink', async (t) =
   );
 });
 
+test('search preserves an in-workspace symlink namespace in returned paths', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'src'));
+  await writeFile(join(root, 'src', 'app.ts'), 'const needle = true;');
+  await symlink(join(root, 'src'), join(root, 'alias'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'search_text',
+    workspaceId: 'primary',
+    query: 'needle',
+    path: 'alias',
+  });
+
+  if (result.operation !== 'search_text') assert.fail('expected search result');
+  assert.deepEqual(result.matches, [
+    {
+      path: 'alias/app.ts',
+      line: 1,
+      column: 7,
+      text: 'const needle = true;',
+    },
+  ]);
+});
+
 test('search returns a bounded match for a very long line', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -245,7 +278,8 @@ test('search rejects multiline literal queries', async (t) => {
       workspaceId: 'primary',
       query: 'first\nsecond',
     }),
-    /invalid workspace search/i,
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
   );
 });
 
@@ -263,7 +297,8 @@ test('search rejects queries larger than its bounded preview', async (t) => {
       workspaceId: 'primary',
       query: 'a'.repeat(2001),
     }),
-    /invalid workspace search/i,
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
   );
 });
 
@@ -513,6 +548,31 @@ test('bounds bytes read from a workspace file', async (t) => {
   );
 });
 
+test('bounds workspace reads after UTF-16 decoding', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const utf16 = Buffer.from('\u4e00'.repeat(400_000), 'utf16le');
+  await writeFile(
+    join(root, 'large-utf16.txt'),
+    Buffer.concat([Buffer.from([0xff, 0xfe]), utf16]),
+  );
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'primary',
+      path: 'large-utf16.txt',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'READ_LIMIT_EXCEEDED',
+  );
+});
+
 test('rejects ambiguous workspace registrations', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -573,5 +633,116 @@ test('does not start workspace I/O after its execution is aborted', async (t) =>
       controller.signal,
     ),
     /workspace tool execution aborted/i,
+  );
+});
+
+test('validates workspace results against the originating request', () => {
+  const request = {
+    protocolVersion: 1 as const,
+    operation: 'read_file' as const,
+    workspaceId: 'primary',
+    path: 'README.md',
+  };
+  const result = {
+    protocolVersion: 1 as const,
+    operation: 'read_file' as const,
+    workspaceId: 'primary',
+    path: 'README.md',
+    content: '# LibreChat',
+    startLine: 1,
+    endLine: 1,
+    truncated: false,
+  };
+
+  assert.equal(isWorkspaceToolResult(request, result), true);
+  assert.equal(
+    isWorkspaceToolResult(request, { ...result, path: '/Users/operator/key' }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      root: '/Users/operator/private',
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      truncated: true,
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      content: '',
+      endLine: 0,
+      truncated: true,
+      nextStartLine: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      nextStartLine: 2,
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(
+      { ...request, maxLines: 1 },
+      { ...result, content: 'first\nsecond' },
+    ),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      matches: [
+        { path: 'src/index.ts', line: 1, column: 1, text: 'unrelated' },
+      ],
+    }),
+    false,
+  );
+});
+
+test('validates search result paths against the requested scope', () => {
+  const request = {
+    protocolVersion: 1 as const,
+    operation: 'search_text' as const,
+    workspaceId: 'primary',
+    query: 'needle',
+    path: './src',
+  };
+  const result = {
+    protocolVersion: 1 as const,
+    operation: 'search_text' as const,
+    workspaceId: 'primary',
+    matches: [
+      { path: 'src/index.ts', line: 1, column: 1, text: 'needle' },
+    ],
+    truncated: false,
+  };
+
+  assert.equal(isWorkspaceToolResult(request, result), true);
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      matches: [
+        { path: 'src-old/index.ts', line: 1, column: 1, text: 'needle' },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      matches: [
+        { path: 'secrets.env', line: 1, column: 1, text: 'needle' },
+      ],
+    }),
+    false,
   );
 });
