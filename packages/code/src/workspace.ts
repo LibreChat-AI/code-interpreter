@@ -840,6 +840,10 @@ async function listSearchCandidates(
         '--files',
         '--no-config',
         '--no-follow',
+        /* Deterministic order, as list_files uses: without it ripgrep's parallel
+         * walk decides both result order and which files survive truncation. */
+        '--sort',
+        'path',
         '--path-separator',
         '/',
         '--null',
