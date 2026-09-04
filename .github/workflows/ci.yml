@@ -121,6 +121,37 @@ jobs:
       - name: Bun tests
         run: bun run test
 
+  code-package-tests:
+    name: Code Package Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/code
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          # The suite fails 47 worker tests on Node 22 despite the package's
+          # ">=20.11" engines range, so CI pins the version it is green on.
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: packages/code/package-lock.json
+
+      - name: Install ripgrep
+        # list_files and search_text shell out to rg. Without it the workspace
+        # tools degrade to LIST_UNAVAILABLE / SEARCH_UNAVAILABLE and 37 tests
+        # fail, so the dependency is part of the job, not an assumption.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ripgrep
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Tests
+        run: npm test
+
   lambda-microvm-provisioning:
     name: Lambda MicroVM Provisioning
     runs-on: ubuntu-latest
