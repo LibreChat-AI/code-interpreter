@@ -1,5 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -170,7 +180,8 @@ test('workspace mutation quarantine persists until explicitly cleared', async (t
     await clearWorkspaceMutationQuarantine(path);
     assert.equal(syncCalls, process.platform === 'win32' ? 1 : 4);
     assert.equal(await loadWorkspaceMutationQuarantine(path), undefined);
-    await writeFile(path, '{bad json', 'utf8');
+    /* Owner-only, so this exercises the parse failure and not the mode check. */
+    await writeFile(path, '{bad json', { encoding: 'utf8', mode: 0o600 });
     await assert.rejects(
       loadWorkspaceMutationQuarantine(path),
       /invalid workspace quarantine file/i,
@@ -211,5 +222,154 @@ test('workspace mutation quarantine cannot be replaced or cleared by another own
     assert.equal(await loadWorkspaceMutationQuarantine(path), undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+const SAMPLE_IDENTITY = {
+  protocolVersion: 1 as const,
+  workerId: 'vm-1',
+  codeApiUrl: 'https://code.example/v1',
+  credential: 'credential',
+  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  publicKey: 'public',
+  privateKey: 'private',
+};
+
+/**
+ * Locate a mount that ignores POSIX permissions (WSL2 DrvFs under `/mnt/<drive>`).
+ * Returns undefined on hosts where every writable filesystem honours chmod.
+ */
+async function findChmodIgnoringDirectory(): Promise<string | undefined> {
+  const roots: string[] = [];
+  const configured = process.env.LIBRECHAT_CODE_TEST_NONPOSIX_DIR?.trim();
+  if (configured) roots.push(configured);
+  try {
+    for (const entry of await readdir('/mnt')) roots.push(join('/mnt', entry));
+  } catch {
+    /* No /mnt on this host. */
+  }
+  for (const root of roots) {
+    let directory: string | undefined;
+    try {
+      directory = await mkdtemp(join(root, 'librechat-code-mode-'));
+      const probe = join(directory, 'probe');
+      await writeFile(probe, '', { mode: 0o600 });
+      await chmod(probe, 0o600);
+      if (((await stat(probe)).mode & 0o077) !== 0) return directory;
+    } catch {
+      /* Root is absent or not writable. */
+    }
+    if (directory) await rm(directory, { recursive: true, force: true });
+  }
+  return undefined;
+}
+
+test('credential storage fails closed on filesystems that ignore chmod', async (t) => {
+  const directory = await findChmodIgnoringDirectory();
+  if (!directory) {
+    t.skip('no chmod-ignoring filesystem available on this host');
+    return;
+  }
+  try {
+    const identityPath = join(directory, 'worker.json');
+    await assert.rejects(
+      saveBridgeIdentity(identityPath, SAMPLE_IDENTITY),
+      /owner-only access/,
+    );
+    /* The private key must not be left behind on a world-readable path. */
+    await assert.rejects(stat(identityPath), { code: 'ENOENT' });
+
+    await assert.rejects(
+      ensurePrivateWorkspaceDirectory(join(directory, 'workspace')),
+      /owner-only access/,
+    );
+
+    const quarantinePath = join(directory, 'quarantine.json');
+    await assert.rejects(
+      saveWorkspaceMutationQuarantine(quarantinePath, {
+        version: 1,
+        workerId: 'vm-1',
+        workspaceId: 'primary',
+        quarantinedAt: new Date().toISOString(),
+        reason: 'test',
+      }),
+      /owner-only access/,
+    );
+    /* An unreadable half-written marker would wedge every later load. */
+    await assert.rejects(stat(quarantinePath), { code: 'ENOENT' });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('an already-exposed identity is refused on load', async (t) => {
+  const directory = await findChmodIgnoringDirectory();
+  if (!directory) {
+    t.skip('no chmod-ignoring filesystem available on this host');
+    return;
+  }
+  try {
+    /* Written the way a release without the save-time check would have. */
+    const path = join(directory, 'legacy-worker.json');
+    await writeFile(path, JSON.stringify(SAMPLE_IDENTITY), { mode: 0o600 });
+    await assert.rejects(loadBridgeIdentity(path), /accessible beyond its owner/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('an already-exposed quarantine marker is refused on load', async (t) => {
+  const directory = await findChmodIgnoringDirectory();
+  if (!directory) {
+    t.skip('no chmod-ignoring filesystem available on this host');
+    return;
+  }
+  try {
+    const path = join(directory, 'quarantine.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        workerId: 'vm-1',
+        workspaceId: 'primary',
+        ownerId: 'incarnation-1',
+        quarantinedAt: new Date().toISOString(),
+        reason: 'test',
+      }),
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      loadWorkspaceMutationQuarantine(path),
+      /accessible beyond its owner/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('a symlinked owner-only identity is accepted', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'librechat-code-storage-'));
+  try {
+    const target = join(base, 'real.json');
+    await saveBridgeIdentity(target, SAMPLE_IDENTITY);
+    /* A link's own mode is always 0777; the credential's mode is the target's. */
+    const link = join(base, 'link.json');
+    await symlink(target, link);
+    assert.deepEqual(await loadBridgeIdentity(link), SAMPLE_IDENTITY);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('default workspace directories are tightened when they already exist', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'librechat-code-storage-'));
+  try {
+    const workspace = join(base, 'workspace');
+    await mkdir(workspace, { mode: 0o777 });
+    await chmod(workspace, 0o777);
+    await ensurePrivateWorkspaceDirectory(workspace);
+    assert.equal((await stat(workspace)).mode & 0o777, 0o700);
+  } finally {
+    await rm(base, { recursive: true, force: true });
   }
 });

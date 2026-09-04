@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -149,6 +149,60 @@ export function defaultWorkspaceQuarantinePath(
   );
 }
 
+/**
+ * Verify a path really is owner-only. `chmod` reports success without effect on
+ * mounts that do not implement POSIX permissions - notably WSL2 DrvFs
+ * (`/mnt/<drive>`), where the result stays world-accessible - so a credential
+ * that cannot be protected must fail closed rather than appear protected.
+ *
+ * Symlinks are resolved: a link's own mode is always `0777` and ignored by the
+ * kernel, so the file the bytes live in is what counts.
+ */
+async function groupOrOtherAccessMode(
+  path: string,
+): Promise<number | undefined> {
+  if (process.platform === 'win32') return undefined;
+  const mode = (await stat(path)).mode & 0o777;
+  return (mode & 0o077) === 0 ? undefined : mode;
+}
+
+async function assertOwnerOnlyPath(
+  path: string,
+  reportedPath: string = path,
+): Promise<void> {
+  const mode = await groupOrOtherAccessMode(path);
+  if (mode === undefined) return;
+  throw new BridgeProtocolError(
+    `Cannot restrict ${reportedPath} to owner-only access (mode ${mode.toString(8)}). ` +
+      'Filesystems that ignore POSIX permissions, such as Windows drives mounted ' +
+      'under /mnt, cannot protect worker credentials or workspaces. Use a path on a ' +
+      'native Linux filesystem.',
+  );
+}
+
+/**
+ * Validate and read through one descriptor. Checking a path and then reading it
+ * resolves the name twice, so a symlink retargeted in between would let the file
+ * that was judged differ from the file that is read.
+ */
+async function readGuardedFile(
+  path: string,
+  exposed: (mode: string) => string,
+): Promise<string> {
+  const handle = await open(path, 'r');
+  try {
+    if (process.platform !== 'win32') {
+      const mode = (await handle.stat()).mode & 0o777;
+      if ((mode & 0o077) !== 0) {
+        throw new BridgeProtocolError(exposed(mode.toString(8)));
+      }
+    }
+    return await handle.readFile('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function ensurePrivateWorkspaceDirectory(
   path: string,
 ): Promise<void> {
@@ -158,6 +212,7 @@ export async function ensurePrivateWorkspaceDirectory(
     throw new BridgeProtocolError('Default workspace path must be a directory');
   }
   await chmod(path, 0o700);
+  await assertOwnerOnlyPath(path);
 }
 
 export async function saveBridgeIdentity(
@@ -169,6 +224,10 @@ export async function saveBridgeIdentity(
   try {
     const file = await open(temporaryPath, 'wx', 0o600);
     try {
+      /* Tighten every way available before judging, and judge before the key
+       * is written, so no private key reaches a world-readable path. */
+      await file.chmod(0o600);
+      await assertOwnerOnlyPath(temporaryPath, path);
       await file.writeFile(`${JSON.stringify(identity, null, 2)}\n`, 'utf8');
       await file.sync();
     } finally {
@@ -205,10 +264,24 @@ export async function saveWorkspaceMutationQuarantine(
   await ensureDurableDirectory(dirname(path));
   const file = await open(path, 'wx', 0o600);
   try {
-    await file.writeFile(`${JSON.stringify(record, null, 2)}\n`, 'utf8');
-    await file.sync();
-  } finally {
-    await file.close();
+    try {
+      await file.chmod(0o600);
+      await assertOwnerOnlyPath(path);
+      await file.writeFile(`${JSON.stringify(record, null, 2)}\n`, 'utf8');
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+  } catch (error) {
+    /* A partial marker fails every later load, so undoing it has to reach the
+     * disk as durably as the write it is undoing. */
+    await rm(path, { force: true });
+    try {
+      await syncParentDirectory(path);
+    } catch {
+      /* Surface the original failure, not a cleanup-durability one. */
+    }
+    throw error;
   }
   await syncParentDirectory(path);
 }
@@ -218,13 +291,15 @@ export async function loadWorkspaceMutationQuarantine(
 ): Promise<WorkspaceMutationQuarantineRecord | undefined> {
   let content: string;
   try {
-    content = await readFile(path, 'utf8');
+    content = await readGuardedFile(
+      path,
+      (mode) =>
+        `Workspace quarantine ${path} is accessible beyond its owner (mode ${mode}). ` +
+        'Another local account could clear or forge it. Keep worker state on a ' +
+        'native Linux filesystem.',
+    );
   } catch (error) {
-    if (
-      isRecord(error) &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    ) {
+    if (isMissingPathError(error)) {
       return undefined;
     }
     throw error;
@@ -278,7 +353,16 @@ export async function assertWorkspaceMutationQuarantineOwner(
 export async function loadBridgeIdentity(
   path: string,
 ): Promise<PairedBridgeWorkerIdentity> {
-  const identity = JSON.parse(await readFile(path, 'utf8')) as unknown;
+  /* An identity written before this check, or by an older release, is still a
+   * private key other local accounts can read. Refuse it rather than booting. */
+  const content = await readGuardedFile(
+    path,
+    (mode) =>
+      `Bridge identity ${path} is accessible beyond its owner (mode ${mode}). ` +
+      'Treat its private key as compromised: revoke the worker and pair again with an ' +
+      'identity path on a native Linux filesystem.',
+  );
+  const identity = JSON.parse(content) as unknown;
   if (!isPairedIdentity(identity)) {
     throw new BridgeProtocolError(`Invalid bridge identity file: ${path}`);
   }
