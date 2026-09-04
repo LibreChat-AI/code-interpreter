@@ -157,6 +157,13 @@ export function defaultWorkspaceQuarantinePath(
  *
  * Symlinks are resolved: a link's own mode is always `0777` and ignored by the
  * kernel, so the file the bytes live in is what counts.
+ *
+ * This reads POSIX mode bits, which is not the whole access story everywhere.
+ * A Linux POSIX ACL surfaces its mask in the group bits and so is caught, but
+ * a macOS extended ACL inherited from the parent directory is invisible here
+ * and survives `chmod`, and Windows is exempt entirely. Establishing owner-only
+ * storage on those needs real ACL inspection; until then this verifies what the
+ * mode can express and nothing more.
  */
 async function groupOrOtherAccessMode(
   path: string,
