@@ -20,12 +20,13 @@ import {
   saveWorkspaceMutationQuarantine,
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
-import { DockerRuntimeSupervisor, EndpointRuntimeSupervisor } from './runtime.js';
 import {
   LocalWorkspaceTools,
   SandboxWorkspaceTools,
 } from './workspace.js';
+import { DockerRuntimeSupervisor, EndpointRuntimeSupervisor } from './runtime.js';
 import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
+import { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
 import type { RuntimeSupervisor } from './runtime.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
 import {
@@ -267,6 +268,18 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     (args.includes('--allow-workspace-commands') ||
       process.env.LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS?.trim().toLowerCase() ===
         'true');
+  const commandSandboxMode =
+    option(args, '--command-sandbox') ??
+    process.env.LIBRECHAT_CODE_COMMAND_SANDBOX?.trim().toLowerCase() ??
+    (nsjailDockerMode ? 'runtime' : 'native-srt');
+  if (commandSandboxMode !== 'native-srt' && commandSandboxMode !== 'runtime') {
+    throw new Error(
+      'LIBRECHAT_CODE_COMMAND_SANDBOX must be native-srt or runtime',
+    );
+  }
+  const commandAllowedDomains = [
+    ...new Set(list(process.env.LIBRECHAT_CODE_COMMAND_ALLOWED_DOMAINS)),
+  ].sort();
   if (explicitWorkerDirectory && useDefaultWorkspace) {
     throw new Error(
       '--worker-dir and --default-workspace cannot be used together',
@@ -321,9 +334,16 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
         ],
       })
     : undefined;
-  if (allowWorkspaceCommands && (!canonicalWorkerDirectory || !nsjailDockerMode)) {
+  if (allowWorkspaceCommands && !canonicalWorkerDirectory) {
+    throw new Error('Workspace commands require a registered directory');
+  }
+  if (
+    allowWorkspaceCommands &&
+    commandSandboxMode === 'runtime' &&
+    !nsjailDockerMode
+  ) {
     throw new Error(
-      'Workspace commands require a registered directory and the docker-nsjail runtime supervisor',
+      'The runtime command sandbox requires the docker-nsjail runtime supervisor',
     );
   }
   const controller = new AbortController();
@@ -397,21 +417,26 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     controller.signal,
   );
   const workspaceMount =
-    allowWorkspaceCommands && canonicalWorkerDirectory
+    allowWorkspaceCommands &&
+    commandSandboxMode === 'runtime' &&
+    canonicalWorkerDirectory
       ? {
           source: canonicalWorkerDirectory,
           target: '/mnt/workspace',
         }
       : undefined;
-  const workspaceCommandToken = allowWorkspaceCommands
-    ? createHmac(
-        'sha256',
-        pairedIdentity?.privateKey ??
-          required('LIBRECHAT_CODE_WORKER_TOKEN', configuredToken),
-      )
-        .update(`librechat-code-workspace-command-v1\0${canonicalWorkerDirectory}`)
-        .digest('base64url')
-    : undefined;
+  const workspaceCommandToken =
+    allowWorkspaceCommands && commandSandboxMode === 'runtime'
+      ? createHmac(
+          'sha256',
+          pairedIdentity?.privateKey ??
+            required('LIBRECHAT_CODE_WORKER_TOKEN', configuredToken),
+        )
+          .update(
+            `librechat-code-workspace-command-v1\0${canonicalWorkerDirectory}`,
+          )
+          .digest('base64url')
+      : undefined;
   const runtimeSupervisor: RuntimeSupervisor =
     runtimeMode !== 'endpoint'
       ? new DockerRuntimeSupervisor({
@@ -469,31 +494,61 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
           endpoint: sandboxEndpoint,
           statefulWorkspace,
         });
+  const nativeCommandSandbox =
+    allowWorkspaceCommands && commandSandboxMode === 'native-srt'
+      ? new NativeSrtWorkspaceCommandSandbox({
+          workspaceRoot: canonicalWorkerDirectory!,
+          protectedPaths: [identityPath, mutationQuarantinePath].filter(
+            (path): path is string => path != null,
+          ),
+          allowedDomains: commandAllowedDomains,
+        })
+      : undefined;
   if (allowWorkspaceCommands && workspaceTools) {
     workspaceTools = new SandboxWorkspaceTools({
       workspaceTools,
       commandWorkspaces: [workspaceId],
-      commandSandbox: new RuntimeWorkspaceCommandSandbox({
-        runtimeSupervisor,
-        workerId,
-        incarnationId,
-      }),
+      commandSandbox:
+        nativeCommandSandbox ??
+        new RuntimeWorkspaceCommandSandbox({
+          runtimeSupervisor,
+          workerId,
+          incarnationId,
+        }),
     });
   }
   const capabilities = {
     statefulWorkspace,
     sandboxProfile:
       process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ??
-      (runtimeMode.startsWith('docker') ? 'oci-docker' : 'nsjail'),
+      (allowWorkspaceCommands && commandSandboxMode === 'native-srt'
+        ? 'anthropic-srt'
+        : runtimeMode.startsWith('docker')
+          ? 'oci-docker'
+          : 'nsjail'),
     runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
-    policyDigest: createHash('sha256').update(policy).digest('hex'),
+    policyDigest: createHash('sha256')
+      .update(policy)
+      .update(
+        allowWorkspaceCommands && commandSandboxMode === 'native-srt'
+          ? `\0native-srt\0${commandAllowedDomains.join('\0')}`
+          : '',
+      )
+      .digest('hex'),
     ...(fileRelayEnabled ? { requiresReadyConfirmation: true } : {}),
     ...(workspaceTools ? { workspaceTools: workspaceTools.capabilities } : {}),
   };
   if (!isValidBridgeWorkerCapabilities(capabilities)) {
+    await fileRelaySupervisor?.stop().catch(() => undefined);
     throw new Error(
       'LIBRECHAT_CODE_SANDBOX_PROFILE or LIBRECHAT_CODE_RUNTIMES is invalid',
     );
+  }
+  try {
+    await nativeCommandSandbox?.prepare();
+  } catch (error) {
+    await fileRelaySupervisor?.stop().catch(() => undefined);
+    throw error;
   }
   try {
     const worker = new BridgeWorker({
@@ -587,7 +642,11 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     }
     await worker.run(controller.signal);
   } finally {
-    await fileRelaySupervisor?.stop();
+    try {
+      await nativeCommandSandbox?.close();
+    } finally {
+      await fileRelaySupervisor?.stop();
+    }
   }
 }
 

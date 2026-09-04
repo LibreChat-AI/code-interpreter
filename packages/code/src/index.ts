@@ -5,4 +5,5 @@ export * from './storage.js';
 export * from './runtime.js';
 export * from './workspace.js';
 export * from './workspace-runtime.js';
+export * from './native-sandbox.js';
 export * from './worker.js';

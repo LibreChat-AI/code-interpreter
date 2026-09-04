@@ -30,6 +30,10 @@
     "./workspace-runtime": {
       "types": "./dist/workspace-runtime.d.ts",
       "import": "./dist/workspace-runtime.js"
+    },
+    "./native-sandbox": {
+      "types": "./dist/native-sandbox.d.ts",
+      "import": "./dist/native-sandbox.js"
     }
   },
   "bin": {
@@ -49,6 +53,9 @@
     "typescript": "^5.5.4"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.11"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.75"
   }
 }

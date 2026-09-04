@@ -3,9 +3,11 @@
 Provider-neutral protocol and worker CLI for attaching a stateful, sandboxed
 code environment to LibreChat Code API.
 
-The CLI owns the runtime-supervisor seam. The bundled endpoint adapter connects
-to an already-running loopback Code Interpreter sandbox; future adapters create
-and isolate the runtime themselves. It connects outbound to Code API,
+The CLI owns the runtime-supervisor seam. Native workspace commands use
+Anthropic's open-source Sandbox Runtime (SRT) on the worker machine. The
+bundled endpoint adapter can also connect to an already-running loopback Code
+Interpreter sandbox, while the optional Docker adapter provides a stronger
+container/NsJail profile. The worker connects outbound to Code API,
 long-polls for assignments, sends them to the local runtime, and returns fenced
 results. The VM does not need an inbound public port.
 
@@ -37,7 +39,61 @@ Use `--identity <path>` while pairing and
 `LIBRECHAT_CODE_IDENTITY_FILE=<path>` while running to override the identity
 file location.
 
-## Docker runtime supervisor (programmatic adapter)
+## Native BYOM sandbox (default)
+
+The MVP command sandbox runs directly on the user's chosen laptop or VM. It
+does not require Docker. Enable commands for an existing project or for a new
+application-owned directory:
+
+```bash
+librechat-code run --worker-dir /path/to/project --allow-workspace-commands
+
+# Git is optional; this creates and reuses an empty workspace.
+librechat-code run --default-workspace --allow-workspace-commands
+```
+
+`native-srt` is the default command sandbox unless a Docker/NsJail runtime was
+selected. It uses `@anthropic-ai/sandbox-runtime`: Seatbelt on macOS,
+bubblewrap plus seccomp on Linux, and the SRT restricted-account helper on
+Windows. Startup fails before worker registration when the platform or its
+dependencies are unavailable. There is no unsandboxed command fallback.
+
+The bridge worker remains outside the sandbox so it can maintain its outbound
+Code API connection. Each command and its descendants run inside SRT with:
+
+- write access restricted to the one canonical registered workspace;
+- read access denied to the worker's home directory except for that workspace;
+- paired identity and mutation-quarantine files explicitly denied;
+- `LIBRECHAT_CODE_*` and nonessential inherited environment variables removed;
+- network egress denied by default, local binding denied, and Unix sockets
+  denied; and
+- bounded time and aggregate output, with best-effort process-group termination
+  on cancellation, timeout, and completion.
+
+SRT restrictions remain inherited by descendants. Windows additionally uses a
+kill-on-close Job Object. Native macOS does not provide an equivalent hard
+process-lifetime boundary: a deliberately daemonized descendant can outlive
+the command while remaining confined to the approved workspace and network
+policy. This matches the personal-machine SRT trust model; use the Docker/NsJail
+backend or a dedicated VM boundary when hard teardown of adversarial process
+trees is required.
+
+Linux hosts need Bash at `/bin/bash`, `bubblewrap`, `socat`, and `ripgrep`; macOS uses system
+facilities. Follow SRT's one-time restricted-account setup when using Windows.
+An operator may allow explicit egress destinations with the comma-separated
+`LIBRECHAT_CODE_COMMAND_ALLOWED_DOMAINS` setting. Treat that as a security
+policy: an allowed destination can receive workspace data. The normalized
+allowlist is included in the worker policy digest. Tool approval hooks remain
+the user-facing allow/deny boundary for each invocation.
+
+Select the backend explicitly when desired:
+
+```bash
+LIBRECHAT_CODE_COMMAND_SANDBOX=native-srt librechat-code run \
+  --worker-dir /path/to/project --allow-workspace-commands
+```
+
+## Docker runtime supervisor (optional hardened adapter)
 
 `DockerRuntimeSupervisor` is the first self-contained local OCI adapter. It
 owns one named container per runtime session, does not publish the runner port,
@@ -158,7 +214,9 @@ librechat-code run
 
 Optional environment variables:
 
-- `LIBRECHAT_CODE_SANDBOX_PROFILE`: capability label; defaults to `nsjail`.
+- `LIBRECHAT_CODE_SANDBOX_PROFILE`: capability label; defaults to
+  `anthropic-srt` for native workspace commands, `oci-docker` for Docker, and
+  the existing `nsjail` label otherwise.
 - `LIBRECHAT_CODE_RUNTIMES`: comma-separated capability labels.
 - `LIBRECHAT_CODE_POLICY`: local policy description hashed into the worker's
   registration; defaults to `default-deny`.
@@ -219,8 +277,9 @@ capabilities; absolute host paths remain local to the worker process.
 The protocol also defines a bounded `execute_command` request and result for a
 sandbox-backed executor. Commands are treated as workspace mutations and cannot
 be advertised without durable quarantine storage. `LocalWorkspaceTools` never
-runs them in the worker host process; the CLI does not advertise command support
-until a sandbox runtime executor is configured.
+runs them directly in the trusted worker process; the CLI does not advertise
+command support until its selected SRT or Docker/NsJail sandbox has passed
+startup checks.
 
 `SandboxWorkspaceTools` is the composition boundary for that runtime. It adds
 `execute_command` only to workspace IDs explicitly backed by a
@@ -228,8 +287,8 @@ until a sandbox runtime executor is configured.
 executor, and validates the sandbox's complete result before returning it. It
 does not include a shell fallback. Invalid responses and unknown sandbox errors
 are reported as potentially committed mutations so the worker's durable
-quarantine remains armed. A concrete runtime adapter must prove its mount and
-identity behavior before the CLI can enable this composition.
+quarantine remains armed. The concrete adapter must pass its platform and
+identity checks before the CLI can enable this composition.
 
 The built-in Docker/NsJail adapter can be enabled explicitly for one registered
 directory:
@@ -239,6 +298,7 @@ LIBRECHAT_CODE_RUNTIME_SUPERVISOR=docker-nsjail \
 LIBRECHAT_CODE_RUNTIME_IMAGE=librechat-code-runtime:local \
 LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE=./seccomp/nsjail.json \
 LIBRECHAT_CODE_DOCKER_PACKAGES_PATH=./data/pkgs \
+LIBRECHAT_CODE_COMMAND_SANDBOX=runtime \
 librechat-code run --worker-dir /path/to/workspace --allow-workspace-commands
 ```
 
@@ -247,9 +307,11 @@ bind-mounts only that canonical directory into an unexposed runtime
 container and submits commands to a private, capability-authenticated runner
 route. The runner maps the mounted directory owner into NsJail without chowning
 the directory, disables network access by default, rejects an escaping `cwd`,
-and bounds command, time, stdout, and stderr. The endpoint supervisor cannot
-enable this feature. This operator switch controls availability; LibreChat tool
-approval hooks remain the user-facing allow/deny boundary for each invocation.
+and bounds command, time, stdout, and stderr. The endpoint supervisor cannot be
+used as the `runtime` command backend, but it can coexist with the default
+native SRT command backend. This operator switch controls availability;
+LibreChat tool approval hooks remain the user-facing allow/deny boundary for
+each invocation.
 
 Reads reject absolute paths, traversal, escaping symlinks, non-regular files,
 and files larger than 1 MiB. The opened file is checked against its canonical
