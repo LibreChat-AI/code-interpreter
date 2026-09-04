@@ -81,6 +81,7 @@ RUN apt-get update && \
     bc \
     file \
     jq \
+    unzip \
     poppler-utils \
     libreoffice \
     ffmpeg \
@@ -179,7 +180,8 @@ ENTRYPOINT ["/sandbox_api/entrypoint.sh"]
 # ============================================================================
 FROM fedora:43 AS launcher-builder
 
-RUN dnf install -y \
+RUN dnf upgrade -y --refresh \
+    && dnf install -y \
     rust cargo \
     libkrun-devel \
     gcc \
@@ -205,7 +207,8 @@ RUN cargo build --release
 # ============================================================================
 FROM fedora:43 AS sandbox-runner-base
 
-RUN dnf install -y --setopt=install_weak_deps=False \
+RUN dnf upgrade -y --refresh \
+    && dnf install -y --setopt=install_weak_deps=False \
     libkrun \
     socat \
     curl \

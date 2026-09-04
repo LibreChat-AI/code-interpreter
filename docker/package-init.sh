@@ -31,6 +31,16 @@ BUN_VERSION="${BUN_VERSION:-1.3.14}"
 BASH_PACKAGE_VERSION="${BASH_PACKAGE_VERSION:-5.2.0}"
 INSTALL_FAILED=false
 JS_PACKAGE_MANIFEST="${JS_PACKAGE_MANIFEST:-${SCRIPT_DIR}/javascript-packages.txt}"
+RUNTIME_ARCH="$(uname -m)"
+TABLEAU_HYPER_SUPPORTED=false
+TABLEAU_PYTHON_PACKAGES=(
+    tableauserverclient==0.41
+    tableau-parser==0.1.0
+)
+if [ "$RUNTIME_ARCH" = "x86_64" ]; then
+    TABLEAU_HYPER_SUPPORTED=true
+    TABLEAU_PYTHON_PACKAGES=(tableauhyperapi==0.0.26359 "${TABLEAU_PYTHON_PACKAGES[@]}")
+fi
 
 load_js_packages() {
     if [ ! -f "$JS_PACKAGE_MANIFEST" ]; then
@@ -89,12 +99,17 @@ python_security_baseline_ready() {
     local python_path="/pkgs/python/${PYTHON_VERSION}/bin/python3"
     local pip_vendor_sbom
     [ -x "$python_path" ] || return 1
-    "$python_path" - <<'PY' >/dev/null 2>&1
+    TABLEAU_HYPER_SUPPORTED="$TABLEAU_HYPER_SUPPORTED" "$python_path" - <<'PY' >/dev/null 2>&1
 from importlib import metadata
+import os
 from packaging.version import Version
 
 assert Version(metadata.version("msgpack")) >= Version("1.2.1")
 assert Version(metadata.version("setuptools")) >= Version("78.1.1")
+assert metadata.version("tableauserverclient") == "0.41"
+assert metadata.version("tableau-parser") == "0.1.0"
+if os.environ["TABLEAU_HYPER_SUPPORTED"] == "true":
+    assert metadata.version("tableauhyperapi") == "0.0.26359"
 PY
     pip_vendor_sbom="$(pip_vendor_sbom_path "$python_path" 2>/dev/null)" || return 1
     [ ! -e "$pip_vendor_sbom" ]
@@ -149,6 +164,13 @@ npm_runtime_ready() {
 
     echo "npm runtime mismatch: expected npm ${NPM_VERSION}/tar ${NPM_TAR_VERSION}/brace-expansion ${NPM_BRACE_EXPANSION_VERSION}/ip-address ${NPM_IP_ADDRESS_VERSION}, got npm ${actual_npm_version:-missing}/tar ${actual_tar_version:-missing}/brace-expansion ${actual_brace_expansion_version:-missing}/ip-address ${actual_ip_address_version:-missing}" >&2
     return 1
+}
+
+tableau_hyper_ready() {
+    if [ "$TABLEAU_HYPER_SUPPORTED" != "true" ]; then
+        return 0
+    fi
+    [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/tableauhyperapi" ]
 }
 
 install_npm_dependency_patch() {
@@ -236,6 +258,9 @@ packages_ready() {
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/statsmodels" ] &&
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/pypdf" ] &&
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/pdfplumber" ] &&
+    [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/tableauserverclient" ] &&
+    [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/tableau_parser" ] &&
+    tableau_hyper_ready &&
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/weasyprint" ] &&
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/rasterio" ] &&
     python_security_baseline_ready &&
@@ -356,6 +381,7 @@ if [ -f "$PIP_PATH" ]; then
         pypdf \
         pypdf2 \
         pdfplumber \
+        "${TABLEAU_PYTHON_PACKAGES[@]}" \
         "weasyprint>=68" \
         "msgpack>=1.2.1" \
         "setuptools>=78.1.1" \
