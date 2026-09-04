@@ -12,6 +12,8 @@ import type {
 
 import {
   BRIDGE_PROTOCOL_VERSION,
+  isValidBridgeWorkerCapabilities,
+  isValidBridgeWorkerId,
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
 } from '../../../packages/code/src/protocol';
@@ -66,6 +68,13 @@ export interface RegisteredBridgeWorker extends BridgeWorkerRegistration {
   binding?: BridgeWorkerBinding;
   credentialId?: string;
   identityId?: string;
+}
+
+export interface BridgeWorkerStatus {
+  online: boolean;
+  ready: boolean;
+  leaseExpiresInMs?: number;
+  capabilities?: BridgeWorkerRegistration['capabilities'];
 }
 
 function supportsWorkspaceTool(
@@ -307,6 +316,63 @@ export class RedisBridgeStore {
       label,
       signal,
     );
+  }
+
+  /** Returns only the worker's ephemeral registration state. The registration
+   * is the heartbeat: when its TTL expires the worker is offline. */
+  async workerStatus(workerId: string): Promise<BridgeWorkerStatus> {
+    const snapshot = (await boundedCommand(
+      this.redis.eval(
+        [
+          "local registration = redis.call('GET', KEYS[1])",
+          "if not registration then return { false, false, false, -2 } end",
+          'return {',
+          '  registration,',
+          "  redis.call('GET', KEYS[2]) or false,",
+          "  redis.call('GET', KEYS[3]) or false,",
+          "  redis.call('PTTL', KEYS[1])",
+          '}',
+        ].join('\n'),
+        3,
+        workerKey(workerId),
+        workerReadyKey(workerId),
+        workerRegistrationGenerationKey(workerId),
+      ),
+      this.redisCommandTimeoutMs,
+      'Bridge worker status',
+    )) as [string | null, string | null, string | null, number];
+    const [rawRegistration, readyToken, registrationGeneration, leaseExpiresInMs] = snapshot;
+    if (rawRegistration == null || rawRegistration === '' || leaseExpiresInMs <= 0) {
+      return { online: false, ready: false };
+    }
+
+    let registration: RegisteredBridgeWorker;
+    try {
+      registration = JSON.parse(rawRegistration) as RegisteredBridgeWorker;
+    } catch {
+      return { online: false, ready: false };
+    }
+    if (
+      registration.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      !isValidBridgeWorkerId(registration.workerId) ||
+      registration.workerId !== workerId ||
+      typeof registration.incarnationId !== 'string' ||
+      !isValidBridgeWorkerCapabilities(registration.capabilities)
+    ) {
+      return { online: false, ready: false };
+    }
+
+    const requiresConfirmation = registration.capabilities.requiresReadyConfirmation === true;
+    const ready =
+      !requiresConfirmation ||
+      (registrationGeneration != null &&
+        readyToken === workerReadyToken(registration.incarnationId, Number(registrationGeneration)));
+    return {
+      online: true,
+      ready,
+      leaseExpiresInMs,
+      capabilities: registration.capabilities,
+    };
   }
 
   async register(
