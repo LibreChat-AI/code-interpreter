@@ -89,9 +89,11 @@ function supportsWorkspaceTool(
     return capabilities?.listFileFeatures?.includes('after_path') === true;
   }
   if (request.operation === 'write_file') {
-    if (request.overwrite === undefined) return true;
     const mode = request.overwrite === false ? 'create' : 'replace';
-    return capabilities?.writeFileModes?.includes(mode) === true;
+    const modes = capabilities?.writeFileModes;
+    return request.overwrite === undefined && modes == null
+      ? true
+      : modes?.includes(mode) === true;
   }
   if (
     request.operation === 'preview_edit' ||
@@ -519,12 +521,11 @@ export class RedisBridgeStore {
       finalize: async (settlement, registration) => {
         if (
           settlement.status === 'fulfilled' &&
-          (!isWorkspaceToolResult(args.request, settlement.result) ||
-            (args.request.operation === 'list_files' &&
-              'nextAfterPath' in settlement.result &&
-              !registration.capabilities.workspaceTools?.listFileFeatures?.includes(
-                'after_path',
-              )))
+          !isWorkspaceToolResult(
+            args.request,
+            settlement.result,
+            registration.capabilities.workspaceTools,
+          )
         ) {
           throw new BridgeStoreError(
             'RESULT_INVALID',

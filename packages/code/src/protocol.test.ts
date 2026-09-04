@@ -262,6 +262,22 @@ test('workspace file listing accepts only bounded portable requests and results'
   };
   assert.equal(isWorkspaceToolResult(request, result), true);
   assert.equal(
+    isWorkspaceToolResult(
+      { ...request, afterPath: undefined },
+      { ...result, nextAfterPath: undefined },
+      {},
+    ),
+    true,
+  );
+  assert.equal(
+    isWorkspaceToolResult(
+      { ...request, afterPath: undefined },
+      { ...result, nextAfterPath: undefined },
+      { listFileFeatures: ['after_path'] },
+    ),
+    false,
+  );
+  assert.equal(
     isWorkspaceToolResult(request, {
       ...result,
       paths: ['src/\uE000.ts', 'src/\u{10000}.ts'],

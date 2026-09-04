@@ -966,13 +966,14 @@ export class BridgeWorker {
             'Workspace tool operation is not advertised for workspace',
           );
         }
-        if (
-          workspaceRequest.operation === 'write_file' &&
-          workspaceRequest.overwrite !== undefined
-        ) {
+        if (workspaceRequest.operation === 'write_file') {
           const mode =
             workspaceRequest.overwrite === false ? 'create' : 'replace';
-          if (!advertised.writeFileModes?.includes(mode)) {
+          const modes = advertised.writeFileModes;
+          if (
+            (workspaceRequest.overwrite !== undefined && modes == null) ||
+            (modes != null && !modes.includes(mode))
+          ) {
             throw new BridgeProtocolError(
               'Workspace write mode is not advertised',
             );

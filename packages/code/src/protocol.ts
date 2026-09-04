@@ -800,6 +800,7 @@ export function isWorkspaceToolRequest(
 export function isWorkspaceToolResult(
   request: WorkspaceToolRequest,
   value: unknown,
+  capabilities?: Pick<BridgeWorkspaceToolCapabilities, 'listFileFeatures'>,
 ): value is WorkspaceToolResult {
   if (typeof value !== 'object' || value === null) return false;
   const result = value as Record<string, unknown>;
@@ -883,10 +884,17 @@ export function isWorkspaceToolResult(
       normalizedPaths.add(normalizedPath);
       previousPath = normalizedPath;
     }
-    return result.truncated === true
-      ? result.paths.length > 0 &&
-          result.nextAfterPath === result.paths[result.paths.length - 1]
-      : result.nextAfterPath === undefined;
+    if (result.truncated !== true) return result.nextAfterPath === undefined;
+    if (!capabilities?.listFileFeatures?.includes('after_path')) {
+      return capabilities === undefined
+        ? result.paths.length > 0 &&
+            result.nextAfterPath === result.paths[result.paths.length - 1]
+        : result.nextAfterPath === undefined;
+    }
+    return (
+      result.paths.length > 0 &&
+      result.nextAfterPath === result.paths[result.paths.length - 1]
+    );
   }
 
   if (request.operation === 'write_file') {

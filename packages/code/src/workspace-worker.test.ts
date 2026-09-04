@@ -2416,3 +2416,61 @@ test('worker rejects workspace operations outside its advertised capability', as
   assert.equal(settlement?.status, 'rejected');
   assert.match(String(settlement?.error), /operation is not advertised/i);
 });
+
+test('worker rejects legacy replacement writes outside its advertised mode', async () => {
+  let executions = 0;
+  let settlement: Record<string, unknown> | undefined;
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    writeFileModes: ['create' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        executions += 1;
+        throw new Error('must not execute');
+      },
+    },
+    workspaceMutationQuarantine: mutationQuarantine(),
+    fetchImpl: async (_input, init) => {
+      settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-workspace-replace-mode',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      content: 'blocked',
+    },
+  });
+
+  assert.equal(executions, 0);
+  assert.equal(settlement?.status, 'rejected');
+  assert.match(String(settlement?.error), /write mode is not advertised/i);
+});

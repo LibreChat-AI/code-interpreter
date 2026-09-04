@@ -192,6 +192,60 @@ test('rejects pagination fields from a worker without the negotiated feature', a
   await expect(completion).rejects.toMatchObject({ code: 'RESULT_INVALID' });
 });
 
+test('accepts a legacy truncated listing without a pagination cursor', async () => {
+  await store.register({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    workerId: 'workspace-worker',
+    incarnationId,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operations: ['list_files'],
+        workspaces: [{ id: 'primary' }],
+      },
+    },
+  });
+  const completion = store.dispatchWorkspaceTool({
+    workerId: 'workspace-worker',
+    request: {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      maxResults: 1,
+    },
+    deadlineAtMs: Date.now() + 5_000,
+    signal: new AbortController().signal,
+  });
+
+  const assignment = await store.lease(
+    'workspace-worker',
+    incarnationId,
+    1_000,
+  );
+  await store.settle('workspace-worker', assignment?.assignmentId ?? '', {
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    generation: assignment?.generation ?? 0,
+    leaseToken: assignment?.leaseToken ?? '',
+    incarnationId,
+    status: 'fulfilled',
+    result: {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      paths: ['first.txt'],
+      truncated: true,
+    },
+  });
+
+  await expect(completion).resolves.toMatchObject({
+    status: 'fulfilled',
+    result: { paths: ['first.txt'], truncated: true },
+  });
+});
+
 test('rejects an operation omitted from the selected workspace capability', async () => {
   await store.register({
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -256,6 +310,41 @@ test('rejects create-only writes from workers without the negotiated mode', asyn
         path: 'notes.txt',
         content: 'create me',
         overwrite: false,
+      },
+      deadlineAtMs: Date.now() + 1_000,
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+  expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
+});
+
+test('rejects legacy replacement writes from create-only workers', async () => {
+  await store.register({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    workerId: 'workspace-worker',
+    incarnationId,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operations: ['write_file'],
+        writeFileModes: ['create'],
+        workspaces: [{ id: 'primary' }],
+      },
+    },
+  });
+
+  await expect(
+    store.dispatchWorkspaceTool({
+      workerId: 'workspace-worker',
+      request: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operation: 'write_file',
+        workspaceId: 'primary',
+        path: 'notes.txt',
+        content: 'replace me',
       },
       deadlineAtMs: Date.now() + 1_000,
       signal: new AbortController().signal,
