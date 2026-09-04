@@ -821,6 +821,7 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
       },
     ],
     writeFileModes: ['replace', 'create'],
+    editFileModes: ['single', 'batch'],
   });
   await tools.execute({
     protocolVersion: 1,
@@ -916,6 +917,51 @@ test('workspace writes can require an atomic create without replacement', async 
   assert.ok(rejected?.reason instanceof WorkspaceToolError);
   assert.equal(rejected.reason.code, 'EDIT_CONFLICT');
   assert.match(await readFile(join(root, 'raced.txt'), 'utf8'), /^(first|second)$/);
+});
+
+test('workspace batch edits commit all replacements atomically', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'batch.txt'), 'alpha beta gamma');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'batch.txt',
+    edits: [
+      { oldText: 'alpha', newText: 'one' },
+      { oldText: 'gamma', newText: 'three' },
+    ],
+  });
+  assert.deepEqual(result, {
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'batch.txt',
+    replacements: 2,
+    bytesWritten: 14,
+  });
+  assert.equal(await readFile(join(root, 'batch.txt'), 'utf8'), 'one beta three');
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'batch.txt',
+      edits: [
+        { oldText: 'one', newText: 'partial' },
+        { oldText: 'missing', newText: 'never' },
+      ],
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
+  );
+  assert.equal(await readFile(join(root, 'batch.txt'), 'utf8'), 'one beta three');
 });
 
 test('workspace mutations sync the containing directory after replacement', async (t) => {
@@ -1699,6 +1745,7 @@ test('composes sandboxed commands without exposing them on unconfigured workspac
     'execute_command',
   ]);
   assert.deepEqual(tools.capabilities.writeFileModes, ['replace', 'create']);
+  assert.deepEqual(tools.capabilities.editFileModes, ['single', 'batch']);
   assert.deepEqual(
     tools.capabilities.workspaces.find(({ id }) => id === 'sandboxed')?.operations,
     tools.capabilities.operations,

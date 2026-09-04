@@ -708,20 +708,26 @@ async function editWorkspaceFile(
         'INVALID_REQUEST',
       );
     }
-    const first = text.indexOf(request.oldText);
-    if (
-      first < 0 ||
-      text.indexOf(request.oldText, first + 1) >= 0
-    ) {
-      throw new WorkspaceToolError(
-        'Workspace edit must match exactly once',
-        'EDIT_CONFLICT',
-      );
+    const edits = request.edits ?? [
+      { oldText: request.oldText ?? '', newText: request.newText ?? '' },
+    ];
+    let updatedText = text;
+    for (const edit of edits) {
+      const first = updatedText.indexOf(edit.oldText);
+      if (
+        first < 0 ||
+        updatedText.indexOf(edit.oldText, first + 1) >= 0
+      ) {
+        throw new WorkspaceToolError(
+          'Workspace edit must match exactly once',
+          'EDIT_CONFLICT',
+        );
+      }
+      updatedText =
+        updatedText.slice(0, first) +
+        edit.newText +
+        updatedText.slice(first + edit.oldText.length);
     }
-    const updatedText =
-      text.slice(0, first) +
-      request.newText +
-      text.slice(first + request.oldText.length);
     const updatedBody = Buffer.from(updatedText, 'utf8');
     const updated = hasBom
       ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), updatedBody])
@@ -742,7 +748,7 @@ async function editWorkspaceFile(
       operation: 'edit_file',
       workspaceId: request.workspaceId,
       path: request.path,
-      replacements: 1,
+      replacements: edits.length,
       bytesWritten: updated.byteLength,
     };
   } catch (error) {
@@ -1337,12 +1343,14 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     operations: BridgeWorkspaceToolCapabilities['operations'],
     workspaces: BridgeWorkspaceDescriptor[],
     writeFileModes?: BridgeWorkspaceToolCapabilities['writeFileModes'],
+    editFileModes?: BridgeWorkspaceToolCapabilities['editFileModes'],
   ) {
     this.capabilities = {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       operations,
       workspaces,
       ...(writeFileModes != null ? { writeFileModes } : {}),
+      ...(editFileModes != null ? { editFileModes } : {}),
     };
   }
 
@@ -1376,6 +1384,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       operations,
       workspaces,
       ...(anyWritable ? { writeFileModes: ['replace', 'create'] } : {}),
+      ...(anyWritable ? { editFileModes: ['single', 'batch'] } : {}),
     };
     if (!isValidBridgeWorkspaceToolCapabilities(capabilities)) {
       throw new WorkspaceToolError(
@@ -1404,6 +1413,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       operations,
       workspaces,
       capabilities.writeFileModes,
+      capabilities.editFileModes,
     );
   }
 
@@ -1530,6 +1540,9 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
       operations: [...new Set([...base.operations, 'execute_command' as const])],
       ...(base.writeFileModes != null
         ? { writeFileModes: base.writeFileModes }
+        : {}),
+      ...(base.editFileModes != null
+        ? { editFileModes: base.editFileModes }
         : {}),
       workspaces: base.workspaces.map((workspace) => ({
         ...workspace,

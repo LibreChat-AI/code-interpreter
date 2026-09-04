@@ -141,6 +141,10 @@ function workspaceCapabilitiesMatch(
     (advertised.writeFileModes?.every(
       (mode, index) => mode === executor.writeFileModes?.[index],
     ) ?? executor.writeFileModes == null) &&
+    advertised.editFileModes?.length === executor.editFileModes?.length &&
+    (advertised.editFileModes?.every(
+      (mode, index) => mode === executor.editFileModes?.[index],
+    ) ?? executor.editFileModes == null) &&
     advertised.workspaces.length === executor.workspaces.length &&
     advertised.workspaces.every(
       (workspace, index) =>
@@ -195,8 +199,11 @@ function registrationCompatibleCapabilities(
     const { workspaceTools: _workspaceTools, ...compatible } = capabilities;
     return compatible;
   }
-  const { writeFileModes: _writeFileModes, ...compatibleWorkspaceTools } =
-    workspaceTools;
+  const {
+    writeFileModes: _writeFileModes,
+    editFileModes: _editFileModes,
+    ...compatibleWorkspaceTools
+  } = workspaceTools;
   return {
     ...capabilities,
     workspaceTools: {
@@ -231,7 +238,14 @@ function supportedWorkspaceCapabilities(
   const writeFileModes = desired.writeFileModes?.filter((mode) =>
     registration.supportedWorkspaceWriteFileModes?.includes(mode),
   );
-  const { writeFileModes: _writeFileModes, ...compatibleDesired } = desired;
+  const editFileModes = desired.editFileModes?.filter((mode) =>
+    registration.supportedWorkspaceEditFileModes?.includes(mode),
+  );
+  const {
+    writeFileModes: _writeFileModes,
+    editFileModes: _editFileModes,
+    ...compatibleDesired
+  } = desired;
   return {
     ...capabilities,
     workspaceTools: {
@@ -240,6 +254,9 @@ function supportedWorkspaceCapabilities(
       workspaces,
       ...(operations.includes('write_file') && writeFileModes?.length
         ? { writeFileModes }
+        : {}),
+      ...(operations.includes('edit_file') && editFileModes?.length
+        ? { editFileModes }
         : {}),
     },
   };
@@ -897,6 +914,18 @@ export class BridgeWorker {
           if (!advertised.writeFileModes?.includes(mode)) {
             throw new BridgeProtocolError(
               'Workspace write mode is not advertised',
+            );
+          }
+        }
+        if (workspaceRequest.operation === 'edit_file') {
+          const mode = workspaceRequest.edits === undefined ? 'single' : 'batch';
+          const modes = advertised.editFileModes;
+          if (
+            (modes == null && mode !== 'single') ||
+            (modes != null && !modes.includes(mode))
+          ) {
+            throw new BridgeProtocolError(
+              'Workspace edit mode is not advertised',
             );
           }
         }
