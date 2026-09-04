@@ -21,7 +21,13 @@ import {
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
 import { DockerRuntimeSupervisor, EndpointRuntimeSupervisor } from './runtime.js';
-import { LocalWorkspaceTools } from './workspace.js';
+import {
+  LocalWorkspaceTools,
+  SandboxWorkspaceTools,
+} from './workspace.js';
+import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
+import type { RuntimeSupervisor } from './runtime.js';
+import type { WorkspaceToolExecutor } from './workspace.js';
 import {
   BRIDGE_WORKSPACE_NAME_MAX_LENGTH,
   BridgeProtocolError,
@@ -201,12 +207,15 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
   if (
     runtimeMode !== 'endpoint' &&
     runtimeMode !== 'docker' &&
+    runtimeMode !== 'docker-nsjail' &&
     runtimeMode !== 'docker-macos-nsjail'
   ) {
     throw new Error(
-      'LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be endpoint, docker, or docker-macos-nsjail',
+      'LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be endpoint, docker, docker-nsjail, or docker-macos-nsjail',
     );
   }
+  const nsjailDockerMode =
+    runtimeMode === 'docker-nsjail' || runtimeMode === 'docker-macos-nsjail';
   const sandboxEndpoint =
     process.env.LIBRECHAT_CODE_SANDBOX_ENDPOINT ??
     'http://127.0.0.1:2000/api/v2';
@@ -229,7 +238,7 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
   const fileRelayUpstream =
     process.env.LIBRECHAT_CODE_FILE_RELAY_UPSTREAM?.trim();
   const fileRelayEnabled =
-    runtimeMode === 'docker-macos-nsjail' &&
+    nsjailDockerMode &&
     runtimeSessionId == null &&
     (fileRelayUpstream?.length ?? 0) > 0;
   const workspaceId =
@@ -252,6 +261,11 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     runtimeSessionId == null &&
     (args.includes('--allow-workspace-writes') ||
       process.env.LIBRECHAT_CODE_ALLOW_WORKSPACE_WRITES?.trim().toLowerCase() ===
+        'true');
+  const allowWorkspaceCommands =
+    runtimeSessionId == null &&
+    (args.includes('--allow-workspace-commands') ||
+      process.env.LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS?.trim().toLowerCase() ===
         'true');
   if (explicitWorkerDirectory && useDefaultWorkspace) {
     throw new Error(
@@ -283,14 +297,14 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     }
   }
   const mutationQuarantinePath =
-    allowWorkspaceWrites && canonicalWorkerDirectory
+    (allowWorkspaceWrites || allowWorkspaceCommands) && canonicalWorkerDirectory
       ? workspaceQuarantinePath({
           codeApiUrl,
           workerId,
           workspaceRoot: canonicalWorkerDirectory,
         })
       : undefined;
-  const workspaceTools = workerDirectory
+  let workspaceTools: WorkspaceToolExecutor | undefined = workerDirectory
     ? await LocalWorkspaceTools.create({
         workspaces: [
           {
@@ -307,19 +321,9 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
         ],
       })
     : undefined;
-  const capabilities = {
-    statefulWorkspace,
-    sandboxProfile:
-      process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ??
-      (runtimeMode.startsWith('docker') ? 'oci-docker' : 'nsjail'),
-    runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
-    policyDigest: createHash('sha256').update(policy).digest('hex'),
-    ...(fileRelayEnabled ? { requiresReadyConfirmation: true } : {}),
-    ...(workspaceTools ? { workspaceTools: workspaceTools.capabilities } : {}),
-  };
-  if (!isValidBridgeWorkerCapabilities(capabilities)) {
+  if (allowWorkspaceCommands && (!canonicalWorkerDirectory || !nsjailDockerMode)) {
     throw new Error(
-      'LIBRECHAT_CODE_SANDBOX_PROFILE or LIBRECHAT_CODE_RUNTIMES is invalid',
+      'Workspace commands require a registered directory and the docker-nsjail runtime supervisor',
     );
   }
   const controller = new AbortController();
@@ -332,8 +336,8 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
         ? required('LIBRECHAT_CODE_RUNTIME_IMAGE')
         : process.env.LIBRECHAT_CODE_RUNTIME_IMAGE?.trim()
       : undefined;
-  const macLaunchProfile =
-    runtimeMode === 'docker-macos-nsjail' && runtimeSessionId == null
+  const nsjailLaunchProfile =
+    nsjailDockerMode && runtimeSessionId == null
       ? (() => {
           const seccompProfile = resolve(
             required('LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE'),
@@ -392,6 +396,105 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
   const fileRelayProfile = await fileRelaySupervisor?.prepare(
     controller.signal,
   );
+  const workspaceMount =
+    allowWorkspaceCommands && canonicalWorkerDirectory
+      ? {
+          source: canonicalWorkerDirectory,
+          target: '/mnt/workspace',
+        }
+      : undefined;
+  const workspaceCommandToken = allowWorkspaceCommands
+    ? createHmac(
+        'sha256',
+        pairedIdentity?.privateKey ??
+          required('LIBRECHAT_CODE_WORKER_TOKEN', configuredToken),
+      )
+        .update(`librechat-code-workspace-command-v1\0${canonicalWorkerDirectory}`)
+        .digest('base64url')
+    : undefined;
+  const runtimeSupervisor: RuntimeSupervisor =
+    runtimeMode !== 'endpoint'
+      ? new DockerRuntimeSupervisor({
+          image: runtimeImage,
+          ...(nsjailDockerMode && runtimeSessionId == null
+            ? (() => {
+                const { seccompProfile, packagesPath, profileRevision } =
+                  nsjailLaunchProfile!;
+                return {
+                  capabilities: MACOS_NSJAIL_CAPABILITIES,
+                  securityOptions: [`seccomp=${seccompProfile}`],
+                  profileRevision,
+                  restartStoppedContainers: false,
+                  ...(fileRelayProfile ? { network: fileRelayProfile.network } : {}),
+                  bindMounts: [
+                    { source: packagesPath, target: '/pkgs', readOnly: true },
+                    ...(workspaceMount ? [workspaceMount] : []),
+                  ],
+                  httpClient: 'bun' as const,
+                  environment: {
+                    SANDBOX_USE_CGROUPV2: 'false',
+                    SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP: 'false',
+                    ...(workspaceMount
+                      ? {
+                          SANDBOX_EXTERNAL_WORKSPACE_ENABLED: 'true',
+                          SANDBOX_EXTERNAL_WORKSPACE_ROOT: workspaceMount.target,
+                          SANDBOX_EXTERNAL_WORKSPACE_TOKEN: workspaceCommandToken!,
+                        }
+                      : {}),
+                    ...(fileRelayProfile
+                      ? {
+                          EGRESS_GATEWAY_URL: fileRelayProfile.url,
+                          SANDBOX_PRIME_CONCURRENCY: String(fileRelayLimits!.maxConcurrentRequests),
+                          SANDBOX_UPLOAD_CONCURRENCY: String(fileRelayLimits!.maxConcurrentRequests),
+                          SANDBOX_FILE_RELAY_TOKEN: fileRelayProfile.token,
+                          SANDBOX_REQUIRE_EGRESS_MANIFEST: 'true',
+                          SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY: executionManifestPublicKey!,
+                        }
+                      : {}),
+                  },
+                };
+              })()
+            : workspaceMount
+              ? {
+                  bindMounts: [workspaceMount],
+                  environment: {
+                    SANDBOX_EXTERNAL_WORKSPACE_ENABLED: 'true',
+                    SANDBOX_EXTERNAL_WORKSPACE_ROOT: workspaceMount.target,
+                    SANDBOX_EXTERNAL_WORKSPACE_TOKEN: workspaceCommandToken!,
+                  },
+                }
+              : {}),
+        })
+      : new EndpointRuntimeSupervisor({
+          endpoint: sandboxEndpoint,
+          statefulWorkspace,
+        });
+  if (allowWorkspaceCommands && workspaceTools) {
+    workspaceTools = new SandboxWorkspaceTools({
+      workspaceTools,
+      commandWorkspaces: [workspaceId],
+      commandSandbox: new RuntimeWorkspaceCommandSandbox({
+        runtimeSupervisor,
+        workerId,
+        incarnationId,
+      }),
+    });
+  }
+  const capabilities = {
+    statefulWorkspace,
+    sandboxProfile:
+      process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ??
+      (runtimeMode.startsWith('docker') ? 'oci-docker' : 'nsjail'),
+    runtimes: list(process.env.LIBRECHAT_CODE_RUNTIMES),
+    policyDigest: createHash('sha256').update(policy).digest('hex'),
+    ...(fileRelayEnabled ? { requiresReadyConfirmation: true } : {}),
+    ...(workspaceTools ? { workspaceTools: workspaceTools.capabilities } : {}),
+  };
+  if (!isValidBridgeWorkerCapabilities(capabilities)) {
+    throw new Error(
+      'LIBRECHAT_CODE_SANDBOX_PROFILE or LIBRECHAT_CODE_RUNTIMES is invalid',
+    );
+  }
   try {
     const worker = new BridgeWorker({
       codeApiUrl,
@@ -399,57 +502,7 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
       identity: workerIdentity,
       workerId,
       incarnationId,
-      runtimeSupervisor:
-        runtimeMode !== 'endpoint'
-          ? new DockerRuntimeSupervisor({
-              image: runtimeImage,
-              ...(runtimeMode === 'docker-macos-nsjail' && runtimeSessionId == null
-                ? (() => {
-                    const { seccompProfile, packagesPath, profileRevision } =
-                      macLaunchProfile!;
-                    return {
-                      capabilities: MACOS_NSJAIL_CAPABILITIES,
-                      securityOptions: [`seccomp=${seccompProfile}`],
-                      profileRevision,
-                      restartStoppedContainers: false,
-                      ...(fileRelayProfile
-                        ? { network: fileRelayProfile.network }
-                        : {}),
-                      bindMounts: [
-                        {
-                          source: packagesPath,
-                          target: '/pkgs',
-                          readOnly: true,
-                        },
-                      ],
-                      httpClient: 'bun',
-                      environment: {
-                        SANDBOX_USE_CGROUPV2: 'false',
-                        SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP: 'false',
-                        ...(fileRelayProfile
-                          ? {
-                              EGRESS_GATEWAY_URL: fileRelayProfile.url,
-                              SANDBOX_PRIME_CONCURRENCY: String(
-                                fileRelayLimits!.maxConcurrentRequests,
-                              ),
-                              SANDBOX_UPLOAD_CONCURRENCY: String(
-                                fileRelayLimits!.maxConcurrentRequests,
-                              ),
-                              SANDBOX_FILE_RELAY_TOKEN: fileRelayProfile.token,
-                              SANDBOX_REQUIRE_EGRESS_MANIFEST: 'true',
-                              SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY:
-                                executionManifestPublicKey!,
-                            }
-                          : {}),
-                      },
-                    };
-                  })()
-                : {}),
-            })
-          : new EndpointRuntimeSupervisor({
-              endpoint: sandboxEndpoint,
-              statefulWorkspace,
-            }),
+      runtimeSupervisor,
       capabilities,
       workspaceTools,
       workspaceMutationQuarantine: mutationQuarantinePath

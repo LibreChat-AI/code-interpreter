@@ -26,6 +26,10 @@
     "./workspace": {
       "types": "./dist/workspace.d.ts",
       "import": "./dist/workspace.js"
+    },
+    "./workspace-runtime": {
+      "types": "./dist/workspace-runtime.d.ts",
+      "import": "./dist/workspace-runtime.js"
     }
   },
   "bin": {

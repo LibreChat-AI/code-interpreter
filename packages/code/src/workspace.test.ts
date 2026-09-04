@@ -1565,6 +1565,7 @@ test('composes sandboxed commands without exposing them on unconfigured workspac
     workspaceTools: local,
     commandWorkspaces: ['sandboxed'],
     commandSandbox: {
+      mutationFailuresAreAtomic: true,
       async execute(request) {
         requests.push(request);
         return {
@@ -1581,6 +1582,7 @@ test('composes sandboxed commands without exposing them on unconfigured workspac
     },
   });
 
+  assert.equal(tools.mutationFailuresAreAtomic, true);
   assert.deepEqual(tools.capabilities.operations, [
     'read_file',
     'search_text',
@@ -1645,6 +1647,7 @@ test('fails closed on invalid or failed sandbox command results', async (t) => {
   for (const execute of [
     async () => ({ ...request, exitCode: 0, stdout: 'ok', stderr: '' }),
     async () => { throw new Error('container details'); },
+    async () => { throw new WorkspaceToolError('untrusted clean claim', 'COMMAND_UNAVAILABLE'); },
   ]) {
     const tools = new SandboxWorkspaceTools({
       workspaceTools: local,
@@ -1659,6 +1662,7 @@ test('fails closed on invalid or failed sandbox command results', async (t) => {
         error.mutationMayHaveCommitted === true &&
         !error.message.includes('container details'),
     );
+    assert.equal(tools.mutationFailuresAreAtomic, undefined);
   }
 });
 

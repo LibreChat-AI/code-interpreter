@@ -71,6 +71,10 @@ export const config = {
    * session mode. An enabled runner additionally binds each request to a
    * workspace through the authenticated X-Runtime-Session-Id header. */
   session_workspace_enabled: (process.env.SANDBOX_SESSION_WORKSPACE_ENABLED ?? 'false') === 'true',
+  external_workspace_enabled: (process.env.SANDBOX_EXTERNAL_WORKSPACE_ENABLED ?? 'false') === 'true',
+  external_workspace_root: cleanDirectory(process.env.SANDBOX_EXTERNAL_WORKSPACE_ROOT)
+    ?? '/mnt/workspace',
+  external_workspace_token: process.env.SANDBOX_EXTERNAL_WORKSPACE_TOKEN ?? '',
   /**
    * Enables the Lambda-only hosted-app runner surface. This must only be set
    * on a dedicated app-host MicroVM image: user application processes share

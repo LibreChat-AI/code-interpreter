@@ -67,7 +67,7 @@ test('CLI rejects an unknown runtime supervisor before entering the run loop', (
   assert.notEqual(result.status, 0);
   assert.match(
     result.stderr,
-    /LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be endpoint, docker, or docker-macos-nsjail/,
+    /LIBRECHAT_CODE_RUNTIME_SUPERVISOR must be endpoint, docker, docker-nsjail, or docker-macos-nsjail/,
   );
 });
 
@@ -102,7 +102,7 @@ test('CLI requires the macOS NsJail seccomp profile', () => {
         LIBRECHAT_CODE_URL: 'https://code.example/v1',
         LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
         LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
-        LIBRECHAT_CODE_RUNTIME_SUPERVISOR: 'docker-macos-nsjail',
+        LIBRECHAT_CODE_RUNTIME_SUPERVISOR: 'docker-nsjail',
         LIBRECHAT_CODE_RUNTIME_IMAGE: 'example/runtime:latest',
       },
     },

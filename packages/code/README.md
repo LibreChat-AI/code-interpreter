@@ -77,7 +77,7 @@ the same capability and seccomp policy as `docker-compose.mac.yml`:
 docker build --target local-oci-runtime \
   -t librechat-code-runtime:local -f api/Dockerfile .
 
-LIBRECHAT_CODE_RUNTIME_SUPERVISOR=docker-macos-nsjail \
+LIBRECHAT_CODE_RUNTIME_SUPERVISOR=docker-nsjail \
 LIBRECHAT_CODE_RUNTIME_IMAGE=librechat-code-runtime:local \
 LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE=./seccomp/nsjail.json \
 LIBRECHAT_CODE_DOCKER_PACKAGES_PATH=./data/pkgs \
@@ -230,6 +230,26 @@ does not include a shell fallback. Invalid responses and unknown sandbox errors
 are reported as potentially committed mutations so the worker's durable
 quarantine remains armed. A concrete runtime adapter must prove its mount and
 identity behavior before the CLI can enable this composition.
+
+The built-in Docker/NsJail adapter can be enabled explicitly for one registered
+directory:
+
+```bash
+LIBRECHAT_CODE_RUNTIME_SUPERVISOR=docker-nsjail \
+LIBRECHAT_CODE_RUNTIME_IMAGE=librechat-code-runtime:local \
+LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE=./seccomp/nsjail.json \
+LIBRECHAT_CODE_DOCKER_PACKAGES_PATH=./data/pkgs \
+librechat-code run --worker-dir /path/to/workspace --allow-workspace-commands
+```
+
+`docker-macos-nsjail` remains accepted as a compatibility alias. The worker
+bind-mounts only that canonical directory into an unexposed runtime
+container and submits commands to a private, capability-authenticated runner
+route. The runner maps the mounted directory owner into NsJail without chowning
+the directory, disables network access by default, rejects an escaping `cwd`,
+and bounds command, time, stdout, and stderr. The endpoint supervisor cannot
+enable this feature. This operator switch controls availability; LibreChat tool
+approval hooks remain the user-facing allow/deny boundary for each invocation.
 
 Reads reject absolute paths, traversal, escaping symlinks, non-regular files,
 and files larger than 1 MiB. The opened file is checked against its canonical
