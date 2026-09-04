@@ -7,6 +7,37 @@ import {
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
 } from './protocol.js';
+import type { WorkspaceEditFileRequest } from './protocol.js';
+
+const validSingleEditRequest: WorkspaceEditFileRequest = {
+  protocolVersion: 1,
+  operation: 'edit_file',
+  workspaceId: 'primary',
+  path: 'notes.txt',
+  oldText: 'before',
+  newText: 'after',
+};
+const validBatchEditRequest: WorkspaceEditFileRequest = {
+  protocolVersion: 1,
+  operation: 'edit_file',
+  workspaceId: 'primary',
+  path: 'notes.txt',
+  edits: [{ oldText: 'before', newText: 'after' }],
+};
+// @ts-expect-error An edit request must choose a complete single or batch form.
+const invalidEmptyEditRequest: WorkspaceEditFileRequest = {
+  protocolVersion: 1,
+  operation: 'edit_file',
+  workspaceId: 'primary',
+  path: 'notes.txt',
+};
+// @ts-expect-error Single and batch edit forms are mutually exclusive.
+const invalidMixedEditRequest: WorkspaceEditFileRequest = {
+  ...validSingleEditRequest,
+  edits: validBatchEditRequest.edits,
+};
+void invalidEmptyEditRequest;
+void invalidMixedEditRequest;
 
 test('bridgeWorkerPath encodes worker-controlled path segments', () => {
   assert.equal(
@@ -80,6 +111,27 @@ test('bridge worker capabilities accept only bounded public workspace descriptor
       },
     }),
     true,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
+        operations: ['read_file', 'edit_file'],
+        editFileModes: ['single', 'batch'],
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
+        editFileModes: ['batch'],
+      },
+    }),
+    false,
   );
   assert.equal(
     isValidBridgeWorkerCapabilities({

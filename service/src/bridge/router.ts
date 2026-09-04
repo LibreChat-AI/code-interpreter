@@ -388,6 +388,7 @@ router.post(
           'execute_command',
         ],
         supportedWorkspaceWriteFileModes: ['replace', 'create'],
+        supportedWorkspaceEditFileModes: ['single', 'batch'],
       });
     } catch (error) {
       if (error instanceof BridgeStoreError) {

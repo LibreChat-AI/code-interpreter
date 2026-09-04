@@ -82,12 +82,20 @@ function supportsWorkspaceTool(
     workspace != null &&
     (workspace.operations == null ||
       workspace.operations.includes(request.operation));
-  if (!supportsOperation || request.operation !== 'write_file') {
+  if (!supportsOperation) {
     return supportsOperation;
   }
-  if (request.overwrite === undefined) return true;
-  const mode = request.overwrite === false ? 'create' : 'replace';
-  return capabilities?.writeFileModes?.includes(mode) === true;
+  if (request.operation === 'write_file') {
+    if (request.overwrite === undefined) return true;
+    const mode = request.overwrite === false ? 'create' : 'replace';
+    return capabilities?.writeFileModes?.includes(mode) === true;
+  }
+  if (request.operation === 'edit_file') {
+    const mode = request.edits === undefined ? 'single' : 'batch';
+    const modes = capabilities?.editFileModes;
+    return modes == null ? mode === 'single' : modes.includes(mode);
+  }
+  return true;
 }
 
 function workerKey(workerId: string): string {

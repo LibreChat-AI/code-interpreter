@@ -277,7 +277,8 @@ the target already exists. Code API dispatches that mode only after the worker
 and server negotiate `create` in `writeFileModes`.
 `edit_file` accepts either the legacy `oldText`/`newText` pair or an ordered
 `edits` array; every exact replacement is validated before the updated file is
-installed as one atomic mutation.
+installed as one atomic mutation. Code API dispatches the batch form only after
+the worker and server negotiate `batch` in `editFileModes`.
 Only IDs, names, protocol version, supported operations, and negotiated write
 modes appear in worker capabilities; absolute host paths remain local to the
 worker process.

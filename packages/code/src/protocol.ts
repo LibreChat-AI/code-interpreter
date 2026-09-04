@@ -32,6 +32,7 @@ export type BridgeWorkspaceToolOperation =
   | 'execute_command';
 
 export type WorkspaceWriteFileMode = 'replace' | 'create';
+export type WorkspaceEditFileMode = 'single' | 'batch';
 
 export interface BridgeWorkspaceDescriptor {
   id: string;
@@ -46,6 +47,8 @@ export interface BridgeWorkspaceToolCapabilities {
   workspaces: BridgeWorkspaceDescriptor[];
   /** Omitted by legacy workers, which only accept replacement writes. */
   writeFileModes?: WorkspaceWriteFileMode[];
+  /** Omitted by legacy workers, which only accept single exact replacements. */
+  editFileModes?: WorkspaceEditFileMode[];
 }
 
 export interface WorkspaceReadFileRequest {
@@ -128,18 +131,33 @@ export interface WorkspaceWriteFileResult {
   bytesWritten: number;
 }
 
-export interface WorkspaceEditFileRequest {
+interface WorkspaceEditFileRequestBase {
   protocolVersion: BridgeProtocolVersion;
   operation: 'edit_file';
   workspaceId: string;
   path: string;
-  /** Legacy single-edit form. Mutually exclusive with edits. */
-  oldText?: string;
-  /** Legacy single-edit form. Mutually exclusive with edits. */
-  newText?: string;
-  /** Ordered exact replacements applied atomically as one file mutation. */
-  edits?: WorkspaceTextEdit[];
 }
+
+export interface WorkspaceSingleEditFileRequest
+  extends WorkspaceEditFileRequestBase {
+  /** Legacy single-edit form. */
+  oldText: string;
+  /** Legacy single-edit form. */
+  newText: string;
+  edits?: never;
+}
+
+export interface WorkspaceBatchEditFileRequest
+  extends WorkspaceEditFileRequestBase {
+  /** Ordered exact replacements applied atomically as one file mutation. */
+  edits: WorkspaceTextEdit[];
+  oldText?: never;
+  newText?: never;
+}
+
+export type WorkspaceEditFileRequest =
+  | WorkspaceSingleEditFileRequest
+  | WorkspaceBatchEditFileRequest;
 
 export interface WorkspaceTextEdit {
   oldText: string;
@@ -332,6 +350,8 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceToolOperations?: BridgeWorkspaceToolOperation[];
   /** Write modes this Code API can safely route to a capability-aware worker. */
   supportedWorkspaceWriteFileModes?: WorkspaceWriteFileMode[];
+  /** Edit modes this Code API can safely route to a capability-aware worker. */
+  supportedWorkspaceEditFileModes?: WorkspaceEditFileMode[];
 }
 
 export interface BridgePairingRedemption {
@@ -856,6 +876,21 @@ export function isValidBridgeWorkspaceToolCapabilities(
       ) ||
       new Set(capabilities.writeFileModes).size !==
         capabilities.writeFileModes.length)
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.editFileModes !== undefined &&
+    (!Array.isArray(capabilities.editFileModes) ||
+      capabilities.editFileModes.length < 1 ||
+      capabilities.editFileModes.length > 2 ||
+      !capabilities.operations.includes('edit_file') ||
+      !capabilities.editFileModes.every(
+        (mode) => mode === 'single' || mode === 'batch',
+      ) ||
+      new Set(capabilities.editFileModes).size !==
+        capabilities.editFileModes.length)
   ) {
     return false;
   }
