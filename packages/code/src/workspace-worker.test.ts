@@ -485,12 +485,13 @@ test('worker omits write modes not negotiated by an older Code API', async () =>
   ]);
 });
 
-test('worker omits batch edits not negotiated by an older Code API', async () => {
+test('worker advertises only edit modes and features negotiated by Code API', async () => {
   const registrations: Array<Record<string, unknown>> = [];
   const workspaceCapabilities = {
     protocolVersion: 1 as const,
     operations: ['read_file' as const, 'edit_file' as const],
     editFileModes: ['single' as const, 'batch' as const],
+    editFileFeatures: ['expected_base_sha256' as const],
     workspaces: [
       {
         id: 'primary',
@@ -529,6 +530,7 @@ test('worker omits batch edits not negotiated by an older Code API', async () =>
         registeredAt: new Date().toISOString(),
         leaseTtlMs: 60_000,
         supportedWorkspaceToolOperations: ['read_file', 'edit_file'],
+        supportedWorkspaceEditFileModes: ['single', 'batch'],
       });
     },
   });
@@ -544,6 +546,7 @@ test('worker omits batch edits not negotiated by an older Code API', async () =>
     {
       protocolVersion: 1,
       operations: ['read_file', 'edit_file'],
+      editFileModes: ['single', 'batch'],
       workspaces: [
         { id: 'primary', operations: ['read_file', 'edit_file'] },
       ],

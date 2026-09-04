@@ -34,6 +34,7 @@ export type BridgeWorkspaceToolOperation =
 
 export type WorkspaceWriteFileMode = 'replace' | 'create';
 export type WorkspaceEditFileMode = 'single' | 'batch';
+export type WorkspaceEditFileFeature = 'expected_base_sha256';
 
 export interface BridgeWorkspaceDescriptor {
   id: string;
@@ -50,6 +51,8 @@ export interface BridgeWorkspaceToolCapabilities {
   writeFileModes?: WorkspaceWriteFileMode[];
   /** Omitted by legacy workers, which only accept single exact replacements. */
   editFileModes?: WorkspaceEditFileMode[];
+  /** Omitted by workers that cannot fence edits against a preview revision. */
+  editFileFeatures?: WorkspaceEditFileFeature[];
 }
 
 export interface WorkspaceReadFileRequest {
@@ -176,15 +179,30 @@ export interface WorkspaceEditFileResult {
   bytesWritten: number;
 }
 
-export interface WorkspacePreviewEditRequest {
+interface WorkspacePreviewEditRequestBase {
   protocolVersion: BridgeProtocolVersion;
   operation: 'preview_edit';
   workspaceId: string;
   path: string;
-  oldText?: string;
-  newText?: string;
-  edits?: WorkspaceTextEdit[];
 }
+
+export interface WorkspaceSinglePreviewEditRequest
+  extends WorkspacePreviewEditRequestBase {
+  oldText: string;
+  newText: string;
+  edits?: never;
+}
+
+export interface WorkspaceBatchPreviewEditRequest
+  extends WorkspacePreviewEditRequestBase {
+  edits: WorkspaceTextEdit[];
+  oldText?: never;
+  newText?: never;
+}
+
+export type WorkspacePreviewEditRequest =
+  | WorkspaceSinglePreviewEditRequest
+  | WorkspaceBatchPreviewEditRequest;
 
 export interface WorkspacePreviewEditResult {
   protocolVersion: BridgeProtocolVersion;
@@ -400,6 +418,8 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceWriteFileModes?: WorkspaceWriteFileMode[];
   /** Edit modes this Code API can safely route to a capability-aware worker. */
   supportedWorkspaceEditFileModes?: WorkspaceEditFileMode[];
+  /** Edit features this Code API can safely route to a capability-aware worker. */
+  supportedWorkspaceEditFileFeatures?: WorkspaceEditFileFeature[];
 }
 
 export interface BridgePairingRedemption {
@@ -964,12 +984,23 @@ export function isValidBridgeWorkspaceToolCapabilities(
     (!Array.isArray(capabilities.editFileModes) ||
       capabilities.editFileModes.length < 1 ||
       capabilities.editFileModes.length > 2 ||
-      !capabilities.operations.includes('edit_file') ||
+      (!capabilities.operations.includes('edit_file') &&
+        !capabilities.operations.includes('preview_edit')) ||
       !capabilities.editFileModes.every(
         (mode) => mode === 'single' || mode === 'batch',
       ) ||
       new Set(capabilities.editFileModes).size !==
         capabilities.editFileModes.length)
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.editFileFeatures !== undefined &&
+    (!Array.isArray(capabilities.editFileFeatures) ||
+      capabilities.editFileFeatures.length !== 1 ||
+      !capabilities.operations.includes('edit_file') ||
+      capabilities.editFileFeatures[0] !== 'expected_base_sha256')
   ) {
     return false;
   }

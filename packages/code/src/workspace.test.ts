@@ -824,6 +824,7 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
     ],
     writeFileModes: ['replace', 'create'],
     editFileModes: ['single', 'batch'],
+    editFileFeatures: ['expected_base_sha256'],
   });
   await tools.execute({
     protocolVersion: 1,
@@ -1811,6 +1812,9 @@ test('composes sandboxed commands without exposing them on unconfigured workspac
   ]);
   assert.deepEqual(tools.capabilities.writeFileModes, ['replace', 'create']);
   assert.deepEqual(tools.capabilities.editFileModes, ['single', 'batch']);
+  assert.deepEqual(tools.capabilities.editFileFeatures, [
+    'expected_base_sha256',
+  ]);
   assert.deepEqual(
     tools.capabilities.workspaces.find(({ id }) => id === 'sandboxed')?.operations,
     tools.capabilities.operations,

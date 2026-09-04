@@ -1403,6 +1403,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     workspaces: BridgeWorkspaceDescriptor[],
     writeFileModes?: BridgeWorkspaceToolCapabilities['writeFileModes'],
     editFileModes?: BridgeWorkspaceToolCapabilities['editFileModes'],
+    editFileFeatures?: BridgeWorkspaceToolCapabilities['editFileFeatures'],
   ) {
     this.capabilities = {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -1410,6 +1411,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       workspaces,
       ...(writeFileModes != null ? { writeFileModes } : {}),
       ...(editFileModes != null ? { editFileModes } : {}),
+      ...(editFileFeatures != null ? { editFileFeatures } : {}),
     };
   }
 
@@ -1444,6 +1446,9 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       workspaces,
       ...(anyWritable ? { writeFileModes: ['replace', 'create'] } : {}),
       ...(anyWritable ? { editFileModes: ['single', 'batch'] } : {}),
+      ...(anyWritable
+        ? { editFileFeatures: ['expected_base_sha256'] }
+        : {}),
     };
     if (!isValidBridgeWorkspaceToolCapabilities(capabilities)) {
       throw new WorkspaceToolError(
@@ -1473,6 +1478,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       workspaces,
       capabilities.writeFileModes,
       capabilities.editFileModes,
+      capabilities.editFileFeatures,
     );
   }
 
@@ -1609,6 +1615,9 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
         : {}),
       ...(base.editFileModes != null
         ? { editFileModes: base.editFileModes }
+        : {}),
+      ...(base.editFileFeatures != null
+        ? { editFileFeatures: base.editFileFeatures }
         : {}),
       workspaces: base.workspaces.map((workspace) => ({
         ...workspace,

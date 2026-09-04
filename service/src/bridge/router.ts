@@ -390,6 +390,7 @@ router.post(
         ],
         supportedWorkspaceWriteFileModes: ['replace', 'create'],
         supportedWorkspaceEditFileModes: ['single', 'batch'],
+        supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
       });
     } catch (error) {
       if (error instanceof BridgeStoreError) {

@@ -279,6 +279,8 @@ and server negotiate `create` in `writeFileModes`.
 `edits` array; every exact replacement is validated before the updated file is
 installed as one atomic mutation. Code API dispatches the batch form only after
 the worker and server negotiate `batch` in `editFileModes`.
+Revision-fenced edits likewise require the negotiated
+`expected_base_sha256` entry in `editFileFeatures`.
 Only IDs, names, protocol version, supported operations, and negotiated write
 modes appear in worker capabilities; absolute host paths remain local to the
 worker process.

@@ -7,7 +7,10 @@ import {
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
 } from './protocol.js';
-import type { WorkspaceEditFileRequest } from './protocol.js';
+import type {
+  WorkspaceEditFileRequest,
+  WorkspacePreviewEditRequest,
+} from './protocol.js';
 
 const validSingleEditRequest: WorkspaceEditFileRequest = {
   protocolVersion: 1,
@@ -38,6 +41,26 @@ const invalidMixedEditRequest: WorkspaceEditFileRequest = {
 };
 void invalidEmptyEditRequest;
 void invalidMixedEditRequest;
+
+// @ts-expect-error A preview request must choose a complete single or batch form.
+const invalidEmptyPreviewRequest: WorkspacePreviewEditRequest = {
+  protocolVersion: 1,
+  operation: 'preview_edit',
+  workspaceId: 'primary',
+  path: 'notes.txt',
+};
+// @ts-expect-error Single and batch preview forms are mutually exclusive.
+const invalidMixedPreviewRequest: WorkspacePreviewEditRequest = {
+  protocolVersion: 1,
+  operation: 'preview_edit',
+  workspaceId: 'primary',
+  path: 'notes.txt',
+  oldText: 'before',
+  newText: 'after',
+  edits: [{ oldText: 'before', newText: 'after' }],
+};
+void invalidEmptyPreviewRequest;
+void invalidMixedPreviewRequest;
 
 test('bridgeWorkerPath encodes worker-controlled path segments', () => {
   assert.equal(
@@ -117,11 +140,33 @@ test('bridge worker capabilities accept only bounded public workspace descriptor
       ...valid,
       workspaceTools: {
         ...valid.workspaceTools,
-        operations: ['read_file', 'edit_file'],
+        operations: ['read_file', 'preview_edit'],
         editFileModes: ['single', 'batch'],
       },
     }),
     true,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
+        operations: ['read_file', 'edit_file'],
+        editFileModes: ['single', 'batch'],
+        editFileFeatures: ['expected_base_sha256'],
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
+        editFileFeatures: ['expected_base_sha256'],
+      },
+    }),
+    false,
   );
   assert.equal(
     isValidBridgeWorkerCapabilities({
