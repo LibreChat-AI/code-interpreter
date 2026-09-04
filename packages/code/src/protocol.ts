@@ -433,6 +433,17 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceListFileFeatures?: WorkspaceListFileFeature[];
 }
 
+/** Administrator-visible liveness for a configured worker. Credentials,
+ * bindings, host paths, and worker identity material are deliberately omitted. */
+export interface BridgeWorkerStatusResponse {
+  protocolVersion: BridgeProtocolVersion;
+  workerId: string;
+  online: boolean;
+  ready: boolean;
+  leaseExpiresInMs?: number;
+  capabilities?: BridgeWorkerCapabilities;
+}
+
 export interface BridgePairingRedemption {
   protocolVersion: BridgeProtocolVersion;
   workerId: string;

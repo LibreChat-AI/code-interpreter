@@ -312,6 +312,23 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     }),
   );
 
+  router.get(
+    '/workers/:workerId/status',
+    adminAuth,
+    asyncRoute(async (req, res) => {
+      const workerId = req.params.workerId;
+      if (!validWorkerId(workerId) || !configuredWorker(workerId)) {
+        res.status(400).json({ error: 'Invalid bridge worker ID' });
+        return;
+      }
+      const status = await options.store.workerStatus(workerId);
+      res.json({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId,
+        ...status,
+      });
+    }),
+  );
 
 router.post(
   '/workers/register',

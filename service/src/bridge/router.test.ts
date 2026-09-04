@@ -25,6 +25,79 @@ afterEach(async () => {
 });
 
 describe('paired bridge HTTP API', () => {
+  test('reports authenticated worker readiness without exposing identity or binding data', async () => {
+    const store = new RedisBridgeStore(redis);
+    const app = express();
+    app.use(json());
+    app.use(
+      '/v1/bridge',
+      createBridgeRouter({
+        store,
+        pairings: new RedisBridgePairingStore(redis),
+        authMode: 'paired',
+        adminToken: 'strong-administrator-bootstrap-token',
+        allowDynamicWorkers: true,
+      }),
+    );
+    server = createServer(app);
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') {
+      throw new Error('Expected TCP listener');
+    }
+    const baseUrl = `http://127.0.0.1:${address.port}/v1/bridge`;
+    const headers = { Authorization: 'Bearer strong-administrator-bootstrap-token' };
+
+    const offline = await fetch(`${baseUrl}/workers/user-vm/status`, { headers });
+    expect(offline.status).toBe(200);
+    await expect(offline.json()).resolves.toEqual({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'user-vm',
+      online: false,
+      ready: false,
+    });
+
+    const capabilities = {
+      statefulWorkspace: true,
+      sandboxProfile: 'native-srt',
+      runtimes: ['bash'],
+      requiresReadyConfirmation: true,
+    };
+    const registrationGeneration = await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'user-vm',
+      incarnationId: 'incarnation-00000001',
+      capabilities,
+      binding: {
+        tenantId: 'tenant-1',
+        principal: { type: 'user', id: 'user-1' },
+      },
+      credentialId: 'secret-credential-id',
+      identityId: 'secret-identity-id',
+    });
+
+    const starting = await fetch(`${baseUrl}/workers/user-vm/status`, { headers });
+    expect(starting.status).toBe(200);
+    await expect(starting.json()).resolves.toMatchObject({
+      workerId: 'user-vm',
+      online: true,
+      ready: false,
+      capabilities,
+    });
+    expect(
+      JSON.stringify(await (await fetch(`${baseUrl}/workers/user-vm/status`, { headers })).json()),
+    ).not.toMatch(/tenant-1|user-1|secret-credential-id|secret-identity-id/);
+
+    await store.confirmReady('user-vm', 'incarnation-00000001', registrationGeneration);
+    const ready = await fetch(`${baseUrl}/workers/user-vm/status`, { headers });
+    const status = (await ready.json()) as Record<string, unknown>;
+    expect(status).toMatchObject({ workerId: 'user-vm', online: true, ready: true, capabilities });
+    expect(status.leaseExpiresInMs).toBeNumber();
+
+    const unauthorized = await fetch(`${baseUrl}/workers/user-vm/status`);
+    expect(unauthorized.status).toBe(401);
+  });
+
   test('rejects a malformed optional binding for a configured worker', async () => {
     const app = express();
     app.use(json());
