@@ -24,6 +24,9 @@ RUN bun build ./src/file-server.ts --outdir .build --target bun --external '@ope
 # Production stage
 FROM base AS production
 ENV NODE_ENV=production
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=install /temp/prod/node_modules node_modules
 COPY --from=builder /usr/src/app/.build ./.build
 EXPOSE 3000
