@@ -19,6 +19,7 @@ import type {
   BridgeWorkerCapabilities,
   BridgeWorkerCredentialResponse,
   BridgeWorkerRegistrationResponse,
+  BridgeWorkspaceToolOperation,
 } from './protocol.js';
 import type { RuntimeLease, RuntimeSupervisor } from './runtime.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
@@ -227,12 +228,50 @@ function supportedWorkspaceCapabilities(
   const desired = capabilities.workspaceTools;
   const supported = registration.supportedWorkspaceToolOperations;
   if (desired == null || !Array.isArray(supported)) return undefined;
-  const operations = desired.operations.filter((operation) =>
+  let operations = desired.operations.filter((operation) =>
     supported.includes(operation),
   );
-  const supportsEditRequests =
-    operations.includes('edit_file') || operations.includes('preview_edit');
   if (operations.length === 0) return undefined;
+  let writeFileModes: typeof desired.writeFileModes;
+  if (operations.includes('write_file')) {
+    const desiredModes = desired.writeFileModes ?? ['replace'];
+    const serverModes = registration.supportedWorkspaceWriteFileModes ?? [
+      'replace',
+    ];
+    const commonModes = desiredModes.filter((mode) =>
+      serverModes.includes(mode),
+    );
+    if (commonModes.length === 0) {
+      operations = operations.filter((operation) => operation !== 'write_file');
+    } else if (registration.supportedWorkspaceWriteFileModes != null) {
+      writeFileModes = commonModes;
+    }
+  }
+  const editOperations = new Set<BridgeWorkspaceToolOperation>([
+    'preview_edit',
+    'edit_file',
+  ]);
+  let editFileModes: typeof desired.editFileModes;
+  if (operations.some((operation) => editOperations.has(operation))) {
+    const desiredModes = desired.editFileModes ?? ['single'];
+    const serverModes = registration.supportedWorkspaceEditFileModes ?? [
+      'single',
+    ];
+    const commonModes = desiredModes.filter((mode) =>
+      serverModes.includes(mode),
+    );
+    if (commonModes.length === 0) {
+      operations = operations.filter(
+        (operation) => !editOperations.has(operation),
+      );
+    } else if (registration.supportedWorkspaceEditFileModes != null) {
+      editFileModes = commonModes;
+    }
+  }
+  if (operations.length === 0) return undefined;
+  const supportsEditRequests = operations.some((operation) =>
+    editOperations.has(operation),
+  );
   const workspaces = desired.workspaces.flatMap((workspace) => {
     if (workspace.operations == null) return [workspace];
     const workspaceOperations = workspace.operations.filter((operation) =>
@@ -243,12 +282,6 @@ function supportedWorkspaceCapabilities(
       : [{ ...workspace, operations: workspaceOperations }];
   });
   if (workspaces.length === 0) return undefined;
-  const writeFileModes = desired.writeFileModes?.filter((mode) =>
-    registration.supportedWorkspaceWriteFileModes?.includes(mode),
-  );
-  const editFileModes = desired.editFileModes?.filter((mode) =>
-    registration.supportedWorkspaceEditFileModes?.includes(mode),
-  );
   const editFileFeatures = desired.editFileFeatures?.filter((feature) =>
     registration.supportedWorkspaceEditFileFeatures?.includes(feature),
   );

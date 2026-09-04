@@ -554,6 +554,85 @@ test('worker advertises only edit modes and features negotiated by Code API', as
   ]);
 });
 
+test('worker drops file operations when no request mode is compatible', async () => {
+  const registrations: Array<Record<string, unknown>> = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: [
+      'read_file' as const,
+      'write_file' as const,
+      'preview_edit' as const,
+    ],
+    writeFileModes: ['create' as const],
+    editFileModes: ['batch' as const],
+    workspaces: [
+      {
+        id: 'primary',
+        operations: [
+          'read_file' as const,
+          'write_file' as const,
+          'preview_edit' as const,
+        ],
+      },
+    ],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        throw new Error('not executed');
+      },
+    },
+    workspaceMutationQuarantine: mutationQuarantine(),
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        capabilities: { workspaceTools?: Record<string, unknown> };
+      };
+      registrations.push(body.capabilities.workspaceTools ?? {});
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+        supportedWorkspaceToolOperations: [
+          'read_file',
+          'write_file',
+          'preview_edit',
+        ],
+        supportedWorkspaceWriteFileModes: ['replace'],
+        supportedWorkspaceEditFileModes: ['single'],
+      });
+    },
+  });
+
+  await worker.register();
+
+  assert.deepEqual(registrations, [
+    {
+      protocolVersion: 1,
+      operations: ['read_file'],
+      workspaces: [{ id: 'primary' }],
+    },
+    {
+      protocolVersion: 1,
+      operations: ['read_file'],
+      workspaces: [{ id: 'primary', operations: ['read_file'] }],
+    },
+  ]);
+});
+
 test('worker retains per-workspace restrictions during read-only promotion', async () => {
   const registrations: Array<{
     operations: string[];
