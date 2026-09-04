@@ -199,6 +199,9 @@ install_python_packages() {
         pypdf \
         pypdf2 \
         pdfplumber \
+        tableauhyperapi==0.0.26359 \
+        tableauserverclient==0.41 \
+        tableau-parser==0.1.0 \
         "weasyprint>=68" \
         "msgpack>=1.2.1" \
         "setuptools>=78.1.1" \

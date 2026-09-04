@@ -23,6 +23,18 @@ from PIL import Image
 from pptx import Presentation
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
+import tableau_parser
+import tableauserverclient
+from tableauhyperapi import (
+    Connection,
+    CreateMode,
+    HyperProcess,
+    Inserter,
+    SqlType,
+    TableDefinition,
+    TableName,
+    Telemetry,
+)
 
 
 REQUIRED_DISTRIBUTIONS = (
@@ -38,10 +50,19 @@ REQUIRED_DISTRIBUTIONS = (
     "pypdf2",
     "pdfplumber",
     "reportlab",
+    "tableauhyperapi",
+    "tableauserverclient",
+    "tableau-parser",
     "weasyprint",
     "msgpack",
     "setuptools",
 )
+
+TABLEAU_DISTRIBUTIONS = {
+    "tableauhyperapi": "0.0.26359",
+    "tableauserverclient": "0.41",
+    "tableau-parser": "0.1.0",
+}
 
 
 def run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -115,6 +136,11 @@ def command_version(*args: str) -> str:
 
 def runtime_versions() -> dict[str, object]:
     packages = {name: metadata.version(name) for name in REQUIRED_DISTRIBUTIONS}
+    for name, expected_version in TABLEAU_DISTRIBUTIONS.items():
+        require(
+            packages[name] == expected_version,
+            f"{name} {packages[name]} does not match required {expected_version}",
+        )
     require(
         Version(packages["weasyprint"]) >= Version("68"),
         f"WeasyPrint {packages['weasyprint']} is below the patched runtime baseline",
@@ -131,6 +157,7 @@ def runtime_versions() -> dict[str, object]:
         "python": platform.python_version(),
         "libreoffice": command_version("libreoffice", "--version"),
         "ffmpeg": command_version("ffmpeg", "-version"),
+        "unzip": command_version("unzip", "-v"),
         "weasyprint": command_version("weasyprint", "--version"),
         "packages": packages,
     }
@@ -152,6 +179,51 @@ def main() -> None:
     results: dict[str, str] = {}
     with tempfile.TemporaryDirectory(prefix="wowloop-file-runtime-") as tmp:
         root = Path(tmp)
+
+        twb = root / "workbook.twb"
+        twb.write_text(
+            '<?xml version="1.0" encoding="utf-8"?><workbook version="2024.1"/>',
+            encoding="utf-8",
+        )
+        twbx = root / "workbook.twbx"
+        with zipfile.ZipFile(twbx, "w") as archive:
+            archive.write(twb, arcname=twb.name)
+        extracted = root / "twbx"
+        extracted.mkdir()
+        run("unzip", "-q", str(twbx), "-d", str(extracted))
+        require(
+            extracted.joinpath(twb.name).read_text(encoding="utf-8")
+            == twb.read_text(encoding="utf-8"),
+            "twbx extraction failed",
+        )
+        require(tableau_parser.__name__ == "tableau_parser", "tableau-parser import failed")
+        require(
+            tableauserverclient.__name__ == "tableauserverclient",
+            "tableauserverclient import failed",
+        )
+        results["twbx"] = "pass"
+
+        hyper_path = root / "extract.hyper"
+        table = TableDefinition(
+            TableName("Extract", "Extract"),
+            [TableDefinition.Column("name", SqlType.text())],
+        )
+        with HyperProcess(Telemetry.DO_NOT_SEND_USAGE_DATA_TO_TABLEAU) as hyper:
+            with Connection(
+                hyper.endpoint,
+                hyper_path,
+                CreateMode.CREATE_AND_REPLACE,
+            ) as connection:
+                connection.catalog.create_schema("Extract")
+                connection.catalog.create_table(table)
+                with Inserter(connection, table) as inserter:
+                    inserter.add_row(["WowLoop"])
+                    inserter.execute()
+                rows = connection.execute_list_query(
+                    'SELECT "name" FROM "Extract"."Extract"'
+                )
+        require(rows == [["WowLoop"]], "Hyper extract round trip failed")
+        results["hyper"] = "pass"
 
         xlsx = root / "report.xlsx"
         workbook = Workbook()

@@ -95,6 +95,9 @@ from packaging.version import Version
 
 assert Version(metadata.version("msgpack")) >= Version("1.2.1")
 assert Version(metadata.version("setuptools")) >= Version("78.1.1")
+assert metadata.version("tableauhyperapi") == "0.0.26359"
+assert metadata.version("tableauserverclient") == "0.41"
+assert metadata.version("tableau-parser") == "0.1.0"
 PY
     pip_vendor_sbom="$(pip_vendor_sbom_path "$python_path" 2>/dev/null)" || return 1
     [ ! -e "$pip_vendor_sbom" ]
@@ -236,6 +239,9 @@ packages_ready() {
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/statsmodels" ] &&
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/pypdf" ] &&
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/pdfplumber" ] &&
+    [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/tableauhyperapi" ] &&
+    [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/tableauserverclient" ] &&
+    [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/tableau_parser" ] &&
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/weasyprint" ] &&
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/rasterio" ] &&
     python_security_baseline_ready &&
@@ -356,6 +362,9 @@ if [ -f "$PIP_PATH" ]; then
         pypdf \
         pypdf2 \
         pdfplumber \
+        tableauhyperapi==0.0.26359 \
+        tableauserverclient==0.41 \
+        tableau-parser==0.1.0 \
         "weasyprint>=68" \
         "msgpack>=1.2.1" \
         "setuptools>=78.1.1" \

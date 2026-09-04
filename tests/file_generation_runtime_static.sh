@@ -34,6 +34,10 @@ PY
 for package in libreoffice ffmpeg poppler-utils libpango-1.0-0 libpangoft2-1.0-0 shared-mime-info; do
     grep -F "$package" "$ROOT/api/Dockerfile" >/dev/null
 done
+sed -n '/FROM oven\/bun:1.3.14-debian AS sandbox-build/,/rm -rf \/var\/lib\/apt\/lists/p' \
+    "$ROOT/api/Dockerfile" | grep -F '    unzip \' >/dev/null
+sed -n '/FROM fedora:43 AS sandbox-runner-base/,/dnf clean all/p' \
+    "$ROOT/api/Dockerfile" | grep -F 'dnf upgrade -y --refresh' >/dev/null
 if grep -F '    weasyprint \' "$ROOT/api/Dockerfile" >/dev/null; then
     echo 'Debian WeasyPrint is vulnerable; install the patched Python runtime package instead.' >&2
     exit 1
@@ -42,6 +46,14 @@ fi
 for package in openpyxl xlsxwriter pandas numpy python-docx docxtpl python-pptx pillow pypdf pypdf2 pdfplumber reportlab weasyprint msgpack setuptools; do
     grep -F "$package" "$ROOT/build-packages.sh" >/dev/null
     grep -F "$package" "$ROOT/docker/package-init.sh" >/dev/null
+done
+for package in tableauhyperapi==0.0.26359 tableauserverclient==0.41 tableau-parser==0.1.0; do
+    grep -F "$package" "$ROOT/build-packages.sh" >/dev/null
+    grep -F "$package" "$ROOT/docker/package-init.sh" >/dev/null
+done
+for package in tableauhyperapi tableauserverclient tableau_parser; do
+    sed -n '/^packages_ready()/,/^}/p' "$ROOT/docker/package-init.sh" \
+        | grep -F "/site-packages/$package" >/dev/null
 done
 
 grep -F '/pkgs/.bundle.sha256' "$ROOT/build-packages.sh" >/dev/null
