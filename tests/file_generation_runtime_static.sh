@@ -51,10 +51,14 @@ for package in tableauhyperapi==0.0.26359 tableauserverclient==0.41 tableau-pars
     grep -F "$package" "$ROOT/build-packages.sh" >/dev/null
     grep -F "$package" "$ROOT/docker/package-init.sh" >/dev/null
 done
-for package in tableauhyperapi tableauserverclient tableau_parser; do
+for package in tableauserverclient tableau_parser; do
     sed -n '/^packages_ready()/,/^}/p' "$ROOT/docker/package-init.sh" \
         | grep -F "/site-packages/$package" >/dev/null
 done
+sed -n '/^tableau_hyper_ready()/,/^}/p' "$ROOT/docker/package-init.sh" \
+    | grep -F '/site-packages/tableauhyperapi' >/dev/null
+grep -F 'TABLEAU_HYPER_SUPPORTED' "$ROOT/docker/package-init.sh" >/dev/null
+grep -F 'TABLEAU_HYPER_SUPPORTED' "$ROOT/scripts/verify-file-generation-runtime.py" >/dev/null
 
 grep -F '/pkgs/.bundle.sha256' "$ROOT/build-packages.sh" >/dev/null
 grep -F '/pkgs/.bundle.sha256' "$ROOT/docker/package-init.sh" >/dev/null

@@ -87,6 +87,16 @@ case "$ARCH" in
     *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
+TABLEAU_PYTHON_PACKAGES=(
+    tableauserverclient==0.41
+    tableau-parser==0.1.0
+)
+if [ "$ARCH" = "x86_64" ]; then
+    TABLEAU_PYTHON_PACKAGES=(tableauhyperapi==0.0.26359 "${TABLEAU_PYTHON_PACKAGES[@]}")
+else
+    echo "Tableau Hyper is unavailable on Linux $ARCH; installing architecture-neutral Tableau clients only"
+fi
+
 if [ "${FORCE_REBUILD:-}" = "1" ]; then
     echo "Force rebuild requested, cleaning existing packages..."
     docker run --rm -v "$PWD/data/pkgs:/pkgs" alpine sh -c "rm -rf /pkgs/*" 2>/dev/null || rm -rf "$PACKAGES_DIR"/*
@@ -199,9 +209,7 @@ install_python_packages() {
         pypdf \
         pypdf2 \
         pdfplumber \
-        tableauhyperapi==0.0.26359 \
-        tableauserverclient==0.41 \
-        tableau-parser==0.1.0 \
+        "${TABLEAU_PYTHON_PACKAGES[@]}" \
         "weasyprint>=68" \
         "msgpack>=1.2.1" \
         "setuptools>=78.1.1" \

@@ -25,16 +25,20 @@ from pypdf import PdfReader
 from reportlab.pdfgen import canvas
 import tableau_parser
 import tableauserverclient
-from tableauhyperapi import (
-    Connection,
-    CreateMode,
-    HyperProcess,
-    Inserter,
-    SqlType,
-    TableDefinition,
-    TableName,
-    Telemetry,
-)
+
+
+TABLEAU_HYPER_SUPPORTED = platform.machine().lower() in {"amd64", "x86_64"}
+if TABLEAU_HYPER_SUPPORTED:
+    from tableauhyperapi import (
+        Connection,
+        CreateMode,
+        HyperProcess,
+        Inserter,
+        SqlType,
+        TableDefinition,
+        TableName,
+        Telemetry,
+    )
 
 
 REQUIRED_DISTRIBUTIONS = (
@@ -50,7 +54,6 @@ REQUIRED_DISTRIBUTIONS = (
     "pypdf2",
     "pdfplumber",
     "reportlab",
-    "tableauhyperapi",
     "tableauserverclient",
     "tableau-parser",
     "weasyprint",
@@ -59,10 +62,12 @@ REQUIRED_DISTRIBUTIONS = (
 )
 
 TABLEAU_DISTRIBUTIONS = {
-    "tableauhyperapi": "0.0.26359",
     "tableauserverclient": "0.41",
     "tableau-parser": "0.1.0",
 }
+if TABLEAU_HYPER_SUPPORTED:
+    TABLEAU_DISTRIBUTIONS["tableauhyperapi"] = "0.0.26359"
+    REQUIRED_DISTRIBUTIONS += ("tableauhyperapi",)
 
 
 def run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -203,27 +208,30 @@ def main() -> None:
         )
         results["twbx"] = "pass"
 
-        hyper_path = root / "extract.hyper"
-        table = TableDefinition(
-            TableName("Extract", "Extract"),
-            [TableDefinition.Column("name", SqlType.text())],
-        )
-        with HyperProcess(Telemetry.DO_NOT_SEND_USAGE_DATA_TO_TABLEAU) as hyper:
-            with Connection(
-                hyper.endpoint,
-                hyper_path,
-                CreateMode.CREATE_AND_REPLACE,
-            ) as connection:
-                connection.catalog.create_schema("Extract")
-                connection.catalog.create_table(table)
-                with Inserter(connection, table) as inserter:
-                    inserter.add_row(["WowLoop"])
-                    inserter.execute()
-                rows = connection.execute_list_query(
-                    'SELECT "name" FROM "Extract"."Extract"'
-                )
-        require(rows == [["WowLoop"]], "Hyper extract round trip failed")
-        results["hyper"] = "pass"
+        if TABLEAU_HYPER_SUPPORTED:
+            hyper_path = root / "extract.hyper"
+            table = TableDefinition(
+                TableName("Extract", "Extract"),
+                [TableDefinition.Column("name", SqlType.text())],
+            )
+            with HyperProcess(Telemetry.DO_NOT_SEND_USAGE_DATA_TO_TABLEAU) as hyper:
+                with Connection(
+                    hyper.endpoint,
+                    hyper_path,
+                    CreateMode.CREATE_AND_REPLACE,
+                ) as connection:
+                    connection.catalog.create_schema("Extract")
+                    connection.catalog.create_table(table)
+                    with Inserter(connection, table) as inserter:
+                        inserter.add_row(["WowLoop"])
+                        inserter.execute()
+                    rows = connection.execute_list_query(
+                        'SELECT "name" FROM "Extract"."Extract"'
+                    )
+            require(rows == [["WowLoop"]], "Hyper extract round trip failed")
+            results["hyper"] = "pass"
+        else:
+            results["hyper"] = f"unsupported_on_{platform.machine().lower()}"
 
         xlsx = root / "report.xlsx"
         workbook = Workbook()
