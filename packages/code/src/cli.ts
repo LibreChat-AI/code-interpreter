@@ -8,6 +8,7 @@ import { pairBridgeWorker } from './pairing.js';
 import { startFileRelay } from './relay.js';
 import { DockerFileRelaySupervisor } from './relay-runtime.js';
 import {
+  assertIdentityPathIsPrivate,
   assertWorkspaceMutationQuarantineOwner,
   clearWorkspaceMutationQuarantine,
   defaultBridgeIdentityPath,
@@ -128,8 +129,14 @@ async function pair(args: string[]): Promise<void> {
     option(args, '--identity') ??
     process.env.LIBRECHAT_CODE_IDENTITY_FILE ??
     defaultBridgeIdentityPath(workerId);
-  const identity = await pairBridgeWorker({ codeApiUrl, workerId, code });
-  await saveBridgeIdentity(identityPath, identity);
+  const reservation = await assertIdentityPathIsPrivate(identityPath);
+  try {
+    const identity = await pairBridgeWorker({ codeApiUrl, workerId, code });
+    await saveBridgeIdentity(identityPath, identity);
+  } catch (error) {
+    await reservation.release();
+    throw error;
+  }
   process.stdout.write(
     `Paired worker ${workerId}. Identity saved to ${identityPath}\n`,
   );
