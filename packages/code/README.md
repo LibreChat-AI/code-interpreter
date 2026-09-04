@@ -271,8 +271,13 @@ names and exposes bounded `read_file`, literal `search_text`, and deterministic
 can explicitly add confined `write_file` and exact-match `edit_file` operations
 with `--allow-workspace-writes` or
 `LIBRECHAT_CODE_ALLOW_WORKSPACE_WRITES=true`.
-Only IDs, names, protocol version, and supported operations appear in worker
-capabilities; absolute host paths remain local to the worker process.
+`write_file` preserves its overwrite behavior by default; callers can set
+`overwrite: false` to require an atomic create that returns `EDIT_CONFLICT` if
+the target already exists. Code API dispatches that mode only after the worker
+and server negotiate `create` in `writeFileModes`.
+Only IDs, names, protocol version, supported operations, and negotiated write
+modes appear in worker capabilities; absolute host paths remain local to the
+worker process.
 
 The protocol also defines a bounded `execute_command` request and result for a
 sandbox-backed executor. Commands are treated as workspace mutations and cannot

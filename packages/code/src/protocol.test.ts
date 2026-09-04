@@ -75,6 +75,27 @@ test('bridge worker capabilities accept only bounded public workspace descriptor
       ...valid,
       workspaceTools: {
         ...valid.workspaceTools,
+        operations: ['read_file', 'write_file'],
+        writeFileModes: ['replace', 'create'],
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
+        writeFileModes: ['create'],
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
         workspaces: [{ id: 'primary', root: '/Users/operator/private' }],
       },
     }),
@@ -156,8 +177,13 @@ test('workspace mutations accept bounded UTF-8 requests and exact result shapes'
     workspaceId: 'primary',
     path: 'notes.txt',
     content: 'hello',
+    overwrite: false,
   };
   assert.equal(isWorkspaceToolRequest(writeRequest), true);
+  assert.equal(
+    isWorkspaceToolRequest({ ...writeRequest, overwrite: 'false' }),
+    false,
+  );
   assert.equal(
     isWorkspaceToolRequest({
       ...writeRequest,
@@ -175,6 +201,17 @@ test('workspace mutations accept bounded UTF-8 requests and exact result shapes'
       bytesWritten: 5,
     }),
     true,
+  );
+  assert.equal(
+    isWorkspaceToolResult(writeRequest, {
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      created: false,
+      bytesWritten: 5,
+    }),
+    false,
   );
 
   const editRequest = {

@@ -76,13 +76,18 @@ function supportsWorkspaceTool(
   const workspace = capabilities?.workspaces.find(
     (candidate) => candidate.id === request.workspaceId,
   );
-  return (
+  const supportsOperation =
     capabilities != null &&
     capabilities.operations.includes(request.operation) &&
     workspace != null &&
     (workspace.operations == null ||
-      workspace.operations.includes(request.operation))
-  );
+      workspace.operations.includes(request.operation));
+  if (!supportsOperation || request.operation !== 'write_file') {
+    return supportsOperation;
+  }
+  if (request.overwrite === undefined) return true;
+  const mode = request.overwrite === false ? 'create' : 'replace';
+  return capabilities?.writeFileModes?.includes(mode) === true;
 }
 
 function workerKey(workerId: string): string {
