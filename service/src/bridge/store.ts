@@ -76,13 +76,41 @@ function supportsWorkspaceTool(
   const workspace = capabilities?.workspaces.find(
     (candidate) => candidate.id === request.workspaceId,
   );
-  return (
+  const supportsOperation =
     capabilities != null &&
     capabilities.operations.includes(request.operation) &&
     workspace != null &&
     (workspace.operations == null ||
-      workspace.operations.includes(request.operation))
-  );
+      workspace.operations.includes(request.operation));
+  if (!supportsOperation) {
+    return supportsOperation;
+  }
+  if (request.operation === 'list_files' && request.afterPath !== undefined) {
+    return capabilities?.listFileFeatures?.includes('after_path') === true;
+  }
+  if (request.operation === 'write_file') {
+    const mode = request.overwrite === false ? 'create' : 'replace';
+    const modes = capabilities?.writeFileModes;
+    return request.overwrite === undefined && modes == null
+      ? true
+      : modes?.includes(mode) === true;
+  }
+  if (
+    request.operation === 'preview_edit' ||
+    request.operation === 'edit_file'
+  ) {
+    const mode = request.edits === undefined ? 'single' : 'batch';
+    const modes = capabilities?.editFileModes;
+    const supportsMode = modes == null ? mode === 'single' : modes.includes(mode);
+    if (request.operation === 'preview_edit') return supportsMode;
+    return (
+      supportsMode &&
+      (request.expectedBaseSha256 === undefined ||
+        capabilities?.editFileFeatures?.includes('expected_base_sha256') ===
+          true)
+    );
+  }
+  return true;
 }
 
 function workerKey(workerId: string): string {
@@ -485,22 +513,28 @@ export class RedisBridgeStore {
         'Invalid workspace tool request',
       );
     }
-    const settlement = (await this.dispatch({
+    return (await this.dispatch({
       ...args,
       body: {} as t.PayloadBody,
       headers: {},
       workspaceRequest: args.request,
+      finalize: async (settlement, registration) => {
+        if (
+          settlement.status === 'fulfilled' &&
+          !isWorkspaceToolResult(
+            args.request,
+            settlement.result,
+            registration.capabilities.workspaceTools,
+          )
+        ) {
+          throw new BridgeStoreError(
+            'RESULT_INVALID',
+            'Bridge worker returned an invalid workspace tool result',
+          );
+        }
+        return settlement;
+      },
     })) as unknown as CodeBridgeWorkspaceSettlement;
-    if (
-      settlement.status === 'fulfilled' &&
-      !isWorkspaceToolResult(args.request, settlement.result)
-    ) {
-      throw new BridgeStoreError(
-        'RESULT_INVALID',
-        'Bridge worker returned an invalid workspace tool result',
-      );
-    }
-    return settlement;
   }
 
   async dispatch(args: {
@@ -515,6 +549,7 @@ export class RedisBridgeStore {
     signal: AbortSignal;
     finalize?: (
       settlement: CodeBridgeSettlement,
+      registration: RegisteredBridgeWorker,
     ) => Promise<CodeBridgeSettlement>;
   }): Promise<CodeBridgeSettlement> {
     this.assertDispatchActive(args.signal, args.deadlineAtMs);
@@ -694,7 +729,7 @@ export class RedisBridgeStore {
         const result =
           args.finalize == null
             ? settlement
-            : await args.finalize(settlement);
+            : await args.finalize(settlement, registration);
         await this.commitPendingWorkspace(
           assignment,
           settlement,

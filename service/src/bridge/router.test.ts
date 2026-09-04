@@ -284,9 +284,14 @@ describe('paired bridge HTTP API', () => {
         'search_text',
         'list_files',
         'write_file',
+        'preview_edit',
         'edit_file',
         'execute_command',
       ],
+      supportedWorkspaceWriteFileModes: ['replace', 'create'],
+      supportedWorkspaceEditFileModes: ['single', 'batch'],
+      supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
+      supportedWorkspaceListFileFeatures: ['after_path'],
     });
 
     const crossDeploymentRevoke = await fetch(

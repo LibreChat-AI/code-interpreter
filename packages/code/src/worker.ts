@@ -19,6 +19,7 @@ import type {
   BridgeWorkerCapabilities,
   BridgeWorkerCredentialResponse,
   BridgeWorkerRegistrationResponse,
+  BridgeWorkspaceToolOperation,
 } from './protocol.js';
 import type { RuntimeLease, RuntimeSupervisor } from './runtime.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
@@ -137,6 +138,24 @@ function workspaceCapabilitiesMatch(
     advertised.operations.every(
       (operation, index) => operation === executor.operations[index],
     ) &&
+    advertised.writeFileModes?.length === executor.writeFileModes?.length &&
+    (advertised.writeFileModes?.every(
+      (mode, index) => mode === executor.writeFileModes?.[index],
+    ) ?? executor.writeFileModes == null) &&
+    advertised.editFileModes?.length === executor.editFileModes?.length &&
+    (advertised.editFileModes?.every(
+      (mode, index) => mode === executor.editFileModes?.[index],
+    ) ?? executor.editFileModes == null) &&
+    advertised.editFileFeatures?.length ===
+      executor.editFileFeatures?.length &&
+    (advertised.editFileFeatures?.every(
+      (feature, index) => feature === executor.editFileFeatures?.[index],
+    ) ?? executor.editFileFeatures == null) &&
+    advertised.listFileFeatures?.length ===
+      executor.listFileFeatures?.length &&
+    (advertised.listFileFeatures?.every(
+      (feature, index) => feature === executor.listFileFeatures?.[index],
+    ) ?? executor.listFileFeatures == null) &&
     advertised.workspaces.length === executor.workspaces.length &&
     advertised.workspaces.every(
       (workspace, index) =>
@@ -191,10 +210,17 @@ function registrationCompatibleCapabilities(
     const { workspaceTools: _workspaceTools, ...compatible } = capabilities;
     return compatible;
   }
+  const {
+    writeFileModes: _writeFileModes,
+    editFileModes: _editFileModes,
+    editFileFeatures: _editFileFeatures,
+    listFileFeatures: _listFileFeatures,
+    ...compatibleWorkspaceTools
+  } = workspaceTools;
   return {
     ...capabilities,
     workspaceTools: {
-      ...workspaceTools,
+      ...compatibleWorkspaceTools,
       operations,
       workspaces,
     },
@@ -208,10 +234,50 @@ function supportedWorkspaceCapabilities(
   const desired = capabilities.workspaceTools;
   const supported = registration.supportedWorkspaceToolOperations;
   if (desired == null || !Array.isArray(supported)) return undefined;
-  const operations = desired.operations.filter((operation) =>
+  let operations = desired.operations.filter((operation) =>
     supported.includes(operation),
   );
   if (operations.length === 0) return undefined;
+  let writeFileModes: typeof desired.writeFileModes;
+  if (operations.includes('write_file')) {
+    const desiredModes = desired.writeFileModes ?? ['replace'];
+    const serverModes = registration.supportedWorkspaceWriteFileModes ?? [
+      'replace',
+    ];
+    const commonModes = desiredModes.filter((mode) =>
+      serverModes.includes(mode),
+    );
+    if (commonModes.length === 0) {
+      operations = operations.filter((operation) => operation !== 'write_file');
+    } else if (registration.supportedWorkspaceWriteFileModes != null) {
+      writeFileModes = commonModes;
+    }
+  }
+  const editOperations = new Set<BridgeWorkspaceToolOperation>([
+    'preview_edit',
+    'edit_file',
+  ]);
+  let editFileModes: typeof desired.editFileModes;
+  if (operations.some((operation) => editOperations.has(operation))) {
+    const desiredModes = desired.editFileModes ?? ['single'];
+    const serverModes = registration.supportedWorkspaceEditFileModes ?? [
+      'single',
+    ];
+    const commonModes = desiredModes.filter((mode) =>
+      serverModes.includes(mode),
+    );
+    if (commonModes.length === 0) {
+      operations = operations.filter(
+        (operation) => !editOperations.has(operation),
+      );
+    } else if (registration.supportedWorkspaceEditFileModes != null) {
+      editFileModes = commonModes;
+    }
+  }
+  if (operations.length === 0) return undefined;
+  const supportsEditRequests = operations.some((operation) =>
+    editOperations.has(operation),
+  );
   const workspaces = desired.workspaces.flatMap((workspace) => {
     if (workspace.operations == null) return [workspace];
     const workspaceOperations = workspace.operations.filter((operation) =>
@@ -222,12 +288,37 @@ function supportedWorkspaceCapabilities(
       : [{ ...workspace, operations: workspaceOperations }];
   });
   if (workspaces.length === 0) return undefined;
+  const editFileFeatures = desired.editFileFeatures?.filter((feature) =>
+    registration.supportedWorkspaceEditFileFeatures?.includes(feature),
+  );
+  const listFileFeatures = desired.listFileFeatures?.filter((feature) =>
+    registration.supportedWorkspaceListFileFeatures?.includes(feature),
+  );
+  const {
+    writeFileModes: _writeFileModes,
+    editFileModes: _editFileModes,
+    editFileFeatures: _editFileFeatures,
+    listFileFeatures: _listFileFeatures,
+    ...compatibleDesired
+  } = desired;
   return {
     ...capabilities,
     workspaceTools: {
-      ...desired,
+      ...compatibleDesired,
       operations,
       workspaces,
+      ...(operations.includes('write_file') && writeFileModes?.length
+        ? { writeFileModes }
+        : {}),
+      ...(supportsEditRequests && editFileModes?.length
+        ? { editFileModes }
+        : {}),
+      ...(operations.includes('edit_file') && editFileFeatures?.length
+        ? { editFileFeatures }
+        : {}),
+      ...(operations.includes('list_files') && listFileFeatures?.length
+        ? { listFileFeatures }
+        : {}),
     },
   };
 }
@@ -875,6 +966,52 @@ export class BridgeWorker {
             'Workspace tool operation is not advertised for workspace',
           );
         }
+        if (workspaceRequest.operation === 'write_file') {
+          const mode =
+            workspaceRequest.overwrite === false ? 'create' : 'replace';
+          const modes = advertised.writeFileModes;
+          if (
+            (workspaceRequest.overwrite !== undefined && modes == null) ||
+            (modes != null && !modes.includes(mode))
+          ) {
+            throw new BridgeProtocolError(
+              'Workspace write mode is not advertised',
+            );
+          }
+        }
+        if (
+          workspaceRequest.operation === 'preview_edit' ||
+          workspaceRequest.operation === 'edit_file'
+        ) {
+          const mode = workspaceRequest.edits === undefined ? 'single' : 'batch';
+          const modes = advertised.editFileModes;
+          if (
+            (modes == null && mode !== 'single') ||
+            (modes != null && !modes.includes(mode))
+          ) {
+            throw new BridgeProtocolError(
+              'Workspace edit mode is not advertised',
+            );
+          }
+          if (
+            workspaceRequest.operation === 'edit_file' &&
+            workspaceRequest.expectedBaseSha256 !== undefined &&
+            !advertised.editFileFeatures?.includes('expected_base_sha256')
+          ) {
+            throw new BridgeProtocolError(
+              'Workspace edit feature is not advertised',
+            );
+          }
+        }
+        if (
+          workspaceRequest.operation === 'list_files' &&
+          workspaceRequest.afterPath !== undefined &&
+          !advertised.listFileFeatures?.includes('after_path')
+        ) {
+          throw new BridgeProtocolError(
+            'Workspace listing feature is not advertised',
+          );
+        }
         const isMutation =
           workspaceRequest.operation === 'write_file' ||
           workspaceRequest.operation === 'edit_file' ||
@@ -898,6 +1035,17 @@ export class BridgeWorker {
           workspaceRequest,
           executionController.signal,
         );
+        if (
+          workspaceRequest.operation === 'list_files' &&
+          !advertised.listFileFeatures?.includes('after_path') &&
+          'nextAfterPath' in payload
+        ) {
+          const {
+            nextAfterPath: _nextAfterPath,
+            ...compatiblePayload
+          } = payload;
+          payload = compatiblePayload;
+        }
         workspaceMutationApplied = isMutation;
         if (isMutation && !isWorkspaceToolResult(workspaceRequest, payload)) {
           throw new BridgeProtocolError(

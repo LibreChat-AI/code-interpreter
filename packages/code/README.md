@@ -271,8 +271,19 @@ names and exposes bounded `read_file`, literal `search_text`, and deterministic
 can explicitly add confined `write_file` and exact-match `edit_file` operations
 with `--allow-workspace-writes` or
 `LIBRECHAT_CODE_ALLOW_WORKSPACE_WRITES=true`.
-Only IDs, names, protocol version, and supported operations appear in worker
-capabilities; absolute host paths remain local to the worker process.
+`write_file` preserves its overwrite behavior by default; callers can set
+`overwrite: false` to require an atomic create that returns `EDIT_CONFLICT` if
+the target already exists. Code API dispatches that mode only after the worker
+and server negotiate `create` in `writeFileModes`.
+`edit_file` accepts either the legacy `oldText`/`newText` pair or an ordered
+`edits` array; every exact replacement is validated before the updated file is
+installed as one atomic mutation. Code API dispatches the batch form only after
+the worker and server negotiate `batch` in `editFileModes`.
+Revision-fenced edits likewise require the negotiated
+`expected_base_sha256` entry in `editFileFeatures`.
+Only IDs, names, protocol version, supported operations, and negotiated write
+modes appear in worker capabilities; absolute host paths remain local to the
+worker process.
 
 The protocol also defines a bounded `execute_command` request and result for a
 sandbox-backed executor. Commands are treated as workspace mutations and cannot
@@ -320,9 +331,14 @@ bounded set of ignored-aware candidates with configuration and symlink following
 disabled. It then opens and verifies each candidate through the same confined
 1 MiB read boundary before matching locally. File listing invokes `rg` without
 a shell, with configuration and symlink following disabled. Both operations
-stop after bounded global result counts. The worker process still belongs inside
-the trusted BYOM boundary and should receive filesystem access only to roots the
-operator intentionally registers.
+stop after bounded global result counts. A truncated `list_files` result includes
+`nextAfterPath`; pass that value back as `afterPath` with the same workspace and
+path to continue deterministically beyond the 500-file protocol ceiling.
+Continuation is advertised and negotiated as the `after_path` list-file feature,
+so mixed Code API and worker versions keep the legacy bounded response shape
+during rolling upgrades. The worker process still belongs inside the trusted
+BYOM boundary and should receive filesystem access only to roots the operator
+intentionally registers.
 
 Writes are limited to 1 MiB of UTF-8 text and require an existing directory
 inside the registered root. They reject traversal, symlink targets, and

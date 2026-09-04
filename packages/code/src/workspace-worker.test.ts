@@ -15,9 +15,13 @@ const listWorkspaceCapabilities = {
     'list_files' as const,
   ],
   workspaces: [{ id: 'primary' }],
+  listFileFeatures: ['after_path' as const],
 };
 
-function registrationResponse(supportsList: boolean): Response {
+function registrationResponse(
+  supportsList: boolean,
+  supportsPagination = false,
+): Response {
   return Response.json({
     protocolVersion: 1,
     workerId: 'vm-1',
@@ -31,6 +35,9 @@ function registrationResponse(supportsList: boolean): Response {
             'search_text',
             'list_files',
           ],
+          ...(supportsPagination
+            ? { supportedWorkspaceListFileFeatures: ['after_path'] }
+            : {}),
         }
       : {}),
   });
@@ -131,6 +138,67 @@ test('worker re-registers list_files after the Code API advertises support', asy
   ]);
 });
 
+test('worker omits pagination fields until Code API negotiates them', async () => {
+  let settlement: Record<string, unknown> | undefined;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: listWorkspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: listWorkspaceCapabilities,
+      async execute() {
+        return {
+          protocolVersion: 1 as const,
+          operation: 'list_files' as const,
+          workspaceId: 'primary',
+          paths: ['first.txt'],
+          truncated: true,
+          nextAfterPath: 'first.txt',
+        };
+      },
+    },
+    fetchImpl: async (input, init) => {
+      if (String(input).endsWith('/register')) return registrationResponse(true);
+      settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.register();
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-list-legacy-consumer',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      maxResults: 1,
+    },
+  });
+
+  assert.deepEqual(settlement?.result, {
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+    paths: ['first.txt'],
+    truncated: true,
+  });
+});
+
 test('worker omits restricted workspaces that legacy registration would widen', async () => {
   const registrations: Array<{
     operations: string[];
@@ -220,6 +288,7 @@ test('worker promotes only operations understood by an older Code API', async ()
   const registrations: Array<{
     operations: string[];
     workspaces: Array<Record<string, unknown>>;
+    writeFileModes?: string[];
   }> = [];
   const workspaceCapabilities = {
     protocolVersion: 1 as const,
@@ -230,6 +299,7 @@ test('worker promotes only operations understood by an older Code API', async ()
       'write_file' as const,
       'edit_file' as const,
     ],
+    writeFileModes: ['replace' as const, 'create' as const],
     workspaces: [
       {
         id: 'primary',
@@ -268,6 +338,7 @@ test('worker promotes only operations understood by an older Code API', async ()
           workspaceTools: {
             operations: string[];
             workspaces: Array<Record<string, unknown>>;
+            writeFileModes?: string[];
           };
         };
       };
@@ -312,6 +383,7 @@ test('worker retains per-workspace restrictions during partial mutation promotio
   const registrations: Array<{
     operations: string[];
     workspaces: Array<Record<string, unknown>>;
+    writeFileModes?: string[];
   }> = [];
   const workspaceCapabilities = {
     protocolVersion: 1 as const,
@@ -322,6 +394,7 @@ test('worker retains per-workspace restrictions during partial mutation promotio
       'write_file' as const,
       'edit_file' as const,
     ],
+    writeFileModes: ['replace' as const, 'create' as const],
     workspaces: [
       {
         id: 'readonly',
@@ -368,6 +441,7 @@ test('worker retains per-workspace restrictions during partial mutation promotio
           workspaceTools: {
             operations: string[];
             workspaces: Array<Record<string, unknown>>;
+            writeFileModes?: string[];
           };
         };
       };
@@ -384,6 +458,7 @@ test('worker retains per-workspace restrictions during partial mutation promotio
           'list_files',
           'write_file',
         ],
+        supportedWorkspaceWriteFileModes: ['replace', 'create'],
       });
     },
   });
@@ -393,6 +468,7 @@ test('worker retains per-workspace restrictions during partial mutation promotio
   assert.deepEqual(registrations[1], {
     protocolVersion: 1,
     operations: ['read_file', 'search_text', 'list_files', 'write_file'],
+    writeFileModes: ['replace', 'create'],
     workspaces: [
       {
         id: 'readonly',
@@ -409,6 +485,220 @@ test('worker retains per-workspace restrictions during partial mutation promotio
       },
     ],
   });
+});
+
+test('worker omits write modes not negotiated by an older Code API', async () => {
+  const registrations: Array<Record<string, unknown>> = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const, 'write_file' as const],
+    writeFileModes: ['replace' as const, 'create' as const],
+    workspaces: [
+      {
+        id: 'primary',
+        operations: ['read_file' as const, 'write_file' as const],
+      },
+    ],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        throw new Error('not executed');
+      },
+    },
+    workspaceMutationQuarantine: mutationQuarantine(),
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        capabilities: { workspaceTools?: Record<string, unknown> };
+      };
+      registrations.push(body.capabilities.workspaceTools ?? {});
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+        supportedWorkspaceToolOperations: ['read_file', 'write_file'],
+      });
+    },
+  });
+
+  await worker.register();
+
+  assert.deepEqual(registrations, [
+    {
+      protocolVersion: 1,
+      operations: ['read_file'],
+      workspaces: [{ id: 'primary' }],
+    },
+    {
+      protocolVersion: 1,
+      operations: ['read_file', 'write_file'],
+      workspaces: [
+        { id: 'primary', operations: ['read_file', 'write_file'] },
+      ],
+    },
+  ]);
+});
+
+test('worker advertises only edit modes and features negotiated by Code API', async () => {
+  const registrations: Array<Record<string, unknown>> = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const, 'edit_file' as const],
+    editFileModes: ['single' as const, 'batch' as const],
+    editFileFeatures: ['expected_base_sha256' as const],
+    workspaces: [
+      {
+        id: 'primary',
+        operations: ['read_file' as const, 'edit_file' as const],
+      },
+    ],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        throw new Error('not executed');
+      },
+    },
+    workspaceMutationQuarantine: mutationQuarantine(),
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        capabilities: { workspaceTools?: Record<string, unknown> };
+      };
+      registrations.push(body.capabilities.workspaceTools ?? {});
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+        supportedWorkspaceToolOperations: ['read_file', 'edit_file'],
+        supportedWorkspaceEditFileModes: ['single', 'batch'],
+      });
+    },
+  });
+
+  await worker.register();
+
+  assert.deepEqual(registrations, [
+    {
+      protocolVersion: 1,
+      operations: ['read_file'],
+      workspaces: [{ id: 'primary' }],
+    },
+    {
+      protocolVersion: 1,
+      operations: ['read_file', 'edit_file'],
+      editFileModes: ['single', 'batch'],
+      workspaces: [
+        { id: 'primary', operations: ['read_file', 'edit_file'] },
+      ],
+    },
+  ]);
+});
+
+test('worker drops file operations when no request mode is compatible', async () => {
+  const registrations: Array<Record<string, unknown>> = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: [
+      'read_file' as const,
+      'write_file' as const,
+      'preview_edit' as const,
+    ],
+    writeFileModes: ['create' as const],
+    editFileModes: ['batch' as const],
+    workspaces: [
+      {
+        id: 'primary',
+        operations: [
+          'read_file' as const,
+          'write_file' as const,
+          'preview_edit' as const,
+        ],
+      },
+    ],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        throw new Error('not executed');
+      },
+    },
+    workspaceMutationQuarantine: mutationQuarantine(),
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        capabilities: { workspaceTools?: Record<string, unknown> };
+      };
+      registrations.push(body.capabilities.workspaceTools ?? {});
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+        supportedWorkspaceToolOperations: [
+          'read_file',
+          'write_file',
+          'preview_edit',
+        ],
+        supportedWorkspaceWriteFileModes: ['replace'],
+        supportedWorkspaceEditFileModes: ['single'],
+      });
+    },
+  });
+
+  await worker.register();
+
+  assert.deepEqual(registrations, [
+    {
+      protocolVersion: 1,
+      operations: ['read_file'],
+      workspaces: [{ id: 'primary' }],
+    },
+    {
+      protocolVersion: 1,
+      operations: ['read_file'],
+      workspaces: [{ id: 'primary', operations: ['read_file'] }],
+    },
+  ]);
 });
 
 test('worker retains per-workspace restrictions during read-only promotion', async () => {
@@ -2125,4 +2415,62 @@ test('worker rejects workspace operations outside its advertised capability', as
   assert.equal(executions, 0);
   assert.equal(settlement?.status, 'rejected');
   assert.match(String(settlement?.error), /operation is not advertised/i);
+});
+
+test('worker rejects legacy replacement writes outside its advertised mode', async () => {
+  let executions = 0;
+  let settlement: Record<string, unknown> | undefined;
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    writeFileModes: ['create' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        executions += 1;
+        throw new Error('must not execute');
+      },
+    },
+    workspaceMutationQuarantine: mutationQuarantine(),
+    fetchImpl: async (_input, init) => {
+      settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-workspace-replace-mode',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      content: 'blocked',
+    },
+  });
+
+  assert.equal(executions, 0);
+  assert.equal(settlement?.status, 'rejected');
+  assert.match(String(settlement?.error), /write mode is not advertised/i);
 });
