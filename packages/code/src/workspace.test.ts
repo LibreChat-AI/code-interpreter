@@ -805,6 +805,7 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
       'search_text',
       'list_files',
       'write_file',
+      'preview_edit',
       'edit_file',
     ],
     workspaces: [
@@ -816,10 +817,14 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
           'search_text',
           'list_files',
           'write_file',
+          'preview_edit',
           'edit_file',
         ],
       },
     ],
+    writeFileModes: ['replace', 'create'],
+    editFileModes: ['single', 'batch'],
+    editFileFeatures: ['expected_base_sha256'],
   });
   await tools.execute({
     protocolVersion: 1,
@@ -845,6 +850,183 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
     bytesWritten: 10,
   });
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'hello BYOM');
+});
+
+test('workspace writes can require an atomic create without replacement', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'existing.txt'), 'preserve me');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'existing.txt',
+      content: 'replace me',
+      overwrite: false,
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
+  );
+  assert.equal(await readFile(join(root, 'existing.txt'), 'utf8'), 'preserve me');
+
+  const created = await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'created.txt',
+    content: 'new file',
+    overwrite: false,
+  });
+  assert.deepEqual(created, {
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'created.txt',
+    created: true,
+    bytesWritten: 8,
+  });
+  assert.equal(await readFile(join(root, 'created.txt'), 'utf8'), 'new file');
+
+  const competingWrites = await Promise.allSettled([
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'raced.txt',
+      content: 'first',
+      overwrite: false,
+    }),
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'raced.txt',
+      content: 'second',
+      overwrite: false,
+    }),
+  ]);
+  assert.equal(
+    competingWrites.filter((result) => result.status === 'fulfilled').length,
+    1,
+  );
+  const rejected = competingWrites.find(
+    (result): result is PromiseRejectedResult => result.status === 'rejected',
+  );
+  assert.ok(rejected?.reason instanceof WorkspaceToolError);
+  assert.equal(rejected.reason.code, 'EDIT_CONFLICT');
+  assert.match(await readFile(join(root, 'raced.txt'), 'utf8'), /^(first|second)$/);
+});
+
+test('workspace batch edits commit all replacements atomically', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'batch.txt'), 'alpha beta gamma');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  const result = await tools.execute({
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'batch.txt',
+    edits: [
+      { oldText: 'alpha', newText: 'one' },
+      { oldText: 'gamma', newText: 'three' },
+    ],
+  });
+  assert.deepEqual(result, {
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'batch.txt',
+    replacements: 2,
+    bytesWritten: 14,
+  });
+  assert.equal(await readFile(join(root, 'batch.txt'), 'utf8'), 'one beta three');
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'batch.txt',
+      edits: [
+        { oldText: 'one', newText: 'partial' },
+        { oldText: 'missing', newText: 'never' },
+      ],
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
+  );
+  assert.equal(await readFile(join(root, 'batch.txt'), 'utf8'), 'one beta three');
+});
+
+test('workspace edit previews are non-mutating and fence the commit revision', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'preview.txt'), 'prefix SEC suffix');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  const preview = await tools.execute({
+    protocolVersion: 1,
+    operation: 'preview_edit',
+    workspaceId: 'primary',
+    path: 'preview.txt',
+    oldText: ' suffix',
+    newText: 'RET suffix',
+  });
+  assert.equal(preview.operation, 'preview_edit');
+  assert.equal(preview.content, 'prefix SECRET suffix');
+  assert.equal(preview.hasUtf8Bom, false);
+  assert.match(preview.baseSha256, /^[a-f0-9]{64}$/);
+  assert.equal(await readFile(join(root, 'preview.txt'), 'utf8'), 'prefix SEC suffix');
+
+  await writeFile(join(root, 'preview.txt'), 'changed SEC suffix');
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'preview.txt',
+      oldText: ' suffix',
+      newText: 'RET suffix',
+      expectedBaseSha256: preview.baseSha256,
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
+  );
+  assert.equal(await readFile(join(root, 'preview.txt'), 'utf8'), 'changed SEC suffix');
+});
+
+test('workspace edit previews strip a UTF-8 BOM while retaining its byte count', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'bom.txt'), Buffer.from('\ufeffbefore', 'utf8'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  const preview = await tools.execute({
+    protocolVersion: 1,
+    operation: 'preview_edit',
+    workspaceId: 'primary',
+    path: 'bom.txt',
+    oldText: 'before',
+    newText: 'after',
+  });
+  assert.equal(preview.operation, 'preview_edit');
+  assert.equal(preview.content, 'after');
+  assert.equal(preview.hasUtf8Bom, true);
+  assert.equal(preview.bytesWritten, 8);
+  assert.equal(await readFile(join(root, 'bom.txt'), 'utf8'), '\ufeffbefore');
 });
 
 test('workspace mutations sync the containing directory after replacement', async (t) => {
@@ -887,6 +1069,42 @@ test('workspace mutations sync the containing directory after replacement', asyn
     newText: 'after',
   });
   assert.equal(syncCalls, 5);
+});
+
+test('atomic creates remove staging before syncing the directory', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Directory fsync is unavailable on Windows');
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const probe = await open(root, 'r');
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+    sync(): Promise<void>;
+  };
+  await probe.close();
+  const originalSync = fileHandlePrototype.sync;
+  let syncCalls = 0;
+  t.mock.method(fileHandlePrototype, 'sync', async function (this: FileHandle) {
+    syncCalls += 1;
+    if (syncCalls === 2) {
+      assert.deepEqual(await readdir(root), ['created.txt']);
+    }
+    await originalSync.call(this);
+  });
+
+  await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'created.txt',
+    content: 'durable create',
+    overwrite: false,
+  });
+  assert.equal(syncCalls, 2);
 });
 
 test('workspace mutations report uncertain commit when directory sync fails', async (t) => {
@@ -1588,8 +1806,14 @@ test('composes sandboxed commands without exposing them on unconfigured workspac
     'search_text',
     'list_files',
     'write_file',
+    'preview_edit',
     'edit_file',
     'execute_command',
+  ]);
+  assert.deepEqual(tools.capabilities.writeFileModes, ['replace', 'create']);
+  assert.deepEqual(tools.capabilities.editFileModes, ['single', 'batch']);
+  assert.deepEqual(tools.capabilities.editFileFeatures, [
+    'expected_base_sha256',
   ]);
   assert.deepEqual(
     tools.capabilities.workspaces.find(({ id }) => id === 'sandboxed')?.operations,

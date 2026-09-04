@@ -9,6 +9,7 @@ export const BRIDGE_WORKSPACE_PATH_MAX_LENGTH = 4096;
 export const BRIDGE_WORKSPACE_QUERY_MAX_LENGTH = 4096;
 export const BRIDGE_WORKSPACE_READ_MAX_BYTES = 1024 * 1024;
 export const BRIDGE_WORKSPACE_WRITE_MAX_BYTES = 1024 * 1024;
+export const BRIDGE_WORKSPACE_EDIT_MAX_EDITS = 100;
 export const BRIDGE_WORKSPACE_READ_MAX_LINES = 500;
 export const BRIDGE_WORKSPACE_SEARCH_MAX_RESULTS = 200;
 export const BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH = 2000;
@@ -27,8 +28,13 @@ export type BridgeWorkspaceToolOperation =
   | 'search_text'
   | 'list_files'
   | 'write_file'
+  | 'preview_edit'
   | 'edit_file'
   | 'execute_command';
+
+export type WorkspaceWriteFileMode = 'replace' | 'create';
+export type WorkspaceEditFileMode = 'single' | 'batch';
+export type WorkspaceEditFileFeature = 'expected_base_sha256';
 
 export interface BridgeWorkspaceDescriptor {
   id: string;
@@ -41,6 +47,12 @@ export interface BridgeWorkspaceToolCapabilities {
   protocolVersion: BridgeProtocolVersion;
   operations: BridgeWorkspaceToolOperation[];
   workspaces: BridgeWorkspaceDescriptor[];
+  /** Omitted by legacy workers, which only accept replacement writes. */
+  writeFileModes?: WorkspaceWriteFileMode[];
+  /** Omitted by legacy workers, which only accept single exact replacements. */
+  editFileModes?: WorkspaceEditFileMode[];
+  /** Omitted by workers that cannot fence edits against a preview revision. */
+  editFileFeatures?: WorkspaceEditFileFeature[];
 }
 
 export interface WorkspaceReadFileRequest {
@@ -110,6 +122,8 @@ export interface WorkspaceWriteFileRequest {
   workspaceId: string;
   path: string;
   content: string;
+  /** False requires an atomic create and refuses to replace an existing file. */
+  overwrite?: boolean;
 }
 
 export interface WorkspaceWriteFileResult {
@@ -121,11 +135,37 @@ export interface WorkspaceWriteFileResult {
   bytesWritten: number;
 }
 
-export interface WorkspaceEditFileRequest {
+interface WorkspaceEditFileRequestBase {
   protocolVersion: BridgeProtocolVersion;
   operation: 'edit_file';
   workspaceId: string;
   path: string;
+  /** Refuses the mutation unless current file bytes match this preview revision. */
+  expectedBaseSha256?: string;
+}
+
+export interface WorkspaceSingleEditFileRequest
+  extends WorkspaceEditFileRequestBase {
+  /** Legacy single-edit form. */
+  oldText: string;
+  /** Legacy single-edit form. */
+  newText: string;
+  edits?: never;
+}
+
+export interface WorkspaceBatchEditFileRequest
+  extends WorkspaceEditFileRequestBase {
+  /** Ordered exact replacements applied atomically as one file mutation. */
+  edits: WorkspaceTextEdit[];
+  oldText?: never;
+  newText?: never;
+}
+
+export type WorkspaceEditFileRequest =
+  | WorkspaceSingleEditFileRequest
+  | WorkspaceBatchEditFileRequest;
+
+export interface WorkspaceTextEdit {
   oldText: string;
   newText: string;
 }
@@ -135,7 +175,44 @@ export interface WorkspaceEditFileResult {
   operation: 'edit_file';
   workspaceId: string;
   path: string;
-  replacements: 1;
+  replacements: number;
+  bytesWritten: number;
+}
+
+interface WorkspacePreviewEditRequestBase {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'preview_edit';
+  workspaceId: string;
+  path: string;
+}
+
+export interface WorkspaceSinglePreviewEditRequest
+  extends WorkspacePreviewEditRequestBase {
+  oldText: string;
+  newText: string;
+  edits?: never;
+}
+
+export interface WorkspaceBatchPreviewEditRequest
+  extends WorkspacePreviewEditRequestBase {
+  edits: WorkspaceTextEdit[];
+  oldText?: never;
+  newText?: never;
+}
+
+export type WorkspacePreviewEditRequest =
+  | WorkspaceSinglePreviewEditRequest
+  | WorkspaceBatchPreviewEditRequest;
+
+export interface WorkspacePreviewEditResult {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'preview_edit';
+  workspaceId: string;
+  path: string;
+  content: string;
+  hasUtf8Bom: boolean;
+  baseSha256: string;
+  replacements: number;
   bytesWritten: number;
 }
 
@@ -169,6 +246,7 @@ export type WorkspaceToolRequest =
   | WorkspaceSearchTextRequest
   | WorkspaceListFilesRequest
   | WorkspaceWriteFileRequest
+  | WorkspacePreviewEditRequest
   | WorkspaceEditFileRequest
   | WorkspaceExecuteCommandRequest;
 export type WorkspaceToolResult =
@@ -176,6 +254,7 @@ export type WorkspaceToolResult =
   | WorkspaceSearchTextResult
   | WorkspaceListFilesResult
   | WorkspaceWriteFileResult
+  | WorkspacePreviewEditResult
   | WorkspaceEditFileResult
   | WorkspaceExecuteCommandResult;
 
@@ -208,6 +287,7 @@ const WORKSPACE_WRITE_REQUEST_KEYS = new Set([
   'workspaceId',
   'path',
   'content',
+  'overwrite',
 ]);
 const WORKSPACE_EDIT_REQUEST_KEYS = new Set([
   'protocolVersion',
@@ -216,7 +296,19 @@ const WORKSPACE_EDIT_REQUEST_KEYS = new Set([
   'path',
   'oldText',
   'newText',
+  'edits',
+  'expectedBaseSha256',
 ]);
+const WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'path',
+  'oldText',
+  'newText',
+  'edits',
+]);
+const WORKSPACE_TEXT_EDIT_KEYS = new Set(['oldText', 'newText']);
 const WORKSPACE_COMMAND_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
@@ -267,6 +359,17 @@ const WORKSPACE_EDIT_RESULT_KEYS = new Set([
   'replacements',
   'bytesWritten',
 ]);
+const WORKSPACE_PREVIEW_EDIT_RESULT_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'path',
+  'content',
+  'hasUtf8Bom',
+  'baseSha256',
+  'replacements',
+  'bytesWritten',
+]);
 const WORKSPACE_COMMAND_RESULT_KEYS = new Set([
   'protocolVersion',
   'operation',
@@ -311,6 +414,12 @@ export interface BridgeWorkerRegistrationResponse {
   leaseTtlMs: number;
   /** Operations this Code API can dispatch after the worker advertises them. */
   supportedWorkspaceToolOperations?: BridgeWorkspaceToolOperation[];
+  /** Write modes this Code API can safely route to a capability-aware worker. */
+  supportedWorkspaceWriteFileModes?: WorkspaceWriteFileMode[];
+  /** Edit modes this Code API can safely route to a capability-aware worker. */
+  supportedWorkspaceEditFileModes?: WorkspaceEditFileMode[];
+  /** Edit features this Code API can safely route to a capability-aware worker. */
+  supportedWorkspaceEditFileFeatures?: WorkspaceEditFileFeature[];
 }
 
 export interface BridgePairingRedemption {
@@ -487,6 +596,55 @@ function isWithinRequestedPath(candidate: string, requested?: string): boolean {
   );
 }
 
+function isValidWorkspaceEditRequest(request: Record<string, unknown>): boolean {
+  const hasBatch = request.edits !== undefined;
+  if (hasBatch && (request.oldText !== undefined || request.newText !== undefined)) {
+    return false;
+  }
+  const edits = hasBatch
+    ? request.edits
+    : [{ oldText: request.oldText, newText: request.newText }];
+  if (
+    !Array.isArray(edits) ||
+    edits.length < 1 ||
+    edits.length > BRIDGE_WORKSPACE_EDIT_MAX_EDITS
+  ) {
+    return false;
+  }
+  let totalBytes = 0;
+  for (const edit of edits) {
+    if (
+      typeof edit !== 'object' ||
+      edit === null ||
+      !hasOnlyKeys(edit as Record<string, unknown>, WORKSPACE_TEXT_EDIT_KEYS)
+    ) {
+      return false;
+    }
+    const candidate = edit as Record<string, unknown>;
+    if (
+      typeof candidate.oldText !== 'string' ||
+      candidate.oldText.length === 0 ||
+      Buffer.from(candidate.oldText).toString('utf8') !== candidate.oldText ||
+      typeof candidate.newText !== 'string' ||
+      Buffer.from(candidate.newText).toString('utf8') !== candidate.newText
+    ) {
+      return false;
+    }
+    const oldBytes = new TextEncoder().encode(candidate.oldText).byteLength;
+    const newBytes = new TextEncoder().encode(candidate.newText).byteLength;
+    totalBytes += oldBytes + newBytes;
+    if (
+      (hasBatch && totalBytes > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) ||
+      (!hasBatch &&
+        (oldBytes > BRIDGE_WORKSPACE_WRITE_MAX_BYTES ||
+          newBytes > BRIDGE_WORKSPACE_WRITE_MAX_BYTES))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function hasOnlyKeys(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
@@ -557,22 +715,26 @@ export function isWorkspaceToolRequest(
       typeof request.content === 'string' &&
       Buffer.from(request.content).toString('utf8') === request.content &&
       new TextEncoder().encode(request.content).byteLength <=
-        BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+        BRIDGE_WORKSPACE_WRITE_MAX_BYTES &&
+      (request.overwrite === undefined ||
+        typeof request.overwrite === 'boolean')
+    );
+  }
+  if (request.operation === 'preview_edit') {
+    return (
+      hasOnlyKeys(request, WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS) &&
+      isSafePortableRelativePath(request.path) &&
+      isValidWorkspaceEditRequest(request)
     );
   }
   if (request.operation === 'edit_file') {
     return (
       hasOnlyKeys(request, WORKSPACE_EDIT_REQUEST_KEYS) &&
       isSafePortableRelativePath(request.path) &&
-      typeof request.oldText === 'string' &&
-      request.oldText.length > 0 &&
-      Buffer.from(request.oldText).toString('utf8') === request.oldText &&
-      new TextEncoder().encode(request.oldText).byteLength <=
-        BRIDGE_WORKSPACE_WRITE_MAX_BYTES &&
-      typeof request.newText === 'string' &&
-      Buffer.from(request.newText).toString('utf8') === request.newText &&
-      new TextEncoder().encode(request.newText).byteLength <=
-        BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+      (request.expectedBaseSha256 === undefined ||
+        (typeof request.expectedBaseSha256 === 'string' &&
+          /^[a-f0-9]{64}$/.test(request.expectedBaseSha256))) &&
+      isValidWorkspaceEditRequest(request)
     );
   }
   if (request.operation === 'execute_command') {
@@ -681,6 +843,7 @@ export function isWorkspaceToolResult(
       hasOnlyKeys(result, WORKSPACE_WRITE_RESULT_KEYS) &&
       result.path === request.path &&
       typeof result.created === 'boolean' &&
+      (request.overwrite !== false || result.created === true) &&
       Number.isSafeInteger(result.bytesWritten) &&
       Number(result.bytesWritten) ===
         new TextEncoder().encode(request.content).byteLength
@@ -688,12 +851,33 @@ export function isWorkspaceToolResult(
   }
 
   if (request.operation === 'edit_file') {
+    const replacements = request.edits?.length ?? 1;
     return (
       hasOnlyKeys(result, WORKSPACE_EDIT_RESULT_KEYS) &&
       result.path === request.path &&
-      result.replacements === 1 &&
+      result.replacements === replacements &&
       Number.isSafeInteger(result.bytesWritten) &&
       Number(result.bytesWritten) >= 0 &&
+      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+    );
+  }
+
+  if (request.operation === 'preview_edit') {
+    const replacements = request.edits?.length ?? 1;
+    const content = typeof result.content === 'string' ? result.content : null;
+    return (
+      hasOnlyKeys(result, WORKSPACE_PREVIEW_EDIT_RESULT_KEYS) &&
+      result.path === request.path &&
+      content !== null &&
+      Buffer.from(content).toString('utf8') === content &&
+      typeof result.hasUtf8Bom === 'boolean' &&
+      typeof result.baseSha256 === 'string' &&
+      /^[a-f0-9]{64}$/.test(result.baseSha256) &&
+      result.replacements === replacements &&
+      Number.isSafeInteger(result.bytesWritten) &&
+      Number(result.bytesWritten) ===
+        new TextEncoder().encode(content).byteLength +
+          (result.hasUtf8Bom ? 3 : 0) &&
       Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES
     );
   }
@@ -761,13 +945,14 @@ export function isValidBridgeWorkspaceToolCapabilities(
     capabilities.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
     !Array.isArray(capabilities.operations) ||
     capabilities.operations.length < 1 ||
-    capabilities.operations.length > 6 ||
+    capabilities.operations.length > 7 ||
     !capabilities.operations.every(
       (operation) =>
         operation === 'read_file' ||
         operation === 'search_text' ||
         operation === 'list_files' ||
         operation === 'write_file' ||
+        operation === 'preview_edit' ||
         operation === 'edit_file' ||
         operation === 'execute_command',
     ) ||
@@ -775,6 +960,47 @@ export function isValidBridgeWorkspaceToolCapabilities(
     !Array.isArray(capabilities.workspaces) ||
     capabilities.workspaces.length < 1 ||
     capabilities.workspaces.length > BRIDGE_WORKSPACE_MAX_COUNT
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.writeFileModes !== undefined &&
+    (!Array.isArray(capabilities.writeFileModes) ||
+      capabilities.writeFileModes.length < 1 ||
+      capabilities.writeFileModes.length > 2 ||
+      !capabilities.operations.includes('write_file') ||
+      !capabilities.writeFileModes.every(
+        (mode) => mode === 'replace' || mode === 'create',
+      ) ||
+      new Set(capabilities.writeFileModes).size !==
+        capabilities.writeFileModes.length)
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.editFileModes !== undefined &&
+    (!Array.isArray(capabilities.editFileModes) ||
+      capabilities.editFileModes.length < 1 ||
+      capabilities.editFileModes.length > 2 ||
+      (!capabilities.operations.includes('edit_file') &&
+        !capabilities.operations.includes('preview_edit')) ||
+      !capabilities.editFileModes.every(
+        (mode) => mode === 'single' || mode === 'batch',
+      ) ||
+      new Set(capabilities.editFileModes).size !==
+        capabilities.editFileModes.length)
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.editFileFeatures !== undefined &&
+    (!Array.isArray(capabilities.editFileFeatures) ||
+      capabilities.editFileFeatures.length !== 1 ||
+      !capabilities.operations.includes('edit_file') ||
+      capabilities.editFileFeatures[0] !== 'expected_base_sha256')
   ) {
     return false;
   }

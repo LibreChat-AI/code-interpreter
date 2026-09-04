@@ -151,8 +151,12 @@ test('CLI advertises explicitly enabled writes without exposing the workspace ro
               'search_text',
               'list_files',
               'write_file',
+              'preview_edit',
               'edit_file',
             ],
+            supportedWorkspaceWriteFileModes: ['replace', 'create'],
+            supportedWorkspaceEditFileModes: ['single', 'batch'],
+            supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
           }),
         );
         return;
@@ -215,8 +219,12 @@ test('CLI advertises explicitly enabled writes without exposing the workspace ro
         'search_text',
         'list_files',
         'write_file',
+        'preview_edit',
         'edit_file',
       ],
+      writeFileModes: ['replace', 'create'],
+      editFileModes: ['single', 'batch'],
+      editFileFeatures: ['expected_base_sha256'],
       workspaces: [
         {
           id: 'root-workspace',
@@ -226,6 +234,7 @@ test('CLI advertises explicitly enabled writes without exposing the workspace ro
             'search_text',
             'list_files',
             'write_file',
+            'preview_edit',
             'edit_file',
           ],
         },
