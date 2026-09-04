@@ -820,6 +820,7 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
         ],
       },
     ],
+    writeFileModes: ['replace', 'create'],
   });
   await tools.execute({
     protocolVersion: 1,
@@ -957,6 +958,42 @@ test('workspace mutations sync the containing directory after replacement', asyn
     newText: 'after',
   });
   assert.equal(syncCalls, 5);
+});
+
+test('atomic creates remove staging before syncing the directory', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Directory fsync is unavailable on Windows');
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const probe = await open(root, 'r');
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+    sync(): Promise<void>;
+  };
+  await probe.close();
+  const originalSync = fileHandlePrototype.sync;
+  let syncCalls = 0;
+  t.mock.method(fileHandlePrototype, 'sync', async function (this: FileHandle) {
+    syncCalls += 1;
+    if (syncCalls === 2) {
+      assert.deepEqual(await readdir(root), ['created.txt']);
+    }
+    await originalSync.call(this);
+  });
+
+  await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    path: 'created.txt',
+    content: 'durable create',
+    overwrite: false,
+  });
+  assert.equal(syncCalls, 2);
 });
 
 test('workspace mutations report uncertain commit when directory sync fails', async (t) => {
@@ -1661,6 +1698,7 @@ test('composes sandboxed commands without exposing them on unconfigured workspac
     'edit_file',
     'execute_command',
   ]);
+  assert.deepEqual(tools.capabilities.writeFileModes, ['replace', 'create']);
   assert.deepEqual(
     tools.capabilities.workspaces.find(({ id }) => id === 'sandboxed')?.operations,
     tools.capabilities.operations,

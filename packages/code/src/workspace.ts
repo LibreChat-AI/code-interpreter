@@ -513,6 +513,7 @@ async function atomicWriteConfinedFile(
   );
   const installTarget = resolve(canonicalParent, basename(candidate));
   let handle: FileHandle | undefined;
+  let temporaryNeedsCleanup = true;
   let staged: { dev: bigint | number; ino: bigint | number; content: Buffer };
   try {
     handle = await open(
@@ -595,11 +596,13 @@ async function atomicWriteConfinedFile(
         staged,
         signal,
       );
+      temporaryNeedsCleanup = false;
       return { created: false };
     }
     throwIfAborted(signal);
     if (allowOverwrite) {
       await rename(temporary, installTarget);
+      temporaryNeedsCleanup = false;
     } else {
       try {
         await link(temporary, installTarget);
@@ -612,6 +615,16 @@ async function atomicWriteConfinedFile(
         }
         throw error;
       }
+      try {
+        await unlink(temporary);
+        temporaryNeedsCleanup = false;
+      } catch {
+        throw new WorkspaceToolError(
+          'Workspace create cleanup could not be confirmed',
+          'WRITE_UNAVAILABLE',
+          true,
+        );
+      }
     }
     await confirmInstalledMutation(root, installTarget, staged);
     return { created: existing == null };
@@ -623,7 +636,9 @@ async function atomicWriteConfinedFile(
     );
   } finally {
     await handle?.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
+    if (temporaryNeedsCleanup) {
+      await unlink(temporary).catch(() => undefined);
+    }
   }
 }
 
@@ -1321,11 +1336,13 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     private readonly roots: ReadonlyMap<string, WorkspaceRoot>,
     operations: BridgeWorkspaceToolCapabilities['operations'],
     workspaces: BridgeWorkspaceDescriptor[],
+    writeFileModes?: BridgeWorkspaceToolCapabilities['writeFileModes'],
   ) {
     this.capabilities = {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       operations,
       workspaces,
+      ...(writeFileModes != null ? { writeFileModes } : {}),
     };
   }
 
@@ -1358,6 +1375,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       operations,
       workspaces,
+      ...(anyWritable ? { writeFileModes: ['replace', 'create'] } : {}),
     };
     if (!isValidBridgeWorkspaceToolCapabilities(capabilities)) {
       throw new WorkspaceToolError(
@@ -1381,7 +1399,12 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
         writable: workspace.writable === true,
       });
     }
-    return new LocalWorkspaceTools(roots, operations, workspaces);
+    return new LocalWorkspaceTools(
+      roots,
+      operations,
+      workspaces,
+      capabilities.writeFileModes,
+    );
   }
 
   async execute(
@@ -1505,6 +1528,9 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
     this.capabilities = {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       operations: [...new Set([...base.operations, 'execute_command' as const])],
+      ...(base.writeFileModes != null
+        ? { writeFileModes: base.writeFileModes }
+        : {}),
       workspaces: base.workspaces.map((workspace) => ({
         ...workspace,
         operations: [

@@ -137,6 +137,10 @@ function workspaceCapabilitiesMatch(
     advertised.operations.every(
       (operation, index) => operation === executor.operations[index],
     ) &&
+    advertised.writeFileModes?.length === executor.writeFileModes?.length &&
+    (advertised.writeFileModes?.every(
+      (mode, index) => mode === executor.writeFileModes?.[index],
+    ) ?? executor.writeFileModes == null) &&
     advertised.workspaces.length === executor.workspaces.length &&
     advertised.workspaces.every(
       (workspace, index) =>
@@ -191,10 +195,12 @@ function registrationCompatibleCapabilities(
     const { workspaceTools: _workspaceTools, ...compatible } = capabilities;
     return compatible;
   }
+  const { writeFileModes: _writeFileModes, ...compatibleWorkspaceTools } =
+    workspaceTools;
   return {
     ...capabilities,
     workspaceTools: {
-      ...workspaceTools,
+      ...compatibleWorkspaceTools,
       operations,
       workspaces,
     },
@@ -222,12 +228,19 @@ function supportedWorkspaceCapabilities(
       : [{ ...workspace, operations: workspaceOperations }];
   });
   if (workspaces.length === 0) return undefined;
+  const writeFileModes = desired.writeFileModes?.filter((mode) =>
+    registration.supportedWorkspaceWriteFileModes?.includes(mode),
+  );
+  const { writeFileModes: _writeFileModes, ...compatibleDesired } = desired;
   return {
     ...capabilities,
     workspaceTools: {
-      ...desired,
+      ...compatibleDesired,
       operations,
       workspaces,
+      ...(operations.includes('write_file') && writeFileModes?.length
+        ? { writeFileModes }
+        : {}),
     },
   };
 }
@@ -874,6 +887,18 @@ export class BridgeWorker {
           throw new BridgeProtocolError(
             'Workspace tool operation is not advertised for workspace',
           );
+        }
+        if (
+          workspaceRequest.operation === 'write_file' &&
+          workspaceRequest.overwrite !== undefined
+        ) {
+          const mode =
+            workspaceRequest.overwrite === false ? 'create' : 'replace';
+          if (!advertised.writeFileModes?.includes(mode)) {
+            throw new BridgeProtocolError(
+              'Workspace write mode is not advertised',
+            );
+          }
         }
         const isMutation =
           workspaceRequest.operation === 'write_file' ||

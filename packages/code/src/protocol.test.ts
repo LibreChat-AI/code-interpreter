@@ -75,6 +75,27 @@ test('bridge worker capabilities accept only bounded public workspace descriptor
       ...valid,
       workspaceTools: {
         ...valid.workspaceTools,
+        operations: ['read_file', 'write_file'],
+        writeFileModes: ['replace', 'create'],
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
+        writeFileModes: ['create'],
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
         workspaces: [{ id: 'primary', root: '/Users/operator/private' }],
       },
     }),

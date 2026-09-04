@@ -143,6 +143,41 @@ test('rejects an operation omitted from the selected workspace capability', asyn
   expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
 });
 
+test('rejects create-only writes from workers without the negotiated mode', async () => {
+  await store.register({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    workerId: 'workspace-worker',
+    incarnationId,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operations: ['write_file'],
+        workspaces: [{ id: 'primary' }],
+      },
+    },
+  });
+
+  await expect(
+    store.dispatchWorkspaceTool({
+      workerId: 'workspace-worker',
+      request: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operation: 'write_file',
+        workspaceId: 'primary',
+        path: 'notes.txt',
+        content: 'create me',
+        overwrite: false,
+      },
+      deadlineAtMs: Date.now() + 1_000,
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+  expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
+});
+
 test('rejects a fulfilled workspace settlement that violates the result contract', async () => {
   await store.register({
     protocolVersion: BRIDGE_PROTOCOL_VERSION,

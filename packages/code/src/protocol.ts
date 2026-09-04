@@ -30,6 +30,8 @@ export type BridgeWorkspaceToolOperation =
   | 'edit_file'
   | 'execute_command';
 
+export type WorkspaceWriteFileMode = 'replace' | 'create';
+
 export interface BridgeWorkspaceDescriptor {
   id: string;
   name?: string;
@@ -41,6 +43,8 @@ export interface BridgeWorkspaceToolCapabilities {
   protocolVersion: BridgeProtocolVersion;
   operations: BridgeWorkspaceToolOperation[];
   workspaces: BridgeWorkspaceDescriptor[];
+  /** Omitted by legacy workers, which only accept replacement writes. */
+  writeFileModes?: WorkspaceWriteFileMode[];
 }
 
 export interface WorkspaceReadFileRequest {
@@ -314,6 +318,8 @@ export interface BridgeWorkerRegistrationResponse {
   leaseTtlMs: number;
   /** Operations this Code API can dispatch after the worker advertises them. */
   supportedWorkspaceToolOperations?: BridgeWorkspaceToolOperation[];
+  /** Write modes this Code API can safely route to a capability-aware worker. */
+  supportedWorkspaceWriteFileModes?: WorkspaceWriteFileMode[];
 }
 
 export interface BridgePairingRedemption {
@@ -781,6 +787,21 @@ export function isValidBridgeWorkspaceToolCapabilities(
     !Array.isArray(capabilities.workspaces) ||
     capabilities.workspaces.length < 1 ||
     capabilities.workspaces.length > BRIDGE_WORKSPACE_MAX_COUNT
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.writeFileModes !== undefined &&
+    (!Array.isArray(capabilities.writeFileModes) ||
+      capabilities.writeFileModes.length < 1 ||
+      capabilities.writeFileModes.length > 2 ||
+      !capabilities.operations.includes('write_file') ||
+      !capabilities.writeFileModes.every(
+        (mode) => mode === 'replace' || mode === 'create',
+      ) ||
+      new Set(capabilities.writeFileModes).size !==
+        capabilities.writeFileModes.length)
   ) {
     return false;
   }
