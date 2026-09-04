@@ -384,11 +384,13 @@ router.post(
           'search_text',
           'list_files',
           'write_file',
+          'preview_edit',
           'edit_file',
           'execute_command',
         ],
         supportedWorkspaceWriteFileModes: ['replace', 'create'],
         supportedWorkspaceEditFileModes: ['single', 'batch'],
+        supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
       });
     } catch (error) {
       if (error instanceof BridgeStoreError) {

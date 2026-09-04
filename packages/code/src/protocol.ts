@@ -28,11 +28,13 @@ export type BridgeWorkspaceToolOperation =
   | 'search_text'
   | 'list_files'
   | 'write_file'
+  | 'preview_edit'
   | 'edit_file'
   | 'execute_command';
 
 export type WorkspaceWriteFileMode = 'replace' | 'create';
 export type WorkspaceEditFileMode = 'single' | 'batch';
+export type WorkspaceEditFileFeature = 'expected_base_sha256';
 
 export interface BridgeWorkspaceDescriptor {
   id: string;
@@ -49,6 +51,8 @@ export interface BridgeWorkspaceToolCapabilities {
   writeFileModes?: WorkspaceWriteFileMode[];
   /** Omitted by legacy workers, which only accept single exact replacements. */
   editFileModes?: WorkspaceEditFileMode[];
+  /** Omitted by workers that cannot fence edits against a preview revision. */
+  editFileFeatures?: WorkspaceEditFileFeature[];
 }
 
 export interface WorkspaceReadFileRequest {
@@ -136,6 +140,8 @@ interface WorkspaceEditFileRequestBase {
   operation: 'edit_file';
   workspaceId: string;
   path: string;
+  /** Refuses the mutation unless current file bytes match this preview revision. */
+  expectedBaseSha256?: string;
 }
 
 export interface WorkspaceSingleEditFileRequest
@@ -173,6 +179,43 @@ export interface WorkspaceEditFileResult {
   bytesWritten: number;
 }
 
+interface WorkspacePreviewEditRequestBase {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'preview_edit';
+  workspaceId: string;
+  path: string;
+}
+
+export interface WorkspaceSinglePreviewEditRequest
+  extends WorkspacePreviewEditRequestBase {
+  oldText: string;
+  newText: string;
+  edits?: never;
+}
+
+export interface WorkspaceBatchPreviewEditRequest
+  extends WorkspacePreviewEditRequestBase {
+  edits: WorkspaceTextEdit[];
+  oldText?: never;
+  newText?: never;
+}
+
+export type WorkspacePreviewEditRequest =
+  | WorkspaceSinglePreviewEditRequest
+  | WorkspaceBatchPreviewEditRequest;
+
+export interface WorkspacePreviewEditResult {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'preview_edit';
+  workspaceId: string;
+  path: string;
+  content: string;
+  hasUtf8Bom: boolean;
+  baseSha256: string;
+  replacements: number;
+  bytesWritten: number;
+}
+
 export interface WorkspaceExecuteCommandRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'execute_command';
@@ -203,6 +246,7 @@ export type WorkspaceToolRequest =
   | WorkspaceSearchTextRequest
   | WorkspaceListFilesRequest
   | WorkspaceWriteFileRequest
+  | WorkspacePreviewEditRequest
   | WorkspaceEditFileRequest
   | WorkspaceExecuteCommandRequest;
 export type WorkspaceToolResult =
@@ -210,6 +254,7 @@ export type WorkspaceToolResult =
   | WorkspaceSearchTextResult
   | WorkspaceListFilesResult
   | WorkspaceWriteFileResult
+  | WorkspacePreviewEditResult
   | WorkspaceEditFileResult
   | WorkspaceExecuteCommandResult;
 
@@ -245,6 +290,16 @@ const WORKSPACE_WRITE_REQUEST_KEYS = new Set([
   'overwrite',
 ]);
 const WORKSPACE_EDIT_REQUEST_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'path',
+  'oldText',
+  'newText',
+  'edits',
+  'expectedBaseSha256',
+]);
+const WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
@@ -304,6 +359,17 @@ const WORKSPACE_EDIT_RESULT_KEYS = new Set([
   'replacements',
   'bytesWritten',
 ]);
+const WORKSPACE_PREVIEW_EDIT_RESULT_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'path',
+  'content',
+  'hasUtf8Bom',
+  'baseSha256',
+  'replacements',
+  'bytesWritten',
+]);
 const WORKSPACE_COMMAND_RESULT_KEYS = new Set([
   'protocolVersion',
   'operation',
@@ -352,6 +418,8 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceWriteFileModes?: WorkspaceWriteFileMode[];
   /** Edit modes this Code API can safely route to a capability-aware worker. */
   supportedWorkspaceEditFileModes?: WorkspaceEditFileMode[];
+  /** Edit features this Code API can safely route to a capability-aware worker. */
+  supportedWorkspaceEditFileFeatures?: WorkspaceEditFileFeature[];
 }
 
 export interface BridgePairingRedemption {
@@ -652,10 +720,20 @@ export function isWorkspaceToolRequest(
         typeof request.overwrite === 'boolean')
     );
   }
+  if (request.operation === 'preview_edit') {
+    return (
+      hasOnlyKeys(request, WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS) &&
+      isSafePortableRelativePath(request.path) &&
+      isValidWorkspaceEditRequest(request)
+    );
+  }
   if (request.operation === 'edit_file') {
     return (
       hasOnlyKeys(request, WORKSPACE_EDIT_REQUEST_KEYS) &&
       isSafePortableRelativePath(request.path) &&
+      (request.expectedBaseSha256 === undefined ||
+        (typeof request.expectedBaseSha256 === 'string' &&
+          /^[a-f0-9]{64}$/.test(request.expectedBaseSha256))) &&
       isValidWorkspaceEditRequest(request)
     );
   }
@@ -784,6 +862,26 @@ export function isWorkspaceToolResult(
     );
   }
 
+  if (request.operation === 'preview_edit') {
+    const replacements = request.edits?.length ?? 1;
+    const content = typeof result.content === 'string' ? result.content : null;
+    return (
+      hasOnlyKeys(result, WORKSPACE_PREVIEW_EDIT_RESULT_KEYS) &&
+      result.path === request.path &&
+      content !== null &&
+      Buffer.from(content).toString('utf8') === content &&
+      typeof result.hasUtf8Bom === 'boolean' &&
+      typeof result.baseSha256 === 'string' &&
+      /^[a-f0-9]{64}$/.test(result.baseSha256) &&
+      result.replacements === replacements &&
+      Number.isSafeInteger(result.bytesWritten) &&
+      Number(result.bytesWritten) ===
+        new TextEncoder().encode(content).byteLength +
+          (result.hasUtf8Bom ? 3 : 0) &&
+      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+    );
+  }
+
   if (request.operation === 'execute_command') {
     const stdout = typeof result.stdout === 'string' ? result.stdout : null;
     const stderr = typeof result.stderr === 'string' ? result.stderr : null;
@@ -847,13 +945,14 @@ export function isValidBridgeWorkspaceToolCapabilities(
     capabilities.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
     !Array.isArray(capabilities.operations) ||
     capabilities.operations.length < 1 ||
-    capabilities.operations.length > 6 ||
+    capabilities.operations.length > 7 ||
     !capabilities.operations.every(
       (operation) =>
         operation === 'read_file' ||
         operation === 'search_text' ||
         operation === 'list_files' ||
         operation === 'write_file' ||
+        operation === 'preview_edit' ||
         operation === 'edit_file' ||
         operation === 'execute_command',
     ) ||
@@ -885,12 +984,23 @@ export function isValidBridgeWorkspaceToolCapabilities(
     (!Array.isArray(capabilities.editFileModes) ||
       capabilities.editFileModes.length < 1 ||
       capabilities.editFileModes.length > 2 ||
-      !capabilities.operations.includes('edit_file') ||
+      (!capabilities.operations.includes('edit_file') &&
+        !capabilities.operations.includes('preview_edit')) ||
       !capabilities.editFileModes.every(
         (mode) => mode === 'single' || mode === 'batch',
       ) ||
       new Set(capabilities.editFileModes).size !==
         capabilities.editFileModes.length)
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.editFileFeatures !== undefined &&
+    (!Array.isArray(capabilities.editFileFeatures) ||
+      capabilities.editFileFeatures.length !== 1 ||
+      !capabilities.operations.includes('edit_file') ||
+      capabilities.editFileFeatures[0] !== 'expected_base_sha256')
   ) {
     return false;
   }

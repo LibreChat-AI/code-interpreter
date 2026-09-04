@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, lstat, open, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
@@ -27,6 +27,8 @@ import type {
   WorkspaceReadFileResult,
   WorkspaceEditFileRequest,
   WorkspaceEditFileResult,
+  WorkspacePreviewEditRequest,
+  WorkspacePreviewEditResult,
   WorkspaceExecuteCommandRequest,
   WorkspaceExecuteCommandResult,
   WorkspaceListFilesRequest,
@@ -47,6 +49,8 @@ export type {
   WorkspaceReadFileResult,
   WorkspaceEditFileRequest,
   WorkspaceEditFileResult,
+  WorkspacePreviewEditRequest,
+  WorkspacePreviewEditResult,
   WorkspaceExecuteCommandRequest,
   WorkspaceExecuteCommandResult,
   WorkspaceListFilesRequest,
@@ -119,7 +123,7 @@ const READ_OPERATIONS = [
   'search_text',
   'list_files',
 ] as const;
-const WRITE_OPERATIONS = ['write_file', 'edit_file'] as const;
+const WRITE_OPERATIONS = ['write_file', 'preview_edit', 'edit_file'] as const;
 
 function isUtf8ScalarString(value: string): boolean {
   return Buffer.from(value).toString('utf8') === value;
@@ -698,40 +702,17 @@ async function editWorkspaceFile(
       );
     }
     const original = await readBoundedEditFile(opened);
-    const hasBom =
-      original[0] === 0xef && original[1] === 0xbb && original[2] === 0xbf;
-    const body = hasBom ? original.subarray(3) : original;
-    const text = body.toString('utf8');
-    if (!Buffer.from(text, 'utf8').equals(body)) {
+    if (
+      request.expectedBaseSha256 !== undefined &&
+      createHash('sha256').update(original).digest('hex') !==
+        request.expectedBaseSha256
+    ) {
       throw new WorkspaceToolError(
-        'Workspace file is not UTF-8 text',
-        'INVALID_REQUEST',
+        'Workspace file changed after edit preview',
+        'EDIT_CONFLICT',
       );
     }
-    const edits = request.edits ?? [
-      { oldText: request.oldText ?? '', newText: request.newText ?? '' },
-    ];
-    let updatedText = text;
-    for (const edit of edits) {
-      const first = updatedText.indexOf(edit.oldText);
-      if (
-        first < 0 ||
-        updatedText.indexOf(edit.oldText, first + 1) >= 0
-      ) {
-        throw new WorkspaceToolError(
-          'Workspace edit must match exactly once',
-          'EDIT_CONFLICT',
-        );
-      }
-      updatedText =
-        updatedText.slice(0, first) +
-        edit.newText +
-        updatedText.slice(first + edit.oldText.length);
-    }
-    const updatedBody = Buffer.from(updatedText, 'utf8');
-    const updated = hasBom
-      ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), updatedBody])
-      : updatedBody;
+    const { updated, replacements } = applyWorkspaceEdits(original, request);
     await atomicWriteConfinedFile(
       root,
       request.path,
@@ -748,7 +729,7 @@ async function editWorkspaceFile(
       operation: 'edit_file',
       workspaceId: request.workspaceId,
       path: request.path,
-      replacements: edits.length,
+      replacements,
       bytesWritten: updated.byteLength,
     };
   } catch (error) {
@@ -757,6 +738,84 @@ async function editWorkspaceFile(
   } finally {
     await opened?.close().catch(() => undefined);
   }
+}
+
+function applyWorkspaceEdits(
+  original: Buffer,
+  request: WorkspaceEditFileRequest | WorkspacePreviewEditRequest,
+): { updated: Buffer; replacements: number } {
+  const hasBom =
+    original[0] === 0xef && original[1] === 0xbb && original[2] === 0xbf;
+  const body = hasBom ? original.subarray(3) : original;
+  const text = body.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(body)) {
+    throw new WorkspaceToolError(
+      'Workspace file is not UTF-8 text',
+      'INVALID_REQUEST',
+    );
+  }
+  const edits = request.edits ?? [
+    { oldText: request.oldText ?? '', newText: request.newText ?? '' },
+  ];
+  let updatedText = text;
+  for (const edit of edits) {
+    const first = updatedText.indexOf(edit.oldText);
+    if (first < 0 || updatedText.indexOf(edit.oldText, first + 1) >= 0) {
+      throw new WorkspaceToolError(
+        'Workspace edit must match exactly once',
+        'EDIT_CONFLICT',
+      );
+    }
+    updatedText =
+      updatedText.slice(0, first) +
+      edit.newText +
+      updatedText.slice(first + edit.oldText.length);
+  }
+  const updatedBody = Buffer.from(updatedText, 'utf8');
+  const updated = hasBom
+    ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), updatedBody])
+    : updatedBody;
+  if (updated.byteLength > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
+    throw new WorkspaceToolError(
+      'Workspace file exceeds write limit',
+      'WRITE_LIMIT_EXCEEDED',
+    );
+  }
+  return { updated, replacements: edits.length };
+}
+
+async function previewWorkspaceEdit(
+  root: string,
+  request: WorkspacePreviewEditRequest,
+  signal?: AbortSignal,
+): Promise<WorkspacePreviewEditResult> {
+  const original = await readConfinedFileBuffer(root, request.path);
+  if (signal?.aborted) {
+    throw new WorkspaceToolError(
+      'Workspace tool execution aborted',
+      'EXECUTION_ABORTED',
+    );
+  }
+  const { updated, replacements } = applyWorkspaceEdits(original, request);
+  if (signal?.aborted) {
+    throw new WorkspaceToolError(
+      'Workspace tool execution aborted',
+      'EXECUTION_ABORTED',
+    );
+  }
+  const hasUtf8Bom =
+    updated[0] === 0xef && updated[1] === 0xbb && updated[2] === 0xbf;
+  return {
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    operation: 'preview_edit',
+    workspaceId: request.workspaceId,
+    path: request.path,
+    content: decodeWorkspaceText(updated),
+    hasUtf8Bom,
+    baseSha256: createHash('sha256').update(original).digest('hex'),
+    replacements,
+    bytesWritten: updated.byteLength,
+  };
 }
 
 interface SearchCandidates {
@@ -1344,6 +1403,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     workspaces: BridgeWorkspaceDescriptor[],
     writeFileModes?: BridgeWorkspaceToolCapabilities['writeFileModes'],
     editFileModes?: BridgeWorkspaceToolCapabilities['editFileModes'],
+    editFileFeatures?: BridgeWorkspaceToolCapabilities['editFileFeatures'],
   ) {
     this.capabilities = {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -1351,6 +1411,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       workspaces,
       ...(writeFileModes != null ? { writeFileModes } : {}),
       ...(editFileModes != null ? { editFileModes } : {}),
+      ...(editFileFeatures != null ? { editFileFeatures } : {}),
     };
   }
 
@@ -1385,6 +1446,9 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       workspaces,
       ...(anyWritable ? { writeFileModes: ['replace', 'create'] } : {}),
       ...(anyWritable ? { editFileModes: ['single', 'batch'] } : {}),
+      ...(anyWritable
+        ? { editFileFeatures: ['expected_base_sha256'] }
+        : {}),
     };
     if (!isValidBridgeWorkspaceToolCapabilities(capabilities)) {
       throw new WorkspaceToolError(
@@ -1414,6 +1478,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       workspaces,
       capabilities.writeFileModes,
       capabilities.editFileModes,
+      capabilities.editFileFeatures,
     );
   }
 
@@ -1439,7 +1504,11 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     }
     const { root } = workspace;
 
-    if (request.operation === 'write_file' || request.operation === 'edit_file') {
+    if (
+      request.operation === 'write_file' ||
+      request.operation === 'preview_edit' ||
+      request.operation === 'edit_file'
+    ) {
       if (!workspace.writable) {
         throw new WorkspaceToolError(
           'Workspace mutations are disabled by the worker',
@@ -1452,8 +1521,11 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
           'EXECUTION_ABORTED',
         );
       }
-      return request.operation === 'write_file'
-        ? writeWorkspaceFile(root, request, signal)
+      if (request.operation === 'write_file') {
+        return writeWorkspaceFile(root, request, signal);
+      }
+      return request.operation === 'preview_edit'
+        ? previewWorkspaceEdit(root, request, signal)
         : editWorkspaceFile(root, request, signal);
     }
 
@@ -1543,6 +1615,9 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
         : {}),
       ...(base.editFileModes != null
         ? { editFileModes: base.editFileModes }
+        : {}),
+      ...(base.editFileFeatures != null
+        ? { editFileFeatures: base.editFileFeatures }
         : {}),
       workspaces: base.workspaces.map((workspace) => ({
         ...workspace,

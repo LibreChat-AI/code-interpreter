@@ -90,10 +90,20 @@ function supportsWorkspaceTool(
     const mode = request.overwrite === false ? 'create' : 'replace';
     return capabilities?.writeFileModes?.includes(mode) === true;
   }
-  if (request.operation === 'edit_file') {
+  if (
+    request.operation === 'preview_edit' ||
+    request.operation === 'edit_file'
+  ) {
     const mode = request.edits === undefined ? 'single' : 'batch';
     const modes = capabilities?.editFileModes;
-    return modes == null ? mode === 'single' : modes.includes(mode);
+    const supportsMode = modes == null ? mode === 'single' : modes.includes(mode);
+    if (request.operation === 'preview_edit') return supportsMode;
+    return (
+      supportsMode &&
+      (request.expectedBaseSha256 === undefined ||
+        capabilities?.editFileFeatures?.includes('expected_base_sha256') ===
+          true)
+    );
   }
   return true;
 }
