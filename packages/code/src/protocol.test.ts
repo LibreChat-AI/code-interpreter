@@ -264,7 +264,11 @@ test('workspace file listing accepts only bounded portable requests and results'
   assert.equal(
     isWorkspaceToolResult(
       { ...request, afterPath: undefined },
-      { ...result, nextAfterPath: undefined },
+      {
+        ...result,
+        paths: ['src//z.ts', 'src/worker.ts'],
+        nextAfterPath: undefined,
+      },
       {},
     ),
     true,
@@ -272,7 +276,11 @@ test('workspace file listing accepts only bounded portable requests and results'
   assert.equal(
     isWorkspaceToolResult(
       { ...request, afterPath: undefined },
-      { ...result, nextAfterPath: undefined },
+      {
+        ...result,
+        paths: ['src//z.ts', 'src/worker.ts'],
+        nextAfterPath: undefined,
+      },
       { listFileFeatures: ['after_path'] },
     ),
     false,

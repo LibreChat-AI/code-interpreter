@@ -864,6 +864,9 @@ export function isWorkspaceToolResult(
       request.afterPath === undefined
         ? undefined
         : normalizePortableRelativePath(request.afterPath);
+    const enforcesPaginationContract =
+      capabilities === undefined ||
+      capabilities.listFileFeatures?.includes('after_path') === true;
     let previousPath = normalizedAfterPath;
     for (const path of result.paths) {
       if (
@@ -874,23 +877,21 @@ export function isWorkspaceToolResult(
       }
       const normalizedPath = normalizePortableRelativePath(path);
       if (
-        normalizedPath !== path ||
         normalizedPaths.has(normalizedPath) ||
-        (previousPath !== undefined &&
-          comparePortableRelativePaths(normalizedPath, previousPath) <= 0)
+        (enforcesPaginationContract &&
+          (normalizedPath !== path ||
+            (previousPath !== undefined &&
+              comparePortableRelativePaths(normalizedPath, previousPath) <= 0)))
       ) {
         return false;
       }
       normalizedPaths.add(normalizedPath);
       previousPath = normalizedPath;
     }
-    if (result.truncated !== true) return result.nextAfterPath === undefined;
-    if (!capabilities?.listFileFeatures?.includes('after_path')) {
-      return capabilities === undefined
-        ? result.paths.length > 0 &&
-            result.nextAfterPath === result.paths[result.paths.length - 1]
-        : result.nextAfterPath === undefined;
+    if (!enforcesPaginationContract) {
+      return result.nextAfterPath === undefined;
     }
+    if (result.truncated !== true) return result.nextAfterPath === undefined;
     return (
       result.paths.length > 0 &&
       result.nextAfterPath === result.paths[result.paths.length - 1]

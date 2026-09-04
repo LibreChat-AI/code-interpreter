@@ -214,7 +214,7 @@ test('accepts a legacy truncated listing without a pagination cursor', async () 
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       operation: 'list_files',
       workspaceId: 'primary',
-      maxResults: 1,
+      maxResults: 2,
     },
     deadlineAtMs: Date.now() + 5_000,
     signal: new AbortController().signal,
@@ -235,14 +235,14 @@ test('accepts a legacy truncated listing without a pagination cursor', async () 
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       operation: 'list_files',
       workspaceId: 'primary',
-      paths: ['first.txt'],
+      paths: ['src//z.ts', 'src/a.ts'],
       truncated: true,
     },
   });
 
   await expect(completion).resolves.toMatchObject({
     status: 'fulfilled',
-    result: { paths: ['first.txt'], truncated: true },
+    result: { paths: ['src//z.ts', 'src/a.ts'], truncated: true },
   });
 });
 
