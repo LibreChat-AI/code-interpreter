@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   bridgeWorkerPath,
+  comparePortableRelativePaths,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
   isWorkspaceToolRequest,
@@ -173,6 +174,27 @@ test('bridge worker capabilities accept only bounded public workspace descriptor
       ...valid,
       workspaceTools: {
         ...valid.workspaceTools,
+        operations: ['read_file', 'list_files'],
+        listFileFeatures: ['after_path'],
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
+        listFileFeatures: ['after_path'],
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      ...valid,
+      workspaceTools: {
+        ...valid.workspaceTools,
         editFileModes: ['batch'],
       },
     }),
@@ -288,10 +310,24 @@ test('workspace file listing accepts only bounded portable requests and results'
   assert.equal(
     isWorkspaceToolResult(request, {
       ...result,
+      paths: ['src//worker.ts'],
+      nextAfterPath: 'src//worker.ts',
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
       root: '/private/workspace',
     }),
     false,
   );
+});
+
+test('workspace path ordering matches sorted depth-first traversal', () => {
+  assert.ok(comparePortableRelativePaths('src/app.ts', 'src.ts') < 0);
+  assert.ok(comparePortableRelativePaths('src/app.ts', 'src/worker.ts') < 0);
+  assert.ok(comparePortableRelativePaths('src.ts', 'src/app.ts') > 0);
 });
 
 test('workspace mutations accept bounded UTF-8 requests and exact result shapes', () => {

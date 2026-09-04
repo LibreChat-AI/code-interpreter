@@ -44,7 +44,11 @@ test('dispatches a workspace tool only to a worker advertising its workspace and
     signal: new AbortController().signal,
   });
 
-  const assignment = await store.lease('workspace-worker', incarnationId, 1_000);
+  const assignment = await store.lease(
+    'workspace-worker',
+    incarnationId,
+    1_000,
+  );
   expect(assignment).toMatchObject({
     executionKind: 'workspace_tool',
     request,
@@ -104,6 +108,88 @@ test('rejects a workspace tool that the selected worker did not advertise', asyn
     }),
   ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
   expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
+});
+
+test('rejects listing continuation without the negotiated feature', async () => {
+  await store.register({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    workerId: 'workspace-worker',
+    incarnationId,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operations: ['list_files'],
+        workspaces: [{ id: 'primary' }],
+      },
+    },
+  });
+
+  await expect(
+    store.dispatchWorkspaceTool({
+      workerId: 'workspace-worker',
+      request: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operation: 'list_files',
+        workspaceId: 'primary',
+        maxResults: 10,
+        afterPath: 'src/app.ts',
+      },
+      deadlineAtMs: Date.now() + 1_000,
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+  expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
+});
+
+test('rejects pagination fields from a worker without the negotiated feature', async () => {
+  await store.register({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    workerId: 'workspace-worker',
+    incarnationId,
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operations: ['list_files'],
+        workspaces: [{ id: 'primary' }],
+      },
+    },
+  });
+  const completion = store.dispatchWorkspaceTool({
+    workerId: 'workspace-worker',
+    request: {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      maxResults: 1,
+    },
+    deadlineAtMs: Date.now() + 5_000,
+    signal: new AbortController().signal,
+  });
+
+  const assignment = await store.lease('workspace-worker', incarnationId, 1_000);
+  await store.settle('workspace-worker', assignment?.assignmentId ?? '', {
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    generation: assignment?.generation ?? 0,
+    leaseToken: assignment?.leaseToken ?? '',
+    incarnationId,
+    status: 'fulfilled',
+    result: {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      paths: ['first.txt'],
+      truncated: true,
+      nextAfterPath: 'first.txt',
+    },
+  });
+
+  await expect(completion).rejects.toMatchObject({ code: 'RESULT_INVALID' });
 });
 
 test('rejects an operation omitted from the selected workspace capability', async () => {

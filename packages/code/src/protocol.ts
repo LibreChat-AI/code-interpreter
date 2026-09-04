@@ -35,6 +35,7 @@ export type BridgeWorkspaceToolOperation =
 export type WorkspaceWriteFileMode = 'replace' | 'create';
 export type WorkspaceEditFileMode = 'single' | 'batch';
 export type WorkspaceEditFileFeature = 'expected_base_sha256';
+export type WorkspaceListFileFeature = 'after_path';
 
 export interface BridgeWorkspaceDescriptor {
   id: string;
@@ -53,6 +54,8 @@ export interface BridgeWorkspaceToolCapabilities {
   editFileModes?: WorkspaceEditFileMode[];
   /** Omitted by workers that cannot fence edits against a preview revision. */
   editFileFeatures?: WorkspaceEditFileFeature[];
+  /** Omitted by workers that cannot continue a bounded file listing. */
+  listFileFeatures?: WorkspaceListFileFeature[];
 }
 
 export interface WorkspaceReadFileRequest {
@@ -426,6 +429,8 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceEditFileModes?: WorkspaceEditFileMode[];
   /** Edit features this Code API can safely route to a capability-aware worker. */
   supportedWorkspaceEditFileFeatures?: WorkspaceEditFileFeature[];
+  /** Listing features this Code API can safely route to a capability-aware worker. */
+  supportedWorkspaceListFileFeatures?: WorkspaceListFileFeature[];
 }
 
 export interface BridgePairingRedemption {
@@ -591,17 +596,24 @@ function normalizePortableRelativePath(value: string): string {
   );
 }
 
-/** Compare portable paths by their UTF-8 wire representation on every worker OS. */
+/** Compare path segments in ripgrep's sorted, depth-first traversal order. */
 export function comparePortableRelativePaths(left: string, right: string): number {
   const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < sharedLength; index += 1) {
-    const difference = leftBytes[index] - rightBytes[index];
-    if (difference !== 0) return difference;
+  const leftSegments = left.split('/');
+  const rightSegments = right.split('/');
+  const segmentCount = Math.min(leftSegments.length, rightSegments.length);
+  for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex += 1) {
+    const leftBytes = encoder.encode(leftSegments[segmentIndex]);
+    const rightBytes = encoder.encode(rightSegments[segmentIndex]);
+    const byteCount = Math.min(leftBytes.length, rightBytes.length);
+    for (let byteIndex = 0; byteIndex < byteCount; byteIndex += 1) {
+      const difference = leftBytes[byteIndex] - rightBytes[byteIndex];
+      if (difference !== 0) return difference;
+    }
+    const lengthDifference = leftBytes.length - rightBytes.length;
+    if (lengthDifference !== 0) return lengthDifference;
   }
-  return leftBytes.length - rightBytes.length;
+  return leftSegments.length - rightSegments.length;
 }
 
 function isWithinRequestedPath(candidate: string, requested?: string): boolean {
@@ -861,6 +873,7 @@ export function isWorkspaceToolResult(
       }
       const normalizedPath = normalizePortableRelativePath(path);
       if (
+        normalizedPath !== path ||
         normalizedPaths.has(normalizedPath) ||
         (previousPath !== undefined &&
           comparePortableRelativePaths(normalizedPath, previousPath) <= 0)
@@ -1039,6 +1052,16 @@ export function isValidBridgeWorkspaceToolCapabilities(
       capabilities.editFileFeatures.length !== 1 ||
       !capabilities.operations.includes('edit_file') ||
       capabilities.editFileFeatures[0] !== 'expected_base_sha256')
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.listFileFeatures !== undefined &&
+    (!Array.isArray(capabilities.listFileFeatures) ||
+      capabilities.listFileFeatures.length !== 1 ||
+      !capabilities.operations.includes('list_files') ||
+      capabilities.listFileFeatures[0] !== 'after_path')
   ) {
     return false;
   }

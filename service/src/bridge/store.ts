@@ -85,6 +85,9 @@ function supportsWorkspaceTool(
   if (!supportsOperation) {
     return supportsOperation;
   }
+  if (request.operation === 'list_files' && request.afterPath !== undefined) {
+    return capabilities?.listFileFeatures?.includes('after_path') === true;
+  }
   if (request.operation === 'write_file') {
     if (request.overwrite === undefined) return true;
     const mode = request.overwrite === false ? 'create' : 'replace';
@@ -508,22 +511,29 @@ export class RedisBridgeStore {
         'Invalid workspace tool request',
       );
     }
-    const settlement = (await this.dispatch({
+    return (await this.dispatch({
       ...args,
       body: {} as t.PayloadBody,
       headers: {},
       workspaceRequest: args.request,
+      finalize: async (settlement, registration) => {
+        if (
+          settlement.status === 'fulfilled' &&
+          (!isWorkspaceToolResult(args.request, settlement.result) ||
+            (args.request.operation === 'list_files' &&
+              'nextAfterPath' in settlement.result &&
+              !registration.capabilities.workspaceTools?.listFileFeatures?.includes(
+                'after_path',
+              )))
+        ) {
+          throw new BridgeStoreError(
+            'RESULT_INVALID',
+            'Bridge worker returned an invalid workspace tool result',
+          );
+        }
+        return settlement;
+      },
     })) as unknown as CodeBridgeWorkspaceSettlement;
-    if (
-      settlement.status === 'fulfilled' &&
-      !isWorkspaceToolResult(args.request, settlement.result)
-    ) {
-      throw new BridgeStoreError(
-        'RESULT_INVALID',
-        'Bridge worker returned an invalid workspace tool result',
-      );
-    }
-    return settlement;
   }
 
   async dispatch(args: {
@@ -538,6 +548,7 @@ export class RedisBridgeStore {
     signal: AbortSignal;
     finalize?: (
       settlement: CodeBridgeSettlement,
+      registration: RegisteredBridgeWorker,
     ) => Promise<CodeBridgeSettlement>;
   }): Promise<CodeBridgeSettlement> {
     this.assertDispatchActive(args.signal, args.deadlineAtMs);
@@ -717,7 +728,7 @@ export class RedisBridgeStore {
         const result =
           args.finalize == null
             ? settlement
-            : await args.finalize(settlement);
+            : await args.finalize(settlement, registration);
         await this.commitPendingWorkspace(
           assignment,
           settlement,

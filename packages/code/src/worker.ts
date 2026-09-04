@@ -151,6 +151,11 @@ function workspaceCapabilitiesMatch(
     (advertised.editFileFeatures?.every(
       (feature, index) => feature === executor.editFileFeatures?.[index],
     ) ?? executor.editFileFeatures == null) &&
+    advertised.listFileFeatures?.length ===
+      executor.listFileFeatures?.length &&
+    (advertised.listFileFeatures?.every(
+      (feature, index) => feature === executor.listFileFeatures?.[index],
+    ) ?? executor.listFileFeatures == null) &&
     advertised.workspaces.length === executor.workspaces.length &&
     advertised.workspaces.every(
       (workspace, index) =>
@@ -209,6 +214,7 @@ function registrationCompatibleCapabilities(
     writeFileModes: _writeFileModes,
     editFileModes: _editFileModes,
     editFileFeatures: _editFileFeatures,
+    listFileFeatures: _listFileFeatures,
     ...compatibleWorkspaceTools
   } = workspaceTools;
   return {
@@ -285,10 +291,14 @@ function supportedWorkspaceCapabilities(
   const editFileFeatures = desired.editFileFeatures?.filter((feature) =>
     registration.supportedWorkspaceEditFileFeatures?.includes(feature),
   );
+  const listFileFeatures = desired.listFileFeatures?.filter((feature) =>
+    registration.supportedWorkspaceListFileFeatures?.includes(feature),
+  );
   const {
     writeFileModes: _writeFileModes,
     editFileModes: _editFileModes,
     editFileFeatures: _editFileFeatures,
+    listFileFeatures: _listFileFeatures,
     ...compatibleDesired
   } = desired;
   return {
@@ -305,6 +315,9 @@ function supportedWorkspaceCapabilities(
         : {}),
       ...(operations.includes('edit_file') && editFileFeatures?.length
         ? { editFileFeatures }
+        : {}),
+      ...(operations.includes('list_files') && listFileFeatures?.length
+        ? { listFileFeatures }
         : {}),
     },
   };
@@ -989,6 +1002,15 @@ export class BridgeWorker {
             );
           }
         }
+        if (
+          workspaceRequest.operation === 'list_files' &&
+          workspaceRequest.afterPath !== undefined &&
+          !advertised.listFileFeatures?.includes('after_path')
+        ) {
+          throw new BridgeProtocolError(
+            'Workspace listing feature is not advertised',
+          );
+        }
         const isMutation =
           workspaceRequest.operation === 'write_file' ||
           workspaceRequest.operation === 'edit_file' ||
@@ -1012,6 +1034,17 @@ export class BridgeWorker {
           workspaceRequest,
           executionController.signal,
         );
+        if (
+          workspaceRequest.operation === 'list_files' &&
+          !advertised.listFileFeatures?.includes('after_path') &&
+          'nextAfterPath' in payload
+        ) {
+          const {
+            nextAfterPath: _nextAfterPath,
+            ...compatiblePayload
+          } = payload;
+          payload = compatiblePayload;
+        }
         workspaceMutationApplied = isMutation;
         if (isMutation && !isWorkspaceToolResult(workspaceRequest, payload)) {
           throw new BridgeProtocolError(

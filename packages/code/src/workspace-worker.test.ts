@@ -15,9 +15,13 @@ const listWorkspaceCapabilities = {
     'list_files' as const,
   ],
   workspaces: [{ id: 'primary' }],
+  listFileFeatures: ['after_path' as const],
 };
 
-function registrationResponse(supportsList: boolean): Response {
+function registrationResponse(
+  supportsList: boolean,
+  supportsPagination = false,
+): Response {
   return Response.json({
     protocolVersion: 1,
     workerId: 'vm-1',
@@ -31,6 +35,9 @@ function registrationResponse(supportsList: boolean): Response {
             'search_text',
             'list_files',
           ],
+          ...(supportsPagination
+            ? { supportedWorkspaceListFileFeatures: ['after_path'] }
+            : {}),
         }
       : {}),
   });
@@ -129,6 +136,67 @@ test('worker re-registers list_files after the Code API advertises support', asy
     ['read_file', 'search_text'],
     ['read_file', 'search_text', 'list_files'],
   ]);
+});
+
+test('worker omits pagination fields until Code API negotiates them', async () => {
+  let settlement: Record<string, unknown> | undefined;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: listWorkspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: listWorkspaceCapabilities,
+      async execute() {
+        return {
+          protocolVersion: 1 as const,
+          operation: 'list_files' as const,
+          workspaceId: 'primary',
+          paths: ['first.txt'],
+          truncated: true,
+          nextAfterPath: 'first.txt',
+        };
+      },
+    },
+    fetchImpl: async (input, init) => {
+      if (String(input).endsWith('/register')) return registrationResponse(true);
+      settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.register();
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-list-legacy-consumer',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      maxResults: 1,
+    },
+  });
+
+  assert.deepEqual(settlement?.result, {
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+    paths: ['first.txt'],
+    truncated: true,
+  });
 });
 
 test('worker omits restricted workspaces that legacy registration would widen', async () => {

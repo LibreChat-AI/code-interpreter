@@ -280,6 +280,54 @@ test('continues a workspace listing beyond the protocol result ceiling', async (
   );
 });
 
+test(
+  'continues listings across directory and file prefix siblings',
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'app.ts'), 'nested');
+    await writeFile(join(root, 'src.ts'), 'sibling');
+    const tools = await LocalWorkspaceTools.create({
+      workspaces: [{ id: 'primary', root }],
+    });
+
+    const firstPage = await tools.execute({
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      maxResults: 1,
+    });
+    assert.deepEqual(firstPage, {
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      paths: ['src/app.ts'],
+      truncated: true,
+      nextAfterPath: 'src/app.ts',
+    });
+    if (firstPage.operation !== 'list_files') {
+      assert.fail('expected list result');
+    }
+    assert.deepEqual(
+      await tools.execute({
+        protocolVersion: 1,
+        operation: 'list_files',
+        workspaceId: 'primary',
+        maxResults: 1,
+        afterPath: firstPage.nextAfterPath,
+      }),
+      {
+        protocolVersion: 1,
+        operation: 'list_files',
+        workspaceId: 'primary',
+        paths: ['src.ts'],
+        truncated: false,
+      },
+    );
+  },
+);
+
 test('rejects listing through a directory symlink that leaves the workspace', async (t) => {
   const parent = await mkdtemp(
     join(tmpdir(), 'librechat-code-workspace-parent-'),
@@ -826,6 +874,7 @@ test('advertises workspace IDs and names without exposing host roots', async (t)
     protocolVersion: 1,
     operations: ['read_file', 'search_text', 'list_files'],
     workspaces: [{ id: 'primary', name: 'LibreChat' }],
+    listFileFeatures: ['after_path'],
   });
   assert.equal(JSON.stringify(tools.capabilities).includes(root), false);
 });
@@ -884,6 +933,7 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
     writeFileModes: ['replace', 'create'],
     editFileModes: ['single', 'batch'],
     editFileFeatures: ['expected_base_sha256'],
+    listFileFeatures: ['after_path'],
   });
   await tools.execute({
     protocolVersion: 1,
@@ -1874,6 +1924,7 @@ test('composes sandboxed commands without exposing them on unconfigured workspac
   assert.deepEqual(tools.capabilities.editFileFeatures, [
     'expected_base_sha256',
   ]);
+  assert.deepEqual(tools.capabilities.listFileFeatures, ['after_path']);
   assert.deepEqual(
     tools.capabilities.workspaces.find(({ id }) => id === 'sandboxed')?.operations,
     tools.capabilities.operations,
