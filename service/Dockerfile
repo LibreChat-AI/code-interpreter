@@ -25,8 +25,13 @@ RUN bun build ./scripts/rehydrate-session-cache.ts --minify --outdir .build-migr
 RUN bun build ./src/worker-server.ts --minify --outdir .build-worker --target bun --external '@opentelemetry/*'
 RUN bun build ./src/egress-gateway.ts --minify --outdir .build-egress-gateway --target bun --external '@opentelemetry/*'
 
+FROM oven/bun:1.3.14 AS production-base
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
 # File server production
-FROM oven/bun:1.3.14 AS production
+FROM production-base AS production
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
@@ -34,7 +39,7 @@ COPY --from=builder /app/.build ./.build
 CMD ["bun", "run", ".build/file-server.js"]
 
 # API server (HTTP on port 3112)
-FROM oven/bun:1.3.14 AS api
+FROM production-base AS api
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
@@ -44,7 +49,7 @@ COPY --from=builder /app/src/*.py ./src/
 CMD ["bun", "run", ".build-api/api-server.js"]
 
 # Worker server (job processor, health on port 3113)
-FROM oven/bun:1.3.14 AS worker
+FROM production-base AS worker
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
@@ -53,7 +58,7 @@ COPY --from=builder /app/src/*.py ./src/
 CMD ["bun", "run", ".build-worker/worker-server.js"]
 
 # Egress gateway (sandbox outbound delegation)
-FROM oven/bun:1.3.14 AS egress-gateway
+FROM production-base AS egress-gateway
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
