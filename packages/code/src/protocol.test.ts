@@ -217,6 +217,7 @@ test('workspace file listing accepts only bounded portable requests and results'
     workspaceId: 'primary',
     path: 'src',
     maxResults: 20,
+    afterPath: 'src/app.ts',
   };
   assert.equal(isWorkspaceToolRequest(request), true);
   assert.equal(
@@ -224,15 +225,41 @@ test('workspace file listing accepts only bounded portable requests and results'
     false,
   );
   assert.equal(isWorkspaceToolRequest({ ...request, maxResults: 501 }), false);
+  assert.equal(
+    isWorkspaceToolRequest({ ...request, afterPath: 'outside/app.ts' }),
+    false,
+  );
 
   const result = {
     protocolVersion: 1 as const,
     operation: 'list_files' as const,
     workspaceId: 'primary',
-    paths: ['src/app.ts', 'src/worker.ts'],
-    truncated: false,
+    paths: ['src/worker.ts', 'src/z.ts'],
+    truncated: true,
+    nextAfterPath: 'src/z.ts',
   };
   assert.equal(isWorkspaceToolResult(request, result), true);
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      paths: ['src/\uE000.ts', 'src/\u{10000}.ts'],
+      truncated: false,
+      nextAfterPath: undefined,
+    }),
+    true,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, { ...result, nextAfterPath: 'src/worker.ts' }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(request, {
+      ...result,
+      paths: ['src/z.ts', 'src/worker.ts'],
+      nextAfterPath: 'src/worker.ts',
+    }),
+    false,
+  );
   assert.equal(
     isWorkspaceToolResult(request, {
       ...result,

@@ -201,6 +201,23 @@ test('lists workspace files deterministically with a hard result bound', async (
       workspaceId: 'primary',
       paths: ['docs/guide.md', 'src/app.ts'],
       truncated: true,
+      nextAfterPath: 'src/app.ts',
+    },
+  );
+  assert.deepEqual(
+    await tools.execute({
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      maxResults: 2,
+      afterPath: 'src/app.ts',
+    }),
+    {
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      paths: ['src/worker.ts'],
+      truncated: false,
     },
   );
   assert.deepEqual(
@@ -216,6 +233,48 @@ test('lists workspace files deterministically with a hard result bound', async (
       operation: 'list_files',
       workspaceId: 'primary',
       paths: ['src/app.ts', 'src/worker.ts'],
+      truncated: false,
+    },
+  );
+});
+
+test('continues a workspace listing beyond the protocol result ceiling', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await Promise.all(
+    Array.from({ length: 501 }, (_, index) =>
+      writeFile(join(root, `file-${String(index).padStart(3, '0')}.txt`), 'x'),
+    ),
+  );
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root }],
+  });
+
+  const firstPage = await tools.execute({
+    protocolVersion: 1,
+    operation: 'list_files',
+    workspaceId: 'primary',
+    maxResults: 500,
+  });
+  assert.equal(firstPage.operation, 'list_files');
+  if (firstPage.operation !== 'list_files') assert.fail('expected list result');
+  assert.equal(firstPage.paths.length, 500);
+  assert.equal(firstPage.truncated, true);
+  assert.equal(firstPage.nextAfterPath, 'file-499.txt');
+
+  assert.deepEqual(
+    await tools.execute({
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      maxResults: 500,
+      afterPath: firstPage.nextAfterPath,
+    }),
+    {
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+      paths: ['file-500.txt'],
       truncated: false,
     },
   );

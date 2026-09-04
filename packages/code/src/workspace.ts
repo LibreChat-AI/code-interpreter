@@ -14,6 +14,7 @@ import {
   BRIDGE_WORKSPACE_LIST_MAX_RESULTS,
   BRIDGE_WORKSPACE_SEARCH_MAX_RESULTS,
   BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH,
+  comparePortableRelativePaths,
   isSafePortableRelativePath,
   isValidBridgeWorkspaceToolCapabilities,
   isWorkspaceToolRequest,
@@ -1152,6 +1153,7 @@ async function listWorkspaceFiles(
     .filter((segment) => segment.length > 0 && segment !== '.')
     .join('/');
   const requestedResultPath = normalizedRequestedResultPath || undefined;
+  const afterPath = request.afterPath;
 
   const candidates: Array<{ filesystemPath: string; resultPath: string }> = [];
   let truncated = false;
@@ -1230,6 +1232,12 @@ async function listWorkspaceFiles(
               ? `${requestedResultPath}${normalizedPath.slice(portableCanonicalListPath.length)}`
               : normalizedPath;
       if (!isSafePortableRelativePath(resultPath)) return;
+      if (
+        afterPath !== undefined &&
+        comparePortableRelativePaths(resultPath, afterPath) <= 0
+      ) {
+        return;
+      }
       candidates.push({ filesystemPath: normalizedPath, resultPath });
     };
 
@@ -1337,6 +1345,9 @@ async function listWorkspaceFiles(
     workspaceId: request.workspaceId,
     paths,
     truncated,
+    ...(truncated && paths.length > 0
+      ? { nextAfterPath: paths[paths.length - 1] }
+      : {}),
   };
 }
 

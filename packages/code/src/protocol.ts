@@ -106,6 +106,8 @@ export interface WorkspaceListFilesRequest {
   workspaceId: string;
   path?: string;
   maxResults?: number;
+  /** Continue strictly after this canonical path from a previous page. */
+  afterPath?: string;
 }
 
 export interface WorkspaceListFilesResult {
@@ -114,6 +116,8 @@ export interface WorkspaceListFilesResult {
   workspaceId: string;
   paths: string[];
   truncated: boolean;
+  /** Last returned path; pass as afterPath to fetch the next page. */
+  nextAfterPath?: string;
 }
 
 export interface WorkspaceWriteFileRequest {
@@ -280,6 +284,7 @@ const WORKSPACE_LIST_REQUEST_KEYS = new Set([
   'workspaceId',
   'path',
   'maxResults',
+  'afterPath',
 ]);
 const WORKSPACE_WRITE_REQUEST_KEYS = new Set([
   'protocolVersion',
@@ -342,6 +347,7 @@ const WORKSPACE_LIST_RESULT_KEYS = new Set([
   'workspaceId',
   'paths',
   'truncated',
+  'nextAfterPath',
 ]);
 const WORKSPACE_WRITE_RESULT_KEYS = new Set([
   'protocolVersion',
@@ -585,6 +591,19 @@ function normalizePortableRelativePath(value: string): string {
   );
 }
 
+/** Compare portable paths by their UTF-8 wire representation on every worker OS. */
+export function comparePortableRelativePaths(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const difference = leftBytes[index] - rightBytes[index];
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
 function isWithinRequestedPath(candidate: string, requested?: string): boolean {
   if (requested == null) return true;
   const normalizedCandidate = normalizePortableRelativePath(candidate);
@@ -702,6 +721,10 @@ export function isWorkspaceToolRequest(
       hasOnlyKeys(request, WORKSPACE_LIST_REQUEST_KEYS) &&
       (request.path === undefined ||
         isSafePortableRelativePath(request.path)) &&
+      (request.afterPath === undefined ||
+        (isSafePortableRelativePath(request.afterPath) &&
+          normalizePortableRelativePath(request.afterPath) === request.afterPath &&
+          isWithinRequestedPath(request.afterPath, request.path))) &&
       (request.maxResults === undefined ||
         (Number.isSafeInteger(request.maxResults) &&
           Number(request.maxResults) >= 1 &&
@@ -824,6 +847,11 @@ export function isWorkspaceToolResult(
       return false;
     }
     const normalizedPaths = new Set<string>();
+    const normalizedAfterPath =
+      request.afterPath === undefined
+        ? undefined
+        : normalizePortableRelativePath(request.afterPath);
+    let previousPath = normalizedAfterPath;
     for (const path of result.paths) {
       if (
         !isSafePortableRelativePath(path) ||
@@ -832,10 +860,20 @@ export function isWorkspaceToolResult(
         return false;
       }
       const normalizedPath = normalizePortableRelativePath(path);
-      if (normalizedPaths.has(normalizedPath)) return false;
+      if (
+        normalizedPaths.has(normalizedPath) ||
+        (previousPath !== undefined &&
+          comparePortableRelativePaths(normalizedPath, previousPath) <= 0)
+      ) {
+        return false;
+      }
       normalizedPaths.add(normalizedPath);
+      previousPath = normalizedPath;
     }
-    return true;
+    return result.truncated === true
+      ? result.paths.length > 0 &&
+          result.nextAfterPath === result.paths[result.paths.length - 1]
+      : result.nextAfterPath === undefined;
   }
 
   if (request.operation === 'write_file') {

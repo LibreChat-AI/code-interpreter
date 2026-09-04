@@ -331,9 +331,11 @@ bounded set of ignored-aware candidates with configuration and symlink following
 disabled. It then opens and verifies each candidate through the same confined
 1 MiB read boundary before matching locally. File listing invokes `rg` without
 a shell, with configuration and symlink following disabled. Both operations
-stop after bounded global result counts. The worker process still belongs inside
-the trusted BYOM boundary and should receive filesystem access only to roots the
-operator intentionally registers.
+stop after bounded global result counts. A truncated `list_files` result includes
+`nextAfterPath`; pass that value back as `afterPath` with the same workspace and
+path to continue deterministically beyond the 500-file protocol ceiling. The
+worker process still belongs inside the trusted BYOM boundary and should receive
+filesystem access only to roots the operator intentionally registers.
 
 Writes are limited to 1 MiB of UTF-8 text and require an existing directory
 inside the registered root. They reject traversal, symlink targets, and
