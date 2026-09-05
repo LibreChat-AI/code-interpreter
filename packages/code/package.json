@@ -34,6 +34,10 @@
     "./native-sandbox": {
       "types": "./dist/native-sandbox.d.ts",
       "import": "./dist/native-sandbox.js"
+    },
+    "./github": {
+      "types": "./dist/github.d.ts",
+      "import": "./dist/github.js"
     }
   },
   "bin": {
