@@ -37,6 +37,7 @@ function fakeManager(
   let config: SandboxRuntimeConfig | undefined;
   let reset = false;
   let credentialSeenDuringWrap: string | undefined;
+  let gitLfsRequiredSeenDuringWrap: string | undefined;
   const manager = {
     isSupportedPlatform: () => true,
     async checkDependenciesAsync() {
@@ -48,6 +49,7 @@ function fakeManager(
     async wrapWithSandboxArgv(command: string) {
       await options.beforeWrap?.();
       credentialSeenDuringWrap = process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
+      gitLfsRequiredSeenDuringWrap = process.env.GIT_CONFIG_VALUE_3;
       return {
         argv: ['/bin/bash', '-c', command],
         env: {
@@ -79,6 +81,9 @@ function fakeManager(
     },
     get credentialSeenDuringWrap() {
       return credentialSeenDuringWrap;
+    },
+    get gitLfsRequiredSeenDuringWrap() {
+      return gitLfsRequiredSeenDuringWrap;
     },
   };
 }
@@ -265,9 +270,10 @@ test('isolates Git from host-level global and system configuration', async (t) =
 test('restores trusted Git LFS filters without reading host Git configuration', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager();
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
     workspaceRoot: root,
-    manager: fakeManager().manager,
+    manager: fake.manager,
   });
 
   const result = await sandbox.execute({
@@ -281,6 +287,7 @@ test('restores trusted Git LFS filters without reading host Git configuration', 
     result.stdout,
     'git-lfs clean -- %f|git-lfs smudge -- %f|git-lfs filter-process|true',
   );
+  assert.equal(fake.gitLfsRequiredSeenDuringWrap, 'true');
 });
 
 test('filters environment names case-insensitively only on Windows', async (t) => {

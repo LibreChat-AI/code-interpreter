@@ -331,7 +331,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       const credentialEnvironment =
         await this.options.maskedEnvironment?.resolve(signal);
       wrapped = await this.withTemporaryHostEnvironment(
-        credentialEnvironment ?? {},
+        {
+          ...TRUSTED_GIT_ENVIRONMENT,
+          ...(credentialEnvironment ?? {}),
+        },
         () =>
           this.manager.wrapWithSandboxArgv(
             sandboxedCommand,
