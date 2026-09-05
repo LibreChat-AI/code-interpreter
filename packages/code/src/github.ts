@@ -215,6 +215,18 @@ export function gitHubAuthenticationPolicyIdentity(options: {
   return `${identity}:app:${options.appId}:installation:${options.installationId}`;
 }
 
+export function normalizeGitHubHost(value: string): string {
+  const host = value.toLowerCase();
+  if (
+    !/^[a-z0-9.-]+$/.test(host) ||
+    host.startsWith('.') ||
+    host.endsWith('.')
+  ) {
+    throw new Error('LIBRECHAT_CODE_GITHUB_HOST must be a DNS hostname');
+  }
+  return host;
+}
+
 export function wrapGitHubCredentialCommand(
   command: string,
   host = 'github.com',

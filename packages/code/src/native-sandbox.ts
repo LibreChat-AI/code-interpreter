@@ -417,7 +417,6 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
               GIT_CONFIG_GLOBAL:
                 this.platform === 'win32' ? 'NUL' : '/dev/null',
               GIT_CONFIG_NOSYSTEM: '1',
-              ...TRUSTED_GIT_ENVIRONMENT,
             },
             detached: this.platform !== 'win32',
             shell: false,

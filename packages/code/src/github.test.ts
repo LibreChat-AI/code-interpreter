@@ -19,8 +19,14 @@ import {
   gitHubAuthenticationPolicyIdentity,
   GITHUB_CREDENTIAL_ENV_NAME,
   gitHubCredentialEnvironment,
+  normalizeGitHubHost,
   wrapGitHubCredentialCommand,
 } from './github.js';
+
+test('normalizes GitHub DNS hostnames before policy and allowlist use', () => {
+  assert.equal(normalizeGitHubHost('GitHub.COM'), 'github.com');
+  assert.throws(() => normalizeGitHubHost('.github.com'), /DNS hostname/);
+});
 
 test('binds the GitHub App installation to the public policy identity', () => {
   assert.equal(

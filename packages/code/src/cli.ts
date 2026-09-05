@@ -35,6 +35,7 @@ import {
   StaticGitHubCredentialProvider,
   gitHubAuthenticationPolicyIdentity,
   gitHubCredentialEnvironment,
+  normalizeGitHubHost,
   wrapGitHubCredentialCommand,
 } from './github.js';
 import type { RuntimeSupervisor } from './runtime.js';
@@ -153,7 +154,12 @@ function githubCredentials(): {
       'Configure either GitHub App authentication or a GitHub token, not both',
     );
   }
-  const configuredHost = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_HOST);
+  const configuredHostValue = nonEmpty(
+    process.env.LIBRECHAT_CODE_GITHUB_HOST,
+  );
+  const configuredHost = configuredHostValue
+    ? normalizeGitHubHost(configuredHostValue)
+    : undefined;
   const apiUrl = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_API_URL);
   let apiHost: string | undefined;
   if (apiUrl) {
@@ -173,14 +179,7 @@ function githubCredentials(): {
       'LIBRECHAT_CODE_GITHUB_HOST must match the GitHub App API hostname',
     );
   }
-  const host = configuredHost ?? apiHost ?? 'github.com';
-  if (
-    !/^[A-Za-z0-9.-]+$/.test(host) ||
-    host.startsWith('.') ||
-    host.endsWith('.')
-  ) {
-    throw new Error('LIBRECHAT_CODE_GITHUB_HOST must be a DNS hostname');
-  }
+  const host = normalizeGitHubHost(configuredHost ?? apiHost ?? 'github.com');
   if (hasApp) {
     return {
       host,
