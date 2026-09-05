@@ -37,6 +37,9 @@ jobs:
       - name: Bridge pairing rollout safety
         run: tests/bridge_pairing_rollout.sh
 
+      - name: Compose bridge configuration
+        run: node tests/compose-bridge-config.cjs
+
       - name: Validate sandbox Dockerfiles
         run: |
           docker buildx build --check -f api/Dockerfile .

@@ -124,6 +124,15 @@ cut.
 
 ## Local Development
 
+Copy `.env.example` to `.env` and set `CODEAPI_BRIDGE_TOKEN` to a private value
+of at least 32 bytes (generate one with `openssl rand -hex 32`). The API exposes
+bridge routes even with the default HTTP sandbox backend, so hardened mode
+requires this enrollment credential. Compose defaults to
+`CODEAPI_BRIDGE_AUTH_MODE=paired` and `CODEAPI_BRIDGE_DYNAMIC_WORKERS=true`.
+To restrict pairing to a fixed worker, set `CODEAPI_BRIDGE_DYNAMIC_WORKERS=false`
+and `CODEAPI_BRIDGE_WORKER_ID` to its ID. Keep the token outside workspaces and
+model-visible configuration.
+
 ```bash
 docker-compose up --build
 ```
