@@ -102,6 +102,68 @@ export function validateWorkerHardenedConfig(): void {
   requireValue('CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY', env.EXECUTION_MANIFEST_PRIVATE_KEY);
 }
 
+function hostedAppKey(name: string, raw: string): Buffer {
+  const normalized = raw.trim();
+  const key = Buffer.from(normalized, 'base64');
+  if (
+    key.length !== 32
+    || key.toString('base64').replace(/=+$/, '') !== normalized.replace(/=+$/, '')
+  ) {
+    throw new SecureStartupConfigError(
+      `${name} must be base64 encoding exactly 32 bytes`,
+    );
+  }
+  return key;
+}
+
+function validateHostedAppsSharedConfig(): Buffer {
+  if (env.EXECUTION_PROFILE !== 'stateful' || env.RUNTIME_SESSION_MODE === 'stateless') {
+    throw new SecureStartupConfigError(
+      'CODEAPI_HOSTED_APPS_ENABLED=true requires the stateful execution profile',
+    );
+  }
+  return hostedAppKey('CODEAPI_HOSTED_APP_CREDENTIAL_KEY', env.HOSTED_APP_CREDENTIAL_KEY);
+}
+
+/** API pods decrypt short-lived preview credentials but never receive AWS IAM
+ * control-plane permissions. Validate only their routing/key contract; the
+ * worker validator below owns image and checkpoint configuration. */
+export function validateHostedAppsApiConfig(): void {
+  if (!env.HOSTED_APPS_ENABLED) return;
+  const credentialKey = validateHostedAppsSharedConfig();
+  const previewSigningKey = hostedAppKey(
+    'CODEAPI_HOSTED_APP_PREVIEW_SIGNING_KEY',
+    env.HOSTED_APP_PREVIEW_SIGNING_KEY,
+  );
+  if (credentialKey.equals(previewSigningKey)) {
+    throw new SecureStartupConfigError(
+      'Hosted app credential and preview signing keys must be distinct',
+    );
+  }
+  let previewOrigin: URL;
+  try {
+    previewOrigin = new URL(env.HOSTED_APP_PREVIEW_ORIGIN);
+  } catch {
+    throw new SecureStartupConfigError(
+      'CODEAPI_HOSTED_APP_PREVIEW_ORIGIN must be an absolute URL',
+    );
+  }
+  if (
+    !['https:', ...(process.env.NODE_ENV === 'production' ? [] : ['http:'])].includes(
+      previewOrigin.protocol,
+    )
+    || previewOrigin.username
+    || previewOrigin.password
+    || previewOrigin.pathname !== '/'
+    || previewOrigin.search
+    || previewOrigin.hash
+  ) {
+    throw new SecureStartupConfigError(
+      'CODEAPI_HOSTED_APP_PREVIEW_ORIGIN must be a bare HTTPS origin',
+    );
+  }
+}
+
 /**
  * Make the endpoint identity trustworthy. Callers route by execution profile,
  * so accepting a contradictory backend/session tuple would silently send work
@@ -255,6 +317,58 @@ export function validateSandboxBackendPolicy(): void {
         'Session checkpoints are enabled but object storage is not configured: '
           + `${missing.join(', ')}. Set them or disable CODEAPI_SESSION_CHECKPOINTS.`,
       );
+    }
+  }
+
+  if (env.HOSTED_APPS_ENABLED) {
+    /* Workers encrypt AWS port credentials but do not serve previews, so they
+     * need the credential key—not the separate URL-signing key or app origin. */
+    validateHostedAppsSharedConfig();
+    if (!env.SESSION_CHECKPOINTS) {
+      throw new SecureStartupConfigError(
+        'CODEAPI_HOSTED_APPS_ENABLED=true requires CODEAPI_SESSION_CHECKPOINTS=true',
+      );
+    }
+    requireValue('LAMBDA_MICROVM_APP_IMAGE_ARN', env.HOSTED_APP_IMAGE_ARN);
+    requireValue('LAMBDA_MICROVM_APP_IMAGE_VERSION', env.HOSTED_APP_IMAGE_VERSION);
+    for (const [name, expected] of [
+      ['LAMBDA_MICROVM_APP_CONTROL_PORT', '8080'],
+      ['LAMBDA_MICROVM_APP_PREVIEW_PORT', '3000'],
+      ['LAMBDA_MICROVM_APP_START_TIMEOUT_MS', '30000'],
+    ] as const) {
+      const configured = process.env[name]?.trim();
+      if (configured && configured !== expected) {
+        throw new SecureStartupConfigError(
+          `${name} cannot override the pinned app-host image contract (${expected})`,
+        );
+      }
+    }
+    requireSafeWholeNumber('LAMBDA_MICROVM_APP_CONTROL_PORT', env.HOSTED_APP_CONTROL_PORT, 1_024);
+    requireSafeWholeNumber('LAMBDA_MICROVM_APP_PREVIEW_PORT', env.HOSTED_APP_PREVIEW_PORT, 1_024);
+    if (env.HOSTED_APP_CONTROL_PORT !== 8080 || env.HOSTED_APP_PREVIEW_PORT !== 3000) {
+      throw new SecureStartupConfigError(
+        'Hosted app image contract requires control port 8080 and preview port 3000',
+      );
+    }
+    requireSafeWholeNumber(
+      'LAMBDA_MICROVM_APP_MAX_DURATION_SECONDS',
+      env.HOSTED_APP_MAX_DURATION_SECONDS,
+      120,
+    );
+    requireSafeWholeNumber('LAMBDA_MICROVM_APP_IDLE_SECONDS', env.HOSTED_APP_IDLE_SECONDS, 60);
+    requireSafeWholeNumber('LAMBDA_MICROVM_APP_SUSPEND_SECONDS', env.HOSTED_APP_SUSPEND_SECONDS, 0);
+    requireSafeWholeNumber('LAMBDA_MICROVM_APP_START_TIMEOUT_MS', env.HOSTED_APP_START_TIMEOUT_MS, 1);
+    if (env.HOSTED_APP_START_TIMEOUT_MS !== 30_000) {
+      throw new SecureStartupConfigError(
+        'Hosted app image contract requires a 30000ms resident startup timeout',
+      );
+    }
+    if (
+      env.HOSTED_APP_MAX_DURATION_SECONDS > 28_800
+      || env.HOSTED_APP_IDLE_SECONDS > 28_800
+      || env.HOSTED_APP_SUSPEND_SECONDS > 28_800
+    ) {
+      throw new SecureStartupConfigError('Hosted app lifetime controls must be at most 28800 seconds');
     }
   }
 }

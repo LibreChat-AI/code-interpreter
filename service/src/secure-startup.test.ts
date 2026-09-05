@@ -6,6 +6,7 @@ import {
   validateApiSandboxBackendPolicy,
   validateEgressGatewayHardenedConfig,
   validateExecutionProfilePolicy,
+  validateHostedAppsApiConfig,
   validateSandboxBackendPolicy,
   validateWorkerHardenedConfig,
 } from './secure-startup';
@@ -47,6 +48,18 @@ const saved = {
   ledgerRequired: env.EGRESS_LEDGER_REQUIRED,
   fileServerUrl: env.EGRESS_GATEWAY_FILE_SERVER_URL,
   toolCallUrl: env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL,
+  hostedAppsEnabled: env.HOSTED_APPS_ENABLED,
+  hostedAppImageArn: env.HOSTED_APP_IMAGE_ARN,
+  hostedAppImageVersion: env.HOSTED_APP_IMAGE_VERSION,
+  hostedAppControlPort: env.HOSTED_APP_CONTROL_PORT,
+  hostedAppPreviewPort: env.HOSTED_APP_PREVIEW_PORT,
+  hostedAppMaxDuration: env.HOSTED_APP_MAX_DURATION_SECONDS,
+  hostedAppIdle: env.HOSTED_APP_IDLE_SECONDS,
+  hostedAppSuspend: env.HOSTED_APP_SUSPEND_SECONDS,
+  hostedAppStartTimeout: env.HOSTED_APP_START_TIMEOUT_MS,
+  hostedAppCredentialKey: env.HOSTED_APP_CREDENTIAL_KEY,
+  hostedAppPreviewOrigin: env.HOSTED_APP_PREVIEW_ORIGIN,
+  hostedAppPreviewSigningKey: env.HOSTED_APP_PREVIEW_SIGNING_KEY,
 };
 
 function restore(): void {
@@ -89,6 +102,18 @@ function restore(): void {
   env.EGRESS_LEDGER_REQUIRED = saved.ledgerRequired;
   env.EGRESS_GATEWAY_FILE_SERVER_URL = saved.fileServerUrl;
   env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL = saved.toolCallUrl;
+  env.HOSTED_APPS_ENABLED = saved.hostedAppsEnabled;
+  env.HOSTED_APP_IMAGE_ARN = saved.hostedAppImageArn;
+  env.HOSTED_APP_IMAGE_VERSION = saved.hostedAppImageVersion;
+  env.HOSTED_APP_CONTROL_PORT = saved.hostedAppControlPort;
+  env.HOSTED_APP_PREVIEW_PORT = saved.hostedAppPreviewPort;
+  env.HOSTED_APP_MAX_DURATION_SECONDS = saved.hostedAppMaxDuration;
+  env.HOSTED_APP_IDLE_SECONDS = saved.hostedAppIdle;
+  env.HOSTED_APP_SUSPEND_SECONDS = saved.hostedAppSuspend;
+  env.HOSTED_APP_START_TIMEOUT_MS = saved.hostedAppStartTimeout;
+  env.HOSTED_APP_CREDENTIAL_KEY = saved.hostedAppCredentialKey;
+  env.HOSTED_APP_PREVIEW_ORIGIN = saved.hostedAppPreviewOrigin;
+  env.HOSTED_APP_PREVIEW_SIGNING_KEY = saved.hostedAppPreviewSigningKey;
 }
 
 afterEach(restore);
@@ -601,5 +626,93 @@ describe('sandbox backend policy', () => {
     env.HARDENED_SANDBOX_MODE = true;
     env.LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS = ['arn:aws:lambda:us-east-2:1:network-connector:vpc-egress'];
     expect(() => validateSandboxBackendPolicy()).toThrow('LAMBDA_MICROVM_ALLOW_SHELL');
+  });
+});
+
+describe('hosted app startup policy', () => {
+  function configureHostedApps(): void {
+    env.HOSTED_APPS_ENABLED = true;
+    env.EXECUTION_PROFILE = 'stateful';
+    env.EXECUTION_PROFILE_SOURCE = 'explicit';
+    env.SANDBOX_BACKEND = 'lambda-microvm';
+    env.RUNTIME_SESSION_MODE = 'affinity';
+    env.SESSION_CHECKPOINTS = true;
+    env.HOSTED_APP_IMAGE_ARN = 'arn:aws:lambda:us-east-2:1:microvm-image:app-host';
+    env.HOSTED_APP_IMAGE_VERSION = '4';
+    env.HOSTED_APP_CONTROL_PORT = 8080;
+    env.HOSTED_APP_PREVIEW_PORT = 3000;
+    env.HOSTED_APP_MAX_DURATION_SECONDS = 28_800;
+    env.HOSTED_APP_IDLE_SECONDS = 300;
+    env.HOSTED_APP_SUSPEND_SECONDS = 900;
+    env.HOSTED_APP_START_TIMEOUT_MS = 30_000;
+    env.HOSTED_APP_CREDENTIAL_KEY = Buffer.alloc(32, 7).toString('base64');
+    env.HOSTED_APP_PREVIEW_ORIGIN = 'https://apps.example.test';
+    env.HOSTED_APP_PREVIEW_SIGNING_KEY = Buffer.alloc(32, 8).toString('base64');
+  }
+
+  test('API-only pods require the stateful profile and a 32-byte credential key', () => {
+    configureHostedApps();
+    expect(() => validateHostedAppsApiConfig()).not.toThrow();
+
+    env.EXECUTION_PROFILE = 'default';
+    expect(() => validateHostedAppsApiConfig()).toThrow('stateful execution profile');
+
+    env.EXECUTION_PROFILE = 'stateful';
+    env.HOSTED_APP_CREDENTIAL_KEY = 'not-a-key';
+    expect(() => validateHostedAppsApiConfig()).toThrow('exactly 32 bytes');
+
+    env.HOSTED_APP_CREDENTIAL_KEY = Buffer.alloc(32, 7).toString('base64');
+    env.HOSTED_APP_PREVIEW_SIGNING_KEY = env.HOSTED_APP_CREDENTIAL_KEY;
+    expect(() => validateHostedAppsApiConfig()).toThrow('must be distinct');
+
+    env.HOSTED_APP_PREVIEW_SIGNING_KEY = Buffer.alloc(32, 8).toString('base64');
+    env.HOSTED_APP_PREVIEW_ORIGIN = 'https://apps.example.test/path';
+    expect(() => validateHostedAppsApiConfig()).toThrow('bare HTTPS origin');
+  });
+
+  test('worker policy requires a pinned dedicated image and its fixed listener contract', () => {
+    configureHostedApps();
+    /* Reuse the suite's valid Lambda/checkpoint baseline. */
+    env.PTC_MODE = 'replay';
+    env.HARDENED_SANDBOX_MODE = false;
+    env.LAMBDA_MICROVM_IMAGE_ARN = 'arn:aws:lambda:us-east-2:1:microvm-image:codeapi';
+    env.LAMBDA_MICROVM_IMAGE_VERSION = '3';
+    env.LAMBDA_MICROVM_PORT = 8080;
+    env.LAMBDA_MICROVM_MAX_DURATION_SECONDS = 28_800;
+    env.LAMBDA_MICROVM_IDLE_SECONDS = 1_800;
+    env.LAMBDA_MICROVM_SUSPEND_SECONDS = 1_800;
+    env.LAMBDA_MICROVM_AUTH_TOKEN_TTL_SECONDS = 300;
+    env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS = 60_000;
+    env.LAMBDA_MICROVM_HEALTH_TIMEOUT_MS = 5_000;
+    env.LAMBDA_MICROVM_LAUNCH_TPS = 4;
+    env.LAMBDA_MICROVM_TOKEN_TPS = 8;
+    env.LAMBDA_MICROVM_ALLOW_SHELL = false;
+    env.JOB_TIMEOUT = 300_000;
+    env.RUNTIME_SESSION_LOCK_WAIT_MS = 15_000;
+    env.CHECKPOINT_MAX_BYTES = 512 * 1024 * 1024;
+    env.CHECKPOINT_TIMEOUT_MS = 60_000;
+    process.env.MINIO_ENDPOINT = 'minio';
+    process.env.CODEAPI_CHECKPOINT_BUCKET = 'codeapi-checkpoints';
+
+    expect(() => validateSandboxBackendPolicy()).not.toThrow();
+    env.HOSTED_APP_PREVIEW_SIGNING_KEY = '';
+    env.HOSTED_APP_PREVIEW_ORIGIN = '';
+    expect(() => validateSandboxBackendPolicy()).not.toThrow();
+    env.HOSTED_APP_MAX_DURATION_SECONDS = 60;
+    expect(() => validateSandboxBackendPolicy()).toThrow(
+      'LAMBDA_MICROVM_APP_MAX_DURATION_SECONDS',
+    );
+    env.HOSTED_APP_MAX_DURATION_SECONDS = 28_800;
+    env.HOSTED_APP_IMAGE_VERSION = undefined;
+    expect(() => validateSandboxBackendPolicy()).toThrow('LAMBDA_MICROVM_APP_IMAGE_VERSION');
+    env.HOSTED_APP_IMAGE_VERSION = '4';
+    env.HOSTED_APP_PREVIEW_PORT = 3001;
+    expect(() => validateSandboxBackendPolicy()).toThrow('preview port 3000');
+    env.HOSTED_APP_PREVIEW_PORT = 3000;
+    env.HOSTED_APP_START_TIMEOUT_MS = 30_001;
+    expect(() => validateSandboxBackendPolicy()).toThrow('30000ms');
+    env.HOSTED_APP_START_TIMEOUT_MS = 30_000;
+    process.env.LAMBDA_MICROVM_APP_PREVIEW_PORT = '4000';
+    expect(() => validateSandboxBackendPolicy()).toThrow('cannot override');
   });
 });

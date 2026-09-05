@@ -13,12 +13,14 @@ import {
   validateApiHardenedConfig,
   validateApiSandboxBackendPolicy,
   validateExecutionProfilePolicy,
+  validateHostedAppsApiConfig,
   validateSandboxBackendPolicy,
   validateWorkerHardenedConfig,
 } from './secure-startup';
 import logger from './logger';
 import { shutdownTelemetry } from './telemetry';
 import { configureExecutionProfileMetrics } from './metrics';
+import { closeHostedAppQueueResources } from './hosted-app/queue';
 
 const { INSTANCE_ID } = env;
 let isShuttingDown = false;
@@ -99,6 +101,7 @@ export async function startupApiOnly(): Promise<void> {
   validateApiBridgePolicy();
   validateExecutionProfilePolicy({ requireBackendMatch: false });
   validateApiSandboxBackendPolicy();
+  validateHostedAppsApiConfig();
   /* No full validateSandboxBackendPolicy() here: an API-only pod authenticates and
    * enqueues jobs, it never constructs the Lambda backend or checkpoint store.
    * Bridge credentials are validated separately above because this process
@@ -130,6 +133,9 @@ export async function startupWorkerOnly(): Promise<void> {
 
   // Dynamically import workers to start them
   const { pyWorker, otherWorker } = await import('./workers');
+  const hostedAppWorker = env.HOSTED_APPS_ENABLED
+    ? (await import('./hosted-app/worker')).hostedAppWorker
+    : undefined;
 
   registerWorkers();
 
@@ -145,6 +151,9 @@ export async function startupWorkerOnly(): Promise<void> {
       throw new Error('Other worker is not running');
     }
     logger.info('Workers health check passed');
+    if (env.HOSTED_APPS_ENABLED && !hostedAppWorker?.isRunning()) {
+      throw new Error('Hosted app worker is not running');
+    }
   };
 
   checkWorkers();
@@ -161,6 +170,7 @@ async function gracefulStartup(): Promise<void> {
   validateApiHardenedConfig();
   validateWorkerHardenedConfig();
   validateExecutionProfilePolicy();
+  validateHostedAppsApiConfig();
   validateSandboxBackendPolicy();
   validateApiBridgePolicy();
   await validateLifecycleAuthConfig();
@@ -171,6 +181,9 @@ async function gracefulStartup(): Promise<void> {
 
     // Import workers (this starts them)
     const { pyWorker, otherWorker } = await import('./workers');
+    const hostedAppWorker = env.HOSTED_APPS_ENABLED
+      ? (await import('./hosted-app/worker')).hostedAppWorker
+      : undefined;
 
     registerWorkers();
 
@@ -190,6 +203,9 @@ async function gracefulStartup(): Promise<void> {
         throw new Error('Other worker is not running');
       }
       logger.info('Workers health check passed');
+      if (env.HOSTED_APPS_ENABLED && !hostedAppWorker?.isRunning()) {
+        throw new Error('Hosted app worker is not running');
+      }
     };
 
     checkWorkers();
@@ -231,12 +247,18 @@ export async function gracefulShutdown(): Promise<void> {
     if (hasWorkers) {
       // Worker shutdown: close workers gracefully
       const { pyWorker, otherWorker } = await import('./workers');
+      const hostedAppWorker = env.HOSTED_APPS_ENABLED
+        ? (await import('./hosted-app/worker')).hostedAppWorker
+        : undefined;
 
       // Pause workers and wait for active jobs to complete
       // Note: We pause workers, NOT queues (queues are shared)
       // pause(false) = wait for active jobs to finish before resolving (doNotWaitActive=false)
       // pause(true) = return immediately without waiting for active jobs
-      const pauseAndDrain = async (worker: typeof pyWorker, name: string): Promise<void> => {
+      const pauseAndDrain = async (
+        worker: { pause(doNotWaitActive?: boolean): Promise<void> },
+        name: string,
+      ): Promise<void> => {
         logger.info(`Pausing ${name} worker and waiting for active jobs to drain...`);
         try {
           // doNotWaitActive=false means wait for active jobs to complete
@@ -249,19 +271,24 @@ export async function gracefulShutdown(): Promise<void> {
 
       await Promise.all([
         pauseAndDrain(pyWorker, 'Python'),
-        pauseAndDrain(otherWorker, 'Other')
+        pauseAndDrain(otherWorker, 'Other'),
+        ...(hostedAppWorker ? [pauseAndDrain(hostedAppWorker, 'Hosted app')] : []),
       ]);
 
       // Close workers
       await Promise.all([
         pyWorker.close(),
-        otherWorker.close()
+        otherWorker.close(),
+        ...(hostedAppWorker ? [hostedAppWorker.close()] : []),
       ]);
       logger.info('Workers closed');
     }
 
     // Close queue connections (both API and Worker need this)
-    await closeQueueConnections();
+    await Promise.all([
+      closeQueueConnections(),
+      closeHostedAppQueueResources(),
+    ]);
     logger.info('Queue connections closed');
 
     // Only disconnect Redis if explicitly requested
