@@ -50,6 +50,18 @@ const SAFE_CHILD_ENV_NAMES = new Set([
 
 let hostEnvironmentMutationQueue: Promise<void> = Promise.resolve();
 
+const TRUSTED_GIT_ENVIRONMENT = {
+  GIT_CONFIG_COUNT: '4',
+  GIT_CONFIG_KEY_0: 'filter.lfs.clean',
+  GIT_CONFIG_VALUE_0: 'git-lfs clean -- %f',
+  GIT_CONFIG_KEY_1: 'filter.lfs.smudge',
+  GIT_CONFIG_VALUE_1: 'git-lfs smudge -- %f',
+  GIT_CONFIG_KEY_2: 'filter.lfs.process',
+  GIT_CONFIG_VALUE_2: 'git-lfs filter-process',
+  GIT_CONFIG_KEY_3: 'filter.lfs.required',
+  GIT_CONFIG_VALUE_3: 'true',
+} as const;
+
 interface NativeSandboxManager {
   isSupportedPlatform(): boolean;
   checkDependenciesAsync(): Promise<{ warnings: string[]; errors: string[] }>;
@@ -401,6 +413,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
               GIT_CONFIG_GLOBAL:
                 this.platform === 'win32' ? 'NUL' : '/dev/null',
               GIT_CONFIG_NOSYSTEM: '1',
+              ...TRUSTED_GIT_ENVIRONMENT,
             },
             detached: this.platform !== 'win32',
             shell: false,

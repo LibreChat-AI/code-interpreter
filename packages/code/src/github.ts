@@ -199,6 +199,22 @@ export function gitHubCredentialEnvironment(
   };
 }
 
+export function gitHubAuthenticationPolicyIdentity(options: {
+  mode?: 'app' | 'token';
+  host: string;
+  appId?: string;
+  installationId?: string;
+}): string {
+  const identity = `github-auth:${options.mode ?? 'none'}:${options.host}`;
+  if (options.mode !== 'app') return identity;
+  if (!options.appId || !options.installationId) {
+    throw new Error(
+      'GitHub App policy identity requires an App and installation ID',
+    );
+  }
+  return `${identity}:app:${options.appId}:installation:${options.installationId}`;
+}
+
 export function wrapGitHubCredentialCommand(
   command: string,
   host = 'github.com',

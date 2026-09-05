@@ -106,6 +106,9 @@ installation tokens. A personal access token is supported as a fallback with
 its repository access and permissions can be narrowly installed and revoked.
 
 Git receives authentication through process-scoped `GIT_CONFIG_*` variables.
+The same isolated config supplies the standard Git LFS filters; hosts using LFS
+must install `git-lfs`, and checkout fails instead of silently leaving pointer
+files when it is unavailable.
 SRT replaces only the bearer-token portion with a sentinel inside the sandbox
 and substitutes the real value in its host proxy only for `github.com` HTTPS
 traffic. TLS termination is enabled for that substitution. The worker restores

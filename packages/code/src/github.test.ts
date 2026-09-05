@@ -16,10 +16,37 @@ import {
   GITHUB_ALLOWED_DOMAINS,
   GitHubAppCredentialProvider,
   StaticGitHubCredentialProvider,
+  gitHubAuthenticationPolicyIdentity,
   GITHUB_CREDENTIAL_ENV_NAME,
   gitHubCredentialEnvironment,
   wrapGitHubCredentialCommand,
 } from './github.js';
+
+test('binds the GitHub App installation to the public policy identity', () => {
+  assert.equal(
+    gitHubAuthenticationPolicyIdentity({
+      mode: 'app',
+      host: 'github.com',
+      appId: '123',
+      installationId: '456',
+    }),
+    'github-auth:app:github.com:app:123:installation:456',
+  );
+  assert.notEqual(
+    gitHubAuthenticationPolicyIdentity({
+      mode: 'app',
+      host: 'github.com',
+      appId: '123',
+      installationId: '456',
+    }),
+    gitHubAuthenticationPolicyIdentity({
+      mode: 'app',
+      host: 'github.com',
+      appId: '123',
+      installationId: '789',
+    }),
+  );
+});
 
 test('mints and caches a short-lived GitHub App installation token', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'librechat-code-github-'));

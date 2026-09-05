@@ -33,6 +33,7 @@ import {
   GITHUB_CREDENTIAL_ENV_NAME,
   GitHubAppCredentialProvider,
   StaticGitHubCredentialProvider,
+  gitHubAuthenticationPolicyIdentity,
   gitHubCredentialEnvironment,
   wrapGitHubCredentialCommand,
 } from './github.js';
@@ -130,6 +131,7 @@ function githubCredentials(): {
   host: string;
   privateKeyPath?: string;
   mode?: 'app' | 'token';
+  policyIdentity: string;
 } {
   const token = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_TOKEN);
   const appId = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_APP_ID);
@@ -183,6 +185,12 @@ function githubCredentials(): {
     return {
       host,
       mode: 'app',
+      policyIdentity: gitHubAuthenticationPolicyIdentity({
+        mode: 'app',
+        host,
+        appId,
+        installationId,
+      }),
       privateKeyPath,
       provider: new GitHubAppCredentialProvider({
         appId: appId!,
@@ -194,6 +202,10 @@ function githubCredentials(): {
   }
   return {
     host,
+    policyIdentity: gitHubAuthenticationPolicyIdentity({
+      mode: token ? 'token' : undefined,
+      host,
+    }),
     ...(token
       ? {
           provider: new StaticGitHubCredentialProvider(token),
@@ -388,7 +400,14 @@ async function run(
     );
   }
   const github =
-    runtimeSessionId == null ? githubCredentials() : { host: 'github.com' };
+    runtimeSessionId == null
+      ? githubCredentials()
+      : {
+          host: 'github.com',
+          policyIdentity: gitHubAuthenticationPolicyIdentity({
+            host: 'github.com',
+          }),
+        };
   if (github.provider && !allowWorkspaceCommands) {
     throw new Error(
       'GitHub authentication requires workspace commands to be enabled',
@@ -701,7 +720,7 @@ async function run(
       .update(policy)
       .update(
         allowWorkspaceCommands && commandSandboxMode === 'native-srt'
-          ? `\0native-srt\0${commandAllowedDomains.join('\0')}\0github-auth:${github.mode ?? 'none'}:${github.host}`
+          ? `\0native-srt\0${commandAllowedDomains.join('\0')}\0${github.policyIdentity}`
           : '',
       )
       .digest('hex'),
