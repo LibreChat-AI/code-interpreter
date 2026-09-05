@@ -61,6 +61,10 @@ const TRUSTED_GIT_ENVIRONMENT = {
   GIT_CONFIG_KEY_3: 'filter.lfs.required',
   GIT_CONFIG_VALUE_3: 'true',
 } as const;
+const {
+  GIT_CONFIG_COUNT: TRUSTED_GIT_CONFIG_COUNT,
+  ...TRUSTED_GIT_CONFIG_ENTRIES
+} = TRUSTED_GIT_ENVIRONMENT;
 
 interface NativeSandboxManager {
   isSupportedPlatform(): boolean;
@@ -413,8 +417,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           child = this.spawnCommand(wrapped.argv[0], wrapped.argv.slice(1), {
             cwd,
             env: {
-              ...TRUSTED_GIT_ENVIRONMENT,
               ...wrapped.env,
+              ...TRUSTED_GIT_CONFIG_ENTRIES,
+              GIT_CONFIG_COUNT:
+                wrapped.env.GIT_CONFIG_COUNT ?? TRUSTED_GIT_CONFIG_COUNT,
               GIT_CONFIG_GLOBAL:
                 this.platform === 'win32' ? 'NUL' : '/dev/null',
               GIT_CONFIG_NOSYSTEM: '1',

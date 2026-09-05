@@ -33,6 +33,7 @@ function fakeManager(
     dependencyErrors?: string[];
     beforeWrap?: () => Promise<void>;
     appendGitSafeDirectory?: boolean;
+    inheritedGitEnvironment?: Record<string, string>;
   } = {},
 ) {
   let config: SandboxRuntimeConfig | undefined;
@@ -60,6 +61,7 @@ function fakeManager(
       if (options.appendGitSafeDirectory) {
         const index = Number(ambientGitEnvironment.GIT_CONFIG_COUNT ?? '0');
         gitEnvironment = {
+          ...(options.inheritedGitEnvironment ?? {}),
           GIT_CONFIG_COUNT: String(index + 1),
           [`GIT_CONFIG_KEY_${index}`]: 'safe.directory',
           [`GIT_CONFIG_VALUE_${index}`]: '/workspace',
@@ -286,7 +288,14 @@ test('isolates Git from host-level global and system configuration', async (t) =
 test('restores trusted Git LFS filters without reading host Git configuration', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const fake = fakeManager({ appendGitSafeDirectory: true });
+  const fake = fakeManager({
+    appendGitSafeDirectory: true,
+    inheritedGitEnvironment: {
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'include.path',
+      GIT_CONFIG_VALUE_0: '/untrusted/host-config',
+    },
+  });
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
     workspaceRoot: root,
     environment: {
@@ -302,12 +311,12 @@ test('restores trusted Git LFS filters without reading host Git configuration', 
     ...request,
     maxOutputBytes: 256,
     command:
-      'printf "%s|%s|%s|%s|%s" "$(git config --get filter.lfs.clean)" "$(git config --get filter.lfs.smudge)" "$(git config --get filter.lfs.process)" "$(git config --get filter.lfs.required)" "$(git config --get safe.directory)"',
+      'printf "%s|%s|%s|%s|%s|%s" "$(git config --get filter.lfs.clean)" "$(git config --get filter.lfs.smudge)" "$(git config --get filter.lfs.process)" "$(git config --get filter.lfs.required)" "$(git config --get safe.directory)" "$(git config --get include.path)"',
   });
 
   assert.equal(
     result.stdout,
-    'git-lfs clean -- %f|git-lfs smudge -- %f|git-lfs filter-process|true|/workspace',
+    'git-lfs clean -- %f|git-lfs smudge -- %f|git-lfs filter-process|true|/workspace|',
   );
   assert.equal(fake.gitLfsRequiredSeenDuringWrap, 'true');
   const denied = fake.config?.credentials?.envVars?.map(({ name }) => name);
