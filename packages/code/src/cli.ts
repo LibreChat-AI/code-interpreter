@@ -151,7 +151,27 @@ function githubCredentials(): {
       'Configure either GitHub App authentication or a GitHub token, not both',
     );
   }
-  const host = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_HOST) ?? 'github.com';
+  const configuredHost = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_HOST);
+  const apiUrl = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_API_URL);
+  let apiHost: string | undefined;
+  if (apiUrl) {
+    let parsedApiUrl: URL;
+    try {
+      parsedApiUrl = new URL(apiUrl);
+    } catch {
+      throw new Error('LIBRECHAT_CODE_GITHUB_API_URL must be a valid URL');
+    }
+    apiHost =
+      parsedApiUrl.hostname.toLowerCase() === 'api.github.com'
+        ? 'github.com'
+        : parsedApiUrl.hostname.toLowerCase();
+  }
+  if (configuredHost && apiHost && configuredHost.toLowerCase() !== apiHost) {
+    throw new Error(
+      'LIBRECHAT_CODE_GITHUB_HOST must match the GitHub App API hostname',
+    );
+  }
+  const host = configuredHost ?? apiHost ?? 'github.com';
   if (
     !/^[A-Za-z0-9.-]+$/.test(host) ||
     host.startsWith('.') ||
@@ -168,7 +188,7 @@ function githubCredentials(): {
         appId: appId!,
         installationId: installationId!,
         privateKeyPath: privateKeyPath!,
-        apiUrl: nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_API_URL),
+        apiUrl,
       }),
     };
   }
@@ -367,7 +387,8 @@ async function run(
       'LIBRECHAT_CODE_COMMAND_SANDBOX must be native-srt or runtime',
     );
   }
-  const github = githubCredentials();
+  const github =
+    runtimeSessionId == null ? githubCredentials() : { host: 'github.com' };
   if (github.provider && !allowWorkspaceCommands) {
     throw new Error(
       'GitHub authentication requires workspace commands to be enabled',
@@ -632,7 +653,7 @@ async function run(
                   variables: [
                     {
                       name: GITHUB_CREDENTIAL_ENV_NAME,
-                      extract: '^Authorization: Bearer (.+)$',
+                      extract: '^(.+)$',
                       injectHosts: [github.host],
                     },
                   ],
@@ -694,6 +715,7 @@ async function run(
     );
   }
   try {
+    await github.provider?.getCredential(controller.signal);
     await nativeCommandSandbox?.prepare();
   } catch (error) {
     await fileRelaySupervisor?.stop().catch(() => undefined);

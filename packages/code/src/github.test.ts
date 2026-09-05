@@ -68,8 +68,7 @@ test('builds process-scoped Git HTTPS authorization without embedding credential
   assert.deepEqual(
     gitHubCredentialEnvironment(await provider.getCredential()),
     {
-      [GITHUB_CREDENTIAL_ENV_NAME]:
-        'Authorization: Bearer github_pat_abcdefghijklmnopqrstuvwxyz',
+      [GITHUB_CREDENTIAL_ENV_NAME]: 'github_pat_abcdefghijklmnopqrstuvwxyz',
     },
   );
 });
@@ -84,6 +83,7 @@ test('composes the masked credential with SRT Git configuration inside the sandb
   assert.match(wrapped, /http\.https:\/\/github\.com\/\.extraheader/);
   assert.match(wrapped, /\$\{LIBRECHAT_CODE_GITHUB_AUTHORIZATION\}/);
   assert.match(wrapped, /unset LIBRECHAT_CODE_GITHUB_AUTHORIZATION/);
+  assert.equal(wrapped.match(/Authorization: Bearer/g)?.length, 1);
   assert.ok(!wrapped.includes('github_pat_'));
 });
 

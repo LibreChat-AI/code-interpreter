@@ -157,7 +157,7 @@ export function gitHubCredentialEnvironment(
   credential: GitHubCredential,
 ): Record<string, string> {
   return {
-    [GITHUB_CREDENTIAL_ENV_NAME]: `Authorization: Bearer ${credential.value}`,
+    [GITHUB_CREDENTIAL_ENV_NAME]: credential.value,
   };
 }
 

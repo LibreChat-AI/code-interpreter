@@ -139,6 +139,60 @@ test('CLI refuses GitHub credentials without native sandboxed commands', () => {
   );
 });
 
+test('CLI rejects a GitHub App API URL that does not match its Git host', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_GITHUB_APP_ID: '123',
+        LIBRECHAT_CODE_GITHUB_INSTALLATION_ID: '456',
+        LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE: '/does/not/matter',
+        LIBRECHAT_CODE_GITHUB_HOST: 'github.example.test',
+        LIBRECHAT_CODE_GITHUB_API_URL: 'https://other.example.test/api/v3',
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /LIBRECHAT_CODE_GITHUB_HOST must match the GitHub App API hostname/,
+  );
+});
+
+test('CLI validates GitHub App credentials before worker registration', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_WORKER_DIR: process.cwd(),
+        LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS: 'true',
+        LIBRECHAT_CODE_GITHUB_APP_ID: '123',
+        LIBRECHAT_CODE_GITHUB_INSTALLATION_ID: '456',
+        LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE: '/does/not/exist/app.pem',
+        LIBRECHAT_CODE_GITHUB_HOST: undefined,
+        LIBRECHAT_CODE_GITHUB_API_URL: undefined,
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /ENOENT|no such file/i);
+  assert.doesNotMatch(result.stderr, /fetch failed/);
+});
+
 test('CLI requires a runtime image for Docker supervision', () => {
   const result = spawnSync(
     process.execPath,
@@ -227,6 +281,7 @@ test('CLI reset does not require Docker runtime launch inputs', () => {
         LIBRECHAT_CODE_RUNTIME_IMAGE: undefined,
         LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE: undefined,
         LIBRECHAT_CODE_DOCKER_PACKAGES_PATH: undefined,
+        LIBRECHAT_CODE_GITHUB_TOKEN: 'github_pat_abcdefghijklmnopqrstuvwxyz',
       },
     },
   );
@@ -235,6 +290,10 @@ test('CLI reset does not require Docker runtime launch inputs', () => {
   assert.doesNotMatch(
     result.stderr,
     /LIBRECHAT_CODE_(?:RUNTIME_IMAGE|DOCKER_SECCOMP_PROFILE|DOCKER_PACKAGES_PATH) is required/,
+  );
+  assert.doesNotMatch(
+    result.stderr,
+    /GitHub authentication requires workspace commands/,
   );
 });
 
