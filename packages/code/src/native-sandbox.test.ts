@@ -28,7 +28,12 @@ const request = {
   maxOutputBytes: 64,
 };
 
-function fakeManager(options: { dependencyErrors?: string[] } = {}) {
+function fakeManager(
+  options: {
+    dependencyErrors?: string[];
+    beforeWrap?: () => Promise<void>;
+  } = {},
+) {
   let config: SandboxRuntimeConfig | undefined;
   let reset = false;
   let credentialSeenDuringWrap: string | undefined;
@@ -41,6 +46,7 @@ function fakeManager(options: { dependencyErrors?: string[] } = {}) {
       config = value;
     },
     async wrapWithSandboxArgv(command: string) {
+      await options.beforeWrap?.();
       credentialSeenDuringWrap = process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
       return {
         argv: ['/bin/bash', '-c', command],
@@ -169,6 +175,75 @@ test('masks a host credential for only its injection host and restores the paren
     mode: 'mask',
     onExtractNoMatch: 'error',
   });
+});
+
+test('serializes credential handoff across concurrent sandbox instances', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
+  delete process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
+  t.after(() => {
+    if (original === undefined)
+      delete process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
+    else process.env.LIBRECHAT_CODE_TEST_CREDENTIAL = original;
+  });
+  let firstEntered!: () => void;
+  const firstEnteredPromise = new Promise<void>((resolve) => {
+    firstEntered = resolve;
+  });
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let secondEntered = false;
+  const first = fakeManager({
+    async beforeWrap() {
+      firstEntered();
+      await firstGate;
+    },
+  });
+  const second = fakeManager({
+    async beforeWrap() {
+      secondEntered = true;
+    },
+  });
+  const sandbox = (
+    manager: ReturnType<typeof fakeManager>['manager'],
+    value: string,
+  ) =>
+    new NativeSrtWorkspaceCommandSandbox({
+      workspaceRoot: root,
+      allowedDomains: ['github.com'],
+      maskedEnvironment: {
+        variables: [
+          {
+            name: 'LIBRECHAT_CODE_TEST_CREDENTIAL',
+            injectHosts: ['github.com'],
+          },
+        ],
+        async resolve() {
+          return { LIBRECHAT_CODE_TEST_CREDENTIAL: value };
+        },
+      },
+      manager,
+    });
+
+  const firstExecution = sandbox(first.manager, 'first-secret').execute(
+    request,
+  );
+  await firstEnteredPromise;
+  const secondExecution = sandbox(second.manager, 'second-secret').execute(
+    request,
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(secondEntered, false);
+  releaseFirst();
+  await firstExecution;
+  await secondExecution;
+
+  assert.equal(first.credentialSeenDuringWrap, 'first-secret');
+  assert.equal(second.credentialSeenDuringWrap, 'second-secret');
+  assert.equal(process.env.LIBRECHAT_CODE_TEST_CREDENTIAL, undefined);
 });
 
 test('isolates Git from host-level global and system configuration', async (t) => {

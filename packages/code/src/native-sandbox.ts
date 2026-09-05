@@ -48,6 +48,8 @@ const SAFE_CHILD_ENV_NAMES = new Set([
   'USER',
 ]);
 
+let hostEnvironmentMutationQueue: Promise<void> = Promise.resolve();
+
 interface NativeSandboxManager {
   isSupportedPlatform(): boolean;
   checkDependenciesAsync(): Promise<{ warnings: string[]; errors: string[] }>;
@@ -355,6 +357,12 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     values: Record<string, string>,
     action: () => Promise<T>,
   ): Promise<T> {
+    const previousMutation = hostEnvironmentMutationQueue;
+    let releaseMutation!: () => void;
+    hostEnvironmentMutationQueue = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    await previousMutation;
     const previous = new Map<string, string | undefined>();
     try {
       for (const [name, value] of Object.entries(values)) {
@@ -367,6 +375,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
       }
+      releaseMutation();
     }
   }
 
