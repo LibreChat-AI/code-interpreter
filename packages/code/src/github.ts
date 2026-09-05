@@ -1,5 +1,7 @@
+import { constants } from 'node:fs';
 import { createPrivateKey, sign } from 'node:crypto';
-import { lstat, readFile } from 'node:fs/promises';
+import { open, realpath, stat } from 'node:fs/promises';
+import { dirname } from 'node:path';
 
 export const GITHUB_CREDENTIAL_ENV_NAME = 'LIBRECHAT_CODE_GITHUB_AUTHORIZATION';
 export const GITHUB_ALLOWED_DOMAINS = [
@@ -7,6 +9,9 @@ export const GITHUB_ALLOWED_DOMAINS = [
   '*.github.com',
   'api.github.com',
   'lfs.github.com',
+  'objects.githubusercontent.com',
+  '*.githubusercontent.com',
+  'github-cloud.s3.amazonaws.com',
 ] as const;
 
 export interface GitHubCredential {
@@ -38,16 +43,49 @@ function assertPositiveIdentifier(name: string, value: string): void {
 }
 
 async function readPrivateKey(path: string): Promise<string> {
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error('GitHub App private key must be a regular file');
+  if (process.platform !== 'win32') {
+    const directory = await stat(await realpath(dirname(path)));
+    const uid = process.getuid?.();
+    if (uid !== undefined && directory.uid !== uid && directory.uid !== 0) {
+      throw new Error(
+        'GitHub App private key directory must be owned by this user or root',
+      );
+    }
+    const mode = directory.mode & 0o7777;
+    const protectedByStickyBit =
+      (mode & 0o1000) !== 0 && (directory.uid === uid || directory.uid === 0);
+    if ((mode & 0o022) !== 0 && !protectedByStickyBit) {
+      throw new Error(
+        'GitHub App private key directory must not be writable by group or other users',
+      );
+    }
   }
-  if (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0) {
-    throw new Error(
-      'GitHub App private key must not be accessible by group or other users',
-    );
+
+  const handle = await open(
+    path,
+    constants.O_RDONLY |
+      (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+  );
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) {
+      throw new Error('GitHub App private key must be a regular file');
+    }
+    const uid = process.getuid?.();
+    if (uid !== undefined && metadata.uid !== uid && metadata.uid !== 0) {
+      throw new Error(
+        'GitHub App private key must be owned by this user or root',
+      );
+    }
+    if (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0) {
+      throw new Error(
+        'GitHub App private key must not be accessible by group or other users',
+      );
+    }
+    return await handle.readFile('utf8');
+  } finally {
+    await handle.close();
   }
-  return await readFile(path, 'utf8');
 }
 
 function createAppJwt(appId: string, privateKey: string, now: Date): string {

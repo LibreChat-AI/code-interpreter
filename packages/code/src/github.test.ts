@@ -1,11 +1,19 @@
 import { generateKeyPairSync } from 'node:crypto';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  GITHUB_ALLOWED_DOMAINS,
   GitHubAppCredentialProvider,
   StaticGitHubCredentialProvider,
   GITHUB_CREDENTIAL_ENV_NAME,
@@ -98,4 +106,62 @@ test('rejects an insecure GitHub App API endpoint before reading the private key
       }),
     /must be an HTTPS URL/,
   );
+});
+
+test('rejects a GitHub App key in a shared writable directory', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX directory permissions are unavailable on Windows');
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-github-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, 'shared');
+  await mkdir(directory, { mode: 0o700 });
+  const privateKeyPath = join(directory, 'app.pem');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await writeFile(
+    privateKeyPath,
+    privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    { mode: 0o600 },
+  );
+  await chmod(directory, 0o777);
+  const provider = new GitHubAppCredentialProvider({
+    appId: '123',
+    installationId: '456',
+    privateKeyPath,
+  });
+
+  await assert.rejects(
+    provider.getCredential(),
+    /private key directory must not be writable/,
+  );
+});
+
+test('rejects a symlinked GitHub App key without reopening its target', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('O_NOFOLLOW is unavailable on Windows');
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-github-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = join(root, 'target.pem');
+  const link = join(root, 'app.pem');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await writeFile(target, privateKey.export({ type: 'pkcs8', format: 'pem' }), {
+    mode: 0o600,
+  });
+  await symlink(target, link);
+  const provider = new GitHubAppCredentialProvider({
+    appId: '123',
+    installationId: '456',
+    privateKeyPath: link,
+  });
+
+  await assert.rejects(provider.getCredential(), /ELOOP|symbolic link/i);
+});
+
+test('allows the GitHub LFS object delivery hosts', () => {
+  assert.ok(GITHUB_ALLOWED_DOMAINS.includes('objects.githubusercontent.com'));
+  assert.ok(GITHUB_ALLOWED_DOMAINS.includes('*.githubusercontent.com'));
+  assert.ok(GITHUB_ALLOWED_DOMAINS.includes('github-cloud.s3.amazonaws.com'));
 });
