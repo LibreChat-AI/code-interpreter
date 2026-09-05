@@ -86,6 +86,42 @@ policy: an allowed destination can receive workspace data. The normalized
 allowlist is included in the worker policy digest. Tool approval hooks remain
 the user-facing allow/deny boundary for each invocation.
 
+### GitHub authentication
+
+The native BYOM worker can provide Git HTTPS authentication without exposing a
+real token to the command sandbox. Prefer a GitHub App installed only on the
+repositories the agent may access:
+
+```bash
+LIBRECHAT_CODE_GITHUB_APP_ID=12345 \
+LIBRECHAT_CODE_GITHUB_INSTALLATION_ID=67890 \
+LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE=/secure/librechat-agent.pem \
+librechat-code run --worker-dir /path/to/project --allow-workspace-commands
+```
+
+The private key must be an owner-only regular file outside the workspace. It is
+read only by the trusted worker, which mints and refreshes short-lived
+installation tokens. A personal access token is supported as a fallback with
+`LIBRECHAT_CODE_GITHUB_TOKEN`, but the GitHub App is the safer default because
+its repository access and permissions can be narrowly installed and revoked.
+
+Git receives authentication through process-scoped `GIT_CONFIG_*` variables.
+SRT replaces only the bearer-token portion with a sentinel inside the sandbox
+and substitutes the real value in its host proxy only for `github.com` HTTPS
+traffic. TLS termination is enabled for that substitution. The worker restores
+the parent environment immediately after constructing the sandbox command; it
+never writes credentials into the repository, a remote URL, or Git config.
+GitHub's required domains are added to the command egress allowlist only when
+authentication is configured. The worker identity, GitHub App key path, token
+source variables, and mutation-quarantine record remain denied to sandboxed
+commands.
+
+For GitHub Enterprise Server, set `LIBRECHAT_CODE_GITHUB_HOST` to its hostname
+and `LIBRECHAT_CODE_GITHUB_API_URL` to its HTTPS API base URL. GitHub
+authentication currently requires the `native-srt` command sandbox. Every
+clone, commit, or push command still crosses LibreChat's tool-approval policy;
+the credential boundary does not grant approval by itself.
+
 Select the backend explicitly when desired:
 
 ```bash

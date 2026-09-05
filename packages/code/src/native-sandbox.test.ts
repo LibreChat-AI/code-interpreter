@@ -31,6 +31,7 @@ const request = {
 function fakeManager(options: { dependencyErrors?: string[] } = {}) {
   let config: SandboxRuntimeConfig | undefined;
   let reset = false;
+  let credentialSeenDuringWrap: string | undefined;
   const manager = {
     isSupportedPlatform: () => true,
     async checkDependenciesAsync() {
@@ -40,9 +41,18 @@ function fakeManager(options: { dependencyErrors?: string[] } = {}) {
       config = value;
     },
     async wrapWithSandboxArgv(command: string) {
+      credentialSeenDuringWrap = process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
       return {
         argv: ['/bin/bash', '-c', command],
-        env: { PATH: process.env.PATH },
+        env: {
+          PATH: process.env.PATH,
+          ...(credentialSeenDuringWrap
+            ? {
+                LIBRECHAT_CODE_TEST_CREDENTIAL:
+                  'Authorization: Bearer srt-sentinel',
+              }
+            : {}),
+        },
       };
     },
     annotateStderrWithSandboxFailures(_commandId: string, stderr: string) {
@@ -60,6 +70,9 @@ function fakeManager(options: { dependencyErrors?: string[] } = {}) {
     },
     get reset() {
       return reset;
+    },
+    get credentialSeenDuringWrap() {
+      return credentialSeenDuringWrap;
     },
   };
 }
@@ -104,6 +117,74 @@ test('initializes SRT with a default-deny network and scrubbed worker credential
   assert.ok(denied?.includes('lc_api_token'));
   await sandbox.close();
   assert.equal(fake.reset, true);
+});
+
+test('masks a host credential for only its injection host and restores the parent environment', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager();
+  const original = process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
+  delete process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
+  t.after(() => {
+    if (original === undefined)
+      delete process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
+    else process.env.LIBRECHAT_CODE_TEST_CREDENTIAL = original;
+  });
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    allowedDomains: ['github.com'],
+    maskedEnvironment: {
+      variables: [
+        {
+          name: 'LIBRECHAT_CODE_TEST_CREDENTIAL',
+          extract: '^Authorization: Bearer (.+)$',
+          injectHosts: ['github.com'],
+        },
+      ],
+      async resolve() {
+        return {
+          LIBRECHAT_CODE_TEST_CREDENTIAL: 'Authorization: Bearer real-secret',
+        };
+      },
+    },
+    manager: fake.manager,
+  });
+
+  const result = await sandbox.execute({
+    ...request,
+    command: 'printf %s "$LIBRECHAT_CODE_TEST_CREDENTIAL"',
+  });
+
+  assert.equal(
+    fake.credentialSeenDuringWrap,
+    'Authorization: Bearer real-secret',
+  );
+  assert.equal(result.stdout, 'Authorization: Bearer srt-sentinel');
+  assert.equal(process.env.LIBRECHAT_CODE_TEST_CREDENTIAL, undefined);
+  assert.deepEqual(fake.config?.network.tlsTerminate, {});
+  assert.deepEqual(fake.config?.credentials?.envVars?.at(-1), {
+    name: 'LIBRECHAT_CODE_TEST_CREDENTIAL',
+    extract: '^Authorization: Bearer (.+)$',
+    injectHosts: ['github.com'],
+    mode: 'mask',
+    onExtractNoMatch: 'error',
+  });
+});
+
+test('isolates Git from host-level global and system configuration', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fakeManager().manager,
+  });
+
+  const result = await sandbox.execute({
+    ...request,
+    command: 'printf "%s|%s" "$GIT_CONFIG_GLOBAL" "$GIT_CONFIG_NOSYSTEM"',
+  });
+
+  assert.equal(result.stdout, '/dev/null|1');
 });
 
 test('filters environment names case-insensitively only on Windows', async (t) => {

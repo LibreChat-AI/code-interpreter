@@ -94,6 +94,51 @@ test('CLI rejects an unknown command sandbox before entering the run loop', () =
   );
 });
 
+test('CLI rejects incomplete GitHub App authentication before worker registration', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_GITHUB_APP_ID: '123',
+        LIBRECHAT_CODE_GITHUB_INSTALLATION_ID: undefined,
+        LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE: undefined,
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /GitHub App authentication requires/);
+});
+
+test('CLI refuses GitHub credentials without native sandboxed commands', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_GITHUB_TOKEN: 'github_pat_abcdefghijklmnopqrstuvwxyz',
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /GitHub authentication requires workspace commands/,
+  );
+});
+
 test('CLI requires a runtime image for Docker supervision', () => {
   const result = spawnSync(
     process.execPath,
@@ -132,7 +177,10 @@ test('CLI requires the macOS NsJail seccomp profile', () => {
   );
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE is required/);
+  assert.match(
+    result.stderr,
+    /LIBRECHAT_CODE_DOCKER_SECCOMP_PROFILE is required/,
+  );
 });
 
 test('CLI requires a package mount for the macOS NsJail profile', () => {
@@ -154,7 +202,10 @@ test('CLI requires a package mount for the macOS NsJail profile', () => {
   );
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /LIBRECHAT_CODE_DOCKER_PACKAGES_PATH is required/);
+  assert.match(
+    result.stderr,
+    /LIBRECHAT_CODE_DOCKER_PACKAGES_PATH is required/,
+  );
 });
 
 test('CLI reset does not require Docker runtime launch inputs', () => {
