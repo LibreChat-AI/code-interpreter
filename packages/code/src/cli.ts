@@ -204,6 +204,7 @@ function githubCredentials(): {
     policyIdentity: gitHubAuthenticationPolicyIdentity({
       mode: token ? 'token' : undefined,
       host,
+      token,
     }),
     ...(token
       ? {

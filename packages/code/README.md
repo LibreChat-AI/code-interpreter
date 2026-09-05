@@ -104,6 +104,8 @@ read only by the trusted worker, which mints and refreshes short-lived
 installation tokens. A personal access token is supported as a fallback with
 `LIBRECHAT_CODE_GITHUB_TOKEN`, but the GitHub App is the safer default because
 its repository access and permissions can be narrowly installed and revoked.
+Native Windows currently requires token mode because the worker cannot
+reliably validate private-key ACLs there; use WSL2 for GitHub App mode.
 
 Git receives authentication through process-scoped `GIT_CONFIG_*` variables.
 The same isolated config supplies the standard Git LFS filters; hosts using LFS

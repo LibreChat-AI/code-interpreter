@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { createPrivateKey, sign } from 'node:crypto';
+import { createHash, createPrivateKey, sign } from 'node:crypto';
 import { open, realpath, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
@@ -30,6 +30,7 @@ export interface GitHubAppCredentialProviderOptions {
   apiUrl?: string;
   fetch?: typeof globalThis.fetch;
   now?: () => Date;
+  platform?: NodeJS.Platform;
 }
 
 function base64UrlJson(value: unknown): string {
@@ -109,6 +110,11 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
   private cached?: GitHubCredential;
 
   constructor(private readonly options: GitHubAppCredentialProviderOptions) {
+    if ((options.platform ?? process.platform) === 'win32') {
+      throw new Error(
+        'GitHub App authentication is unavailable on native Windows because private key ACLs cannot be validated securely; use a token or WSL2',
+      );
+    }
     assertPositiveIdentifier('GitHub App ID', options.appId);
     assertPositiveIdentifier(
       'GitHub App installation ID',
@@ -204,8 +210,19 @@ export function gitHubAuthenticationPolicyIdentity(options: {
   host: string;
   appId?: string;
   installationId?: string;
+  token?: string;
 }): string {
   const identity = `github-auth:${options.mode ?? 'none'}:${options.host}`;
+  if (options.mode === 'token') {
+    if (!options.token) {
+      throw new Error('GitHub token policy identity requires a token');
+    }
+    const fingerprint = createHash('sha256')
+      .update('librechat-code-github-token-v1\0')
+      .update(options.token)
+      .digest('hex');
+    return `${identity}:fingerprint:${fingerprint}`;
+  }
   if (options.mode !== 'app') return identity;
   if (!options.appId || !options.installationId) {
     throw new Error(

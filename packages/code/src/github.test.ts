@@ -54,6 +54,37 @@ test('binds the GitHub App installation to the public policy identity', () => {
   );
 });
 
+test('binds token credentials to policy identity without exposing the token', () => {
+  const firstToken = 'github_pat_abcdefghijklmnopqrstuvwxyz';
+  const secondToken = 'github_pat_zyxwvutsrqponmlkjihgfedcba';
+  const first = gitHubAuthenticationPolicyIdentity({
+    mode: 'token',
+    host: 'github.com',
+    token: firstToken,
+  });
+  const second = gitHubAuthenticationPolicyIdentity({
+    mode: 'token',
+    host: 'github.com',
+    token: secondToken,
+  });
+
+  assert.notEqual(first, second);
+  assert.ok(!first.includes(firstToken));
+});
+
+test('rejects GitHub App authentication where key ACLs cannot be validated', () => {
+  assert.throws(
+    () =>
+      new GitHubAppCredentialProvider({
+        appId: '123',
+        installationId: '456',
+        privateKeyPath: 'C:\\secure\\app.pem',
+        platform: 'win32',
+      }),
+    /private key ACLs cannot be validated securely/,
+  );
+});
+
 test('mints and caches a short-lived GitHub App installation token', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'librechat-code-github-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

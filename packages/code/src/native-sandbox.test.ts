@@ -337,6 +337,19 @@ test('filters environment names case-insensitively only on Windows', async (t) =
       Path: 'C:\\Windows\\System32',
       LC_API_TOKEN: 'secret',
       librechat_code_worker_token: 'secret',
+      librechat_code_github_authorization: 'secret',
+      git_config_count: '1',
+    },
+    maskedEnvironment: {
+      variables: [
+        {
+          name: 'LIBRECHAT_CODE_GITHUB_AUTHORIZATION',
+          injectHosts: ['github.com'],
+        },
+      ],
+      async resolve() {
+        return {};
+      },
     },
     manager: fake.manager,
   });
@@ -347,6 +360,8 @@ test('filters environment names case-insensitively only on Windows', async (t) =
   assert.ok(!denied?.includes('Path'));
   assert.ok(!denied?.includes('LC_API_TOKEN'));
   assert.ok(denied?.includes('librechat_code_worker_token'));
+  assert.ok(!denied?.includes('librechat_code_github_authorization'));
+  assert.ok(!denied?.includes('git_config_count'));
 });
 
 test('fails closed when the configured POSIX shell is unavailable', async (t) => {

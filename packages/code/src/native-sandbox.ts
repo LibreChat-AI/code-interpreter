@@ -163,6 +163,13 @@ function safeEnvironmentNames(
     .sort();
 }
 
+function normalizedEnvironmentName(
+  name: string,
+  platform: NodeJS.Platform,
+): string {
+  return platform === 'win32' ? name.toUpperCase() : name;
+}
+
 export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox {
   readonly mutationFailuresAreAtomic = true as const;
   private readonly manager: NativeSandboxManager;
@@ -266,13 +273,22 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         })),
         envVars: [
           ...safeEnvironmentNames(this.environment, this.platform)
-            .filter(
-              (name) =>
-                !Object.hasOwn(TRUSTED_GIT_ENVIRONMENT, name) &&
+            .filter((name) => {
+              const normalized = normalizedEnvironmentName(
+                name,
+                this.platform,
+              );
+              return (
+                !Object.hasOwn(TRUSTED_GIT_ENVIRONMENT, normalized) &&
                 !this.options.maskedEnvironment?.variables.some(
-                  (variable) => variable.name === name,
-                ),
-            )
+                  (variable) =>
+                    normalizedEnvironmentName(
+                      variable.name,
+                      this.platform,
+                    ) === normalized,
+                )
+              );
+            })
             .map((name) => ({ name, mode: 'deny' as const })),
           ...(this.options.maskedEnvironment?.variables.map((variable) => ({
             ...variable,
