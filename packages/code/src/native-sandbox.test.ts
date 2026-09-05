@@ -51,16 +51,19 @@ function fakeManager(
       await options.beforeWrap?.();
       credentialSeenDuringWrap = process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
       gitLfsRequiredSeenDuringWrap = process.env.GIT_CONFIG_VALUE_3;
-      const gitEnvironment = Object.fromEntries(
+      const ambientGitEnvironment = Object.fromEntries(
         Object.entries(process.env).filter(
           ([name, value]) => name.startsWith('GIT_CONFIG_') && value != null,
         ),
       );
+      let gitEnvironment = ambientGitEnvironment;
       if (options.appendGitSafeDirectory) {
-        const index = Number(gitEnvironment.GIT_CONFIG_COUNT ?? '0');
-        gitEnvironment.GIT_CONFIG_COUNT = String(index + 1);
-        gitEnvironment[`GIT_CONFIG_KEY_${index}`] = 'safe.directory';
-        gitEnvironment[`GIT_CONFIG_VALUE_${index}`] = '/workspace';
+        const index = Number(ambientGitEnvironment.GIT_CONFIG_COUNT ?? '0');
+        gitEnvironment = {
+          GIT_CONFIG_COUNT: String(index + 1),
+          [`GIT_CONFIG_KEY_${index}`]: 'safe.directory',
+          [`GIT_CONFIG_VALUE_${index}`]: '/workspace',
+        };
       }
       return {
         argv: ['/bin/bash', '-c', command],

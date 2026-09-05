@@ -413,6 +413,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           child = this.spawnCommand(wrapped.argv[0], wrapped.argv.slice(1), {
             cwd,
             env: {
+              ...TRUSTED_GIT_ENVIRONMENT,
               ...wrapped.env,
               GIT_CONFIG_GLOBAL:
                 this.platform === 'win32' ? 'NUL' : '/dev/null',
