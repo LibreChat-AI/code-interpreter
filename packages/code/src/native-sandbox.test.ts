@@ -273,6 +273,12 @@ test('restores trusted Git LFS filters without reading host Git configuration', 
   const fake = fakeManager();
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
     workspaceRoot: root,
+    environment: {
+      ...process.env,
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'include.path',
+      GIT_CONFIG_VALUE_0: '/untrusted/host-config',
+    },
     manager: fake.manager,
   });
 
@@ -288,6 +294,10 @@ test('restores trusted Git LFS filters without reading host Git configuration', 
     'git-lfs clean -- %f|git-lfs smudge -- %f|git-lfs filter-process|true',
   );
   assert.equal(fake.gitLfsRequiredSeenDuringWrap, 'true');
+  const denied = fake.config?.credentials?.envVars?.map(({ name }) => name);
+  assert.ok(!denied?.includes('GIT_CONFIG_COUNT'));
+  assert.ok(!denied?.includes('GIT_CONFIG_KEY_0'));
+  assert.ok(!denied?.includes('GIT_CONFIG_VALUE_0'));
 });
 
 test('filters environment names case-insensitively only on Windows', async (t) => {

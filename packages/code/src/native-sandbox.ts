@@ -264,6 +264,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           ...safeEnvironmentNames(this.environment, this.platform)
             .filter(
               (name) =>
+                !Object.hasOwn(TRUSTED_GIT_ENVIRONMENT, name) &&
                 !this.options.maskedEnvironment?.variables.some(
                   (variable) => variable.name === name,
                 ),
