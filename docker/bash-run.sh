@@ -11,7 +11,7 @@ if [ "${CODEAPI_SHELL_OUTPUT_FILTER:-raw}" = "rtk" ] && [ "$#" -gt 0 ]; then
     # Match parameter or array expansion rather than a literal mention in a
     # comment or string. The wrapper only needs to preserve file execution
     # when the script actually depends on Bash's source-file metadata.
-    if ! grep -qE '\$\{BASH_SOURCE([[:space:]]|}|\[|[:?+#%/-])|\$BASH_SOURCE([^[:alnum:]_]|$)|(^|[^[:alnum:]_])BASH_SOURCE\[' -- "$1" 2>/dev/null; then
+    if ! grep -qE '\$\{BASH_SOURCE([^[:alnum:]_]|$)|\$BASH_SOURCE([^[:alnum:]_]|$)|(^|[^[:alnum:]_])BASH_SOURCE\[' -- "$1" 2>/dev/null; then
         rewritten="$(rtk rewrite "$(cat -- "$1")" 2>/dev/null)"
         rewrite_status=$?
 

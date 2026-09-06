@@ -75,6 +75,15 @@ printf '%s\\n' 'printf "identity:%s:%s:%s\\n" "$0" "$BASH_ARGV0" "$1"'
     expect(run({ filter: 'rtk' })).toBe(`identity:${sourcePath}:${sourcePath}\n`);
   });
 
+  it('preserves file execution for BASH_SOURCE transformations', () => {
+    fs.writeFileSync(
+      sourcePath,
+      ': "${BASH_SOURCE@Q}" "${BASH_SOURCE^^}" "${BASH_SOURCE,,}"\nprintf \'raw\\n\'\n',
+    );
+
+    expect(run({ filter: 'rtk' })).toBe('raw\n');
+  });
+
   it('rewrites scripts that only mention BASH_SOURCE literally', () => {
     fs.writeFileSync(
       sourcePath,

@@ -470,11 +470,8 @@ install_bash() {
 }
 PKGEOF"
 
-    docker exec "$CONTAINER_NAME" bash -c "cat > ${pkg_dest}/run << 'RUNEOF'
-#!/bin/bash
-bash \"\$@\"
-RUNEOF
-chmod +x ${pkg_dest}/run"
+    docker cp "${SCRIPT_DIR}/docker/bash-run.sh" "${CONTAINER_NAME}:${pkg_dest}/run"
+    docker exec "$CONTAINER_NAME" chmod 0755 "${pkg_dest}/run"
 
     # Surface node + bun toolchains and their global trees on PATH so bash
     # tool invocations (which is how LLMs typically reach for `npm list -g`,
