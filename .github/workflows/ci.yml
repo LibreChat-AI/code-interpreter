@@ -215,6 +215,7 @@ jobs:
           terraform fmt -check -recursive
           terraform init -backend=false -input=false -lockfile=readonly
           terraform validate
+          terraform test
 
   lambda-microvm-runner-build:
     name: Lambda MicroVM Runner Image (arm64)

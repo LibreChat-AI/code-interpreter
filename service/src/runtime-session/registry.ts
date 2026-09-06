@@ -6,6 +6,7 @@ import {
   RUNTIME_SESSION_REDIS_COMMAND_TIMEOUT_MS,
 } from '../config';
 import logger from '../logger';
+import type { HostedAppRecordDetails } from '../hosted-app/record';
 
 export { RUNTIME_SESSION_REDIS_COMMAND_TIMEOUT_MS } from '../config';
 
@@ -54,6 +55,10 @@ export interface RuntimeSessionRecord {
   workspace_checkpoint?: string;
   checkpointed_at?: number;
   last_error?: string;
+  /** Present only for a dedicated hosted-app MicroVM lease. Reusing this
+   * registry gives app launches the same lock fencing, crash recovery, and
+   * provider-idempotency guarantees as stateful execution VMs. */
+  hosted_app?: HostedAppRecordDetails;
 }
 
 const SESS_PREFIX = 'rtsx:sess:';

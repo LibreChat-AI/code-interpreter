@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import * as fsp from 'fs/promises';
+import { Readable } from 'node:stream';
+import { env } from '../config';
 import {
   MemoryCheckpointStore,
   MinioCheckpointStore,
@@ -10,6 +12,83 @@ import {
 } from './checkpoint-store';
 
 const BIG = 1_000_000;
+
+test('adds retention tags only for hosted-enabled checkpoint writers', async () => {
+  const previous = env.HOSTED_APPS_ENABLED;
+  const tags: Array<string | undefined> = [];
+  const store = new MinioCheckpointStore({
+    async send(command: unknown) {
+      tags.push((command as { input: { Tagging?: string } }).input.Tagging);
+      return {};
+    },
+  }, { bucket: 'test' });
+  try {
+    env.HOSTED_APPS_ENABLED = false;
+    await store.put('source', 1, Buffer.from('workspace'));
+    await store.commit('source', 1);
+    env.HOSTED_APPS_ENABLED = true;
+    await store.put('source', 2, Buffer.from('workspace'));
+    await store.commit('source', 2);
+    expect(tags).toEqual([undefined, undefined, 'codeapi-retention=rolling', 'codeapi-retention=rolling']);
+  } finally { env.HOSTED_APPS_ENABLED = previous; }
+});
+
+test('stores create-only durable revision manifests and fails closed on storage errors', async () => {
+  const objects = new Map<string, string>();
+  let outage = false;
+  const store = new MinioCheckpointStore({
+    async send(command: unknown) {
+      const c = command as { constructor: { name: string }; input: any };
+      if (outage) throw new Error('storage unavailable');
+      if (c.constructor.name === 'PutObjectCommand') {
+        expect(c.input.IfNoneMatch).toBe('*');
+        expect(c.input.Tagging).toBe('codeapi-retention=hosted');
+        if (objects.has(c.input.Key)) throw { $metadata: { httpStatusCode: 412 } };
+        objects.set(c.input.Key, c.input.Body);
+        return {};
+      }
+      const data = objects.get(c.input.Key);
+      if (!data) throw { name: 'NoSuchKey' };
+      return { Body: Readable.from([data]) };
+    },
+  }, { bucket: 'test' });
+  const revision = { tenantId: 'tenant', canonicalUserId: 'user', sourceRuntimeSessionId: 'source',
+    revision: 'rev1', specFingerprint: 'fingerprint', checkpointKey: 'snapshot' };
+  expect(await store.readHostedAppRevision('app', 'rev1')).toBeNull();
+  await store.retainHostedAppRevision('app', revision);
+  expect(await store.retainHostedAppRevision('app', { ...revision, checkpointKey: 'later' })).toEqual(revision);
+  expect(await store.readHostedAppRevision('app', 'rev1')).toEqual(revision);
+  expect(await store.readHostedAppRevision('different-app', 'rev1')).toBeNull();
+  outage = true;
+  await expect(store.readHostedAppRevision('app', 'rev1')).rejects.toThrow('storage unavailable');
+});
+
+test('retained hosted snapshots survive subsequent source checkpoint pruning', async () => {
+  const objects = new Map<string, string>();
+  const source = checkpointObjectKey('rt_source', 1);
+  objects.set(source, 'immutable revision');
+  const store = new MinioCheckpointStore({
+    async send(command: unknown) {
+      const c = command as { constructor: { name: string }; input: any };
+      if (c.constructor.name === 'CopyObjectCommand') {
+        expect(c.input.TaggingDirective).toBe('REPLACE');
+        expect(c.input.Tagging).toBe('codeapi-retention=hosted');
+        objects.set(c.input.Key, objects.get(decodeURIComponent(c.input.CopySource).slice(5))!);
+      } else if (c.constructor.name === 'ListObjectsV2Command') {
+        return { Contents: [...objects.keys()].map(Key => ({ Key })) };
+      } else if (c.constructor.name === 'DeleteObjectsCommand') {
+        for (const { Key } of c.input.Delete.Objects) objects.delete(Key);
+      }
+      return {};
+    },
+  }, { bucket: 'test' });
+  const retained = await store.retainForHostedApp('rt_source', source);
+  objects.set(checkpointObjectKey('rt_source', 2), 'later workspace');
+  await store.pruneOlderThan('rt_source', 2);
+  expect(objects.has(source)).toBe(false);
+  expect(objects.get(retained)).toBe('immutable revision');
+  await expect(store.retainForHostedApp('another-source', source)).rejects.toThrow('outside');
+});
 
 async function readStored(
   store: MemoryCheckpointStore,

@@ -200,6 +200,108 @@ again after expiry. Static assets and request-shaped handlers should remain on
 cheaper stateless delivery paths; this target is only the resident-server
 adapter.
 
+#### Hosted-app control plane and preview gateway
+
+The service-side control plane is stateful-profile only. It snapshots the
+source runtime session under its existing lock, records an exact checkpoint and
+AWS idempotency intent in the fenced Redis registry, then launches/restores the
+dedicated app-host VM on an isolated BullMQ queue. API pods enqueue lifecycle
+work and proxy preview bytes; only worker pods need Lambda MicroVM IAM.
+Start requests share the authenticated execution rate limiter. Before enabling
+this feature broadly for untrusted multi-tenant traffic, add a plan-aware cap on
+active hosted-app leases per owner; the initial feature-flagged slice relies on
+the deployment's Lambda MicroVM quota as its hard fleet ceiling.
+
+Authenticated API contract:
+
+```http
+POST /v1/hosted-apps
+Content-Type: application/json
+
+{
+  "runtime_session_hint": "conversation-123",
+  "app_id": "my-app",
+  "revision": "rev-1",
+  "language": "node",
+  "version": ">=22",
+  "entrypoint": "server.js",
+  "cwd": ".",
+  "args": [],
+  "env": {}
+}
+```
+
+`GET /v1/hosted-apps/:app_id?runtime_session_hint=...` returns status and a
+fresh five-minute `preview_url`; `DELETE` on the same resource terminates the
+lease. A revision is immutable. Retrying the identical spec reasserts the
+resident process; changing code or launch settings requires a new revision and
+captures a new exact checkpoint. An ambiguous provider launch is replayed only
+with its persisted token and can never be overwritten by a newer revision.
+
+Preview traffic uses a wildcard **unprivileged origin**, not a path below the
+CodeAPI or LibreChat origin. Configure wildcard DNS and TLS such that
+`*.apps.example.net` reaches the stateful CodeAPI API service, then set the bare
+origin `https://apps.example.net`. The short-lived URL capability is exchanged
+for an HttpOnly, Secure, host-only cookie and redirected to `/`; every app gets
+its own `happ-<digest>.apps.example.net` origin, so absolute asset paths work
+without exposing privileged-origin cookies to AI-generated JavaScript. Use a
+dedicated registrable domain in production—do not set broad parent-domain
+cookies that also match the app domain.
+
+Set these on both API and worker pods:
+
+| Env | Default | Meaning |
+|---|---|---|
+| `CODEAPI_HOSTED_APPS_ENABLED` | `false` | Enables the stateful-only lifecycle API, isolated preview gateway, and worker. |
+| `CODEAPI_HOSTED_APP_CREDENTIAL_KEY` | — | Base64 of 32 random bytes; AES-GCM encrypts the AWS preview credential stored in Redis. |
+
+Set these only on API pods (the signing key must differ from the credential
+key):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `CODEAPI_HOSTED_APP_PREVIEW_SIGNING_KEY` | — | Different base64 32-byte key for owner-bound preview URL/cookie capabilities. |
+| `CODEAPI_HOSTED_APP_PREVIEW_ORIGIN` | — | Bare HTTPS origin for wildcard app hosts, for example `https://apps.example.net`. |
+
+Set these on worker pods in addition to the ordinary stateful/checkpoint
+configuration:
+
+| Env | Default | Meaning |
+|---|---|---|
+| `LAMBDA_MICROVM_APP_IMAGE_ARN` | — | Dedicated `lambda-microvm-app-host` image ARN. |
+| `LAMBDA_MICROVM_APP_IMAGE_VERSION` | — | Required pinned image version. |
+| `LAMBDA_MICROVM_APP_MAX_DURATION_SECONDS` | `28800` | App-VM hard lifetime. The control plane relaunches an immutable revision after expiry. |
+| `LAMBDA_MICROVM_APP_IDLE_SECONDS` | `300` | Seconds idle before AWS suspends the VM. |
+| `LAMBDA_MICROVM_APP_SUSPEND_SECONDS` | `900` | Seconds suspended before AWS terminates the VM. Suspended VMs still consume quota. |
+
+The pinned app-host image contract fixes the root-owned control/checkpoint
+listener at port 8080, the resident app at port 3000, and resident readiness at
+30 seconds. `RunMicrovm` cannot override the image environment; changing this
+contract requires publishing a matching image and control-plane revision.
+
+Generate the two keys independently:
+
+```bash
+openssl rand -base64 32 # CODEAPI_HOSTED_APP_CREDENTIAL_KEY
+openssl rand -base64 32 # CODEAPI_HOSTED_APP_PREVIEW_SIGNING_KEY
+```
+
+The preview proxy strips CodeAPI authorization, cookies, forwarded identity,
+caller-provided AWS headers, app `Set-Cookie`, app-controlled caching,
+cross-origin policy, and external redirects. Gateway responses are private and
+non-storable so an older revision cannot survive through the browser cache. It
+supports streamed HTTP/SSE and same-origin redirects. WebSockets
+are not part of this first resident adapter. A gateway-owned CSP constrains
+fetches and subresources to the app origin and disables workers/service workers,
+so one app revision cannot leave a persistent worker controlling a later
+revision. Top-level app JavaScript can still navigate the owner's browser to an
+external origin; treat this experimental viewer as owner-trusted. Before broad
+untrusted enablement, serve app content from a separate origin inside a sandboxed
+gateway wrapper. The request `env` map is persisted
+with the immutable launch spec in the registry; it is configuration, not a
+secret store. Add a dedicated secret-reference flow before passing application
+secrets to hosted code.
+
 ### 3. Generate the split execution-manifest keys
 
 The worker signs each execution manifest; the runner only receives the public
@@ -654,3 +756,42 @@ terraform -chdir=docs/lambda-microvm/terraform destroy
 MicroVM images are billed as stored snapshots; running VMs bill while RUNNING and
 suspended VMs bill at a reduced rate, so terminate stray VMs before deleting the
 image.
+
+## Hosted-app retention and rollout
+
+Hosted revisions retain a separate immutable checkpoint under the source session's
+`hosted/` object prefix before releasing the source lease. Rolling workspace
+checkpoint pruning never deletes these snapshots. Keep this prefix out of short
+bucket lifecycle expiry policies; an operator may reclaim retained objects only
+after retiring all hosted revisions that reference them. Automatic reclamation of
+unreferenced hosted snapshots is not yet implemented.
+
+Hosted apps require the `lambda-microvm` backend and an HTTPS preview origin in
+every environment, including development. Preview authentication uses Secure
+host-only cookies. Worker shutdown allows the full hosted-operation budget plus
+launch cleanup and a 30-second reserve; configure the orchestrator's termination
+grace period to cover that same budget (19 minutes with default timeouts).
+
+Immutable revision manifests live in checkpoint storage separately from expiring
+Redis VM records. They bind the owner, source, revision, spec fingerprint and
+retained snapshot using create-only writes. Keep both manifests and hosted
+snapshots until explicitly retiring those revisions; ordinary Redis expiry is
+not a revision reset. Existing experimental records are migrated on reassertion;
+already-expired pre-manifest records cannot be reconstructed automatically.
+Apply the Terraform retention policy and `s3:PutObjectTagging` permission before
+rolling these workers. Configure `hosted_app_image_arn` to match the dedicated
+app-host image; its policy includes resume permission for ambiguous recovery.
+
+Roll the service binary to every hosted-app worker before enabling hosted apps
+on API pods. For upgrades from experimental builds, disable hosted-app admission
+on API pods and drain the hosted queue before replacing workers; re-enable it
+after the workers are ready. Older workers do not recognize the status job and
+must not consume jobs submitted by the new API. The feature defaults to disabled.
+
+Running status is a worker-reconciled observation of the resident process, not
+just a cached VM lease. It is rate-limited like start, waits at most 15 seconds
+for the worker result, and returns unavailable rather than a stale running
+claim if reconciliation fails. A crashed process does not erase its VM identity:
+stop can still terminate the VM and start can reassert the same revision.
+Preview refresh waits at most two seconds (or half the remaining credential/VM
+lifetime when shorter), then rereads and reauthorizes any still-valid credential.

@@ -10,6 +10,16 @@ variable "name_prefix" {
   default     = "codeapi-microvm"
 }
 
+variable "hosted_app_image_arn" {
+  description = "Optional dedicated app-host image ARN; grants hosted lifecycle and suspended-launch recovery permissions only on this image."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.hosted_app_image_arn == "" || can(regex("^arn:[a-z0-9-]+:lambda:[a-z0-9-]+:[0-9]{12}:microvm-image:[A-Za-z0-9_-]+$", var.hosted_app_image_arn))
+    error_message = "hosted_app_image_arn must be empty or an exact MicroVM image ARN without wildcards."
+  }
+}
+
 variable "image_name" {
   description = <<-EOT
     Name of the MicroVM image you will create with the SDK/CLI helper. Only used

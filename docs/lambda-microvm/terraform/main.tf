@@ -164,13 +164,26 @@ resource "aws_s3_bucket_lifecycle_configuration" "checkpoint" {
   rule {
     id     = "expire-checkpoints"
     status = "Enabled"
-    filter {}
+    filter {
+      dynamic "tag" {
+        for_each = var.hosted_app_image_arn == "" ? [] : [1]
+        content {
+          key   = "codeapi-retention"
+          value = "rolling"
+        }
+      }
+    }
     expiration {
       days = var.checkpoint_retention_days
     }
     noncurrent_version_expiration {
       noncurrent_days = var.checkpoint_noncurrent_retention_days
     }
+  }
+  rule {
+    id     = "abort-incomplete-checkpoints"
+    status = "Enabled"
+    filter {}
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
     }
@@ -317,6 +330,21 @@ resource "aws_iam_role_policy" "execution" {
 # for every ingress/egress connector supplied on the request.
 # --------------------------------------------------------------------------
 data "aws_iam_policy_document" "worker_microvm_control" {
+  dynamic "statement" {
+    for_each = var.hosted_app_image_arn == "" ? [] : [var.hosted_app_image_arn]
+    content {
+      sid    = "OperateHostedAppMicrovms"
+      effect = "Allow"
+      actions = [
+        "lambda:RunMicrovm",
+        "lambda:GetMicrovm",
+        "lambda:CreateMicrovmAuthToken",
+        "lambda:TerminateMicrovm",
+        "lambda:ResumeMicrovm",
+      ]
+      resources = [statement.value]
+    }
+  }
   statement {
     sid    = "OperateCodeapiMicrovms"
     effect = "Allow"
@@ -370,7 +398,7 @@ data "aws_iam_policy_document" "checkpoint_access" {
   statement {
     sid       = "CheckpointObjects"
     effect    = "Allow"
-    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:PutObjectTagging", "s3:DeleteObject"]
     resources = ["${aws_s3_bucket.checkpoint.arn}/*"]
   }
   statement {
