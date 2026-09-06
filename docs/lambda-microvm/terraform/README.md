@@ -28,8 +28,10 @@ walkthrough.
 - **Worker control policy** — `Run/Get/TerminateMicrovm`,
   `CreateMicrovmAuthToken`, and the dependent `iam:PassRole` /
   `lambda:PassNetworkConnector` permissions required by `RunMicrovm`. The
-  worker does not call or receive permission for `SuspendMicrovm` or
-  `ResumeMicrovm`; the configured AWS idle policy performs those transitions.
+  ordinary runner policy does not grant `SuspendMicrovm` or `ResumeMicrovm`.
+  Set `hosted_app_image_arn` to the dedicated `LAMBDA_MICROVM_APP_IMAGE_ARN`
+  when enabling hosted apps. A separate image-scoped statement permits its
+  lifecycle operations and `ResumeMicrovm` for same-token suspended-launch recovery.
 - **CloudWatch log groups** — build (`/aws/lambda-microvms/<image_name>`) and
   runtime.
 - **Checkpoint access** — an IAM policy for task-role/instance-profile/IRSA
@@ -77,8 +79,15 @@ terraform output
   repository. The checked-in `terraform.tfvars.example` is specifically an
   AIML-dev/disposable-stack example and explicitly opts all three into
   destructive teardown; do not copy those overrides to retained environments.
-- Current checkpoint versions expire after `checkpoint_retention_days`.
+- Current checkpoint versions tagged `codeapi-retention=rolling` expire after `checkpoint_retention_days`.
   Noncurrent S3 versions expire independently after
   `checkpoint_noncurrent_retention_days` (one day by default), so bucket
   versioning does not unexpectedly retain replaced checkpoint data for another
   full current-version window.
+- Hosted snapshots and immutable revision manifests use `codeapi-retention=hosted`
+  and are excluded from automatic current/noncurrent expiry. The checkpoint IAM
+  policy grants `s3:PutObjectTagging` for these writes and server-side copies.
+  Apply this lifecycle policy before enabling hosted apps. Legacy untagged objects
+  no longer expire automatically: tag only verified ordinary rolling checkpoints
+  during migration, never hosted snapshots or revision manifests. Runtime rolling
+  checkpoint pruning continues to delete superseded ordinary checkpoints.

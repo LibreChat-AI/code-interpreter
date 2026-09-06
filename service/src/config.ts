@@ -238,7 +238,7 @@ export function resolveEgressGrantTtlSeconds(rawTtlSeconds: string | undefined, 
 const lambdaMicrovmNumericConfig = resolveLambdaMicrovmNumericConfig(process.env);
 
 export function hostedAppOperationTimeoutMs(): number {
-  return env.CHECKPOINT_TIMEOUT_MS * 6
+  return env.CHECKPOINT_TIMEOUT_MS * 9
     + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 7
     + env.HOSTED_APP_START_TIMEOUT_MS + 30_000;
 }

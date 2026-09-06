@@ -1,5 +1,15 @@
 import type { ResidentHostedAppSpec } from './spec';
 
+/** Immutable identity retained independently of the ephemeral VM lease. */
+export interface HostedAppRevision {
+  tenantId: string;
+  canonicalUserId: string;
+  sourceRuntimeSessionId: string;
+  revision: string;
+  specFingerprint: string;
+  checkpointKey: string;
+}
+
 /** Durable hosted-app fields carried by the existing fenced MicroVM registry.
  * The registry's top-level runtime_session_id is the opaque `happ_*` lease id;
  * `source_runtime_session_id` identifies the coding workspace checkpoint that

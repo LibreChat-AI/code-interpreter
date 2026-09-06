@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid';
 import { connection } from '../queue';
 import { hostedAppOperationTimeoutMs } from '../config';
 import logger from '../logger';
+import { withHostedAppQueueDeadline } from './queue-deadline';
 import type { HostedAppJobData, HostedAppJobName, HostedAppJobResult } from './jobs';
 
 /** Hosted apps are stateful-only. A fixed isolated queue prevents an ordinary
@@ -53,12 +54,14 @@ export async function submitHostedAppJob(
   waitMs = HOSTED_APP_OPERATION_WAIT_MS,
 ): Promise<HostedAppJobResult> {
   const { queue, events } = resources();
-  const job = await queue.add(name, data, {
-    jobId,
-    removeOnComplete: { age: 3_600, count: 1_000 },
-    removeOnFail: { age: 86_400, count: 1_000 },
-  });
-  return job.waitUntilFinished(events, waitMs);
+  return withHostedAppQueueDeadline(async () => {
+    const job = await queue.add(name, data, {
+      jobId,
+      removeOnComplete: { age: 3_600, count: 1_000 },
+      removeOnFail: { age: 86_400, count: 1_000 },
+    });
+    return job.waitUntilFinished(events, waitMs);
+  }, waitMs);
 }
 
 /** No-op unless this process submitted hosted-app work. Keeping construction

@@ -770,7 +770,17 @@ Hosted apps require the `lambda-microvm` backend and an HTTPS preview origin in
 every environment, including development. Preview authentication uses Secure
 host-only cookies. Worker shutdown allows the full hosted-operation budget plus
 launch cleanup and a 30-second reserve; configure the orchestrator's termination
-grace period to cover that same budget (16 minutes with default timeouts).
+grace period to cover that same budget (19 minutes with default timeouts).
+
+Immutable revision manifests live in checkpoint storage separately from expiring
+Redis VM records. They bind the owner, source, revision, spec fingerprint and
+retained snapshot using create-only writes. Keep both manifests and hosted
+snapshots until explicitly retiring those revisions; ordinary Redis expiry is
+not a revision reset. Existing experimental records are migrated on reassertion;
+already-expired pre-manifest records cannot be reconstructed automatically.
+Apply the Terraform retention policy and `s3:PutObjectTagging` permission before
+rolling these workers. Configure `hosted_app_image_arn` to match the dedicated
+app-host image; its policy includes resume permission for ambiguous recovery.
 
 Roll the service binary to every hosted-app worker before enabling hosted apps
 on API pods. For upgrades from experimental builds, disable hosted-app admission

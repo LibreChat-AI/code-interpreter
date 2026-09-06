@@ -20,6 +20,7 @@ import {
   type HostedAppMicrovmRuntime,
 } from './microvm-runtime';
 import { hostedAppSpecFingerprint, type ResidentHostedAppSpec } from './spec';
+import type { HostedAppRevision } from './record';
 
 const appSpec: ResidentHostedAppSpec = {
   adapter: 'resident',
@@ -144,10 +145,16 @@ function fixture(options: {
   const credentialKey = randomBytes(32);
   const captures: string[] = [];
   const restores: string[] = [];
+  const revisions = new Map<string, HostedAppRevision>();
   const control = new HostedAppControlPlane({
     registry,
     runtime: runtime as unknown as HostedAppMicrovmRuntime,
     checkpointStore: {} as CheckpointStore,
+    readRevision: async (_id, revision) => revisions.get(revision) ?? null,
+    retainRevision: async (_id, revision) => {
+      if (!revisions.has(revision.revision)) revisions.set(revision.revision, structuredClone(revision));
+      return revisions.get(revision.revision)!;
+    },
     checkpointConfig: {
       port: 8080,
       authTokenTtlSeconds: 3_600,
@@ -168,7 +175,7 @@ function fixture(options: {
     startHeartbeat: () => ({ stop() {} }),
     now: () => 1_800_000_000_000,
   });
-  return { control, registry, runtime, credentialKey, captures, restores };
+  return { control, registry, runtime, credentialKey, captures, restores, revisions };
 }
 
 const input = {
@@ -204,6 +211,23 @@ test('replaces a running VM after its launch policy changes', async () => {
   expect(f.runtime.launches).toHaveLength(2);
   expect(f.captures).toHaveLength(1);
   expect(f.restores[1]).toBe(f.restores[0]);
+});
+
+test('retains immutable revision bytes and settings after Redis lease expiry and revision switches', async () => {
+  const f = fixture();
+  await f.control.start(input);
+  const checkpoint = f.restores[0];
+  f.registry.record = null; // Expired ephemeral lease; durable manifest survives.
+  await f.control.start(input);
+  expect(f.captures).toHaveLength(1);
+  expect(f.restores.at(-1)).toBe(checkpoint);
+  f.registry.record = null;
+  await expect(f.control.start({ ...input, spec: { ...appSpec, args: ['changed'] } }))
+    .rejects.toThrow('immutable');
+  await f.control.start({ ...input, spec: { ...appSpec, revision: 'rev-2' } });
+  await f.control.start(input);
+  expect(f.captures).toHaveLength(2);
+  expect(f.restores.at(-1)).toBe(checkpoint);
 });
 
 test('does not report an expired pending intent as starting', () => {

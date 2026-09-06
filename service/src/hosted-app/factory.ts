@@ -83,6 +83,8 @@ export function getHostedAppControlPlane(): HostedAppControlPlane {
     },
     runtime,
     checkpointStore: store,
+    readRevision: (runtimeId, revision) => store.readHostedAppRevision(runtimeId, revision),
+    retainRevision: (runtimeId, revision) => store.retainHostedAppRevision(runtimeId, revision),
     checkpointConfig,
     credentialKey: parseHostedAppCredentialKey(env.HOSTED_APP_CREDENTIAL_KEY),
     lockWaitMs: env.RUNTIME_SESSION_LOCK_WAIT_MS,

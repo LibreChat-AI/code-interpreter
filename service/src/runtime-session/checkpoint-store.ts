@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto';
 import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { env } from '../config';
+import type { HostedAppRevision } from '../hosted-app/record';
 
 interface S3SendClient {
   send(
@@ -251,6 +252,7 @@ export class MinioCheckpointStore implements CheckpointStore {
           Body: source,
           ContentLength: size,
           ContentType: 'application/x-gtar',
+          Tagging: 'codeapi-retention=rolling',
         }), { abortSignal });
       } finally {
         if (!Buffer.isBuffer(source)) source.destroy();
@@ -266,6 +268,7 @@ export class MinioCheckpointStore implements CheckpointStore {
       Body: marker,
       ContentLength: marker.length,
       ContentType: 'text/plain',
+      Tagging: 'codeapi-retention=rolling',
     }));
   }
 
@@ -281,8 +284,63 @@ export class MinioCheckpointStore implements CheckpointStore {
       Bucket: this.bucket,
       Key: key,
       CopySource: `${this.bucket}/${sourceKey}`.split('/').map(encodeURIComponent).join('/'),
+      TaggingDirective: 'REPLACE',
+      Tagging: 'codeapi-retention=hosted',
     }));
     return key;
+  }
+
+  private hostedRevisionKey(runtimeId: string, revision: string): string {
+    return `${env.CHECKPOINT_PREFIX}hosted-revisions/${createHash('sha256')
+      .update(runtimeId).update('\0').update(revision).digest('hex')}.json`;
+  }
+
+  async readHostedAppRevision(runtimeId: string, revision: string): Promise<HostedAppRevision | null> {
+    return this.withDeadline('hosted revision read', async abortSignal => {
+      let response: { Body?: Readable };
+      try {
+        response = await this.client.send(new GetObjectCommand({
+          Bucket: this.bucket, Key: this.hostedRevisionKey(runtimeId, revision),
+        }), { abortSignal }) as { Body?: Readable };
+      } catch (error) {
+        if ((error as { name?: string }).name === 'NoSuchKey') return null;
+        throw error; // A storage outage is not proof that the revision is new.
+      }
+      const body = response.Body;
+      if (!body) throw new Error('Hosted revision body missing');
+      try {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of body) {
+          const bytes = Buffer.from(chunk);
+          size += bytes.length;
+          if (size > 16_384) throw new Error('Hosted revision metadata too large');
+          chunks.push(bytes);
+        }
+        const data = JSON.parse(Buffer.concat(chunks).toString('utf8')) as HostedAppRevision;
+        if (['tenantId', 'canonicalUserId', 'sourceRuntimeSessionId', 'revision', 'specFingerprint', 'checkpointKey']
+          .some(key => typeof data?.[key as keyof HostedAppRevision] !== 'string') || data.revision !== revision) {
+          throw new Error('Hosted revision metadata invalid');
+        }
+        return data;
+      } finally { body.destroy(); }
+    });
+  }
+
+  async retainHostedAppRevision(runtimeId: string, revision: HostedAppRevision): Promise<HostedAppRevision> {
+    try {
+      await this.send('hosted revision retention', new PutObjectCommand({
+        Bucket: this.bucket, Key: this.hostedRevisionKey(runtimeId, revision.revision),
+        Body: JSON.stringify(revision), ContentType: 'application/json',
+        IfNoneMatch: '*', Tagging: 'codeapi-retention=hosted',
+      }));
+      return revision;
+    } catch (error) {
+      if ((error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode !== 412) throw error;
+      const existing = await this.readHostedAppRevision(runtimeId, revision.revision);
+      if (!existing) throw new Error('Hosted revision disappeared after conditional write');
+      return existing;
+    }
   }
 
   async pruneOlderThan(runtimeSessionId: string, sequence: number): Promise<void> {

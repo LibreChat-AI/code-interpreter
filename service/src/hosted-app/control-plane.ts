@@ -12,7 +12,7 @@ import {
   HostedAppMicrovmError,
   type HostedAppMicrovmRuntime,
 } from './microvm-runtime';
-import type { HostedAppPublicStatus } from './record';
+import type { HostedAppPublicStatus, HostedAppRevision } from './record';
 import {
   hostedAppSpecFingerprint,
   type ResidentHostedAppSpec,
@@ -92,6 +92,8 @@ export interface HostedAppControlPlaneDeps {
     ttlMs: number;
   }): LockHeartbeat;
   now?: () => number;
+  readRevision(runtimeId: string, revision: string): Promise<HostedAppRevision | null>;
+  retainRevision(runtimeId: string, revision: HostedAppRevision): Promise<HostedAppRevision>;
 }
 
 function publicState(
@@ -193,6 +195,18 @@ export class HostedAppControlPlane {
   async start(input: HostedAppStartInput): Promise<HostedAppPublicStatus> {
     return this.withLease(input.hostedAppRuntimeId, input.signal, async (signal, lockToken) => {
       const fingerprint = hostedAppSpecFingerprint(input.spec);
+      let revision = await this.deps.readRevision(input.hostedAppRuntimeId, input.spec.revision);
+      const assertRevision = (value: HostedAppRevision): void => {
+        if (value.tenantId !== input.tenantId || value.canonicalUserId !== input.canonicalUserId
+          || value.sourceRuntimeSessionId !== input.sourceRuntimeSessionId) {
+          throw new HostedAppControlPlaneError('hosted_app_not_found', 'Hosted app not found', 404);
+        }
+        if (value.revision !== input.spec.revision || value.specFingerprint !== fingerprint) {
+          throw new HostedAppControlPlaneError('hosted_app_revision_conflict',
+            'An app revision is immutable; use a new revision for changed launch settings', 409);
+        }
+      };
+      if (revision) assertRevision(revision);
       let prior = await this.deps.registry.read(input.hostedAppRuntimeId, { signal });
       if (prior) {
         assertHostedAppOwned(prior, input, input.sourceRuntimeSessionId);
@@ -210,6 +224,15 @@ export class HostedAppControlPlane {
 
       const exactRevision = prior?.hosted_app?.revision === input.spec.revision
         && prior.hosted_app.spec_fingerprint === fingerprint;
+      // Migrate existing experimental records before the running fast path.
+      if (!revision && exactRevision && prior?.hosted_app) {
+        revision = await this.deps.retainRevision(input.hostedAppRuntimeId, {
+          tenantId: input.tenantId, canonicalUserId: input.canonicalUserId,
+          sourceRuntimeSessionId: input.sourceRuntimeSessionId, revision: input.spec.revision,
+          specFingerprint: fingerprint, checkpointKey: prior.hosted_app.checkpoint_key,
+        });
+        assertRevision(revision);
+      }
       if (
         exactRevision
         && prior?.state === 'RUNNING'
@@ -298,9 +321,17 @@ export class HostedAppControlPlane {
       /* An exact revision always reuses its immutable source snapshot. A dead
        * app VM must not silently pick up later workspace edits under the same
        * revision; changed bytes require a new revision. */
-      const checkpointKey = exactRevision && prior?.hosted_app?.checkpoint_key
-        ? prior.hosted_app.checkpoint_key
-        : await this.deps.captureCheckpoint(input.sourceRuntimeSessionId, input, signal);
+      if (!revision) {
+        const checkpointKey = await this.deps.captureCheckpoint(input.sourceRuntimeSessionId, input, signal);
+        revision = await this.deps.retainRevision(input.hostedAppRuntimeId, {
+          tenantId: input.tenantId, canonicalUserId: input.canonicalUserId,
+          sourceRuntimeSessionId: input.sourceRuntimeSessionId, revision: input.spec.revision,
+          specFingerprint: fingerprint, checkpointKey,
+        });
+        assertRevision(revision);
+      }
+      const checkpointKey = revision.checkpointKey;
+      signal.throwIfAborted();
 
       if (prior?.microvm_id) {
         const terminating: RuntimeSessionRecord = {

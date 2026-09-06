@@ -197,7 +197,7 @@ router.get('/:appId', executionLimiter, async (req: AuthenticatedRequest, res) =
   }
 });
 
-router.delete('/:appId', async (req: AuthenticatedRequest, res) => {
+router.delete('/:appId', executionLimiter, async (req: AuthenticatedRequest, res) => {
   if (unavailable(res)) return;
   try {
     const resolved = target(req, req.params.appId, req.query.runtime_session_hint);

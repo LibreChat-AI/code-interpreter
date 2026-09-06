@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import * as fsp from 'fs/promises';
+import { Readable } from 'node:stream';
 import {
   MemoryCheckpointStore,
   MinioCheckpointStore,
@@ -11,6 +12,36 @@ import {
 
 const BIG = 1_000_000;
 
+test('stores create-only durable revision manifests and fails closed on storage errors', async () => {
+  const objects = new Map<string, string>();
+  let outage = false;
+  const store = new MinioCheckpointStore({
+    async send(command: unknown) {
+      const c = command as { constructor: { name: string }; input: any };
+      if (outage) throw new Error('storage unavailable');
+      if (c.constructor.name === 'PutObjectCommand') {
+        expect(c.input.IfNoneMatch).toBe('*');
+        expect(c.input.Tagging).toBe('codeapi-retention=hosted');
+        if (objects.has(c.input.Key)) throw { $metadata: { httpStatusCode: 412 } };
+        objects.set(c.input.Key, c.input.Body);
+        return {};
+      }
+      const data = objects.get(c.input.Key);
+      if (!data) throw { name: 'NoSuchKey' };
+      return { Body: Readable.from([data]) };
+    },
+  }, { bucket: 'test' });
+  const revision = { tenantId: 'tenant', canonicalUserId: 'user', sourceRuntimeSessionId: 'source',
+    revision: 'rev1', specFingerprint: 'fingerprint', checkpointKey: 'snapshot' };
+  expect(await store.readHostedAppRevision('app', 'rev1')).toBeNull();
+  await store.retainHostedAppRevision('app', revision);
+  expect(await store.retainHostedAppRevision('app', { ...revision, checkpointKey: 'later' })).toEqual(revision);
+  expect(await store.readHostedAppRevision('app', 'rev1')).toEqual(revision);
+  expect(await store.readHostedAppRevision('different-app', 'rev1')).toBeNull();
+  outage = true;
+  await expect(store.readHostedAppRevision('app', 'rev1')).rejects.toThrow('storage unavailable');
+});
+
 test('retained hosted snapshots survive subsequent source checkpoint pruning', async () => {
   const objects = new Map<string, string>();
   const source = checkpointObjectKey('rt_source', 1);
@@ -19,6 +50,8 @@ test('retained hosted snapshots survive subsequent source checkpoint pruning', a
     async send(command: unknown) {
       const c = command as { constructor: { name: string }; input: any };
       if (c.constructor.name === 'CopyObjectCommand') {
+        expect(c.input.TaggingDirective).toBe('REPLACE');
+        expect(c.input.Tagging).toBe('codeapi-retention=hosted');
         objects.set(c.input.Key, objects.get(decodeURIComponent(c.input.CopySource).slice(5))!);
       } else if (c.constructor.name === 'ListObjectsV2Command') {
         return { Contents: [...objects.keys()].map(Key => ({ Key })) };
