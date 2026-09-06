@@ -21,14 +21,25 @@ import {
   saveWorkspaceMutationQuarantine,
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
+import { LocalWorkspaceTools, SandboxWorkspaceTools } from './workspace.js';
 import {
-  LocalWorkspaceTools,
-  SandboxWorkspaceTools,
-} from './workspace.js';
-import { DockerRuntimeSupervisor, EndpointRuntimeSupervisor } from './runtime.js';
+  DockerRuntimeSupervisor,
+  EndpointRuntimeSupervisor,
+} from './runtime.js';
 import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
 import { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
+import {
+  GITHUB_ALLOWED_DOMAINS,
+  GITHUB_CREDENTIAL_ENV_NAME,
+  GitHubAppCredentialProvider,
+  StaticGitHubCredentialProvider,
+  gitHubAuthenticationPolicyIdentity,
+  gitHubCredentialEnvironment,
+  normalizeGitHubHost,
+  wrapGitHubCredentialCommand,
+} from './github.js';
 import type { RuntimeSupervisor } from './runtime.js';
+import type { GitHubCredentialProvider } from './github.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
 import {
   BRIDGE_WORKSPACE_NAME_MAX_LENGTH,
@@ -74,7 +85,11 @@ function list(value: string | undefined): string[] {
   );
 }
 
-function positiveInteger(name: string, value: string | undefined, fallback: number): number {
+function positiveInteger(
+  name: string,
+  value: string | undefined,
+  fallback: number,
+): number {
   if (value == null || value.trim().length === 0) return fallback;
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
@@ -103,14 +118,107 @@ const MACOS_NSJAIL_CAPABILITIES = [
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index >= 0) return args[index + 1];
-  return args.find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1);
+  return args
+    .find((value) => value.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
 }
 
 function nonEmpty(value: string | undefined): string | undefined {
   return value?.trim().length ? value : undefined;
 }
 
-function defaultWorkspaceName(workerDirectory: string, workspaceId: string): string {
+function githubCredentials(): {
+  provider?: GitHubCredentialProvider;
+  host: string;
+  privateKeyPath?: string;
+  mode?: 'app' | 'token';
+  policyIdentity: string;
+} {
+  const token = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_TOKEN);
+  const appId = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_APP_ID);
+  const installationId = nonEmpty(
+    process.env.LIBRECHAT_CODE_GITHUB_INSTALLATION_ID,
+  );
+  const privateKeyPath = nonEmpty(
+    process.env.LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE,
+  );
+  const appValues = [appId, installationId, privateKeyPath];
+  const hasApp = appValues.some(Boolean);
+  if (hasApp && !appValues.every(Boolean)) {
+    throw new Error(
+      'GitHub App authentication requires LIBRECHAT_CODE_GITHUB_APP_ID, LIBRECHAT_CODE_GITHUB_INSTALLATION_ID, and LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE',
+    );
+  }
+  if (hasApp && token) {
+    throw new Error(
+      'Configure either GitHub App authentication or a GitHub token, not both',
+    );
+  }
+  const configuredHostValue = nonEmpty(
+    process.env.LIBRECHAT_CODE_GITHUB_HOST,
+  );
+  const configuredHost = configuredHostValue
+    ? normalizeGitHubHost(configuredHostValue)
+    : undefined;
+  const apiUrl = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_API_URL);
+  let apiHost: string | undefined;
+  if (apiUrl) {
+    let parsedApiUrl: URL;
+    try {
+      parsedApiUrl = new URL(apiUrl);
+    } catch {
+      throw new Error('LIBRECHAT_CODE_GITHUB_API_URL must be a valid URL');
+    }
+    apiHost =
+      parsedApiUrl.hostname.toLowerCase() === 'api.github.com'
+        ? 'github.com'
+        : parsedApiUrl.hostname.toLowerCase();
+  }
+  if (configuredHost && apiHost && configuredHost.toLowerCase() !== apiHost) {
+    throw new Error(
+      'LIBRECHAT_CODE_GITHUB_HOST must match the GitHub App API hostname',
+    );
+  }
+  const host = normalizeGitHubHost(configuredHost ?? apiHost ?? 'github.com');
+  if (hasApp) {
+    return {
+      host,
+      mode: 'app',
+      policyIdentity: gitHubAuthenticationPolicyIdentity({
+        mode: 'app',
+        host,
+        appId,
+        installationId,
+      }),
+      privateKeyPath,
+      provider: new GitHubAppCredentialProvider({
+        appId: appId!,
+        installationId: installationId!,
+        privateKeyPath: privateKeyPath!,
+        apiUrl,
+      }),
+    };
+  }
+  return {
+    host,
+    policyIdentity: gitHubAuthenticationPolicyIdentity({
+      mode: token ? 'token' : undefined,
+      host,
+      token,
+    }),
+    ...(token
+      ? {
+          provider: new StaticGitHubCredentialProvider(token),
+          mode: 'token' as const,
+        }
+      : {}),
+  };
+}
+
+function defaultWorkspaceName(
+  workerDirectory: string,
+  workspaceId: string,
+): string {
   const directoryName = basename(resolve(workerDirectory));
   return directoryName.trim().length > 0 &&
     directoryName.length <= BRIDGE_WORKSPACE_NAME_MAX_LENGTH
@@ -168,7 +276,9 @@ async function relay(): Promise<void> {
       8,
     ),
   });
-  process.stdout.write(`librechat-code: file relay listening at ${handle.url}\n`);
+  process.stdout.write(
+    `librechat-code: file relay listening at ${handle.url}\n`,
+  );
   await new Promise<void>((resolve) => {
     process.once('SIGINT', resolve);
     process.once('SIGTERM', resolve);
@@ -176,9 +286,13 @@ async function relay(): Promise<void> {
   await handle.close();
 }
 
-async function run(runtimeSessionId?: string, args: string[] = []): Promise<void> {
+async function run(
+  runtimeSessionId?: string,
+  args: string[] = [],
+): Promise<void> {
   const configuredWorkerId = process.env.LIBRECHAT_CODE_WORKER_ID?.trim();
-  const configuredIdentityPath = process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
+  const configuredIdentityPath =
+    process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
   const configuredToken = process.env.LIBRECHAT_CODE_WORKER_TOKEN?.trim();
   const identityPath =
     configuredIdentityPath ??
@@ -211,7 +325,8 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     process.env.LIBRECHAT_CODE_STATEFUL_WORKSPACE?.trim().toLowerCase() ===
     'true';
   const runtimeMode =
-    process.env.LIBRECHAT_CODE_RUNTIME_SUPERVISOR?.trim().toLowerCase() ?? 'endpoint';
+    process.env.LIBRECHAT_CODE_RUNTIME_SUPERVISOR?.trim().toLowerCase() ??
+    'endpoint';
   if (
     runtimeMode !== 'endpoint' &&
     runtimeMode !== 'docker' &&
@@ -284,8 +399,35 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
       'LIBRECHAT_CODE_COMMAND_SANDBOX must be native-srt or runtime',
     );
   }
+  const github =
+    runtimeSessionId == null
+      ? githubCredentials()
+      : {
+          host: 'github.com',
+          policyIdentity: gitHubAuthenticationPolicyIdentity({
+            host: 'github.com',
+          }),
+        };
+  if (github.provider && !allowWorkspaceCommands) {
+    throw new Error(
+      'GitHub authentication requires workspace commands to be enabled',
+    );
+  }
+  if (github.provider && commandSandboxMode !== 'native-srt') {
+    throw new Error(
+      'GitHub authentication currently requires the native-srt command sandbox',
+    );
+  }
+  const githubDomains = github.provider
+    ? github.host === 'github.com'
+      ? [...GITHUB_ALLOWED_DOMAINS]
+      : [github.host]
+    : [];
   const commandAllowedDomains = [
-    ...new Set(list(process.env.LIBRECHAT_CODE_COMMAND_ALLOWED_DOMAINS)),
+    ...new Set([
+      ...list(process.env.LIBRECHAT_CODE_COMMAND_ALLOWED_DOMAINS),
+      ...githubDomains,
+    ]),
   ].sort();
   if (explicitWorkerDirectory && useDefaultWorkspace) {
     throw new Error(
@@ -457,9 +599,15 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
                   securityOptions: [`seccomp=${seccompProfile}`],
                   profileRevision,
                   restartStoppedContainers: false,
-                  ...(fileRelayProfile ? { network: fileRelayProfile.network } : {}),
+                  ...(fileRelayProfile
+                    ? { network: fileRelayProfile.network }
+                    : {}),
                   bindMounts: [
-                    { source: packagesPath, target: '/pkgs', readOnly: true },
+                    {
+                      source: packagesPath,
+                      target: '/pkgs',
+                      readOnly: true,
+                    },
                     ...(workspaceMount ? [workspaceMount] : []),
                   ],
                   httpClient: 'bun' as const,
@@ -469,18 +617,25 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
                     ...(workspaceMount
                       ? {
                           SANDBOX_EXTERNAL_WORKSPACE_ENABLED: 'true',
-                          SANDBOX_EXTERNAL_WORKSPACE_ROOT: workspaceMount.target,
-                          SANDBOX_EXTERNAL_WORKSPACE_TOKEN: workspaceCommandToken!,
+                          SANDBOX_EXTERNAL_WORKSPACE_ROOT:
+                            workspaceMount.target,
+                          SANDBOX_EXTERNAL_WORKSPACE_TOKEN:
+                            workspaceCommandToken!,
                         }
                       : {}),
                     ...(fileRelayProfile
                       ? {
                           EGRESS_GATEWAY_URL: fileRelayProfile.url,
-                          SANDBOX_PRIME_CONCURRENCY: String(fileRelayLimits!.maxConcurrentRequests),
-                          SANDBOX_UPLOAD_CONCURRENCY: String(fileRelayLimits!.maxConcurrentRequests),
+                          SANDBOX_PRIME_CONCURRENCY: String(
+                            fileRelayLimits!.maxConcurrentRequests,
+                          ),
+                          SANDBOX_UPLOAD_CONCURRENCY: String(
+                            fileRelayLimits!.maxConcurrentRequests,
+                          ),
                           SANDBOX_FILE_RELAY_TOKEN: fileRelayProfile.token,
                           SANDBOX_REQUIRE_EGRESS_MANIFEST: 'true',
-                          SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY: executionManifestPublicKey!,
+                          SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY:
+                            executionManifestPublicKey!,
                         }
                       : {}),
                   },
@@ -505,10 +660,37 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     allowWorkspaceCommands && commandSandboxMode === 'native-srt'
       ? new NativeSrtWorkspaceCommandSandbox({
           workspaceRoot: canonicalWorkerDirectory!,
-          protectedPaths: [identityPath, mutationQuarantinePath].filter(
-            (path): path is string => path != null,
-          ),
+          protectedPaths: [
+            identityPath,
+            mutationQuarantinePath,
+            github.privateKeyPath,
+          ].filter((path): path is string => path != null),
           allowedDomains: commandAllowedDomains,
+          ...(github.provider
+            ? {
+                maskedEnvironment: {
+                  variables: [
+                    {
+                      name: GITHUB_CREDENTIAL_ENV_NAME,
+                      extract: '^(.+)$',
+                      injectHosts: [github.host],
+                    },
+                  ],
+                  async resolve(signal?: AbortSignal) {
+                    return gitHubCredentialEnvironment(
+                      await github.provider!.getCredential(signal),
+                    );
+                  },
+                  wrapCommand(command: string, platform: NodeJS.Platform) {
+                    return wrapGitHubCredentialCommand(
+                      command,
+                      github.host,
+                      platform,
+                    );
+                  },
+                },
+              }
+            : {}),
         })
       : undefined;
   if (allowWorkspaceCommands && workspaceTools) {
@@ -538,7 +720,7 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
       .update(policy)
       .update(
         allowWorkspaceCommands && commandSandboxMode === 'native-srt'
-          ? `\0native-srt\0${commandAllowedDomains.join('\0')}`
+          ? `\0native-srt\0${commandAllowedDomains.join('\0')}\0${github.policyIdentity}`
           : '',
       )
       .digest('hex'),
@@ -552,6 +734,7 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
     );
   }
   try {
+    await github.provider?.getCredential(controller.signal);
     await nativeCommandSandbox?.prepare();
   } catch (error) {
     await fileRelaySupervisor?.stop().catch(() => undefined);
@@ -659,7 +842,8 @@ async function run(runtimeSessionId?: string, args: string[] = []): Promise<void
 
 async function clearMutationQuarantine(args: string[]): Promise<void> {
   const configuredWorkerId = process.env.LIBRECHAT_CODE_WORKER_ID?.trim();
-  const configuredIdentityPath = process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
+  const configuredIdentityPath =
+    process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
   const configuredToken = process.env.LIBRECHAT_CODE_WORKER_TOKEN?.trim();
   const identityPath =
     configuredIdentityPath ??
@@ -682,7 +866,8 @@ async function clearMutationQuarantine(args: string[]): Promise<void> {
     process.env.LIBRECHAT_CODE_WORKSPACE_ID?.trim() ??
     'primary';
   const explicitWorkerDirectory = nonEmpty(
-    option(args, '--worker-dir') ?? process.env.LIBRECHAT_CODE_WORKER_DIR?.trim(),
+    option(args, '--worker-dir') ??
+      process.env.LIBRECHAT_CODE_WORKER_DIR?.trim(),
   );
   const useDefaultWorkspace =
     args.includes('--default-workspace') ||

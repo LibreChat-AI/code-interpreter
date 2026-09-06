@@ -48,6 +48,24 @@ const SAFE_CHILD_ENV_NAMES = new Set([
   'USER',
 ]);
 
+let hostEnvironmentMutationQueue: Promise<void> = Promise.resolve();
+
+const TRUSTED_GIT_ENVIRONMENT = {
+  GIT_CONFIG_COUNT: '4',
+  GIT_CONFIG_KEY_0: 'filter.lfs.clean',
+  GIT_CONFIG_VALUE_0: 'git-lfs clean -- %f',
+  GIT_CONFIG_KEY_1: 'filter.lfs.smudge',
+  GIT_CONFIG_VALUE_1: 'git-lfs smudge -- %f',
+  GIT_CONFIG_KEY_2: 'filter.lfs.process',
+  GIT_CONFIG_VALUE_2: 'git-lfs filter-process',
+  GIT_CONFIG_KEY_3: 'filter.lfs.required',
+  GIT_CONFIG_VALUE_3: 'true',
+} as const;
+const {
+  GIT_CONFIG_COUNT: TRUSTED_GIT_CONFIG_COUNT,
+  ...TRUSTED_GIT_CONFIG_ENTRIES
+} = TRUSTED_GIT_ENVIRONMENT;
+
 interface NativeSandboxManager {
   isSupportedPlatform(): boolean;
   checkDependenciesAsync(): Promise<{ warnings: string[]; errors: string[] }>;
@@ -83,6 +101,16 @@ export interface NativeSrtWorkspaceCommandSandboxOptions {
   platform?: NodeJS.Platform;
   /** Trusted shell path used by SRT on POSIX hosts. */
   shellPath?: string;
+  /** Host-owned credentials exposed only as SRT sentinels inside the sandbox. */
+  maskedEnvironment?: {
+    variables: Array<{
+      name: string;
+      injectHosts: string[];
+      extract?: string;
+    }>;
+    resolve(signal?: AbortSignal): Promise<Record<string, string>>;
+    wrapCommand?(command: string, platform: NodeJS.Platform): string;
+  };
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -133,6 +161,13 @@ function safeEnvironmentNames(
       );
     })
     .sort();
+}
+
+function normalizedEnvironmentName(
+  name: string,
+  platform: NodeJS.Platform,
+): string {
+  return platform === 'win32' ? name.toUpperCase() : name;
 }
 
 export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox {
@@ -222,6 +257,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         strictAllowlist: true,
         allowAllUnixSockets: false,
         allowLocalBinding: false,
+        ...(this.options.maskedEnvironment ? { tlsTerminate: {} } : {}),
       },
       filesystem: {
         denyRead: [home],
@@ -235,10 +271,31 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           path,
           mode: 'deny' as const,
         })),
-        envVars: safeEnvironmentNames(this.environment, this.platform).map((name) => ({
-          name,
-          mode: 'deny' as const,
-        })),
+        envVars: [
+          ...safeEnvironmentNames(this.environment, this.platform)
+            .filter((name) => {
+              const normalized = normalizedEnvironmentName(
+                name,
+                this.platform,
+              );
+              return (
+                !Object.hasOwn(TRUSTED_GIT_ENVIRONMENT, normalized) &&
+                !this.options.maskedEnvironment?.variables.some(
+                  (variable) =>
+                    normalizedEnvironmentName(
+                      variable.name,
+                      this.platform,
+                    ) === normalized,
+                )
+              );
+            })
+            .map((name) => ({ name, mode: 'deny' as const })),
+          ...(this.options.maskedEnvironment?.variables.map((variable) => ({
+            ...variable,
+            mode: 'mask' as const,
+            ...(variable.extract ? { onExtractNoMatch: 'error' as const } : {}),
+          })) ?? []),
+        ],
       },
       allowAppleEvents: false,
       enableWeakerNestedSandbox: false,
@@ -282,19 +339,34 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       );
     }
     const commandId = `librechat-code-${randomUUID()}`;
+    const sandboxedCommand = this.options.maskedEnvironment?.wrapCommand
+      ? this.options.maskedEnvironment.wrapCommand(
+          request.command,
+          this.platform,
+        )
+      : request.command;
     let wrapped: Awaited<
       ReturnType<NativeSandboxManager['wrapWithSandboxArgv']>
     >;
     try {
-      wrapped = await this.manager.wrapWithSandboxArgv(
-        request.command,
-        this.platform === 'win32'
-          ? undefined
-          : this.options.shellPath ?? '/bin/bash',
-        undefined,
-        signal,
-        cwd,
-        { commandId, commandText: request.command },
+      const credentialEnvironment =
+        await this.options.maskedEnvironment?.resolve(signal);
+      wrapped = await this.withTemporaryHostEnvironment(
+        {
+          ...TRUSTED_GIT_ENVIRONMENT,
+          ...(credentialEnvironment ?? {}),
+        },
+        () =>
+          this.manager.wrapWithSandboxArgv(
+            sandboxedCommand,
+            this.platform === 'win32'
+              ? undefined
+              : (this.options.shellPath ?? '/bin/bash'),
+            undefined,
+            signal,
+            cwd,
+            { commandId, commandText: request.command },
+          ),
       );
     } catch (error) {
       if (signal?.aborted) {
@@ -317,6 +389,32 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     return await this.runWrapped(request, wrapped, cwd, commandId, signal);
   }
 
+  private async withTemporaryHostEnvironment<T>(
+    values: Record<string, string>,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const previousMutation = hostEnvironmentMutationQueue;
+    let releaseMutation!: () => void;
+    hostEnvironmentMutationQueue = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    await previousMutation;
+    const previous = new Map<string, string | undefined>();
+    try {
+      for (const [name, value] of Object.entries(values)) {
+        previous.set(name, process.env[name]);
+        process.env[name] = value;
+      }
+      return await action();
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      releaseMutation();
+    }
+  }
+
   private async runWrapped(
     request: WorkspaceExecuteCommandRequest,
     wrapped: { argv: string[]; env: NodeJS.ProcessEnv },
@@ -334,7 +432,15 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         try {
           child = this.spawnCommand(wrapped.argv[0], wrapped.argv.slice(1), {
             cwd,
-            env: wrapped.env,
+            env: {
+              ...wrapped.env,
+              ...TRUSTED_GIT_CONFIG_ENTRIES,
+              GIT_CONFIG_COUNT:
+                wrapped.env.GIT_CONFIG_COUNT ?? TRUSTED_GIT_CONFIG_COUNT,
+              GIT_CONFIG_GLOBAL:
+                this.platform === 'win32' ? 'NUL' : '/dev/null',
+              GIT_CONFIG_NOSYSTEM: '1',
+            },
             detached: this.platform !== 'win32',
             shell: false,
             windowsHide: true,
@@ -467,7 +573,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   }
 
   private protocolExitCode(code: number | null): number {
-    return Number.isSafeInteger(code) && code != null && code >= 0 && code <= 255
+    return Number.isSafeInteger(code) &&
+      code != null &&
+      code >= 0 &&
+      code <= 255
       ? code
       : 1;
   }
