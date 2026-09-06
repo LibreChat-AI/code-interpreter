@@ -8,7 +8,10 @@ if [ "${CODEAPI_SHELL_OUTPUT_FILTER:-raw}" = "rtk" ] && [ "$#" -gt 0 ]; then
     # not populate BASH_SOURCE for command strings. Keep the original file
     # execution path for scripts that inspect BASH_SOURCE so filtering cannot
     # change source-relative imports or helper lookups.
-    if ! grep -q 'BASH_SOURCE' -- "$1" 2>/dev/null; then
+    # Match parameter or array expansion rather than a literal mention in a
+    # comment or string. The wrapper only needs to preserve file execution
+    # when the script actually depends on Bash's source-file metadata.
+    if ! grep -qE '\$\{BASH_SOURCE([[:space:]]|}|\[|[:?+#%/-])|\$BASH_SOURCE([^[:alnum:]_]|$)|(^|[^[:alnum:]_])BASH_SOURCE\[' -- "$1" 2>/dev/null; then
         rewritten="$(rtk rewrite "$(cat -- "$1")" 2>/dev/null)"
         rewrite_status=$?
 

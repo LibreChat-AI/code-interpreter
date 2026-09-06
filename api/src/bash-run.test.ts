@@ -75,6 +75,15 @@ printf '%s\\n' 'printf "identity:%s:%s:%s\\n" "$0" "$BASH_ARGV0" "$1"'
     expect(run({ filter: 'rtk' })).toBe(`identity:${sourcePath}:${sourcePath}\n`);
   });
 
+  it('rewrites scripts that only mention BASH_SOURCE literally', () => {
+    fs.writeFileSync(
+      sourcePath,
+      "# BASH_SOURCE is only documented here\nprintf 'BASH_SOURCE is just text\\n'\n",
+    );
+
+    expect(run({ filter: 'rtk' })).toBe('filtered:\n');
+  });
+
   it('accepts RTK ask rewrites because the API request already authorizes execution', () => {
     expect(run({ filter: 'rtk', status: 3 })).toBe('filtered:\n');
   });
