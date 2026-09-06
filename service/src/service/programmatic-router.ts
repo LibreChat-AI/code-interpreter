@@ -40,6 +40,7 @@ import {
 } from '../sandbox-egress';
 import { findUnregisteredToolCall } from '../tool-scope';
 import { summarizeRequestedFiles } from '../execution-log';
+import { pollBlockingExecution, type BlockingPendingState } from './blocking-poll';
 import { clearSessionOwnership, recordSessionOwnership } from '../session-ownership';
 import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-authorization';
 import {
@@ -225,123 +226,24 @@ function decodeContinuationToken(token: string): { execution_id: string } | null
 // Blocking mode (legacy path)
 // ---------------------------------------------------------------------------
 
-async function waitForExecutionState(
-  execution_id: string,
-  timeout: number,
-): Promise<{
-  status: 'waiting' | 'completed' | 'error' | 'running';
-  pending_calls?: t.ProgrammaticToolCall[];
-  stdout?: string;
-  stderr?: string;
-  files?: t.FileRefs;
-  artifact_delivery?: t.ArtifactDeliveryFailure;
-}> {
-  const startTime = Date.now();
-
-  while (Date.now() - startTime < timeout) {
-    const execution = await getExecutionState(execution_id);
-
-    /** Result lives in the `exec_result:` key (see setBlockingResult). The
-     * inline `execution.jobResult` branch is kept as a fallback so any
-     * in-flight executions whose state was written by an older binary
-     * mid-deploy still complete correctly without rolling back. */
-    if (execution?.jobCompleted === true) {
-      const result = (await getBlockingResult(execution_id)) ?? execution.jobResult;
-      if (result) {
-        return {
-          status: 'completed',
-          stdout: result.stdout,
-          stderr: result.stderr,
-          files: result.files,
-          artifact_delivery: result.artifact_delivery,
-        };
-      }
-    }
-
-    if (execution?.jobError != null) {
-      return { status: 'error' };
-    }
-
-    try {
-      const pendingResponse = await retryToolCallServerRequest(
-        () => axios.get<{
-          status: string;
-          pending_calls?: Array<{
-            call_id: string;
-            tool_name: string;
-            tool_input: Record<string, unknown>;
-            timestamp: number;
-          }>;
-        }>(`${env.TOOL_CALL_SERVER_URL}/sessions/${execution_id}/pending`, {
-          headers: internalServiceHeaders(),
-        }),
+function waitForExecutionState(execution_id: string, timeout: number): ReturnType<typeof pollBlockingExecution> {
+  return pollBlockingExecution(execution_id, timeout, {
+    getExecutionState,
+    getBlockingResult,
+    getPending: async (id) => {
+      const response = await retryToolCallServerRequest(
+        () => axios.get<BlockingPendingState>(
+          `${env.TOOL_CALL_SERVER_URL}/sessions/${id}/pending`,
+          { headers: internalServiceHeaders() },
+        ),
         'Get pending tool calls',
       );
-
-      const { status, pending_calls } = pendingResponse.data;
-
-      if (status === 'waiting' && pending_calls && pending_calls.length > 0) {
-        return {
-          status: 'waiting',
-          pending_calls: pending_calls.map(call => ({
-            id: call.call_id,
-            name: call.tool_name,
-            input: call.tool_input,
-          })),
-        };
-      }
-
-      if (status === 'completed') {
-        const statusResponse = await retryToolCallServerRequest(
-          () => axios.get<{
-            status: string;
-            stdout?: string;
-            stderr?: string;
-            files?: t.FileRefs;
-            artifact_delivery?: t.ArtifactDeliveryFailure;
-          }>(`${env.TOOL_CALL_SERVER_URL}/sessions/${execution_id}/status`, {
-            headers: internalServiceHeaders(),
-          }),
-          'Get execution status',
-        );
-
-        return {
-          status: 'completed',
-          stdout: statusResponse.data.stdout,
-          stderr: statusResponse.data.stderr,
-          files: statusResponse.data.files,
-          artifact_delivery: statusResponse.data.artifact_delivery,
-        };
-      }
-
-      if (status === 'error') {
-        return { status: 'error' };
-      }
-
-      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
-    } catch (error) {
-      if (axios.isAxiosError(error) && error.response?.status === 404) {
-        const exec = await getExecutionState(execution_id);
-        if (exec?.jobCompleted === true) {
-          const result = (await getBlockingResult(execution_id)) ?? exec.jobResult;
-          if (result) {
-            return {
-              status: 'completed',
-              stdout: result.stdout,
-              stderr: result.stderr,
-              files: result.files,
-              artifact_delivery: result.artifact_delivery,
-            };
-          }
-        }
-        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
-        continue;
-      }
-      throw error;
-    }
-  }
-
-  return { status: 'error' };
+      return response.data;
+    },
+    isNotFound: (error) => axios.isAxiosError(error) && error.response?.status === 404,
+    sleep: () => new Promise(resolve => setTimeout(resolve, POLL_INTERVAL)),
+    now: Date.now,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -408,10 +310,10 @@ async function runReplayIteration(
     (state.bridgeWorkerId != null
       ? 'remote-bridge'
       : resolveQueuedSandboxBackend(
-          env.EXECUTION_PROFILE,
-          env.SANDBOX_BACKEND,
-          env.EXECUTION_PROFILE_SOURCE,
-        ));
+        env.EXECUTION_PROFILE,
+        env.SANDBOX_BACKEND,
+        env.EXECUTION_PROFILE_SOURCE,
+      ));
   const { queue, events, language } = getExecutionQueueBinding(
     state.language ?? 'python',
     replayBackend,
