@@ -66,11 +66,12 @@ export function hostedAppPreviewCredentialUsable(
     );
 }
 
-async function previewRecord(
+export async function previewRecord(
   resolved: HostedAppPreviewTarget,
   signal: AbortSignal,
+  deps = { read: readRuntimeSessionRecord, refresh: submitHostedAppJob },
 ) {
-  let record = await readRuntimeSessionRecord(resolved.hostedAppRuntimeId, { signal });
+  let record = await deps.read(resolved.hostedAppRuntimeId, { signal });
   if (!hostedAppPreviewRecordUsable(record, resolved)) {
     throw new HostedAppControlPlaneError(
       'hosted_app_not_running',
@@ -81,14 +82,15 @@ async function previewRecord(
   }
   assertPreviewRecordAuthorized(record, resolved);
   if (!hostedAppPreviewCredentialUsable(record, resolved, Date.now(), PREVIEW_REFRESH_SKEW_MS)) {
-    await submitHostedAppJob('hosted-app:refresh-preview', {
+    await deps.refresh('hosted-app:refresh-preview', {
       operation: 'refresh-preview',
       hostedAppRuntimeId: resolved.hostedAppRuntimeId,
       tenantId: record.tenant_id,
       canonicalUserId: record.canonical_user_id,
       _otel: captureTraceCarrier(),
-    }, `happ-refresh-${resolved.hostedAppRuntimeId}-${Math.floor(Date.now() / 30_000)}`);
-    record = await readRuntimeSessionRecord(resolved.hostedAppRuntimeId, { signal });
+    }, `happ-refresh-${resolved.hostedAppRuntimeId}-${Math.floor(Date.now() / 30_000)}`)
+      .catch(() => { signal.throwIfAborted(); });
+    record = await deps.read(resolved.hostedAppRuntimeId, { signal });
   }
   if (!hostedAppPreviewCredentialUsable(record, resolved)) {
     throw new HostedAppControlPlaneError(
@@ -168,11 +170,16 @@ function requestBody(req: AuthenticatedRequest): BodyInit | undefined {
 export function rewriteHostedAppLocation(
   location: string,
   currentUpstreamUrl: string,
+  publicOrigin?: string,
 ): string | undefined {
   try {
     const upstreamOrigin = new URL(currentUpstreamUrl);
     const destination = new URL(location, upstreamOrigin);
-    if (destination.origin !== upstreamOrigin.origin) return undefined;
+    if (destination.username || destination.password) return undefined;
+    if (destination.origin !== upstreamOrigin.origin
+      && destination.origin !== publicOrigin) return undefined;
+    // A relative Location beginning with // would redirect to another host.
+    if (destination.pathname.startsWith('//')) return undefined;
     return `${destination.pathname}${destination.search}${destination.hash}`;
   } catch {
     return undefined;
@@ -268,7 +275,9 @@ export async function proxyHostedAppPreview(
     if (init.body != null && !Buffer.isBuffer(init.body) && typeof init.body !== 'string') {
       init.duplex = 'half';
     }
-    const response = await fetch(upstream, init);
+    const response = await fetch(upstream, init).catch(error => {
+      throw hostedAppRequestFailure(error);
+    });
     res.status(response.status);
     hostedAppProxyResponseHeaders(response.headers).forEach((value, name) => {
       res.setHeader(name, value);
@@ -278,7 +287,8 @@ export async function proxyHostedAppPreview(
      * root. Framework redirects such as `Location: ../login` depend on the
      * current route while the same-origin check still strips the AWS origin. */
     const safeLocation = location
-      ? rewriteHostedAppLocation(location, upstream.toString())
+      ? rewriteHostedAppLocation(location, upstream.toString(),
+        resolved.publicHost ? `https://${resolved.publicHost}` : undefined)
       : undefined;
     if (location && !safeLocation) {
       await response.body?.cancel().catch(() => {});
@@ -293,4 +303,17 @@ export async function proxyHostedAppPreview(
     req.removeListener('aborted', abort);
     if (res.writableEnded) res.removeListener('close', abort);
   }
+}
+
+/** Node fetch wraps errors raised by a streaming request body in TypeError. */
+export function hostedAppRequestFailure(error: unknown): unknown {
+  let current = error;
+  const seen = new Set<unknown>();
+  while (current instanceof Error && !seen.has(current)) {
+    if (current instanceof HostedAppControlPlaneError
+      && current.code === 'hosted_app_request_too_large') return current;
+    seen.add(current);
+    current = (current as Error & { cause?: unknown }).cause;
+  }
+  return error;
 }

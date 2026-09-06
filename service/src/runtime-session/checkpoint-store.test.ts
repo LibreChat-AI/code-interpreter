@@ -11,6 +11,31 @@ import {
 
 const BIG = 1_000_000;
 
+test('retained hosted snapshots survive subsequent source checkpoint pruning', async () => {
+  const objects = new Map<string, string>();
+  const source = checkpointObjectKey('rt_source', 1);
+  objects.set(source, 'immutable revision');
+  const store = new MinioCheckpointStore({
+    async send(command: unknown) {
+      const c = command as { constructor: { name: string }; input: any };
+      if (c.constructor.name === 'CopyObjectCommand') {
+        objects.set(c.input.Key, objects.get(decodeURIComponent(c.input.CopySource).slice(5))!);
+      } else if (c.constructor.name === 'ListObjectsV2Command') {
+        return { Contents: [...objects.keys()].map(Key => ({ Key })) };
+      } else if (c.constructor.name === 'DeleteObjectsCommand') {
+        for (const { Key } of c.input.Delete.Objects) objects.delete(Key);
+      }
+      return {};
+    },
+  }, { bucket: 'test' });
+  const retained = await store.retainForHostedApp('rt_source', source);
+  objects.set(checkpointObjectKey('rt_source', 2), 'later workspace');
+  await store.pruneOlderThan('rt_source', 2);
+  expect(objects.has(source)).toBe(false);
+  expect(objects.get(retained)).toBe('immutable revision');
+  await expect(store.retainForHostedApp('another-source', source)).rejects.toThrow('outside');
+});
+
 async function readStored(
   store: MemoryCheckpointStore,
   runtimeSessionId: string,

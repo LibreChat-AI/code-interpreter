@@ -117,6 +117,9 @@ function hostedAppKey(name: string, raw: string): Buffer {
 }
 
 function validateHostedAppsSharedConfig(): Buffer {
+  if (env.SANDBOX_BACKEND !== 'lambda-microvm') {
+    throw new SecureStartupConfigError('Hosted apps require CODEAPI_SANDBOX_BACKEND=lambda-microvm');
+  }
   if (env.EXECUTION_PROFILE !== 'stateful' || env.RUNTIME_SESSION_MODE === 'stateless') {
     throw new SecureStartupConfigError(
       'CODEAPI_HOSTED_APPS_ENABLED=true requires the stateful execution profile',
@@ -149,9 +152,7 @@ export function validateHostedAppsApiConfig(): void {
     );
   }
   if (
-    !['https:', ...(process.env.NODE_ENV === 'production' ? [] : ['http:'])].includes(
-      previewOrigin.protocol,
-    )
+    previewOrigin.protocol !== 'https:'
     || previewOrigin.username
     || previewOrigin.password
     || previewOrigin.pathname !== '/'
@@ -209,6 +210,7 @@ export function validateExecutionProfilePolicy(options: {
 }
 
 export function validateApiSandboxBackendPolicy(): void {
+  if (env.HOSTED_APPS_ENABLED) validateHostedAppsSharedConfig();
   if (env.BRIDGE_DYNAMIC_WORKERS && env.BRIDGE_AUTH_MODE !== 'paired') {
     throw new SecureStartupConfigError(
       'Dynamic remote bridge workers require CODEAPI_BRIDGE_AUTH_MODE=paired',

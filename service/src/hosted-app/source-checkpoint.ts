@@ -7,6 +7,7 @@ export interface HostedAppSourceCheckpointDeps {
     args: { waitMs: number; signal: AbortSignal },
   ): Promise<string | null>;
   releaseLock(runtimeSessionId: string, lockToken: string): Promise<void>;
+  retain(runtimeSessionId: string, checkpointKey: string): Promise<string>;
   read(
     runtimeSessionId: string,
     args: { signal: AbortSignal },
@@ -77,7 +78,8 @@ export async function captureHostedAppSourceCheckpoint(args: {
         true,
       );
     }
-    return source.workspace_checkpoint;
+    args.signal.throwIfAborted();
+    return await args.deps.retain(args.runtimeSessionId, source.workspace_checkpoint);
   } finally {
     await args.deps.releaseLock(args.runtimeSessionId, lockToken);
   }

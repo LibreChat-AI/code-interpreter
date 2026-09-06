@@ -5,7 +5,49 @@ import {
   hostedAppForwardedQuery,
   hostedAppUpstreamUrl,
   rewriteHostedAppLocation,
+  hostedAppRequestFailure,
+  previewRecord as resolvePreviewRecord,
 } from './preview-proxy';
+import { HostedAppControlPlaneError } from './control-plane';
+
+test('refresh failure falls back only after rereading and reauthorizing a valid credential', async () => {
+  const record = previewRecord();
+  record.hard_deadline_at = Date.now() + 60_000;
+  record.hosted_app!.preview_credential_expires_at = Date.now() + 30_000;
+  const target = {
+    hostedAppRuntimeId: record.runtime_session_id,
+    revision: 'rev-2',
+    identity: { tenantId: record.tenant_id, canonicalUserId: record.canonical_user_id },
+  };
+  let reads = 0;
+  const deps = {
+    read: async () => { reads++; return record; },
+    refresh: async () => { throw new Error('worker unavailable'); },
+  };
+  expect(await resolvePreviewRecord(target, new AbortController().signal, deps) === record).toBe(true);
+  expect(reads).toBe(2);
+  reads = 0;
+  deps.read = async () => {
+    reads++;
+    return reads === 1 ? record : { ...record, canonical_user_id: 'another-owner' };
+  };
+  await expect(resolvePreviewRecord(target, new AbortController().signal, deps))
+    .rejects.toThrow('Hosted app not found');
+});
+
+test('preserves the request limit classification through fetch error wrapping', () => {
+  const limit = new HostedAppControlPlaneError('hosted_app_request_too_large', 'too large', 413);
+  expect(hostedAppRequestFailure(new TypeError('fetch failed', { cause: limit }))).toBe(limit);
+});
+
+test('accepts only the exact public app origin and rejects network-path redirects', () => {
+  const upstream = 'https://vm.aws.example/app';
+  const origin = 'https://app.apps.example.test';
+  expect(rewriteHostedAppLocation(`${origin}/login`, upstream, origin)).toBe('/login');
+  expect(rewriteHostedAppLocation('https://other.apps.example.test/login', upstream, origin))
+    .toBeUndefined();
+  expect(rewriteHostedAppLocation(`${origin}//attacker.test`, upstream, origin)).toBeUndefined();
+});
 
 function previewRecord(): RuntimeSessionRecord {
   return {

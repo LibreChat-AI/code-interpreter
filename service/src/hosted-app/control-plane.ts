@@ -104,7 +104,10 @@ function publicState(
     && record.hard_deadline_at <= now
   ) return 'stopped';
   if (record.state === 'RUNNING') return 'running';
-  if (record.state === 'PENDING') return 'starting';
+  if (record.state === 'PENDING') {
+    return record.hard_deadline_at != null && record.hard_deadline_at <= now
+      ? 'failed' : 'starting';
+  }
   if (record.state === 'TERMINATED') {
     return record.last_error ? 'failed' : 'stopped';
   }
@@ -190,6 +193,7 @@ export class HostedAppControlPlane {
       if (
         exactRevision
         && prior?.state === 'RUNNING'
+        && prior.launch_fingerprint === hostedAppLaunchFingerprint(this.deps.runtime.config)
         && prior.microvm_id
         && prior.endpoint
         && (prior.hard_deadline_at == null

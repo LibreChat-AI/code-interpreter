@@ -630,6 +630,18 @@ describe('sandbox backend policy', () => {
 });
 
 describe('hosted app startup policy', () => {
+  test('rejects remote bridges on both API and worker startup', () => {
+    configureHostedApps();
+    env.SANDBOX_BACKEND = 'remote-bridge';
+    expect(() => validateHostedAppsApiConfig()).toThrow('lambda-microvm');
+    expect(() => validateSandboxBackendPolicy()).toThrow('lambda-microvm');
+  });
+
+  test('requires HTTPS even outside production for Secure preview cookies', () => {
+    configureHostedApps();
+    env.HOSTED_APP_PREVIEW_ORIGIN = 'http://apps.example.test';
+    expect(() => validateHostedAppsApiConfig()).toThrow('bare HTTPS origin');
+  });
   function configureHostedApps(): void {
     env.HOSTED_APPS_ENABLED = true;
     env.EXECUTION_PROFILE = 'stateful';

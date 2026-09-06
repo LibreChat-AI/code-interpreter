@@ -1,5 +1,5 @@
 import { Worker } from 'bullmq';
-import { env } from '../config';
+import { env, hostedAppOperationTimeoutMs } from '../config';
 import { connection } from '../queue';
 import { withSpan, withTraceContext } from '../telemetry';
 import { HostedAppControlPlaneError } from './control-plane';
@@ -46,10 +46,7 @@ export async function processHostedAppJob(job: HostedAppJob): Promise<HostedAppJ
     'codeapi.hosted_app.id': job.data.hostedAppRuntimeId,
   }, async () => {
     const controller = new AbortController();
-    const timeoutMs = env.CHECKPOINT_TIMEOUT_MS * 5
-      + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 7
-      + env.HOSTED_APP_START_TIMEOUT_MS
-      + 30_000;
+    const timeoutMs = hostedAppOperationTimeoutMs();
     const timer = setTimeout(
       () => controller.abort(new Error(`Hosted app operation timed out after ${timeoutMs}ms`)),
       timeoutMs,

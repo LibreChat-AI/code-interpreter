@@ -97,6 +97,7 @@ export function getHostedAppControlPlane(): HostedAppControlPlane {
         deps: {
           waitForLock: (sourceId, args) => waitForRuntimeSessionLock(sourceId, args),
           releaseLock: releaseRuntimeSessionLock,
+          retain: (sourceId, key) => store.retainForHostedApp(sourceId, key),
           read: readRuntimeSessionRecord,
           checkpoint: ({ runtimeSessionId: sourceId, lockToken, signal: sourceSignal }) => (
             checkpointSession({

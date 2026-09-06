@@ -28,6 +28,7 @@ function fixture(source: RuntimeSessionRecord | null) {
     deps: {
       waitForLock: async () => { calls.push('lock'); return 'source-lock'; },
       releaseLock: async () => { calls.push('release'); },
+      retain: async (_id: string, key: string) => { calls.push('retain'); return key; },
       read: async () => { calls.push('read'); return current; },
       checkpoint: async () => {
         calls.push('checkpoint');
@@ -49,7 +50,7 @@ describe('hosted app source checkpoint capture', () => {
       lockWaitMs: 100, deps: f.deps,
     });
     expect(key).toBe('rtsx-checkpoints/rt_source/0002.tar.gz');
-    expect(f.calls).toEqual(['lock', 'read', 'checkpoint', 'read', 'release']);
+    expect(f.calls).toEqual(['lock', 'read', 'checkpoint', 'read', 'retain', 'release']);
   });
 
   test('reuses a stopped workspace checkpoint without requiring a live source VM', async () => {
@@ -59,7 +60,7 @@ describe('hosted app source checkpoint capture', () => {
       lockWaitMs: 100, deps: f.deps,
     });
     expect(key).toBe('rtsx-checkpoints/rt_source/0001.tar.gz');
-    expect(f.calls).toEqual(['lock', 'read', 'release']);
+    expect(f.calls).toEqual(['lock', 'read', 'retain', 'release']);
   });
 
   test('fails closed on owner mismatch and still releases the source lock', async () => {

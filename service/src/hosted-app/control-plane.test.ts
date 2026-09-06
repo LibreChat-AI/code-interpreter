@@ -178,6 +178,22 @@ const input = {
   signal: new AbortController().signal,
 };
 
+test('replaces a running VM after its launch policy changes', async () => {
+  const f = fixture();
+  await f.control.start(input);
+  f.registry.record!.launch_fingerprint = 'obsolete-policy';
+  await f.control.start(input);
+  expect(f.runtime.terminations).toEqual(['vm-app-1']);
+  expect(f.runtime.launches).toHaveLength(2);
+  expect(f.captures).toHaveLength(1);
+  expect(f.restores[1]).toBe(f.restores[0]);
+});
+
+test('does not report an expired pending intent as starting', () => {
+  expect(hostedAppPublicStatus({ ...pendingRecord(), hard_deadline_at: 100 }, 101).state)
+    .toBe('failed');
+});
+
 function pendingRecord(): RuntimeSessionRecord {
   const generation = hostedAppLaunchGenerationSeed(runtimeConfig);
   return {

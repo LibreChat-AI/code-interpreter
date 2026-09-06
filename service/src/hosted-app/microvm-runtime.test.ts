@@ -62,6 +62,38 @@ function runtime(
 }
 
 describe('HostedAppMicrovmRuntime', () => {
+  test('keeps a second-attempt cancellation ambiguous and replayable', async () => {
+    const fake = new FakeLambdaMicrovmClient();
+    fake.terminateNextLaunch();
+    const caller = new AbortController();
+    let attempts = 0;
+    const run = fake.runMicrovm.bind(fake);
+    fake.runMicrovm = async (...args) => {
+      const vm = await run(...args);
+      if (++attempts === 2) {
+        caller.abort(new Error('caller left after provider acceptance'));
+        throw caller.signal.reason;
+      }
+      return vm;
+    };
+    const error = await runtime(fake).runtime.launch('retry-abort', caller.signal).catch(e => e);
+    expect(error.transient).toBe(true);
+    expect(fake.callsFor('runMicrovm').map(c => (c.args as { clientToken: string }).clientToken))
+      .toEqual(['retry-abort', 'retry-abort-r1']);
+    const recovered = await runtime(fake).runtime.launch('retry-abort', new AbortController().signal);
+    expect(recovered.clientToken).toBe('retry-abort-r1');
+    expect(fake.vms.size).toBe(2);
+  });
+
+  test('classifies a resident-start network reset as transient', async () => {
+    const fake = new FakeLambdaMicrovmClient();
+    const f = runtime(fake, async () => { throw new TypeError('fetch failed'); });
+    const signal = new AbortController().signal;
+    const { vm } = await f.runtime.launch('resident-reset', signal);
+    const error = await f.runtime.startResidentApp(vm, 'source', spec, signal).catch(e => e);
+    expect(error).toBeInstanceOf(HostedAppMicrovmError);
+    expect(error.transient).toBe(true);
+  });
   test('seeds idempotency from exact wire inputs while keeping semantic matching order-independent', () => {
     const first = { ...config(), ingressConnectorArns: ['arn:b', 'arn:a'] };
     const reordered = { ...config(), ingressConnectorArns: ['arn:a', 'arn:b'] };

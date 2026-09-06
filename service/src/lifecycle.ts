@@ -7,7 +7,7 @@ import {
   closeQueueConnections,
 } from './queue';
 import { validateStartupAuthConfig } from './auth/startup';
-import { env } from './config';
+import { env, hostedAppOperationTimeoutMs } from './config';
 import {
   validateApiBridgePolicy,
   validateApiHardenedConfig,
@@ -241,7 +241,9 @@ export async function gracefulShutdown(): Promise<void> {
   const shutdownTimeout = setTimeout(() => {
     logger.error('Shutdown timeout reached, forcing exit');
     process.exit(1);
-  }, 30000);
+  }, hasWorkers && env.HOSTED_APPS_ENABLED
+    ? hostedAppOperationTimeoutMs() + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS + 30_000
+    : 30_000);
 
   try {
     if (hasWorkers) {

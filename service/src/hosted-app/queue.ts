@@ -2,7 +2,7 @@ import { Queue, QueueEvents } from 'bullmq';
 import { setMaxListeners } from 'node:events';
 import { nanoid } from 'nanoid';
 import { connection } from '../queue';
-import { env } from '../config';
+import { hostedAppOperationTimeoutMs } from '../config';
 import logger from '../logger';
 import type { HostedAppJobData, HostedAppJobName, HostedAppJobResult } from './jobs';
 
@@ -44,10 +44,7 @@ function resources(): { queue: HostedAppQueue; events: QueueEvents } {
 /* A cold start can capture (pull + store), restore (load + push), launch, wait
  * for control, start the process, and mint preview credentials. Budget every
  * independently bounded leg so the queue waiter cannot abandon valid work. */
-const HOSTED_APP_OPERATION_WAIT_MS = env.CHECKPOINT_TIMEOUT_MS * 5
-  + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 7
-  + env.HOSTED_APP_START_TIMEOUT_MS
-  + 45_000;
+const HOSTED_APP_OPERATION_WAIT_MS = hostedAppOperationTimeoutMs() + 15_000;
 
 export async function submitHostedAppJob(
   name: HostedAppJobName,

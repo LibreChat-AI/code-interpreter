@@ -201,7 +201,7 @@ export class HostedAppMicrovmRuntime {
       const first = await this.launchOnce(clientToken, deadlineAtMs, signal, deadlineSignal);
       return { vm: first, clientToken };
     } catch (error) {
-      const failure = deadlineSignal.aborted && !callerSignal.aborted
+      const failure = signal.aborted
         ? new HostedAppMicrovmError(
           'hosted_app_launch_timeout',
           `Hosted app MicroVM did not reach RUNNING within ${this.config.launchTimeoutMs}ms`,
@@ -215,7 +215,13 @@ export class HostedAppMicrovmRuntime {
       if (failure.code !== 'hosted_app_boot_failed' || callerSignal.aborted) throw failure;
       const retryToken = `${clientToken}-r1`;
       const vm = await this.launchOnce(retryToken, deadlineAtMs, signal, deadlineSignal)
-        .catch(second => { throw launchFailure(second); });
+        .catch(second => {
+          if (signal.aborted) {
+            throw new HostedAppMicrovmError('hosted_app_launch_timeout',
+              'Hosted app launch interrupted; replay the persisted intent', true, second);
+          }
+          throw launchFailure(second);
+        });
       return { vm, clientToken: retryToken };
     }
   }
@@ -412,7 +418,11 @@ export class HostedAppMicrovmRuntime {
           AbortSignal.timeout(this.config.appStartTimeoutMs),
         ]),
       },
-    );
+    ).catch(error => {
+      callerSignal.throwIfAborted();
+      throw new HostedAppMicrovmError('hosted_app_start_unavailable',
+        'Hosted app runner transport failed', true, error);
+    });
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       throw new HostedAppMicrovmError(

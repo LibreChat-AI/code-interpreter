@@ -756,3 +756,17 @@ terraform -chdir=docs/lambda-microvm/terraform destroy
 MicroVM images are billed as stored snapshots; running VMs bill while RUNNING and
 suspended VMs bill at a reduced rate, so terminate stray VMs before deleting the
 image.
+# Hosted-app retention and rollout
+
+Hosted revisions retain a separate immutable checkpoint under the source session's
+`hosted/` object prefix before releasing the source lease. Rolling workspace
+checkpoint pruning never deletes these snapshots. Keep this prefix out of short
+bucket lifecycle expiry policies; an operator may reclaim retained objects only
+after retiring all hosted revisions that reference them. Automatic reclamation of
+unreferenced hosted snapshots is not yet implemented.
+
+Hosted apps require the `lambda-microvm` backend and an HTTPS preview origin in
+every environment, including development. Preview authentication uses Secure
+host-only cookies. Worker shutdown allows the full hosted-operation budget plus
+launch cleanup and a 30-second reserve; configure the orchestrator's termination
+grace period to cover that same budget (16 minutes with default timeouts).

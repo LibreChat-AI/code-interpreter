@@ -1,4 +1,5 @@
 import {
+  CopyObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -10,6 +11,7 @@ import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
+import { createHash } from 'node:crypto';
 import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { env } from '../config';
@@ -267,9 +269,26 @@ export class MinioCheckpointStore implements CheckpointStore {
     }));
   }
 
+  /** Copy while the source lease is held, outside rolling checkpoint pruning.
+   * The immutable source key makes retries address the same retained object. */
+  async retainForHostedApp(runtimeSessionId: string, sourceKey: string): Promise<string> {
+    const prefix = checkpointPrefixFor(runtimeSessionId);
+    if (!sourceKey.startsWith(prefix) || !sourceKey.endsWith('.tar.gz')) {
+      throw new Error('Checkpoint pointer is outside the runtime session prefix');
+    }
+    const key = `${prefix}hosted/${createHash('sha256').update(sourceKey).digest('hex')}.tar.gz`;
+    await this.send('hosted checkpoint retention', new CopyObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      CopySource: `${this.bucket}/${sourceKey}`.split('/').map(encodeURIComponent).join('/'),
+    }));
+    return key;
+  }
+
   async pruneOlderThan(runtimeSessionId: string, sequence: number): Promise<void> {
     const keepKey = checkpointObjectKey(runtimeSessionId, sequence);
     const stale = (await this.listKeys(runtimeSessionId)).filter(key => {
+      if (key.startsWith(`${checkpointPrefixFor(runtimeSessionId)}hosted/`)) return false;
       if (key.endsWith('.tar.gz')) return key < keepKey;
       if (key.endsWith('.tar.gz.committed')) {
         return key.slice(0, -'.committed'.length) < keepKey;
