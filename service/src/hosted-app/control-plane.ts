@@ -253,12 +253,9 @@ export class HostedAppControlPlane {
             input.spec,
             signal,
           );
-          return hostedAppPublicStatus(
-            await this.persistPreviewCredential(prior, vm, lockToken, signal),
-            this.now(),
-          );
         } catch (error) {
-          if (!(error instanceof HostedAppMicrovmError) || !error.transient) throw error;
+          if (!(error instanceof HostedAppMicrovmError) || !error.transient
+            || !['hosted_app_unhealthy', 'hosted_app_start_unavailable', 'hosted_app_start_failed'].includes(error.code)) throw error;
           const terminating: RuntimeSessionRecord = {
             ...prior,
             state: 'TERMINATING',
@@ -279,6 +276,12 @@ export class HostedAppControlPlane {
             last_seen_at: this.now(),
             last_error: error.message,
           };
+        }
+        if (prior.state === 'RUNNING') {
+          // Credential/control-plane failures do not prove the VM is unhealthy.
+          return hostedAppPublicStatus(
+            await this.persistPreviewCredential(prior, vm, lockToken, signal), this.now(),
+          );
         }
       }
 
@@ -471,11 +474,11 @@ export class HostedAppControlPlane {
             .catch(() => false);
         } else if (
           error instanceof HostedAppMicrovmError
-          && (error.code === 'hosted_app_boot_failed' || !error.transient)
+          && error.code === 'hosted_app_boot_failed'
         ) {
-          /* No VM id escaped launch(), and these outcomes prove AWS did not
-           * leave a live resource: deterministic rejection, or both boot
-           * attempts reached a terminal state. Let the next request allocate a
+          /* No VM id escaped launch(), and both boot attempts reached a
+           * terminal state. A rejected replay alone would not prove an earlier
+           * request was never admitted. Let the next request allocate a
            * fresh generation instead of replaying dead tokens forever. */
           await this.deps.registry.write({
             ...launchIntent,
@@ -530,33 +533,38 @@ export class HostedAppControlPlane {
         const launched = await this.deps.runtime.launch(
           record.launch_client_token as string,
           leaseSignal,
-        );
-        const recovered: RuntimeSessionRecord = {
-          ...record,
-          launch_client_token: launched.clientToken,
-          microvm_id: launched.vm.microvmId,
-          endpoint: launched.vm.endpoint,
-          image_arn: launched.vm.imageArn ?? record.image_arn,
-          image_version: launched.vm.imageVersion ?? record.image_version,
-          launched_at: Number.isFinite(launched.vm.startedAtMs)
-            ? launched.vm.startedAtMs
-            : record.launched_at,
-          hard_deadline_at: Number.isFinite(launched.vm.startedAtMs)
-            ? (launched.vm.startedAtMs as number)
-              + this.deps.runtime.config.maximumDurationSeconds * 1_000
-              - HOSTED_APP_DEADLINE_HEADROOM_MS
-            : record.hard_deadline_at,
-          last_seen_at: this.now(),
-        };
-        try {
-          await this.writeOrFence(recovered, lockToken, leaseSignal);
-        } catch (error) {
-          /* A recovered VM must never escape merely because we lost the Redis
-           * fence while recording its id. */
-          await this.deps.runtime.terminate(launched.vm.microvmId).catch(() => false);
-          throw error;
+        ).catch(error => {
+          if (error instanceof HostedAppMicrovmError && error.code === 'hosted_app_boot_failed') return undefined;
+          throw error; // Ambiguous outcomes must keep the pending intent.
+        });
+        if (launched) {
+          const recovered: RuntimeSessionRecord = {
+            ...record,
+            launch_client_token: launched.clientToken,
+            microvm_id: launched.vm.microvmId,
+            endpoint: launched.vm.endpoint,
+            image_arn: launched.vm.imageArn ?? record.image_arn,
+            image_version: launched.vm.imageVersion ?? record.image_version,
+            launched_at: Number.isFinite(launched.vm.startedAtMs)
+              ? launched.vm.startedAtMs
+              : record.launched_at,
+            hard_deadline_at: Number.isFinite(launched.vm.startedAtMs)
+              ? (launched.vm.startedAtMs as number)
+                + this.deps.runtime.config.maximumDurationSeconds * 1_000
+                - HOSTED_APP_DEADLINE_HEADROOM_MS
+              : record.hard_deadline_at,
+            last_seen_at: this.now(),
+          };
+          try {
+            await this.writeOrFence(recovered, lockToken, leaseSignal);
+          } catch (error) {
+            /* A recovered VM must never escape merely because we lost the Redis
+             * fence while recording its id. */
+            await this.deps.runtime.terminate(launched.vm.microvmId).catch(() => false);
+            throw error;
+          }
+          record = recovered;
         }
-        record = recovered;
       }
       if (record.microvm_id) {
         const terminating: RuntimeSessionRecord = {

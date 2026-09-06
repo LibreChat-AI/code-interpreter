@@ -165,9 +165,12 @@ resource "aws_s3_bucket_lifecycle_configuration" "checkpoint" {
     id     = "expire-checkpoints"
     status = "Enabled"
     filter {
-      tag {
-        key   = "codeapi-retention"
-        value = "rolling"
+      dynamic "tag" {
+        for_each = var.hosted_app_image_arn == "" ? [] : [1]
+        content {
+          key   = "codeapi-retention"
+          value = "rolling"
+        }
       }
     }
     expiration {

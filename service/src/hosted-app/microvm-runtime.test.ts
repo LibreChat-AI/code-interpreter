@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { FakeLambdaMicrovmClient } from '../runtime-session/lambda-client-fake';
 import { LambdaMicrovmApiError } from '../runtime-session/lambda-client';
+import { MicrovmOpThrottledError } from '../runtime-session/throttle';
 import {
   hostedAppLaunchFingerprint,
   hostedAppLaunchGenerationSeed,
@@ -50,11 +51,13 @@ function runtime(
     = async () => new Response('{}', { status: 200 }),
 ) {
   const reservations: string[] = [];
+  const poisons: string[] = [];
   return {
     reservations,
+    poisons,
     runtime: new HostedAppMicrovmRuntime(fake, config(), {
       reserveOp: async op => { reservations.push(op); },
-      poisonOp: async () => {},
+      poisonOp: async op => { poisons.push(op); },
       fetch: fetchImpl,
       sleep: async () => {},
     }),
@@ -62,6 +65,40 @@ function runtime(
 }
 
 describe('HostedAppMicrovmRuntime', () => {
+  test('keeps suspended recovery ambiguous when the shared resume budget is exhausted', async () => {
+    const fake = new FakeLambdaMicrovmClient();
+    const signal = new AbortController().signal;
+    const { vm } = await runtime(fake).runtime.launch('resume-budget', signal);
+    await fake.suspendMicrovm(vm.microvmId);
+    const limited = new HostedAppMicrovmRuntime(fake, config(), {
+      reserveOp: async op => { if (op === 'resume') throw new MicrovmOpThrottledError('resume', 1); },
+    });
+    const failure = await limited.launch('resume-budget', signal).catch(error => error);
+    expect(failure.transient).toBe(true);
+    expect(fake.callsFor('resumeMicrovm')).toHaveLength(0);
+    expect(fake.vms.size).toBe(1);
+  });
+  test('reserves and poisons the distributed resume budget on provider throttling', async () => {
+    const fake = new FakeLambdaMicrovmClient();
+    const f = runtime(fake);
+    const signal = new AbortController().signal;
+    const { vm } = await f.runtime.launch('resume-throttle', signal);
+    await fake.suspendMicrovm(vm.microvmId);
+    fake.failNext('resumeMicrovm', new LambdaMicrovmApiError('throttled', 'ResumeMicrovm', 'throttled'));
+    await expect(f.runtime.launch('resume-throttle', signal)).rejects.toThrow('throttled');
+    expect(f.reservations).toEqual(['run', 'run', 'resume']);
+    expect(f.poisons).toEqual(['resume']);
+  });
+
+  test('does not turn control-token failure into evidence of an unhealthy VM', async () => {
+    const fake = new FakeLambdaMicrovmClient();
+    const f = runtime(fake);
+    const signal = new AbortController().signal;
+    const { vm } = await f.runtime.launch('health-auth', signal);
+    fake.failNext('createMicrovmAuthToken', new LambdaMicrovmApiError('throttled', 'CreateMicrovmAuthToken', 'throttled'));
+    const failure = await f.runtime.waitForControlReady(vm, signal).catch(error => error);
+    expect(failure.code).toBe('hosted_app_auth_failed');
+  });
   test('cancels unsuccessful and successful health response bodies before continuing', async () => {
     const fake = new FakeLambdaMicrovmClient();
     let probes = 0;

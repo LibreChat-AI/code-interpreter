@@ -230,6 +230,30 @@ test('retains immutable revision bytes and settings after Redis lease expiry and
   expect(f.restores.at(-1)).toBe(checkpoint);
 });
 
+test('settles definite boot exhaustion during stop without replaying dead intents', async () => {
+  const f = fixture();
+  f.registry.record = pendingRecord();
+  f.runtime.launchError = new HostedAppMicrovmError('hosted_app_boot_failed', 'both attempts dead', true);
+  expect((await f.control.stop(input.hostedAppRuntimeId, input, input.signal)).state).toBe('stopped');
+  expect(f.registry.record!.state).toBe('TERMINATED');
+  await f.control.stop(input.hostedAppRuntimeId, input, input.signal);
+  expect(f.runtime.launches).toHaveLength(1);
+});
+
+test('keeps a healthy VM through preview and control credential outages', async () => {
+  const f = fixture();
+  await f.control.start(input);
+  const original = structuredClone(f.registry.record);
+  f.runtime.previewToken = async () => { throw new HostedAppMicrovmError('hosted_app_auth_failed', 'throttled', true); };
+  await expect(f.control.start(input)).rejects.toThrow('throttled');
+  expect(f.runtime.terminations).toHaveLength(0);
+  expect(f.runtime.launches).toHaveLength(1);
+  expect(f.registry.record).toEqual(original);
+  f.runtime.healthError = new HostedAppMicrovmError('hosted_app_auth_failed', 'control auth unavailable', true);
+  await expect(f.control.start(input)).rejects.toThrow('control auth unavailable');
+  expect(f.runtime.terminations).toHaveLength(0);
+});
+
 test('does not report an expired pending intent as starting', () => {
   expect(hostedAppPublicStatus({ ...pendingRecord(), hard_deadline_at: 100 }, 101).state)
     .toBe('failed');

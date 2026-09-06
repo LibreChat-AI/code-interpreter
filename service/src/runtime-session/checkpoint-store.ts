@@ -252,7 +252,7 @@ export class MinioCheckpointStore implements CheckpointStore {
           Body: source,
           ContentLength: size,
           ContentType: 'application/x-gtar',
-          Tagging: 'codeapi-retention=rolling',
+          Tagging: env.HOSTED_APPS_ENABLED ? 'codeapi-retention=rolling' : undefined,
         }), { abortSignal });
       } finally {
         if (!Buffer.isBuffer(source)) source.destroy();
@@ -268,7 +268,7 @@ export class MinioCheckpointStore implements CheckpointStore {
       Body: marker,
       ContentLength: marker.length,
       ContentType: 'text/plain',
-      Tagging: 'codeapi-retention=rolling',
+      Tagging: env.HOSTED_APPS_ENABLED ? 'codeapi-retention=rolling' : undefined,
     }));
   }
 

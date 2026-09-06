@@ -67,4 +67,11 @@ run "ordinary_runner_has_no_hosted_permissions" {
     ])
     error_message = "Hosted resume permission must remain opt-in."
   }
+  assert {
+    condition = length(one(one([
+      for rule in aws_s3_bucket_lifecycle_configuration.checkpoint.rule : rule
+      if rule.id == "expire-checkpoints"
+    ]).filter).tag) == 0
+    error_message = "Ordinary deployments retain their existing untagged checkpoint expiry policy."
+  }
 }

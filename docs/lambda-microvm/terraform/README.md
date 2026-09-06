@@ -79,7 +79,8 @@ terraform output
   repository. The checked-in `terraform.tfvars.example` is specifically an
   AIML-dev/disposable-stack example and explicitly opts all three into
   destructive teardown; do not copy those overrides to retained environments.
-- Current checkpoint versions tagged `codeapi-retention=rolling` expire after `checkpoint_retention_days`.
+- Current checkpoint versions expire after `checkpoint_retention_days`; when
+  `hosted_app_image_arn` is configured, only `codeapi-retention=rolling` objects expire.
   Noncurrent S3 versions expire independently after
   `checkpoint_noncurrent_retention_days` (one day by default), so bucket
   versioning does not unexpectedly retain replaced checkpoint data for another
@@ -91,3 +92,7 @@ terraform output
   no longer expire automatically: tag only verified ordinary rolling checkpoints
   during migration, never hosted snapshots or revision manifests. Runtime rolling
   checkpoint pruning continues to delete superseded ordinary checkpoints.
+- Workers tag ordinary checkpoints only when hosted apps are enabled, so the
+  disabled/default deployment does not acquire a new tagging-permission requirement.
+  Never clear `hosted_app_image_arn` while retained hosted data remains: doing so
+  restores the ordinary bucket-wide expiry policy.

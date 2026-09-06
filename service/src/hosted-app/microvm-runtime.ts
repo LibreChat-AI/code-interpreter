@@ -149,7 +149,9 @@ export function normalizeHostedAppMicrovmEndpoint(endpoint: string): string {
 function launchFailure(error: unknown): HostedAppMicrovmError {
   if (error instanceof HostedAppMicrovmError) return error;
   if (error instanceof LambdaMicrovmApiError) {
-    const transient = error.kind === 'throttled' || error.kind === 'other';
+    // A rejected replay does not prove an earlier same-token request was never
+    // admitted. Only observed terminal VMs establish definite boot exhaustion.
+    const transient = true;
     return new HostedAppMicrovmError(
       error.kind === 'throttled' ? 'hosted_app_launch_throttled' : 'hosted_app_launch_failed',
       error.message,
@@ -160,7 +162,7 @@ function launchFailure(error: unknown): HostedAppMicrovmError {
   return new HostedAppMicrovmError(
     'hosted_app_launch_failed',
     error instanceof Error ? error.message : 'Hosted app MicroVM launch failed',
-    false,
+    true,
     error,
   );
 }
@@ -301,9 +303,13 @@ export class HostedAppMicrovmRuntime {
       if (current.state === 'SUSPENDED' && !resumeRequested) {
         resumeRequested = true;
         try {
+          await this.deps.reserveOp('resume', { limitPerSecond: 5, deadlineAtMs, signal });
           current = await this.client.resumeMicrovm(current.microvmId, signal);
           continue;
         } catch (error) {
+          if (error instanceof LambdaMicrovmApiError && error.kind === 'throttled') {
+            await this.deps.poisonOp('resume', deadlineAtMs, signal).catch(() => {});
+          }
           if (error instanceof LambdaMicrovmApiError && error.kind === 'not_found') {
             throw new HostedAppMicrovmError(
               'hosted_app_boot_failed',
@@ -384,6 +390,7 @@ export class HostedAppMicrovmRuntime {
         if (response.ok) return;
         lastError = new Error(`health returned ${response.status}`);
       } catch (error) {
+        if (error instanceof HostedAppMicrovmError && error.code === 'hosted_app_auth_failed') throw error;
         lastError = error;
       }
       await this.deps.sleep(250, callerSignal);
