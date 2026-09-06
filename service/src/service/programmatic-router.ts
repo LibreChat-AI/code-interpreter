@@ -234,6 +234,7 @@ async function waitForExecutionState(
   stdout?: string;
   stderr?: string;
   files?: t.FileRefs;
+  artifact_delivery?: t.ArtifactDeliveryFailure;
 }> {
   const startTime = Date.now();
 
@@ -252,6 +253,7 @@ async function waitForExecutionState(
           stdout: result.stdout,
           stderr: result.stderr,
           files: result.files,
+          artifact_delivery: result.artifact_delivery,
         };
       }
     }
@@ -296,6 +298,7 @@ async function waitForExecutionState(
             stdout?: string;
             stderr?: string;
             files?: t.FileRefs;
+            artifact_delivery?: t.ArtifactDeliveryFailure;
           }>(`${env.TOOL_CALL_SERVER_URL}/sessions/${execution_id}/status`, {
             headers: internalServiceHeaders(),
           }),
@@ -307,6 +310,7 @@ async function waitForExecutionState(
           stdout: statusResponse.data.stdout,
           stderr: statusResponse.data.stderr,
           files: statusResponse.data.files,
+          artifact_delivery: statusResponse.data.artifact_delivery,
         };
       }
 
@@ -326,6 +330,7 @@ async function waitForExecutionState(
               stdout: result.stdout,
               stderr: result.stderr,
               files: result.files,
+              artifact_delivery: result.artifact_delivery,
             };
           }
         }
@@ -1025,6 +1030,7 @@ async function runAndRespond(
     stdout: cleanStdout,
     stderr: result.stderr,
     files: result.files,
+    artifact_delivery: result.artifact_delivery,
     session_id: state.session_id,
   });
 }
@@ -1243,6 +1249,7 @@ async function handleBlocking(
           stdout: state.stdout ?? '',
           stderr: state.stderr ?? '',
           files: state.files ?? [],
+          artifact_delivery: state.artifact_delivery,
           session_id: execution.session_id,
         });
       }
@@ -1495,6 +1502,7 @@ async function handleBlocking(
         stdout: state.stdout ?? '',
         stderr: state.stderr ?? '',
         files: state.files ?? [],
+        artifact_delivery: state.artifact_delivery,
         session_id,
       });
     }
