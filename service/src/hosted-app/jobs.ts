@@ -6,6 +6,7 @@ export const HOSTED_APP_JOBS = [
   'hosted-app:start',
   'hosted-app:stop',
   'hosted-app:refresh-preview',
+  'hosted-app:status',
 ] as const;
 export type HostedAppJobName = (typeof HOSTED_APP_JOBS)[number];
 
@@ -23,7 +24,7 @@ export interface HostedAppStartJobData extends HostedAppJobBase {
 }
 
 export interface HostedAppStopJobData extends HostedAppJobBase {
-  operation: 'stop' | 'refresh-preview';
+  operation: 'stop' | 'refresh-preview' | 'status';
 }
 
 export type HostedAppJobData = HostedAppStartJobData | HostedAppStopJobData;

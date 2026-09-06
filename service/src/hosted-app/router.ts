@@ -166,7 +166,7 @@ router.post('/', executionLimiter, async (req: AuthenticatedRequest, res) => {
   }
 });
 
-router.get('/:appId', async (req: AuthenticatedRequest, res) => {
+router.get('/:appId', executionLimiter, async (req: AuthenticatedRequest, res) => {
   if (unavailable(res)) return;
   try {
     const resolved = target(req, req.params.appId, req.query.runtime_session_hint);
@@ -178,7 +178,17 @@ router.get('/:appId', async (req: AuthenticatedRequest, res) => {
       tenantId: resolved.identity.tenantId,
       canonicalUserId: resolved.identity.canonicalUserId,
     }, resolved.sourceRuntimeSessionId);
-    return res.status(200).json(presentStatus(hostedAppPublicStatus(record), {
+    const cached = hostedAppPublicStatus(record);
+    const status = cached.state === 'running'
+      ? await submitHostedAppJob('hosted-app:status', {
+        operation: 'status',
+        hostedAppRuntimeId: resolved.hostedAppRuntimeId,
+        tenantId: resolved.identity.tenantId,
+        canonicalUserId: resolved.identity.canonicalUserId,
+        _otel: captureTraceCarrier(),
+      }, undefined, 15_000)
+      : cached;
+    return res.status(200).json(presentStatus(status, {
       tenantId: resolved.identity.tenantId,
       canonicalUserId: resolved.identity.canonicalUserId,
     }));

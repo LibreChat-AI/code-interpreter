@@ -46,7 +46,7 @@ export async function processHostedAppJob(job: HostedAppJob): Promise<HostedAppJ
     'codeapi.hosted_app.id': job.data.hostedAppRuntimeId,
   }, async () => {
     const controller = new AbortController();
-    const timeoutMs = hostedAppOperationTimeoutMs();
+    const timeoutMs = job.name === 'hosted-app:status' ? 10_000 : hostedAppOperationTimeoutMs();
     const timer = setTimeout(
       () => controller.abort(new Error(`Hosted app operation timed out after ${timeoutMs}ms`)),
       timeoutMs,
@@ -56,6 +56,9 @@ export async function processHostedAppJob(job: HostedAppJob): Promise<HostedAppJ
       /* Keep AWS SDK and checkpoint-store construction out of default-profile
        * workers; this import is reached only by an enabled hosted-app job. */
       const control = (await import('./factory')).getHostedAppControlPlane();
+      if (job.name === 'hosted-app:status' && job.data.operation === 'status') {
+        return await control.status(job.data.hostedAppRuntimeId, job.data, controller.signal);
+      }
       if (job.name === 'hosted-app:start' && job.data.operation === 'start') {
         return await control.start({
           ...job.data,

@@ -170,6 +170,26 @@ export class HostedAppControlPlane {
     this.now = deps.now ?? Date.now;
   }
 
+  async status(runtimeId: string, owner: HostedAppOwner, callerSignal: AbortSignal): Promise<HostedAppPublicStatus> {
+    return this.withLease(runtimeId, callerSignal, async signal => {
+      const record = await this.deps.registry.read(runtimeId, { signal });
+      if (!record?.hosted_app) {
+        throw new HostedAppControlPlaneError('hosted_app_not_found', 'Hosted app not found', 404);
+      }
+      assertHostedAppOwned(record, owner);
+      const status = hostedAppPublicStatus(record, this.now());
+      if (status.state !== 'running') return status;
+      const state = await this.deps.runtime.residentAppState(this.recordedVm(record),
+        record.hosted_app.source_runtime_session_id, record.hosted_app.spec, signal);
+      signal.throwIfAborted();
+      const current = hostedAppPublicStatus(record, this.now());
+      if (current.state !== 'running') return current;
+      // Process failure is not VM termination: keep its durable identity so stop
+      // can clean it up and start can reassert the resident process.
+      return { ...current, state, ...(state === 'failed' ? { error: 'Hosted app process failed' } : {}) };
+    });
+  }
+
   async start(input: HostedAppStartInput): Promise<HostedAppPublicStatus> {
     return this.withLease(input.hostedAppRuntimeId, input.signal, async (signal, lockToken) => {
       const fingerprint = hostedAppSpecFingerprint(input.spec);
@@ -436,19 +456,6 @@ export class HostedAppControlPlane {
         throw error;
       }
     });
-  }
-
-  async status(
-    hostedAppRuntimeId: string,
-    owner: HostedAppOwner,
-    signal: AbortSignal,
-  ): Promise<HostedAppPublicStatus> {
-    const record = await this.deps.registry.read(hostedAppRuntimeId, { signal });
-    if (!record?.hosted_app) {
-      throw new HostedAppControlPlaneError('hosted_app_not_found', 'Hosted app not found', 404);
-    }
-    assertHostedAppOwned(record, owner);
-    return hostedAppPublicStatus(record, this.now());
   }
 
   async stop(

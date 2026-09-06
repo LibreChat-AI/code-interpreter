@@ -16,6 +16,27 @@ import { hostedAppPreviewOwnerBinding } from './preview-access';
 
 const PREVIEW_REFRESH_SKEW_MS = 60_000;
 
+/** Bound admission as well as the queue result wait (Redis may be reconnecting). */
+async function waitForPreviewRefresh(work: Promise<unknown>, waitMs: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: () => void = () => {};
+  try {
+    await Promise.race([
+      work.catch(() => undefined),
+      new Promise<void>(resolve => {
+        onAbort = resolve;
+        timer = setTimeout(resolve, waitMs);
+        signal.addEventListener('abort', onAbort, { once: true });
+      }),
+    ]);
+    signal.throwIfAborted();
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 export interface HostedAppPreviewTarget {
   hostedAppRuntimeId: string;
   revision?: string;
@@ -82,14 +103,17 @@ export async function previewRecord(
   }
   assertPreviewRecordAuthorized(record, resolved);
   if (!hostedAppPreviewCredentialUsable(record, resolved, Date.now(), PREVIEW_REFRESH_SKEW_MS)) {
-    await deps.refresh('hosted-app:refresh-preview', {
+    // Leave time to use the existing credential when no worker can refresh it.
+    const remaining = Math.min(record.hard_deadline_at!,
+      record.hosted_app.preview_credential_expires_at ?? Date.now()) - Date.now();
+    const waitMs = remaining > 0 ? Math.max(1, Math.min(2_000, remaining / 2)) : 2_000;
+    await waitForPreviewRefresh(deps.refresh('hosted-app:refresh-preview', {
       operation: 'refresh-preview',
       hostedAppRuntimeId: resolved.hostedAppRuntimeId,
       tenantId: record.tenant_id,
       canonicalUserId: record.canonical_user_id,
       _otel: captureTraceCarrier(),
-    }, `happ-refresh-${resolved.hostedAppRuntimeId}-${Math.floor(Date.now() / 30_000)}`)
-      .catch(() => { signal.throwIfAborted(); });
+    }, `happ-refresh-${resolved.hostedAppRuntimeId}-${Math.floor(Date.now() / 30_000)}`, waitMs), waitMs, signal);
     record = await deps.read(resolved.hostedAppRuntimeId, { signal });
   }
   if (!hostedAppPreviewCredentialUsable(record, resolved)) {

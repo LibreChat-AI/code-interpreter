@@ -50,6 +50,7 @@ export async function submitHostedAppJob(
   name: HostedAppJobName,
   data: HostedAppJobData,
   jobId = `happ-${nanoid()}`,
+  waitMs = HOSTED_APP_OPERATION_WAIT_MS,
 ): Promise<HostedAppJobResult> {
   const { queue, events } = resources();
   const job = await queue.add(name, data, {
@@ -57,7 +58,7 @@ export async function submitHostedAppJob(
     removeOnComplete: { age: 3_600, count: 1_000 },
     removeOnFail: { age: 86_400, count: 1_000 },
   });
-  return job.waitUntilFinished(events, HOSTED_APP_OPERATION_WAIT_MS);
+  return job.waitUntilFinished(events, waitMs);
 }
 
 /** No-op unless this process submitted hosted-app work. Keeping construction

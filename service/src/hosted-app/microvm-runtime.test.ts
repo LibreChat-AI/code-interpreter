@@ -62,6 +62,37 @@ function runtime(
 }
 
 describe('HostedAppMicrovmRuntime', () => {
+  test('cancels unsuccessful and successful health response bodies before continuing', async () => {
+    const fake = new FakeLambdaMicrovmClient();
+    let probes = 0;
+    let canceled = 0;
+    const f = runtime(fake, async () => {
+      expect(canceled).toBe(probes);
+      probes++;
+      return new Response(new ReadableStream({ cancel() { canceled++; } }), {
+        status: probes === 1 ? 503 : 200,
+      });
+    });
+    const signal = new AbortController().signal;
+    const { vm } = await f.runtime.launch('health-disposal', signal);
+    await f.runtime.waitForControlReady(vm, signal);
+    expect(canceled).toBe(2);
+  });
+
+  test('reads session-bound resident status and rejects mismatched revision', async () => {
+    const fake = new FakeLambdaMicrovmClient();
+    let revision = spec.revision;
+    const f = runtime(fake, async (url, init) => {
+      expect(String(url)).toEndWith('/api/v2/hosted-app/status');
+      expect(new Headers(init?.headers).get('X-Runtime-Session-Id')).toBe('source');
+      return Response.json({ app_id: spec.app_id, revision, state: 'failed' });
+    });
+    const signal = new AbortController().signal;
+    const { vm } = await f.runtime.launch('status', signal);
+    expect(await f.runtime.residentAppState(vm, 'source', spec, signal)).toBe('failed');
+    revision = 'wrong-revision';
+    await expect(f.runtime.residentAppState(vm, 'source', spec, signal)).rejects.toThrow('does not match');
+  });
   test('keeps a second-attempt cancellation ambiguous and replayable', async () => {
     const fake = new FakeLambdaMicrovmClient();
     fake.terminateNextLaunch();

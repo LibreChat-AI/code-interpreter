@@ -76,6 +76,8 @@ class MemoryRegistry implements HostedAppRegistry {
 }
 
 class FakeRuntime {
+  residentState: 'running' | 'failed' = 'running';
+  async residentAppState() { return this.residentState; }
   readonly config = runtimeConfig;
   launches: string[] = [];
   starts: Array<{ vm: string; source: string; spec: ResidentHostedAppSpec }> = [];
@@ -177,6 +179,21 @@ const input = {
   spec: appSpec,
   signal: new AbortController().signal,
 };
+
+test('reconciles process failure without forgetting the live VM needed for cleanup', async () => {
+  const f = fixture();
+  await f.control.start(input);
+  expect((await f.control.status(input.hostedAppRuntimeId, input, input.signal)).state).toBe('running');
+  f.runtime.residentState = 'failed';
+  const status = await f.control.status(input.hostedAppRuntimeId, input, input.signal);
+  expect(status.state).toBe('failed');
+  expect(status.preview_url).toBeUndefined();
+  expect(f.registry.record!.microvm_id).toBe('vm-app-1');
+  await expect(f.control.status(input.hostedAppRuntimeId, { ...input, canonicalUserId: 'intruder' }, input.signal))
+    .rejects.toThrow('Hosted app not found');
+  await f.control.stop(input.hostedAppRuntimeId, input, input.signal);
+  expect(f.runtime.terminations).toEqual(['vm-app-1']);
+});
 
 test('replaces a running VM after its launch policy changes', async () => {
   const f = fixture();

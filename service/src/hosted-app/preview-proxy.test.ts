@@ -40,6 +40,28 @@ test('preserves the request limit classification through fetch error wrapping', 
   expect(hostedAppRequestFailure(new TypeError('fetch failed', { cause: limit }))).toBe(limit);
 });
 
+test('bounds queued refresh well before credential expiry, then falls back', async () => {
+  const record = previewRecord();
+  record.hard_deadline_at = Date.now() + 60_000;
+  record.hosted_app!.preview_credential_expires_at = Date.now() + 1_000;
+  let budget = 0;
+  let reads = 0;
+  const result = await resolvePreviewRecord({
+    hostedAppRuntimeId: record.runtime_session_id,
+    identity: { tenantId: record.tenant_id, canonicalUserId: record.canonical_user_id },
+  }, new AbortController().signal, {
+    read: async () => { reads++; return record; },
+    refresh: async (_name, _data, _id, waitMs) => {
+      budget = waitMs!;
+      return new Promise<never>(() => {}); // No worker / stalled admission.
+    },
+  });
+  expect(budget).toBeGreaterThan(0);
+  expect(budget).toBeLessThanOrEqual(500);
+  expect(reads).toBe(2);
+  expect(hostedAppPreviewCredentialUsable(result, { hostedAppRuntimeId: record.runtime_session_id })).toBe(true);
+});
+
 test('accepts only the exact public app origin and rejects network-path redirects', () => {
   const upstream = 'https://vm.aws.example/app';
   const origin = 'https://app.apps.example.test';

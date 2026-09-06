@@ -380,6 +380,7 @@ export class HostedAppMicrovmRuntime {
             AbortSignal.timeout(this.config.healthTimeoutMs),
           ]),
         });
+        await response.body?.cancel();
         if (response.ok) return;
         lastError = new Error(`health returned ${response.status}`);
       } catch (error) {
@@ -433,6 +434,40 @@ export class HostedAppMicrovmRuntime {
         response.status,
       );
     }
+    await response.body?.cancel();
+  }
+
+  async residentAppState(
+    vm: MicrovmDescription,
+    runtimeSessionId: string,
+    spec: ResidentHostedAppSpec,
+    signal: AbortSignal,
+  ): Promise<'starting' | 'running' | 'stopping' | 'stopped' | 'failed'> {
+    const token = await this.mintToken(vm.microvmId, this.config.controlPort, signal);
+    const response = await this.deps.fetch(
+      `${normalizeHostedAppMicrovmEndpoint(vm.endpoint ?? '')}/api/v2/hosted-app/status`,
+      {
+        headers: {
+          [token.headerName]: token.token,
+          ...microvmPortHeaders(this.config.controlPort),
+          'X-Runtime-Session-Id': runtimeSessionId,
+        },
+        signal: AbortSignal.any([signal, AbortSignal.timeout(this.config.healthTimeoutMs)]),
+      },
+    );
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (response.status === 404) return 'failed';
+      throw new HostedAppMicrovmError('hosted_app_status_unavailable',
+        'Hosted app runner status is unavailable', true);
+    }
+    const body = await response.json() as Record<string, unknown>;
+    if (body.app_id !== spec.app_id || body.revision !== spec.revision
+      || !['starting', 'running', 'stopping', 'stopped', 'failed'].includes(String(body.state))) {
+      throw new HostedAppMicrovmError('hosted_app_status_invalid',
+        'Hosted app runner status does not match the revision', true);
+    }
+    return body.state as 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
   }
 
   previewToken(microvmId: string, signal: AbortSignal): Promise<MicrovmAuthToken> {

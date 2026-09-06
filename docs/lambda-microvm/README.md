@@ -756,7 +756,8 @@ terraform -chdir=docs/lambda-microvm/terraform destroy
 MicroVM images are billed as stored snapshots; running VMs bill while RUNNING and
 suspended VMs bill at a reduced rate, so terminate stray VMs before deleting the
 image.
-# Hosted-app retention and rollout
+
+## Hosted-app retention and rollout
 
 Hosted revisions retain a separate immutable checkpoint under the source session's
 `hosted/` object prefix before releasing the source lease. Rolling workspace
@@ -770,3 +771,17 @@ every environment, including development. Preview authentication uses Secure
 host-only cookies. Worker shutdown allows the full hosted-operation budget plus
 launch cleanup and a 30-second reserve; configure the orchestrator's termination
 grace period to cover that same budget (16 minutes with default timeouts).
+
+Roll the service binary to every hosted-app worker before enabling hosted apps
+on API pods. For upgrades from experimental builds, disable hosted-app admission
+on API pods and drain the hosted queue before replacing workers; re-enable it
+after the workers are ready. Older workers do not recognize the status job and
+must not consume jobs submitted by the new API. The feature defaults to disabled.
+
+Running status is a worker-reconciled observation of the resident process, not
+just a cached VM lease. It is rate-limited like start, waits at most 15 seconds
+for the worker result, and returns unavailable rather than a stale running
+claim if reconciliation fails. A crashed process does not erase its VM identity:
+stop can still terminate the VM and start can reassert the same revision.
+Preview refresh waits at most two seconds (or half the remaining credential/VM
+lifetime when shorter), then rereads and reauthorizes any still-valid credential.
