@@ -73,6 +73,13 @@ test.each([
   ['SEARCH_UNAVAILABLE', 503],
   ['LIST_TIMEOUT', 504],
   ['LIST_UNAVAILABLE', 503],
+  ['WRITE_DISABLED', 403],
+  ['WRITE_LIMIT_EXCEEDED', 413],
+  ['WRITE_UNAVAILABLE', 503],
+  ['EDIT_CONFLICT', 409],
+  ['COMMAND_TIMEOUT', 504],
+  ['COMMAND_UNAVAILABLE', 503],
+  ['COMMAND_DISABLED', 403],
 ] as const)('maps worker %s rejections to HTTP %i', async (errorCode, expectedStatus) => {
   const app = express();
   app.use(json());

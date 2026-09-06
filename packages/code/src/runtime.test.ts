@@ -110,6 +110,48 @@ test('docker runtime supervisor creates a networkless stateful runtime and execu
   assert.ok(health?.includes('--max-time'));
 });
 
+test('docker runtime supervisor permits only its fixed workspace command route', async () => {
+  const calls: string[][] = [];
+  const supervisor = new DockerRuntimeSupervisor({
+    image: 'runner:latest',
+    environment: {
+      SANDBOX_EXTERNAL_WORKSPACE_TOKEN: 'private-workspace-capability',
+    },
+    client: {
+      async run(args) {
+        calls.push(args);
+        if (args[0] === 'container') throw new Error('No such container');
+        if (args[0] === 'run') return 'container';
+        if (args.some((value) => value.includes('/api/v2/health'))) return '200';
+        if (args.some((value) => value.includes('/api/v2/workspace/execute'))) {
+          const script = args.find((value) => value.includes("const b=await Bun.stdin.text"));
+          const marker = script?.match(/\\n([0-9a-f]{64})/)?.[1];
+          return `{"exitCode":0}\n${marker}200`;
+        }
+        return '';
+      },
+    },
+    httpClient: 'bun',
+  });
+  const lease = await supervisor.acquire(assignment('workspace-route'));
+  const response = await lease.execute?.({
+    body: '{"command":"pwd"}',
+    headers: { 'Content-Type': 'application/json' },
+    path: '/api/v2/workspace/execute',
+  });
+  assert.equal(response?.status, 200);
+  assert.ok(calls.some((args) => args.includes('http://127.0.0.1:2000/api/v2/workspace/execute')));
+  const execution = calls.find((args) =>
+    args.includes('http://127.0.0.1:2000/api/v2/workspace/execute'),
+  );
+  assert.equal(execution?.includes('curl'), false);
+  assert.equal(JSON.stringify(execution).includes('private-workspace-capability'), false);
+  assert.equal(
+    execution?.some((value) => value.includes('X-LibreChat-Workspace-Token')),
+    true,
+  );
+});
+
 test('docker runtime supervisor preserves the legacy profile digest for the default network', async () => {
   const image = 'example/code-runtime:latest';
   const legacyDigest = createHash('sha256')

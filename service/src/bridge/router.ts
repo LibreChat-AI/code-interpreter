@@ -312,6 +312,23 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     }),
   );
 
+  router.get(
+    '/workers/:workerId/status',
+    adminAuth,
+    asyncRoute(async (req, res) => {
+      const workerId = req.params.workerId;
+      if (!validWorkerId(workerId) || !configuredWorker(workerId)) {
+        res.status(400).json({ error: 'Invalid bridge worker ID' });
+        return;
+      }
+      const status = await options.store.workerStatus(workerId);
+      res.json({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId,
+        ...status,
+      });
+    }),
+  );
 
 router.post(
   '/workers/register',
@@ -383,7 +400,15 @@ router.post(
           'read_file',
           'search_text',
           'list_files',
+          'write_file',
+          'preview_edit',
+          'edit_file',
+          'execute_command',
         ],
+        supportedWorkspaceWriteFileModes: ['replace', 'create'],
+        supportedWorkspaceEditFileModes: ['single', 'batch'],
+        supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
+        supportedWorkspaceListFileFeatures: ['after_path'],
       });
     } catch (error) {
       if (error instanceof BridgeStoreError) {

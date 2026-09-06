@@ -122,6 +122,14 @@ leave Code API, and are bounded to 1 MiB/500 lines for reads, 200 matches for
 searches, or 500 relative paths for file listings. Absolute paths, traversal,
 backslashes, symlink escapes, unexpected fields, and host roots are rejected.
 
+Workspace mutation remains disabled unless the operator starts the worker with
+`--allow-workspace-writes` (or
+`LIBRECHAT_CODE_ALLOW_WORKSPACE_WRITES=true`). That adds bounded `write_file`
+and exact-match `edit_file` operations. Writes are limited to 1 MiB of UTF-8
+text, require an existing in-workspace parent directory, reject symlinks, and
+commit atomically. The worker capability is an enforcement boundary; LibreChat
+should still route every mutation through its configurable tool-approval hooks.
+
 The workspace root can be an existing project, a Git repository, or an empty
 directory; Git is not required. This boundary keeps that directory local to the
 operator's machine, but selected file contents, search matches, relative file
@@ -129,9 +137,42 @@ listings, and later tool results necessarily cross the outbound bridge to Code
 API and the model.
 Treat them as explicit tool outputs, apply the same retention and audit policy
 as chat content, and do not register a directory containing secrets. The
-default operations are read-only; future mutation and shell operations must be
-gated by LibreChat's tool-approval hooks in addition to worker capability
-checks.
+default operations are read-only. Operators can explicitly add bounded
+`execute_command` support with `--allow-workspace-commands` (or
+`LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS=true`). The CLI prepares its sandbox
+before registration, so Code API cannot dispatch commands to an unavailable
+boundary. LibreChat's tool-approval hooks remain the per-call decision point.
+
+The package exposes `SandboxWorkspaceTools` for composing that boundary without
+ever invoking an unsandboxed host shell. It requires an explicit sandbox
+implementation and an allowlist of workspace IDs, preserves per-workspace
+operation restrictions, validates bounded results, and treats an unknown
+command failure as an uncertain mutation.
+
+Native SRT is the MVP and default command backend on a user's chosen laptop or
+VM. It uses Seatbelt on macOS, bubblewrap/seccomp on Linux, and the SRT
+restricted-account helper on Windows. It confines writes to the registered
+workspace, denies reads of the worker home and control files, strips worker
+credentials, and denies network egress by default. Startup fails closed when
+the platform dependencies are unavailable; there is no unsandboxed fallback.
+Use `LIBRECHAT_CODE_COMMAND_ALLOWED_DOMAINS` for an explicit comma-separated
+egress allowlist.
+Linux hosts must provide Bash at `/bin/bash`, `bubblewrap`, `socat`, and
+`ripgrep`; macOS uses system facilities. Windows requires SRT's one-time
+restricted-account setup.
+
+The optional `docker-nsjail` adapter enables a stronger container boundary with
+`--allow-workspace-commands` (or
+`LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS=true`) and a registered worker/default
+directory. It mounts only the canonical workspace, keeps the runner port
+unpublished, authenticates its dedicated command route with an ephemeral
+container capability, and runs Bash inside the existing NsJail profile. Direct
+endpoint mode cannot be used as the `runtime` command backend, but endpoint
+runtime supervision can coexist with native SRT commands. Set
+`LIBRECHAT_CODE_COMMAND_SANDBOX=runtime` to select Docker/NsJail explicitly.
+This deployment permission does not replace the per-call approval decision:
+LibreChat must apply its configurable tool-approval hooks before dispatching
+`execute_command`.
 
 Stateful deployments must also set `LIBRECHAT_CODE_STATEFUL_WORKSPACE=true`
 and route the CLI's `{runtimeSessionId}` endpoint template to an isolated,

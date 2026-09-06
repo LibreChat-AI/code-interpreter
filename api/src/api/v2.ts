@@ -36,6 +36,11 @@ import {
   HostedAppError,
   hostedAppSupervisor,
 } from '../hosted-app';
+import {
+  executeWorkspaceCommand,
+  hasWorkspaceCommandToken,
+  WorkspaceCommandRequestError,
+} from '../workspace-command';
 
 const router = express.Router();
 const SYNTHETIC_PRINCIPAL_SOURCE = 'synthetic_test';
@@ -382,6 +387,20 @@ function manifestErrorStatus(error: ExecutionManifestError): number {
   return 403;
 }
 
+router.use('/workspace/execute', (req: Request, res: Response, next: NextFunction) => {
+  if (req.method !== 'POST') return next();
+  if (!config.external_workspace_enabled) {
+    return res.status(404).json({ message: 'Not Found' });
+  }
+  if (!hasWorkspaceCommandToken(
+    config.external_workspace_token,
+    req.header('X-LibreChat-Workspace-Token'),
+  )) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+  next();
+});
+
 router.use((req: Request, res: Response, next: NextFunction) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   /* Checkpoint restore and additive file delivery stream tar.gz bodies, not JSON. */
@@ -614,6 +633,40 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
   }
 });
 
+router.post('/workspace/execute', express.json({ limit: '256kb' }), async (req: Request, res: Response) => {
+  let binding;
+  try {
+    binding = parseSessionBindingFromHeader(req.headers[RUNTIME_SESSION_ID_HEADER]);
+  } catch (error) {
+    return res.status(400).json({
+      message: error instanceof Error ? error.message : 'Invalid runtime session',
+    });
+  }
+  if (!binding) {
+    return res.status(400).json({ message: 'X-Runtime-Session-Id is required' });
+  }
+  if (!bindSessionWorkspace(binding)) {
+    return res.status(409).json({
+      error: 'session_workspace_dirty',
+      message: 'Runner is bound to a different runtime session',
+    });
+  }
+  try {
+    return res.status(200).json(await executeWorkspaceCommand(req.body, {
+      workspaceRoot: config.external_workspace_root,
+    }));
+  } catch (error) {
+    if (error instanceof WorkspaceCommandRequestError) {
+      return res.status(400).json({ message: error.message });
+    }
+    logger.error({ err: error }, 'Sandboxed workspace command failed');
+    return res.status(500).json({
+      error: 'sandbox_execution_failed',
+      message: 'Sandboxed workspace command failed',
+    });
+  }
+});
+
 router.get('/health', async (_req: Request, res: Response) => {
   try {
     return res.status(200).json(await checkSandboxWorkspaceHealth());
@@ -683,9 +736,11 @@ function bindSessionFromHeader(req: Request): SessionBindFailure | null {
   return null;
 }
 
-/* Express 4 (pinned) does NOT auto-forward rejected route-handler promises, so
- * `.catch(next)` is required or a rejection (e.g. session.ownership()) hangs the
- * request and surfaces as an unhandled rejection instead of a 5xx. */
+/* `.catch(next)` hands rejections (e.g. session.ownership()) to the error
+ * middleware so they surface as a 5xx. Express 5 auto-forwards rejected
+ * route-handler promises too, so this is now belt-and-braces; it was strictly
+ * required under the previously pinned Express 4, where a rejection instead
+ * hung the request and surfaced as an unhandled rejection. */
 router.get('/session/checkpoint', (req: Request, res: Response, next: NextFunction) => {
   const failure = bindSessionFromHeader(req);
   if (failure) {

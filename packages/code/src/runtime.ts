@@ -15,6 +15,8 @@ export interface RuntimeLease {
 export interface RuntimeExecutionRequest {
   body: string;
   headers: Record<string, string>;
+  /** Fixed runner route; omitted for ordinary code execution. */
+  path?: '/api/v2/execute' | '/api/v2/workspace/execute';
   signal?: AbortSignal;
 }
 
@@ -434,16 +436,19 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
       throw new Error('Runtime request headers cannot contain line breaks');
     }
     const marker = randomBytes(32).toString('hex');
-    const executeUrl = `http://127.0.0.1:${this.runnerPort}/api/v2/execute`;
+    const executeUrl = `http://127.0.0.1:${this.runnerPort}${request.path ?? '/api/v2/execute'}`;
+    const httpClient = request.path === '/api/v2/workspace/execute'
+      ? 'bun'
+      : this.httpClient;
     const output = await this.client.run(
-      this.httpClient === 'bun'
+      httpClient === 'bun'
         ? [
             'exec',
             '--interactive',
             name,
             'bun',
             '-e',
-            `const b=await Bun.stdin.text();const r=await fetch(process.argv.at(-2),{method:'POST',headers:JSON.parse(process.argv.at(-1)),body:b});process.stdout.write(await r.text());process.stdout.write('\\n${marker}'+r.status);`,
+            `const b=await Bun.stdin.text();const h=JSON.parse(process.argv.at(-1));if(process.argv.at(-2).endsWith('/workspace/execute')){const t=process.env.SANDBOX_EXTERNAL_WORKSPACE_TOKEN;if(!t)throw new Error('workspace capability unavailable');h['X-LibreChat-Workspace-Token']=t;}const r=await fetch(process.argv.at(-2),{method:'POST',headers:h,body:b});process.stdout.write(await r.text());process.stdout.write('\\n${marker}'+r.status);`,
             executeUrl,
             JSON.stringify(request.headers),
           ]

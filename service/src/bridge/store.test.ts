@@ -27,6 +27,34 @@ afterEach(async () => {
 });
 
 describe('RedisBridgeStore', () => {
+  test('reports an atomic, capability-limited worker status snapshot', async () => {
+    const store = new RedisBridgeStore(redis);
+    const capabilities = {
+      statefulWorkspace: true,
+      sandboxProfile: 'native-srt',
+      runtimes: ['bash'],
+      requiresReadyConfirmation: true,
+    };
+    expect(await store.workerStatus('vm-status')).toEqual({ online: false, ready: false });
+
+    const generation = await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'vm-status',
+      incarnationId: 'incarnation-status-01',
+      capabilities,
+    });
+    expect(await store.workerStatus('vm-status')).toMatchObject({
+      online: true,
+      ready: false,
+      capabilities,
+    });
+
+    await store.confirmReady('vm-status', 'incarnation-status-01', generation);
+    const status = await store.workerStatus('vm-status');
+    expect(status).toMatchObject({ online: true, ready: true, capabilities });
+    expect(status.leaseExpiresInMs).toBeGreaterThan(0);
+  });
+
   test('rejects a registration whose authenticated identity was replaced', async () => {
     await redis.set(
       'codeapi:bridge:v1:identity:fenced-worker',
