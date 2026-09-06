@@ -7,6 +7,7 @@ import * as fsp from 'fs/promises';
 import { pipeline } from 'stream/promises';
 import { Readable, Transform } from 'stream';
 import type { Logger } from 'pino';
+import type { ArtifactDeliveryFailure } from './delivery';
 import type { NsJailResult } from './nsjail';
 import type { Runtime } from './runtime';
 import { logger as rootLogger } from './logger';
@@ -676,6 +677,7 @@ interface ExecuteResult {
   /** Top-level execution session id (one sandbox `/exec` invocation). */
   session_id: string;
   files: FileRef[];
+  artifact_delivery?: ArtifactDeliveryFailure;
 }
 
 const jobQueue: Array<() => void> = [];

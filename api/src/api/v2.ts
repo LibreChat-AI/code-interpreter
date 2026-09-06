@@ -4,6 +4,7 @@ import type { TFile } from '../job';
 import { getLatestRuntimeMatchingLanguageVersion, getRuntimes } from '../runtime';
 import { logger } from '../logger';
 import { config } from '../config';
+import { reconcileArtifactDelivery } from '../delivery';
 import {
   Job,
   SessionWorkspaceDirtyError,
@@ -563,15 +564,20 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
             return new Set<string>();
           });
 
-        const generatedIds = new Set(job.getGeneratedFileIds());
-        const before = result.files.length;
-        result.files = result.files.filter(
-          f => !generatedIds.has(f.id) || uploaded.has(f.id),
+        const delivery = reconcileArtifactDelivery(
+          result.files,
+          job.getGeneratedFileIds(),
+          uploaded,
         );
-        const dropped = before - result.files.length;
-        if (dropped > 0) {
+        result.files = delivery.files;
+        result.artifact_delivery = delivery.artifact_delivery;
+        if (delivery.artifact_delivery) {
           logger.warn(
-            { job: job.uuid, dropped, kept: result.files.length },
+            {
+              job: job.uuid,
+              dropped: delivery.artifact_delivery.failed,
+              kept: result.files.length,
+            },
             'Pruned files from response because upload did not reach file_server',
           );
         }
