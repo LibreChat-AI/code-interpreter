@@ -78,13 +78,21 @@ export type SandboxBackendErrorCode =
   | 'BRIDGE_WORKER_BUSY'
   | 'BRIDGE_EXECUTION_FAILED'
   | 'BRIDGE_DEADLINE_EXCEEDED'
+  | 'BRIDGE_ASSIGNMENT_FENCED'
+  | 'BRIDGE_ASSIGNMENT_NOT_FOUND'
+  | 'BRIDGE_WORKER_FENCED'
+  | 'BRIDGE_WORKER_QUARANTINED'
+  | 'BRIDGE_WORKSPACE_QUARANTINED'
+  | 'BRIDGE_WORKER_MISMATCH'
+  | 'BRIDGE_ASSIGNMENT_INVALID'
+  | 'BRIDGE_RESULT_INVALID'
   | 'MICROVM_LAUNCH_FAILED'
   | 'MICROVM_LAUNCH_THROTTLED'
   | 'MICROVM_UNHEALTHY'
   | 'MICROVM_FENCED'
   | 'MICROVM_DEADLINE_EXCEEDED';
 
-/** Lambda-only failure modes; the worker prefixes messages with the code so
+/** Typed sandbox backend failure modes; the worker prefixes messages with the code so
  *  the router can map them (e.g. RUNTIME_SESSION_BUSY -> 409). Axios errors
  *  from the sandbox POST itself are rethrown raw by every backend. */
 export class SandboxBackendError extends Error {
