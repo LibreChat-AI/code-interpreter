@@ -413,13 +413,22 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         'COMMAND_UNAVAILABLE',
       );
     }
-    if (signal?.aborted) {
-      throw new WorkspaceToolError(
-        'Workspace command execution aborted',
-        'EXECUTION_ABORTED',
-      );
+    try {
+      if (signal?.aborted) {
+        throw new WorkspaceToolError(
+          'Workspace command execution aborted',
+          'EXECUTION_ABORTED',
+        );
+      }
+      return await this.runWrapped(request, wrapped, cwd, commandId, signal);
+    } finally {
+      // A successful wrap owns command state even when no child is spawned.
+      try {
+        this.manager.cleanupAfterCommand();
+      } catch {
+        // Cleanup is retried by close(); command settlement must still finish.
+      }
     }
-    return await this.runWrapped(request, wrapped, cwd, commandId, signal);
   }
 
   private async withTemporaryHostEnvironment<T>(
@@ -521,11 +530,6 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         const cleanup = (): void => {
           clearTimeout(timer);
           signal?.removeEventListener('abort', abort);
-          try {
-            this.manager.cleanupAfterCommand();
-          } catch {
-            // Cleanup is retried by close(); command settlement must still finish.
-          }
         };
         child.once('error', () => {
           if (settled) return;
