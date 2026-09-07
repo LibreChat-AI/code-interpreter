@@ -197,7 +197,7 @@ test('rejects a GitHub App key in a shared writable directory', async (t) => {
 
   await assert.rejects(
     provider.getCredential(),
-    /private key directory must not be writable/,
+    /writable by other accounts/,
   );
 });
 

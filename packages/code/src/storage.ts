@@ -4,8 +4,6 @@ import {
   lstat,
   mkdir,
   open,
-  readFile,
-  realpath,
   rename,
   rm,
   stat,
@@ -14,7 +12,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 import { BRIDGE_PROTOCOL_VERSION, BridgeProtocolError } from './protocol.js';
-import { assertPrivateStorageSupported } from './private-storage.js';
+import { assertPrivateStorageAncestors, assertPrivateStorageSupported } from './private-storage.js';
 
 import type { PairedBridgeWorkerIdentity } from './pairing.js';
 
@@ -182,60 +180,13 @@ async function groupOrOtherAccessMode(
   return (mode & 0o077) === 0 ? undefined : mode;
 }
 
-/**
- * A `0600` file in a directory other accounts can write is not owner-only in
- * practice: they cannot read it, but they can unlink and substitute it, so a
- * swapped credential or a forged quarantine marker would be trusted. The sticky
- * bit counts as protection, which keeps shared `/tmp`-style parents usable. A
- * writable ancestor above a private directory could still have that directory
- * renamed out from under us, which is broader hardening than this addresses.
- *
- * Deliberately not applied to the registered workspace, which is the user's own
- * project directory and may legitimately be shared.
- */
-async function assertDirectoryNotSharedWritable(
-  directory: string,
-  path: string,
-): Promise<void> {
-  const metadata = await stat(directory);
-  const mode = metadata.mode & 0o7777;
-  const uid = process.getuid?.();
-  if (uid !== undefined && !isTrustedOwner(metadata.uid, uid)) {
-    throw new BridgeProtocolError(
-      `Directory ${directory} is owned by another account (uid ${metadata.uid}), ` +
-        `which can grant itself write access and replace ${path}. Keep worker ` +
-        'credentials in a directory this account owns.',
-    );
-  }
-  if ((mode & 0o022) === 0) return;
-  if ((mode & 0o1000) !== 0 && (metadata.uid === uid || metadata.uid === 0)) {
-    return;
-  }
-  throw new BridgeProtocolError(
-    `Directory ${directory} is writable by other accounts (mode ${mode.toString(8)}), ` +
-      `so ${path} can be replaced even while owner-only. Keep worker credentials ` +
-      'in a directory only this account can write.',
-  );
-}
-
-/** Publishing goes through `rename`, which replaces the named entry itself. */
+/** Publishing replaces the entry itself; reading also follows its target. */
 async function assertWriteContainerPrivate(path: string): Promise<void> {
-  if (process.platform === 'win32' || process.getuid === undefined) return;
-  await assertDirectoryNotSharedWritable(await realpath(dirname(path)), path);
+  await assertPrivateStorageAncestors(dirname(path), true);
 }
 
-/**
- * Reading follows the link, so both the entry and the file it names are trust
- * boundaries: a writable directory at either end allows a substitution.
- */
 async function assertReadPathPrivate(path: string): Promise<void> {
-  if (process.platform === 'win32' || process.getuid === undefined) return;
-  const entryDirectory = await realpath(dirname(path));
-  await assertDirectoryNotSharedWritable(entryDirectory, path);
-  const targetDirectory = dirname(await realpath(path));
-  if (targetDirectory !== entryDirectory) {
-    await assertDirectoryNotSharedWritable(targetDirectory, path);
-  }
+  await assertPrivateStorageAncestors(path);
 }
 
 /** Root is the trust root; anyone else holding a credential path is not. */
@@ -270,6 +221,7 @@ async function readGuardedFile(
   path: string,
   exposed: (mode: string) => string,
 ): Promise<string> {
+  await assertReadPathPrivate(path);
   const handle = await open(path, 'r');
   try {
     const stats = await handle.stat();
@@ -308,16 +260,18 @@ export async function ensurePrivateWorkspaceDirectory(
   path: string,
 ): Promise<void> {
   assertPrivateStorageSupported();
+  await assertWriteContainerPrivate(path);
   await mkdir(path, { recursive: true, mode: 0o700 });
+  await assertWriteContainerPrivate(path);
   const metadata = await lstat(path);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw new BridgeProtocolError('Default workspace path must be a directory');
   }
-  await chmod(path, 0o700);
-  await assertOwnerOnlyPath(path);
   /* This directory is application-owned by contract; a pre-existing one under
    * another account lets that owner alter workspace inputs and results. */
   await assertOwnedByWorker(path);
+  await chmod(path, 0o700);
+  await assertOwnerOnlyPath(path);
 }
 
 /**
@@ -389,7 +343,9 @@ export async function assertIdentityPathIsPrivate(
   path: string,
 ): Promise<IdentityPathReservation> {
   assertPrivateStorageSupported();
+  await assertWriteContainerPrivate(path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await assertWriteContainerPrivate(path);
   await assertIdentityDestinationIsReplaceable(path);
   let created = false;
   let reservedInode: bigint | undefined;
@@ -431,6 +387,7 @@ export async function assertIdentityPathIsPrivate(
   return {
     async release(): Promise<void> {
       if (!created || reservedInode === undefined) return;
+      await assertWriteContainerPrivate(path);
       /* Only ever drop the placeholder this call made. A concurrent `pair`
        * may have published a real identity over the name since, and removing
        * that would destroy a credential whose code is already spent. */
@@ -452,7 +409,9 @@ export async function saveBridgeIdentity(
   identity: PairedBridgeWorkerIdentity,
 ): Promise<void> {
   assertPrivateStorageSupported();
+  await assertWriteContainerPrivate(path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await assertWriteContainerPrivate(path);
   const temporaryPath = `${path}.${randomBytes(8).toString('hex')}.tmp`;
   try {
     const file = await open(temporaryPath, 'wx', 0o600);
@@ -493,7 +452,9 @@ export async function saveWorkspaceMutationQuarantine(
   record: WorkspaceMutationQuarantineRecord,
 ): Promise<void> {
   assertPrivateStorageSupported();
+  await assertWriteContainerPrivate(path);
   await ensureDurableDirectory(dirname(path));
+  await assertWriteContainerPrivate(path);
   const file = await open(path, 'wx', 0o600);
   try {
     try {
@@ -556,6 +517,7 @@ export async function clearWorkspaceMutationQuarantine(
   ownerId?: string,
 ): Promise<void> {
   assertPrivateStorageSupported();
+  await assertWriteContainerPrivate(path);
   if (ownerId != null) {
     const record = await loadWorkspaceMutationQuarantine(path);
     if (record == null || record.ownerId !== ownerId) {
