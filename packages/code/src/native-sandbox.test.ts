@@ -34,6 +34,7 @@ function fakeManager(
     beforeWrap?: () => Promise<void>;
     appendGitSafeDirectory?: boolean;
     inheritedGitEnvironment?: Record<string, string>;
+    wrappedEnvironment?: NodeJS.ProcessEnv;
   } = {},
 ) {
   let config: SandboxRuntimeConfig | undefined;
@@ -72,6 +73,7 @@ function fakeManager(
         env: {
           PATH: process.env.PATH,
           ...gitEnvironment,
+          ...options.wrappedEnvironment,
           ...(credentialSeenDuringWrap
             ? {
                 LIBRECHAT_CODE_TEST_CREDENTIAL:
@@ -146,6 +148,99 @@ test('initializes SRT with a default-deny network and scrubbed worker credential
   assert.ok(denied?.includes('lc_api_token'));
   await sandbox.close();
   assert.equal(fake.reset, true);
+});
+
+const proxyEnvironment = {
+  HTTP_PROXY: 'http://upstream.invalid:8080',
+  HTTPS_PROXY: 'http://upstream.invalid:8080',
+  ALL_PROXY: 'socks5://upstream.invalid:1080',
+  NO_PROXY: 'upstream.internal',
+  http_proxy: 'http://upstream.invalid:8080',
+  https_proxy: 'http://upstream.invalid:8080',
+  all_proxy: 'socks5://upstream.invalid:1080',
+  no_proxy: 'upstream.internal',
+};
+const windowsEnvironment = {
+  SYSTEMROOT: 'C:\\Windows',
+  SystemRoot: 'C:\\Windows',
+  SYSTEMDRIVE: 'C:',
+  windir: 'C:\\Windows',
+  ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+  PATHEXT: '.COM;.EXE;.BAT;.CMD',
+  TEMP: 'C:\\Temp',
+  Temp: 'C:\\Temp',
+  TMP: 'C:\\Temp',
+  USERPROFILE: 'C:\\Users\\sandbox',
+  HOMEDRIVE: 'C:',
+  HOMEPATH: '\\Users\\sandbox',
+  APPDATA: 'C:\\Users\\sandbox\\AppData\\Roaming',
+  LOCALAPPDATA: 'C:\\Users\\sandbox\\AppData\\Local',
+};
+
+for (const platform of ['darwin', 'linux', 'win32'] as const) {
+  test(`preserves required ${platform} environment names without allowing credentials`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const fake = fakeManager();
+    const credentials = {
+      LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+      LIBRECHAT_CODE_HTTP_PROXY: 'worker-secret',
+      AWS_SECRET_ACCESS_KEY: 'aws-secret',
+      GITHUB_TOKEN: 'github-secret',
+      HTTP_PROXY_TOKEN: 'proxy-secret',
+      CUSTOM_PROXY: 'proxy-secret',
+      SYSTEMROOT_TOKEN: 'runtime-secret',
+      NODE_OPTIONS: '--require /host/private.js',
+      LD_PRELOAD: '/host/private.so',
+    };
+    const sandbox = new NativeSrtWorkspaceCommandSandbox({
+      workspaceRoot: root, platform, allowedDomains: ['github.com'],
+      environment: {
+        ...proxyEnvironment, ...windowsEnvironment, ...credentials,
+        HtTp_PrOxY: 'http://mixed-case.invalid:8080',
+        PATH: '/usr/bin', LC_ALL: 'C.UTF-8',
+      },
+      manager: fake.manager,
+    });
+    t.after(() => sandbox.close());
+    await sandbox.prepare();
+    const denied = new Set(fake.config?.credentials?.envVars
+      ?.filter(({ mode }) => mode === 'deny').map(({ name }) => name));
+    for (const name of [...Object.keys(proxyEnvironment), 'PATH', 'LC_ALL']) {
+      assert.equal(denied.has(name), false, `${name} must remain available`);
+    }
+    for (const name of Object.keys(windowsEnvironment)) {
+      assert.equal(denied.has(name), platform !== 'win32', `${name} must be platform-specific`);
+    }
+    assert.equal(denied.has('HtTp_PrOxY'), platform !== 'win32');
+    for (const name of Object.keys(credentials)) {
+      assert.equal(denied.has(name), true, `${name} must remain denied`);
+    }
+    assert.deepEqual(fake.config?.network.allowedDomains, ['github.com']);
+    assert.equal(fake.config?.network.strictAllowlist, true);
+  });
+}
+
+test('uses SRT proxy values without restoring inherited proxies or credentials', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const wrappedEnvironment = {
+    HTTP_PROXY: 'http://localhost:3128', HTTPS_PROXY: 'http://localhost:3128',
+    ALL_PROXY: 'http://localhost:3128', NO_PROXY: 'localhost',
+  };
+  const fake = fakeManager({ wrappedEnvironment });
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    environment: { ...proxyEnvironment, GITHUB_TOKEN: 'host-secret' },
+    manager: fake.manager,
+  });
+  t.after(() => sandbox.close());
+  const result = await sandbox.execute({
+    ...request, maxOutputBytes: 256,
+    command: 'printf "%s|%s|%s|%s|%s" "$HTTP_PROXY" "$HTTPS_PROXY" "$ALL_PROXY" "$NO_PROXY" "${GITHUB_TOKEN-unset}"',
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, `${Object.values(wrappedEnvironment).join('|')}|unset`);
 });
 
 test('masks a host credential for only its injection host and restores the parent environment', async (t) => {

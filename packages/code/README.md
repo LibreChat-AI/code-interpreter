@@ -86,6 +86,12 @@ policy: an allowed destination can receive workspace data. The normalized
 allowlist is included in the worker policy digest. Tool approval hooks remain
 the user-facing allow/deny boundary for each invocation.
 
+The native sandbox preserves standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+and `NO_PROXY` names (including lowercase forms), plus Windows process and profile
+variables on Windows. SRT remains responsible for the final sandbox environment
+and can replace proxy values with its filtered proxy endpoints. This does not
+expand the allowed domains or expose unrelated inherited credentials.
+
 ### GitHub authentication
 
 The native BYOM worker can provide Git HTTPS authentication without exposing a
