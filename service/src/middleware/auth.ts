@@ -4,6 +4,7 @@ import { connection } from '../queue';
 import { isValidId } from '../utils';
 import { env } from '../config';
 import { resolveSessionKey, parseUploadSessionKeyInput, SessionKeyResolutionError } from '../session-key';
+import { authorizeSessionOwnership } from '../session-ownership';
 import { LibreChatJwtAuthProvider, CodeApiJwtAuthError } from '../auth/librechat-jwt';
 import { applyPrincipal, type CodeApiPrincipal } from '../auth/principal';
 import { applyLocalPrincipal } from '../auth/local';
@@ -238,10 +239,35 @@ export const sessionAuth = async (req: AuthenticatedRequest, res: Response, next
     }
     throw err;
   }
-  const cachedSessionKey = await connection.get(`session:${session_id}`);
-  if (cachedSessionKey !== sessionKey) {
-    logger.error(`Unauthorized download: Cached session key: ${cachedSessionKey} | Expected session key: ${sessionKey} | Session ID: ${session_id} | File ID: ${fileId}`);
+
+  /* A delete may fall back to the durable owner record once the session
+   * cache key has expired; reads keep the `SESSION_CACHE_TTL` window they
+   * have always had. Without the fallback an object is deletable only for
+   * the 24h following upload and is stranded in the bucket forever after
+   * that — see `session-ownership.ts`. */
+  const isDelete = req.method === 'DELETE';
+  let ownership: Awaited<ReturnType<typeof authorizeSessionOwnership>>;
+  try {
+    ownership = await authorizeSessionOwnership(connection, {
+      /* Narrowed by the `isValidId` guard above, which is not a type
+       * predicate. */
+      session_id: session_id as string,
+      expectedSessionKey: sessionKey,
+      allowExpiredCache: isDelete,
+    });
+  } catch (err) {
+    /* Express 4 does not forward a rejected async middleware, so an
+     * unavailable Redis — or an ACL that grants `session:*` but not
+     * `session-owner:*` — would hang the request instead of answering. */
+    logger.error(`Session ownership lookup failed - Session ID: ${session_id} | File ID: ${fileId}`, err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+  if (!ownership.authorized) {
+    logger.error(`Unauthorized ${isDelete ? 'delete' : 'download'}: Cached session key: ${ownership.cachedSessionKey} | Expected session key: ${sessionKey} | Session ID: ${session_id} | File ID: ${fileId} | Reason: ${ownership.reason}`);
     return res.status(403).json({ error: 'Unauthorized' });
+  }
+  if (ownership.source === 'owner') {
+    logger.info(`Delete authorized from durable owner record - Session ID: ${session_id} | File ID: ${fileId}`);
   }
 
   req.sessionKey = sessionKey;

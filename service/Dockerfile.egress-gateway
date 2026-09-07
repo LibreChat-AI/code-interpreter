@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 COPY --from=install /temp/prod/node_modules ./node_modules
 COPY service/src ./src
 COPY shared /shared
+COPY packages/code/src /packages/code/src
 EXPOSE 3190
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:3190/health || exit 1
@@ -28,5 +29,6 @@ ENV NODE_ENV=development
 COPY --from=install /temp/dev/node_modules node_modules
 COPY service/src ./src
 COPY shared /shared
+COPY packages/code/src /packages/code/src
 EXPOSE 3190 9230
 CMD ["bun", "run", "--watch", "src/egress-gateway.ts"]

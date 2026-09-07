@@ -22,6 +22,10 @@ interface CleanupInternals {
   jobIdentity?: SandboxJobIdentity;
 }
 
+interface MarkerInternals {
+  autoLoadDirkeep(): Promise<void>;
+}
+
 function makeRuntime(): Runtime {
   return {
     language: 'bash',
@@ -194,6 +198,89 @@ describe('Job cleanup', () => {
     } finally {
       await job.cleanup();
       await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test('bounds inherited marker listing concurrency', async () => {
+    const files: TFile[] = Array.from(
+      { length: config.prime_concurrency + 4 },
+      (_, index) => ({
+        id: `input-${index}`,
+        name: `input-${index}.txt`,
+        storage_session_id: `storage-${index}`,
+      }),
+    );
+    const job = new Job({
+      session_id: 'marker-concurrency',
+      runtime: makeRuntime(),
+      files,
+      args: [],
+      stdin: '',
+      timeouts: { compile: 5000, run: 5000 },
+      cpu_times: { compile: 5000, run: 5000 },
+      memory_limits: { compile: 100_000_000, run: 100_000_000 },
+    });
+    const originalFetch = globalThis.fetch;
+    let active = 0;
+    let maxActive = 0;
+    globalThis.fetch = async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      active -= 1;
+      return Response.json([]);
+    };
+
+    try {
+      await (job as unknown as MarkerInternals).autoLoadDirkeep();
+      expect(maxActive).toBeLessThanOrEqual(config.prime_concurrency);
+      expect(maxActive).toBeGreaterThan(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('retries relay backpressure and rejects persistent marker-list failures', async () => {
+    const makeMarkerJob = (): Job =>
+      new Job({
+        session_id: 'marker-backpressure',
+        runtime: makeRuntime(),
+        files: [
+          {
+            id: 'input-1',
+            name: 'input.txt',
+            storage_session_id: 'storage-1',
+          },
+        ],
+        args: [],
+        stdin: '',
+        timeouts: { compile: 5000, run: 5000 },
+        cpu_times: { compile: 5000, run: 5000 },
+        memory_limits: { compile: 100_000_000, run: 100_000_000 },
+      });
+    const originalFetch = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response(null, {
+          status: 503,
+          headers: { 'Retry-After': '0' },
+        });
+      }
+      return Response.json([]);
+    };
+
+    try {
+      await (makeMarkerJob() as unknown as MarkerInternals).autoLoadDirkeep();
+      expect(attempts).toBe(2);
+
+      globalThis.fetch = async () => new Response(null, { status: 502 });
+      await expect(
+        (makeMarkerJob() as unknown as MarkerInternals).autoLoadDirkeep(),
+      ).rejects.toThrow('HTTP error loading .dirkeep markers: 502');
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 });

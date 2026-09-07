@@ -180,6 +180,9 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
        * `[]` so the strictened response type from Phase B doesn't
        * surface a regression that wasn't there before. */
       files: files ?? [],
+      ...(responseData.artifact_delivery != null
+        ? { artifact_delivery: responseData.artifact_delivery }
+        : {}),
       stdout,
       stderr,
     };

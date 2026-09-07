@@ -71,6 +71,35 @@ export const config = {
    * session mode. An enabled runner additionally binds each request to a
    * workspace through the authenticated X-Runtime-Session-Id header. */
   session_workspace_enabled: (process.env.SANDBOX_SESSION_WORKSPACE_ENABLED ?? 'false') === 'true',
+  external_workspace_enabled: (process.env.SANDBOX_EXTERNAL_WORKSPACE_ENABLED ?? 'false') === 'true',
+  external_workspace_root: cleanDirectory(process.env.SANDBOX_EXTERNAL_WORKSPACE_ROOT)
+    ?? '/mnt/workspace',
+  external_workspace_token: process.env.SANDBOX_EXTERNAL_WORKSPACE_TOKEN ?? '',
+  /**
+   * Enables the Lambda-only hosted-app runner surface. This must only be set
+   * on a dedicated app-host MicroVM image: user application processes share
+   * that VM's network namespace and are therefore intentionally never started
+   * by the ordinary stateless/session execution runner.
+   */
+  hosted_apps_enabled: (process.env.SANDBOX_HOSTED_APPS_ENABLED ?? 'false') === 'true',
+  hosted_app_port: safeInt(process.env.SANDBOX_HOSTED_APP_PORT, 3000),
+  hosted_app_start_timeout_ms: safeInt(
+    process.env.SANDBOX_HOSTED_APP_START_TIMEOUT_MS,
+    30_000,
+  ),
+  hosted_app_stop_timeout_ms: safeInt(
+    process.env.SANDBOX_HOSTED_APP_STOP_TIMEOUT_MS,
+    5_000,
+  ),
+  hosted_app_log_max_bytes: safeInt(
+    process.env.SANDBOX_HOSTED_APP_LOG_MAX_BYTES,
+    64 * 1024,
+  ),
+  hosted_app_memory_max_bytes: safeInt(
+    process.env.SANDBOX_HOSTED_APP_MEMORY_MAX_BYTES,
+    2 * 1024 * 1024 * 1024,
+  ),
+  hosted_app_pids_max: safeInt(process.env.SANDBOX_HOSTED_APP_PIDS_MAX, 128),
   job_uid_base: safeInt(process.env.SANDBOX_JOB_UID_BASE, 200000),
   job_gid_base: safeInt(process.env.SANDBOX_JOB_GID_BASE, 200000),
   job_uid_count: safeInt(
@@ -103,6 +132,7 @@ export const config = {
   max_input_files: safeInt(process.env.SANDBOX_MAX_INPUT_FILES, 256),
   prime_concurrency: safeInt(process.env.SANDBOX_PRIME_CONCURRENCY, 8),
   egress_gateway_url: egressGatewayUrl,
+  file_relay_token: process.env.SANDBOX_FILE_RELAY_TOKEN ?? '',
   file_server_url: process.env.FILE_SERVER_URL ?? '',
   max_nesting_depth: safeInt(process.env.SANDBOX_MAX_NESTING_DEPTH, 10),
   max_path_length: safeInt(process.env.SANDBOX_MAX_PATH_LENGTH, 256),

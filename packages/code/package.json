@@ -22,6 +22,22 @@
     "./runtime": {
       "types": "./dist/runtime.d.ts",
       "import": "./dist/runtime.js"
+    },
+    "./workspace": {
+      "types": "./dist/workspace.d.ts",
+      "import": "./dist/workspace.js"
+    },
+    "./workspace-runtime": {
+      "types": "./dist/workspace-runtime.d.ts",
+      "import": "./dist/workspace-runtime.js"
+    },
+    "./native-sandbox": {
+      "types": "./dist/native-sandbox.d.ts",
+      "import": "./dist/native-sandbox.js"
+    },
+    "./github": {
+      "types": "./dist/github.d.ts",
+      "import": "./dist/github.js"
     }
   },
   "bin": {
@@ -41,6 +57,9 @@
     "typescript": "^5.5.4"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.11"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.75"
   }
 }

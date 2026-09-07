@@ -20,6 +20,14 @@ describe('execution log summaries', () => {
         { id: 'file_1', name: 'a.txt', inherited: true },
         { id: 'file_2', name: 'b.txt', modified_from: { id: 'file_1', storage_session_id: 'sess_old' } },
       ],
+      artifact_delivery: {
+        code: 'artifact_delivery_failed',
+        status: 'partial',
+        attempted: 3,
+        delivered: 2,
+        failed: 1,
+        detail: 'private storage failure',
+      },
       run: {
         code: 0,
         stdout: 'top secret stdout',
@@ -33,9 +41,17 @@ describe('execution log summaries', () => {
     expect(JSON.stringify(summary)).not.toContain('top secret stdout');
     expect(JSON.stringify(summary)).not.toContain('sensitive stderr');
     expect(JSON.stringify(summary)).not.toContain('combined output');
+    expect(JSON.stringify(summary)).not.toContain('private storage failure');
     expect(summary).toMatchObject({
       session_id: 'sess_123',
       files: { count: 2, inheritedCount: 1, modifiedCount: 1 },
+      artifact_delivery: {
+        code: 'artifact_delivery_failed',
+        status: 'partial',
+        attempted: 3,
+        delivered: 2,
+        failed: 1,
+      },
       run: {
         stdout: { length: 17, present: true },
         stderr: { length: 16, present: true },
@@ -56,4 +72,3 @@ describe('execution log summaries', () => {
     expect(summary).toEqual({ count: 3, skillCount: 1, agentCount: 1, userCount: 1 });
   });
 });
-

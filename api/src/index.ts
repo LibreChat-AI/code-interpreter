@@ -8,6 +8,7 @@ import { httpMetricsMiddleware, metricsHandler } from './metrics';
 import { positiveInt, shutdownTelemetry, traceHttpRequest } from './telemetry';
 import { startWarmupCommand } from './warmup';
 import { stopToolCallSocketProxy } from './tool-call-socket-process';
+import { hostedAppSupervisor, validateHostedAppStartup } from './hosted-app';
 import v2Router from './api/v2';
 import lifecycleRouter, { LIFECYCLE_HOOK_BASE_PATH } from './api/lifecycle';
 
@@ -66,6 +67,7 @@ app.use((err: HttpError, _req: express.Request, res: express.Response, _next: ex
 });
 
 async function main(): Promise<void> {
+  validateHostedAppStartup();
   validateHardenedSandboxStartup();
   await initializeSandboxWorkspaceIsolation();
   await startWarmupCommand();
@@ -111,6 +113,9 @@ async function main(): Promise<void> {
     shuttingDown = true;
     stopWorkspaceReaper();
     await closeHttpServerWithTimeout();
+    await hostedAppSupervisor.shutdown().catch((err) => {
+      logger.warn({ err }, 'Hosted-app process shutdown failed');
+    });
     await stopToolCallSocketProxy().catch((err) => {
       logger.warn({ err }, 'Tool-call socket proxy shutdown failed');
     });

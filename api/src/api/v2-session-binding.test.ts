@@ -20,6 +20,8 @@ let baseUrl: string;
 let packageDir: string;
 const savedSessionWorkspaceEnabled = config.session_workspace_enabled;
 const savedRequireExecutionManifest = config.require_execution_manifest;
+const savedExternalWorkspaceEnabled = config.external_workspace_enabled;
+const savedExternalWorkspaceToken = config.external_workspace_token;
 const testLanguage = 'headerless-session-regression';
 const testVersion = '1.0.0';
 
@@ -49,6 +51,8 @@ afterAll(async () => {
 afterEach(() => {
   config.session_workspace_enabled = savedSessionWorkspaceEnabled;
   config.require_execution_manifest = savedRequireExecutionManifest;
+  config.external_workspace_enabled = savedExternalWorkspaceEnabled;
+  config.external_workspace_token = savedExternalWorkspaceToken;
   resetSessionWorkspaceStateForTests();
 });
 
@@ -65,6 +69,62 @@ const execute = (runtimeSessionId?: string) =>
       files: [{ name: 'main.txt', content: 'test' }],
     }),
   });
+
+describe('workspace command route boundary', () => {
+  test('stays hidden unless the external workspace profile is enabled', async () => {
+    config.external_workspace_enabled = false;
+    const response = await fetch(`${baseUrl}/api/v2/workspace/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{',
+    });
+    expect(response.status).toBe(404);
+  });
+
+  test('authenticates before parsing or binding a command request', async () => {
+    config.external_workspace_enabled = true;
+    config.external_workspace_token = 'a'.repeat(32);
+    config.session_workspace_enabled = true;
+    const unauthorized = await fetch(`${baseUrl}/api/v2/workspace/execute`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Runtime-Session-Id': 'rt_must_not_bind',
+      },
+      body: '{',
+    });
+    expect(unauthorized.status).toBe(401);
+    expect(getBoundSessionWorkspace()).toBeUndefined();
+
+    const authenticated = await fetch(`${baseUrl}/api/v2/workspace/execute`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-LibreChat-Workspace-Token': 'a'.repeat(32),
+      },
+      body: JSON.stringify({ command: 'pwd' }),
+    });
+    expect(authenticated.status).toBe(400);
+    expect(await authenticated.json()).toEqual({
+      message: 'X-Runtime-Session-Id is required',
+    });
+  });
+
+  test('parses the worst-case escaped valid command envelope', async () => {
+    config.external_workspace_enabled = true;
+    config.external_workspace_token = 'a'.repeat(32);
+    const response = await fetch(`${baseUrl}/api/v2/workspace/execute`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-LibreChat-Workspace-Token': 'a'.repeat(32),
+        'X-Runtime-Session-Id': 'rt_maximum_escaped_command',
+      },
+      body: JSON.stringify({ command: '\u0001'.repeat(32 * 1024) }),
+    });
+    expect(response.status).not.toBe(413);
+  });
+});
 
 describe('per-request session binding', () => {
   test('a headerless execute does not inherit the runner session bound by a prior request', async () => {

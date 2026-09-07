@@ -110,11 +110,13 @@ let serverPort = 0;
 const routes = new Map<string, Route>();
 let originalFileServerUrl: string;
 let originalEgressGatewayUrl: string;
+let originalFileRelayToken: string;
 let originalPerJobUids: boolean;
 
 beforeAll(() => {
   originalFileServerUrl = config.file_server_url;
   originalEgressGatewayUrl = config.egress_gateway_url;
+  originalFileRelayToken = config.file_relay_token;
   originalPerJobUids = config.per_job_uids;
   server = Bun.serve({
     port: 0,
@@ -151,6 +153,7 @@ beforeAll(() => {
 afterAll(() => {
   (config as { file_server_url: string }).file_server_url = originalFileServerUrl;
   (config as { egress_gateway_url: string }).egress_gateway_url = originalEgressGatewayUrl;
+  (config as { file_relay_token: string }).file_relay_token = originalFileRelayToken;
   (config as { per_job_uids: boolean }).per_job_uids = originalPerJobUids;
   server.stop(true);
 });
@@ -164,6 +167,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   (config as { egress_gateway_url: string }).egress_gateway_url = originalEgressGatewayUrl;
+  (config as { file_relay_token: string }).file_relay_token = originalFileRelayToken;
   (config as { file_server_url: string }).file_server_url = `http://127.0.0.1:${serverPort}`;
   (config as { per_job_uids: boolean }).per_job_uids = false;
   await fsp.rm(tmpDir, { recursive: true, force: true });
@@ -208,6 +212,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
       name: 'gateway-fallback.txt',
     };
     let sawGrantHeader = false;
+    let sawRelayToken = false;
     let sawInternalHeader = false;
     routes.set(`/sessions/${encodeURIComponent(file.storage_session_id!)}/objects/${encodeURIComponent(file.id!)}`, {
       status: 200,
@@ -215,10 +220,12 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
       body: 'gateway bytes',
       onRequest(req) {
         sawGrantHeader = req.headers.get('x-codeapi-egress-grant') === 'opaque-grant';
+        sawRelayToken = req.headers.get('x-librechat-code-relay-token') === 'relay-secret';
         sawInternalHeader = req.headers.has('x-codeapi-internal-token');
       },
     });
     (config as { egress_gateway_url: string }).egress_gateway_url = `http://127.0.0.1:${serverPort}`;
+    (config as { file_relay_token: string }).file_relay_token = 'relay-secret';
     (config as { file_server_url: string }).file_server_url = 'http://127.0.0.1:1';
 
     const job = new Job({
@@ -238,6 +245,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
 
     expect(writtenName).toBe('gateway.txt');
     expect(sawGrantHeader).toBe(true);
+    expect(sawRelayToken).toBe(true);
     expect(sawInternalHeader).toBe(false);
     expect(await fsp.readFile(path.join(tmpDir, 'gateway.txt'), 'utf8')).toBe('gateway bytes');
   });

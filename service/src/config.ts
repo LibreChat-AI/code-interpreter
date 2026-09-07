@@ -399,6 +399,16 @@ export const env = {
     FETCH_MAX_REQUESTS: Number(process.env.FETCH_MAX_REQUESTS) || 120, // 120 requests per minute
     // Redis Key Cache Config
     SESSION_CACHE_TTL: Number(process.env.SESSION_CACHE_TTL) || 86400,
+    /** TTL for the durable `session-owner:<session_id>` record that backs
+     *  deletion after `SESSION_CACHE_TTL` has lapsed (see
+     *  `session-ownership.ts`). Sized to outlive a client's retention
+     *  window — LibreChat sweeps expired files at 30 days by default, and a
+     *  shorter value here reinstates the leak it exists to close. Clamped
+     *  so it can never be tighter than the cache TTL. */
+    SESSION_OWNER_TTL: Math.max(
+        Number(process.env.SESSION_OWNER_TTL) || 90 * 86400,
+        Number(process.env.SESSION_CACHE_TTL) || 86400,
+    ),
     /** Strict tenant isolation. When true, sessionKey resolution fails closed
      *  (500) on requests whose auth context lacks `tenantId`, instead of
      *  silently falling back to the `'legacy'` tenant prefix. Default OFF in
@@ -503,7 +513,39 @@ export const env = {
     ),
     CHECKPOINT_TIMEOUT_MS: configuredNumber(process.env.CODEAPI_CHECKPOINT_TIMEOUT_MS, 60_000),
     CHECKPOINT_PREFIX: process.env.CODEAPI_CHECKPOINT_PREFIX ?? 'rtsx-checkpoints/',
+    /** Dedicated Lambda MicroVM resident-server fleet. */
+    HOSTED_APPS_ENABLED: process.env.CODEAPI_HOSTED_APPS_ENABLED === 'true',
+    HOSTED_APP_IMAGE_ARN: process.env.LAMBDA_MICROVM_APP_IMAGE_ARN ?? '',
+    HOSTED_APP_IMAGE_VERSION: process.env.LAMBDA_MICROVM_APP_IMAGE_VERSION || undefined,
+    HOSTED_APP_CONTROL_PORT: 8080 as number,
+    HOSTED_APP_PREVIEW_PORT: 3000 as number,
+    HOSTED_APP_MAX_DURATION_SECONDS: configuredNumber(
+        process.env.LAMBDA_MICROVM_APP_MAX_DURATION_SECONDS,
+        28_800,
+    ),
+    HOSTED_APP_IDLE_SECONDS: configuredNumber(
+        process.env.LAMBDA_MICROVM_APP_IDLE_SECONDS,
+        300,
+    ),
+    HOSTED_APP_SUSPEND_SECONDS: configuredNumber(
+        process.env.LAMBDA_MICROVM_APP_SUSPEND_SECONDS,
+        900,
+    ),
+    HOSTED_APP_START_TIMEOUT_MS: 30_000 as number,
+    HOSTED_APP_CREDENTIAL_KEY: process.env.CODEAPI_HOSTED_APP_CREDENTIAL_KEY ?? '',
+    HOSTED_APP_PREVIEW_ORIGIN: process.env.CODEAPI_HOSTED_APP_PREVIEW_ORIGIN ?? '',
+    HOSTED_APP_PREVIEW_SIGNING_KEY:
+        process.env.CODEAPI_HOSTED_APP_PREVIEW_SIGNING_KEY ?? '',
 };
+
+export function hostedAppOperationTimeoutMs(): number {
+    return (
+        env.CHECKPOINT_TIMEOUT_MS * 9 +
+        env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 7 +
+        env.HOSTED_APP_START_TIMEOUT_MS +
+        30_000
+    );
+}
 
 const default_run_memory_limit = 256 * 1024 * 1024;
 

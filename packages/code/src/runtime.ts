@@ -15,6 +15,8 @@ export interface RuntimeLease {
 export interface RuntimeExecutionRequest {
   body: string;
   headers: Record<string, string>;
+  /** Fixed runner route; omitted for ordinary code execution. */
+  path?: '/api/v2/execute' | '/api/v2/workspace/execute';
   signal?: AbortSignal;
 }
 
@@ -47,6 +49,7 @@ export interface DockerRuntimeSupervisorOptions {
   image?: string;
   profileRevision?: string;
   restartStoppedContainers?: boolean;
+  network?: string;
   capabilities?: string[];
   securityOptions?: string[];
   environment?: Record<string, string>;
@@ -76,6 +79,7 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_HEALTH_PATH = '/api/v2/health';
 const CONTAINER_PREFIX = 'librechat-code-';
 const CAPABILITY_PATTERN = /^[A-Z_]{1,32}$/;
+const NETWORK_PATTERN = /^(?:none|[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$/;
 const MAX_DOCKER_COMMAND_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 function normalizedEndpoint(value: string): string {
@@ -106,7 +110,7 @@ function isMissingImageError(error: unknown): boolean {
   return /(?:no such image|no such object)/i.test(error.message);
 }
 
-class DockerCliClient implements ContainerRuntimeClient {
+export class DockerCliClient implements ContainerRuntimeClient {
   private readonly command: string;
 
   constructor(command = 'docker') {
@@ -165,6 +169,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
   private readonly bindMounts: DockerRuntimeBindMount[];
   private readonly httpClient: 'curl' | 'bun';
   private readonly restartStoppedContainers: boolean;
+  private readonly network: string;
 
   constructor(private readonly options: DockerRuntimeSupervisorOptions) {
     if (options.image != null && options.image.trim().length === 0) {
@@ -172,6 +177,9 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     }
     if (options.capabilities?.some((capability) => !CAPABILITY_PATTERN.test(capability))) {
       throw new Error('Docker runtime capabilities must be uppercase capability names');
+    }
+    if (options.network != null && !NETWORK_PATTERN.test(options.network)) {
+      throw new Error('Docker runtime network name is invalid');
     }
     this.client = options.client ?? new DockerCliClient(options.dockerCommand);
     this.runnerPort = options.runnerPort ?? DEFAULT_RUNNER_PORT;
@@ -183,6 +191,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
     this.bindMounts = (options.bindMounts ?? []).map((mount) => ({ ...mount }));
     this.httpClient = options.httpClient ?? 'curl';
     this.restartStoppedContainers = options.restartStoppedContainers ?? true;
+    this.network = options.network ?? 'none';
     if (
       this.bindMounts.some(
         ({ source, target }) =>
@@ -275,7 +284,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
         '--name',
         name,
         '--network',
-        'none',
+        this.network,
         '--cap-drop',
         'ALL',
         ...this.capabilities.flatMap((capability) => ['--cap-add', capability]),
@@ -310,6 +319,7 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
           image,
           profileRevision: this.options.profileRevision ?? null,
           restartStoppedContainers: this.restartStoppedContainers,
+          ...(this.network !== 'none' ? { network: this.network } : {}),
           capabilities: this.capabilities,
           securityOptions: this.securityOptions,
           environment: Object.entries(this.environment).sort(([left], [right]) =>
@@ -426,16 +436,19 @@ export class DockerRuntimeSupervisor implements RuntimeSupervisor {
       throw new Error('Runtime request headers cannot contain line breaks');
     }
     const marker = randomBytes(32).toString('hex');
-    const executeUrl = `http://127.0.0.1:${this.runnerPort}/api/v2/execute`;
+    const executeUrl = `http://127.0.0.1:${this.runnerPort}${request.path ?? '/api/v2/execute'}`;
+    const httpClient = request.path === '/api/v2/workspace/execute'
+      ? 'bun'
+      : this.httpClient;
     const output = await this.client.run(
-      this.httpClient === 'bun'
+      httpClient === 'bun'
         ? [
             'exec',
             '--interactive',
             name,
             'bun',
             '-e',
-            `const b=await Bun.stdin.text();const r=await fetch(process.argv.at(-2),{method:'POST',headers:JSON.parse(process.argv.at(-1)),body:b});process.stdout.write(await r.text());process.stdout.write('\\n${marker}'+r.status);`,
+            `const b=await Bun.stdin.text();const h=JSON.parse(process.argv.at(-1));if(process.argv.at(-2).endsWith('/workspace/execute')){const t=process.env.SANDBOX_EXTERNAL_WORKSPACE_TOKEN;if(!t)throw new Error('workspace capability unavailable');h['X-LibreChat-Workspace-Token']=t;}const r=await fetch(process.argv.at(-2),{method:'POST',headers:h,body:b});process.stdout.write(await r.text());process.stdout.write('\\n${marker}'+r.status);`,
             executeUrl,
             JSON.stringify(request.headers),
           ]

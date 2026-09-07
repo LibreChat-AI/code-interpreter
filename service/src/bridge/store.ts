@@ -6,9 +6,17 @@ import type {
   BridgeAssignment,
   BridgeSettlement,
   BridgeWorkerRegistration,
+  WorkspaceToolRequest,
+  WorkspaceToolResult,
 } from '../../../packages/code/src/protocol';
 
-import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  isValidBridgeWorkerCapabilities,
+  isValidBridgeWorkerId,
+  isWorkspaceToolRequest,
+  isWorkspaceToolResult,
+} from '../../../packages/code/src/protocol';
 import type { BridgeWorkerBinding } from './pairing';
 
 const PREFIX = 'codeapi:bridge:v1';
@@ -24,6 +32,10 @@ export type CodeBridgeSettlement = BridgeSettlement<
     run?: t.ExecuteResponse['run'];
   }
 >;
+export type CodeBridgeWorkspaceSettlement = BridgeSettlement<WorkspaceToolResult>;
+type AnyCodeBridgeSettlement =
+  | CodeBridgeSettlement
+  | CodeBridgeWorkspaceSettlement;
 
 export class BridgeStoreError extends Error {
   constructor(
@@ -37,7 +49,9 @@ export class BridgeStoreError extends Error {
       | 'WORKER_FENCED'
       | 'WORKER_QUARANTINED'
       | 'WORKSPACE_QUARANTINED'
-      | 'WORKER_MISMATCH',
+      | 'WORKER_MISMATCH'
+      | 'ASSIGNMENT_INVALID'
+      | 'RESULT_INVALID',
     message: string,
   ) {
     super(message);
@@ -56,6 +70,58 @@ export interface RegisteredBridgeWorker extends BridgeWorkerRegistration {
   identityId?: string;
 }
 
+export interface BridgeWorkerStatus {
+  online: boolean;
+  ready: boolean;
+  leaseExpiresInMs?: number;
+  capabilities?: BridgeWorkerRegistration['capabilities'];
+}
+
+function supportsWorkspaceTool(
+  registration: RegisteredBridgeWorker,
+  request: WorkspaceToolRequest,
+): boolean {
+  const capabilities = registration.capabilities.workspaceTools;
+  const workspace = capabilities?.workspaces.find(
+    (candidate) => candidate.id === request.workspaceId,
+  );
+  const supportsOperation =
+    capabilities != null &&
+    capabilities.operations.includes(request.operation) &&
+    workspace != null &&
+    (workspace.operations == null ||
+      workspace.operations.includes(request.operation));
+  if (!supportsOperation) {
+    return supportsOperation;
+  }
+  if (request.operation === 'list_files' && request.afterPath !== undefined) {
+    return capabilities?.listFileFeatures?.includes('after_path') === true;
+  }
+  if (request.operation === 'write_file') {
+    const mode = request.overwrite === false ? 'create' : 'replace';
+    const modes = capabilities?.writeFileModes;
+    return request.overwrite === undefined && modes == null
+      ? true
+      : modes?.includes(mode) === true;
+  }
+  if (
+    request.operation === 'preview_edit' ||
+    request.operation === 'edit_file'
+  ) {
+    const mode = request.edits === undefined ? 'single' : 'batch';
+    const modes = capabilities?.editFileModes;
+    const supportsMode = modes == null ? mode === 'single' : modes.includes(mode);
+    if (request.operation === 'preview_edit') return supportsMode;
+    return (
+      supportsMode &&
+      (request.expectedBaseSha256 === undefined ||
+        capabilities?.editFileFeatures?.includes('expected_base_sha256') ===
+          true)
+    );
+  }
+  return true;
+}
+
 function workerKey(workerId: string): string {
   return `${PREFIX}:worker:${encodeURIComponent(workerId)}`;
 }
@@ -66,6 +132,25 @@ function workerStableIdentityKey(workerId: string): string {
 
 function workerIncarnationKey(workerId: string): string {
   return `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation`;
+}
+
+function workerRegistrationGenerationKey(workerId: string): string {
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:registration-generation`;
+}
+
+function workerRegistrationGenerationIncarnationKey(workerId: string): string {
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:registration-generation-incarnation`;
+}
+
+function workerReadyKey(workerId: string): string {
+  return `${PREFIX}:worker:${encodeURIComponent(workerId)}:ready`;
+}
+
+function workerReadyToken(
+  incarnationId: string,
+  registrationGeneration: number,
+): string {
+  return `${incarnationId}:${registrationGeneration}`;
 }
 
 function incarnationFenceKey(workerId: string, incarnationId: string): string {
@@ -233,6 +318,63 @@ export class RedisBridgeStore {
     );
   }
 
+  /** Returns only the worker's ephemeral registration state. The registration
+   * is the heartbeat: when its TTL expires the worker is offline. */
+  async workerStatus(workerId: string): Promise<BridgeWorkerStatus> {
+    const snapshot = (await boundedCommand(
+      this.redis.eval(
+        [
+          "local registration = redis.call('GET', KEYS[1])",
+          "if not registration then return { false, false, false, -2 } end",
+          'return {',
+          '  registration,',
+          "  redis.call('GET', KEYS[2]) or false,",
+          "  redis.call('GET', KEYS[3]) or false,",
+          "  redis.call('PTTL', KEYS[1])",
+          '}',
+        ].join('\n'),
+        3,
+        workerKey(workerId),
+        workerReadyKey(workerId),
+        workerRegistrationGenerationKey(workerId),
+      ),
+      this.redisCommandTimeoutMs,
+      'Bridge worker status',
+    )) as [string | null, string | null, string | null, number];
+    const [rawRegistration, readyToken, registrationGeneration, leaseExpiresInMs] = snapshot;
+    if (rawRegistration == null || rawRegistration === '' || leaseExpiresInMs <= 0) {
+      return { online: false, ready: false };
+    }
+
+    let registration: RegisteredBridgeWorker;
+    try {
+      registration = JSON.parse(rawRegistration) as RegisteredBridgeWorker;
+    } catch {
+      return { online: false, ready: false };
+    }
+    if (
+      registration.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      !isValidBridgeWorkerId(registration.workerId) ||
+      registration.workerId !== workerId ||
+      typeof registration.incarnationId !== 'string' ||
+      !isValidBridgeWorkerCapabilities(registration.capabilities)
+    ) {
+      return { online: false, ready: false };
+    }
+
+    const requiresConfirmation = registration.capabilities.requiresReadyConfirmation === true;
+    const ready =
+      !requiresConfirmation ||
+      (registrationGeneration != null &&
+        readyToken === workerReadyToken(registration.incarnationId, Number(registrationGeneration)));
+    return {
+      online: true,
+      ready,
+      leaseExpiresInMs,
+      capabilities: registration.capabilities,
+    };
+  }
+
   async register(
     registration: RegisteredBridgeWorker,
     authorization?: string | {
@@ -240,7 +382,7 @@ export class RedisBridgeStore {
       pairingGeneration?: number;
       activeCredentialId?: string;
     },
-  ): Promise<void> {
+  ): Promise<number> {
     const authorizationObject =
       typeof authorization === 'object' ? authorization : undefined;
     const expectedActiveCredentialId =
@@ -278,15 +420,24 @@ export class RedisBridgeStore {
       '    redis.call(\'SET\', ARGV[4] .. current .. \':fenced\', \"1\")',
       '  end',
       'end',
+      'local registrationGeneration = tonumber(redis.call(\'GET\', KEYS[10]) or \"0\")',
+      'local registrationGenerationIncarnation = redis.call(\'GET\', KEYS[11])',
+      'local registrationGenerationChanged = false',
+      'if registrationGeneration < 1 or registrationGenerationIncarnation ~= ARGV[1] then',
+      '  registrationGeneration = redis.call(\'INCR\', KEYS[10])',
+      '  redis.call(\'SET\', KEYS[11], ARGV[1])',
+      '  registrationGenerationChanged = true',
+      'end',
       'redis.call(\'SET\', KEYS[1], ARGV[2], \"EX\", ARGV[3])',
       'redis.call(\'SET\', KEYS[4], ARGV[1], \"EX\", ARGV[3])',
-      'return 1',
+      'if ARGV[9] == "1" and registrationGenerationChanged then redis.call(\'DEL\', KEYS[12]) end',
+      'return registrationGeneration',
     ].join('\n');
     const result = Number(
       await boundedCommand(
         this.redis.eval(
           script,
-          9,
+          12,
           workerKey(registration.workerId),
           incarnationFenceKey(registration.workerId, registration.incarnationId),
           quarantineKey(registration.workerId, registration.incarnationId),
@@ -296,6 +447,9 @@ export class RedisBridgeStore {
           `${PREFIX}:pairing-generation:${registration.workerId}`,
           `${PREFIX}:stable-identity:${registration.workerId}`,
           `${PREFIX}:identity:${registration.workerId}`,
+          workerRegistrationGenerationKey(registration.workerId),
+          workerRegistrationGenerationIncarnationKey(registration.workerId),
+          workerReadyKey(registration.workerId),
           registration.incarnationId,
           JSON.stringify(registration),
           String(this.workerTtlSeconds),
@@ -306,6 +460,7 @@ export class RedisBridgeStore {
           authorizationObject?.identityId ?? '',
           expectedActiveCredentialId ?? '',
           registration.identityId ?? '',
+          registration.capabilities.requiresReadyConfirmation === true ? '1' : '0',
         ),
         this.redisCommandTimeoutMs,
         'Bridge worker registration',
@@ -341,6 +496,111 @@ export class RedisBridgeStore {
         'Bridge worker authorization was revoked before registration completed',
       );
     }
+    if (!Number.isSafeInteger(result) || result < 1) {
+      throw new Error('Bridge worker registration returned an invalid generation');
+    }
+    return result;
+  }
+
+  async confirmReady(
+    workerId: string,
+    incarnationId: string,
+    registrationGeneration: number,
+  ): Promise<void> {
+    const result = Number(
+      await boundedCommand(
+        this.redis.eval(
+          [
+            'if redis.call(\'EXISTS\', KEYS[1]) == 0 then return -1 end',
+            'if redis.call(\'GET\', KEYS[2]) ~= ARGV[1] then return -2 end',
+            'if redis.call(\'GET\', KEYS[3]) ~= ARGV[2] then return -2 end',
+            'if redis.call(\'GET\', KEYS[4]) ~= ARGV[1] then return -2 end',
+            'if redis.call(\'EXISTS\', KEYS[5]) == 1 then return -2 end',
+            'if redis.call(\'EXISTS\', KEYS[6]) == 1 then return -3 end',
+            'redis.call(\'SET\', KEYS[7], ARGV[3], "EX", ARGV[4])',
+            'return 1',
+          ].join('\n'),
+          7,
+          workerKey(workerId),
+          workerIncarnationKey(workerId),
+          workerRegistrationGenerationKey(workerId),
+          workerRegistrationGenerationIncarnationKey(workerId),
+          incarnationFenceKey(workerId, incarnationId),
+          quarantineKey(workerId, incarnationId),
+          workerReadyKey(workerId),
+          incarnationId,
+          String(registrationGeneration),
+          workerReadyToken(incarnationId, registrationGeneration),
+          String(
+            Math.min(
+              this.workerTtlSeconds,
+              Math.ceil(this.workerTtlSeconds / 2) + 5,
+            ),
+          ),
+        ),
+        this.redisCommandTimeoutMs,
+        'Bridge worker readiness confirmation',
+      ),
+    );
+    if (result === -1) {
+      throw new BridgeStoreError(
+        'WORKER_OFFLINE',
+        'Bridge worker registration expired before readiness confirmation',
+      );
+    }
+    if (result === -2) {
+      throw new BridgeStoreError(
+        'WORKER_FENCED',
+        'Bridge worker readiness confirmation is stale',
+      );
+    }
+    if (result === -3) {
+      throw new BridgeStoreError(
+        'WORKER_QUARANTINED',
+        'Bridge worker incarnation is quarantined',
+      );
+    }
+    if (result !== 1) {
+      throw new Error('Bridge worker readiness confirmation failed');
+    }
+  }
+
+  async dispatchWorkspaceTool(args: {
+    workerId: string;
+    tenantId?: string;
+    requireTenantBinding?: boolean;
+    request: WorkspaceToolRequest;
+    deadlineAtMs: number;
+    signal: AbortSignal;
+  }): Promise<CodeBridgeWorkspaceSettlement> {
+    if (!isWorkspaceToolRequest(args.request)) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_INVALID',
+        'Invalid workspace tool request',
+      );
+    }
+    return (await this.dispatch({
+      ...args,
+      body: {} as t.PayloadBody,
+      headers: {},
+      workspaceRequest: args.request,
+      finalize: async (settlement, registration) => {
+        if (
+          settlement.status === 'fulfilled' &&
+          !isWorkspaceToolResult(
+            args.request,
+            settlement.result,
+            registration.capabilities.workspaceTools,
+          )
+        ) {
+          throw new BridgeStoreError(
+            'RESULT_INVALID',
+            'Bridge worker returned an invalid workspace tool result',
+          );
+        }
+        return settlement;
+      },
+    })) as unknown as CodeBridgeWorkspaceSettlement;
   }
 
   async dispatch(args: {
@@ -349,25 +609,28 @@ export class RedisBridgeStore {
     requireTenantBinding?: boolean;
     body: t.PayloadBody;
     headers: Record<string, string>;
+    workspaceRequest?: WorkspaceToolRequest;
     runtimeSessionId?: string;
     deadlineAtMs: number;
     signal: AbortSignal;
     finalize?: (
       settlement: CodeBridgeSettlement,
+      registration: RegisteredBridgeWorker,
     ) => Promise<CodeBridgeSettlement>;
   }): Promise<CodeBridgeSettlement> {
     this.assertDispatchActive(args.signal, args.deadlineAtMs);
-    let registration = await this.dispatchCommand(
-      () => this.registration(args.workerId),
+    const dispatchable = await this.dispatchCommand(
+      () => this.dispatchableRegistration(args.workerId),
       args,
       'Bridge worker registration read',
     );
-    if (registration == null) {
+    if (dispatchable == null) {
       throw new BridgeStoreError(
         'WORKER_OFFLINE',
         `Bridge worker ${args.workerId} is offline`,
       );
     }
+    let { registration, readyToken } = dispatchable;
     if (
       (args.requireTenantBinding === true && registration.binding == null) ||
       (registration.binding != null &&
@@ -387,6 +650,15 @@ export class RedisBridgeStore {
       throw new BridgeStoreError(
         'WORKER_MISMATCH',
         `Bridge worker ${args.workerId} does not provide a stateful workspace`,
+      );
+    }
+    if (
+      args.workspaceRequest != null &&
+      !supportsWorkspaceTool(registration, args.workspaceRequest)
+    ) {
+      throw new BridgeStoreError(
+        'WORKER_MISMATCH',
+        `Bridge worker ${args.workerId} does not advertise the requested workspace tool`,
       );
     }
     if (
@@ -449,23 +721,35 @@ export class RedisBridgeStore {
           : {}),
         expiresAt: new Date(args.deadlineAtMs).toISOString(),
         runtimeSessionId: args.runtimeSessionId,
-        request: {
-          body: args.body,
-          headers: args.headers,
-        },
+        ...(args.workspaceRequest != null
+          ? {
+              executionKind: 'workspace_tool' as const,
+              request: args.workspaceRequest,
+            }
+          : {
+              request: {
+                body: args.body,
+                headers: args.headers,
+              },
+            }),
       };
       let queued = false;
       for (let attempt = 0; attempt < 8 && !queued; attempt += 1) {
         this.assertDispatchActive(args.signal, args.deadlineAtMs);
         assignment.incarnationId = registration.incarnationId;
         queued = await this.dispatchCommand(
-          () => this.enqueueForActiveIncarnation(assignment!, ttlSeconds),
+          () =>
+            this.enqueueForActiveIncarnation(
+              assignment!,
+              ttlSeconds,
+              readyToken,
+            ),
           args,
           'Bridge assignment enqueue',
         );
         if (queued) break;
         const replacement = await this.dispatchCommand(
-          () => this.registration(args.workerId),
+          () => this.dispatchableRegistration(args.workerId),
           args,
           'Bridge replacement registration read',
         );
@@ -477,14 +761,24 @@ export class RedisBridgeStore {
         }
         if (
           args.runtimeSessionId !== undefined &&
-          replacement.capabilities.statefulWorkspace !== true
+          replacement.registration.capabilities.statefulWorkspace !== true
         ) {
           throw new BridgeStoreError(
             'WORKER_MISMATCH',
             `Bridge worker ${args.workerId} does not provide a stateful workspace`,
           );
         }
-        registration = replacement;
+        if (
+          args.workspaceRequest != null &&
+          !supportsWorkspaceTool(replacement.registration, args.workspaceRequest)
+        ) {
+          throw new BridgeStoreError(
+            'WORKER_MISMATCH',
+            `Bridge worker ${args.workerId} no longer advertises the requested workspace tool`,
+          );
+        }
+        registration = replacement.registration;
+        readyToken = replacement.readyToken;
       }
       if (!queued) {
         throw new BridgeStoreError(
@@ -501,7 +795,7 @@ export class RedisBridgeStore {
         const result =
           args.finalize == null
             ? settlement
-            : await args.finalize(settlement);
+            : await args.finalize(settlement, registration);
         await this.commitPendingWorkspace(
           assignment,
           settlement,
@@ -842,7 +1136,7 @@ export class RedisBridgeStore {
   async settle(
     workerId: string,
     assignmentId: string,
-    settlement: CodeBridgeSettlement,
+    settlement: AnyCodeBridgeSettlement,
     signal?: AbortSignal,
     identityId?: string,
   ): Promise<void> {
@@ -1103,6 +1397,35 @@ export class RedisBridgeStore {
     return raw == null ? undefined : (JSON.parse(raw) as RegisteredBridgeWorker);
   }
 
+  private async dispatchableRegistration(
+    workerId: string,
+  ): Promise<
+    | { registration: RegisteredBridgeWorker; readyToken?: string }
+    | undefined
+  > {
+    const [raw, ready, generation, generationIncarnation] = await this.redis.mget(
+      workerKey(workerId),
+      workerReadyKey(workerId),
+      workerRegistrationGenerationKey(workerId),
+      workerRegistrationGenerationIncarnationKey(workerId),
+    );
+    if (raw == null) return undefined;
+    const registration = JSON.parse(raw) as RegisteredBridgeWorker;
+    if (registration.capabilities.requiresReadyConfirmation !== true) {
+      return { registration };
+    }
+    const registrationGeneration = Number(generation);
+    if (
+      !Number.isSafeInteger(registrationGeneration) ||
+      registrationGeneration < 1 ||
+      generationIncarnation !== registration.incarnationId ||
+      ready !== workerReadyToken(registration.incarnationId, registrationGeneration)
+    ) {
+      return undefined;
+    }
+    return { registration, readyToken: ready };
+  }
+
   private assertDispatchActive(
     signal: AbortSignal,
     deadlineAtMs: number,
@@ -1201,16 +1524,18 @@ export class RedisBridgeStore {
   private async enqueueForActiveIncarnation(
     assignment: StoredAssignment,
     ttlSeconds: number,
+    readyToken?: string,
   ): Promise<boolean> {
     const script = [
       'if redis.call(\'GET\', KEYS[1]) ~= ARGV[1] then return 0 end',
-      'if #KEYS == 6 and redis.call(\'EXISTS\', KEYS[6]) == 1 then return -1 end',
+      'if ARGV[7] ~= "" and redis.call(\'GET\', KEYS[6]) ~= ARGV[7] then return 0 end',
+      'if #KEYS == 7 and redis.call(\'EXISTS\', KEYS[7]) == 1 then return -1 end',
       'redis.call(\'SET\', KEYS[2], ARGV[2], \"EX\", ARGV[3])',
       'redis.call(\'RPUSH\', KEYS[3], ARGV[4])',
       'redis.call(\'EXPIRE\', KEYS[3], ARGV[3])',
       'redis.call(\'SET\', KEYS[4], ARGV[1], \"PX\", ARGV[5])',
       'redis.call(\'SET\', KEYS[5], "1", \"PXAT\", ARGV[6])',
-      'if #KEYS == 6 then redis.call(\'SET\', KEYS[6], ARGV[4]) end',
+      'if #KEYS == 7 then redis.call(\'SET\', KEYS[7], ARGV[4]) end',
       'return 1',
     ].join('\n');
     const keys = [
@@ -1219,6 +1544,7 @@ export class RedisBridgeStore {
       queueKey(assignment.workerId, assignment.incarnationId),
       lockIncarnationKey(assignment.workerId),
       assignmentDeadlineKey(assignment.assignmentId),
+      workerReadyKey(assignment.workerId),
     ];
     if (assignment.runtimeSessionId !== undefined) {
       keys.push(
@@ -1238,6 +1564,7 @@ export class RedisBridgeStore {
       assignment.assignmentId,
       String(ttlSeconds * 1000),
       String(Date.parse(assignment.expiresAt)),
+      readyToken ?? '',
     );
     if (Number(result) === -1) {
       throw new BridgeStoreError(
@@ -1291,7 +1618,7 @@ export class RedisBridgeStore {
 
   private async commitPendingWorkspace(
     assignment: StoredAssignment,
-    settlement: CodeBridgeSettlement,
+    settlement: AnyCodeBridgeSettlement,
     deadlineAtMs: number,
     signal: AbortSignal,
   ): Promise<void> {

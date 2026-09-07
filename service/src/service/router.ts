@@ -24,6 +24,7 @@ import { captureTraceCarrier, withSpan } from '../telemetry';
 import { Jobs, Languages } from '../enum';
 import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-authorization';
 import { createUploadSessionRegistrar } from './upload-session';
+import { recordSessionOwnership } from '../session-ownership';
 import { prepareSandboxJobSecurity } from '../sandbox-egress';
 import {
   BridgeWorkerSelectionError,
@@ -219,7 +220,16 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
    * sandbox invocation." */
   const session_id = nanoid();
   const execution_id = nanoid();
-  await connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
+  /* Guarded: registration runs before the route's `try`, and Express 4
+   * does not forward a rejected async handler to the error middleware —
+   * an unavailable Redis, or an ACL that permits `session:*` but not
+   * `session-owner:*`, would hang the request instead of answering. */
+  try {
+    await recordSessionOwnership(connection, session_id, sessionKey);
+  } catch (error) {
+    logger.error(`[${INSTANCE_ID}] Error registering session ownership - Session ID: ${session_id}:`, error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 
   try {
     if (!isSyntheticRequest) {
@@ -478,7 +488,7 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
         if (readOnly) {
           putHeaders['X-Read-Only'] = 'true';
         }
-        connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL)
+        recordSessionOwnership(connection, session_id, sessionKey)
           .then(() => {
             logger.info(`[${INSTANCE_ID}] Upload: Session ID: ${session_id} | User ID: ${userId} | Session key: ${sessionKey}`);
             return axios.put<t.UploadResult>(
@@ -600,7 +610,7 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
 
     const ensureSessionRegistered = createUploadSessionRegistrar((sessionKey) => {
       logger.info(`[${INSTANCE_ID}] Batch upload: Session ID: ${session_id} | User ID: ${userId} | Session key: ${sessionKey}`);
-      return connection.set(`session:${session_id}`, sessionKey, 'EX', env.SESSION_CACHE_TTL);
+      return recordSessionOwnership(connection, session_id, sessionKey);
     });
 
     const planFileSize = planLimits[req.planId ?? '']?.max_file_size ?? planLimits.default.max_file_size;
@@ -904,7 +914,15 @@ router.get('/sessions/:session_id/objects/:fileId', fetchLimiter, sessionAuth, a
   }
 });
 
-router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, async (req: t.AuthenticatedRequest, res: Response) => {
+/**
+ * Remove a session object.
+ *
+ * Mounted on two paths (see the registrations below); both are gated by
+ * `sessionAuth`, so the caller has to own the `(session_id, entity_id)`
+ * pair the object was stored under, and both proxy the same file-server
+ * route.
+ */
+const deleteSessionObject = async (req: t.AuthenticatedRequest, res: Response) => {
   const { session_id, fileId } = req.params;
 
   try {
@@ -917,12 +935,46 @@ router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, async (re
     logger.info(`[${INSTANCE_ID}] File deleted: Session ID: ${session_id} | File ID: ${fileId}`);
     return res.status(200).json(response.data);
   } catch (error) {
+    /* The file-server answers 404 when the object is already gone. Pass
+     * that through instead of collapsing it into a 500: a client sweeping
+     * expired files can retire the reference on 404, whereas a 500 reads
+     * as retryable and has it re-issuing the same DELETE for an object
+     * that no longer exists on every subsequent pass. */
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      /* Best effort: this runs inside the catch block, where a rejection
+       * has no handler above it — Express 4 does not forward async
+       * rejections, so it would hang the request instead of answering.
+       * The key expires on its own, and the object is already gone. */
+      await connection.del(`upload:${req.sessionKey}${session_id}${fileId}`).catch((err: unknown) => {
+        logger.warn(`[${INSTANCE_ID}] Failed to clear upload key for absent file - Session ID: ${session_id} | File ID: ${fileId}:`, err);
+      });
+      logger.info(`[${INSTANCE_ID}] File already absent: Session ID: ${session_id} | File ID: ${fileId}`);
+      return res.status(404).json({ error: 'File not found' });
+    }
     const errorDetails = getAxiosErrorDetails(error);
     logger.error(`[${INSTANCE_ID}] Error deleting file - Session ID: ${session_id} | File ID: ${fileId}:`, errorDetails);
     return res.status(500).json({
       error: 'Error deleting file',
     });
   }
-});
+};
+
+router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, deleteSessionObject);
+
+/**
+ * Alias of the route above, on the path LibreChat's `deleteCodeEnvFile`
+ * targets — the file-server's own DELETE path, which is not itself
+ * exposed on `/v1`.
+ *
+ * Until LibreChat v0.8.6 this was the only path the client tried, and the
+ * 404 from an unmounted method was indistinguishable from "the object is
+ * already gone": every deletion silently failed and objects accumulated
+ * with nothing to alert on. Newer clients fall back to `/files/...`, but
+ * mounting the alias costs nothing and makes deletion work for
+ * deployments still running an older client.
+ *
+ * GET on this same path is the metadata proxy above.
+ */
+router.delete('/sessions/:session_id/objects/:fileId', fetchLimiter, sessionAuth, deleteSessionObject);
 
 export default router;

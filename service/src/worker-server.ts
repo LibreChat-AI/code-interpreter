@@ -47,6 +47,7 @@ import { connection } from './queue';
  * The workers are singletons, not created fresh on each import.
  */
 import { pyWorker, otherWorker } from './workers';
+import { hostedAppWorker } from './hosted-app/worker';
 
 const HEALTH_PORT = Number(process.env.WORKER_HEALTH_PORT) || 3113;
 
@@ -101,14 +102,16 @@ const healthServer = http.createServer(async (req, res) => {
       // Check workers are running
       const pyRunning = pyWorker.isRunning();
       const otherRunning = otherWorker.isRunning();
+      const hostedAppsRunning = !env.HOSTED_APPS_ENABLED || hostedAppWorker?.isRunning() === true;
 
-      if (pyRunning && otherRunning) {
+      if (pyRunning && otherRunning && hostedAppsRunning) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           status: 'healthy',
           workers: {
             python: pyRunning,
-            other: otherRunning
+            other: otherRunning,
+            hostedApps: hostedAppsRunning,
           },
           config: {
             pythonConcurrency: env.PYTHON_CONCURRENCY,
@@ -120,7 +123,7 @@ const healthServer = http.createServer(async (req, res) => {
         res.writeHead(503, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           status: 'unhealthy',
-          workers: { python: pyRunning, other: otherRunning }
+          workers: { python: pyRunning, other: otherRunning, hostedApps: hostedAppsRunning }
         }));
       }
     } catch (error) {
@@ -136,8 +139,9 @@ const healthServer = http.createServer(async (req, res) => {
       await connection.ping();
       const pyRunning = pyWorker.isRunning();
       const otherRunning = otherWorker.isRunning();
+      const hostedAppsRunning = !env.HOSTED_APPS_ENABLED || hostedAppWorker?.isRunning() === true;
 
-      if (pyRunning && otherRunning) {
+      if (pyRunning && otherRunning && hostedAppsRunning) {
         res.writeHead(200);
         res.end('ready');
       } else {

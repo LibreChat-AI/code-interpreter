@@ -4,6 +4,7 @@ import type { TFile } from '../job';
 import { getLatestRuntimeMatchingLanguageVersion, getRuntimes } from '../runtime';
 import { logger } from '../logger';
 import { config } from '../config';
+import { reconcileArtifactDelivery } from '../delivery';
 import {
   Job,
   SessionWorkspaceDirtyError,
@@ -32,6 +33,15 @@ import {
   pruneInputCache,
   storeCachedInputs,
 } from '../session-inputs';
+import {
+  HostedAppError,
+  hostedAppSupervisor,
+} from '../hosted-app';
+import {
+  executeWorkspaceCommand,
+  hasWorkspaceCommandToken,
+  WorkspaceCommandRequestError,
+} from '../workspace-command';
 
 const router = express.Router();
 const SYNTHETIC_PRINCIPAL_SOURCE = 'synthetic_test';
@@ -378,12 +388,36 @@ function manifestErrorStatus(error: ExecutionManifestError): number {
   return 403;
 }
 
+router.use('/workspace/execute', (req: Request, res: Response, next: NextFunction) => {
+  if (req.method !== 'POST') return next();
+  if (!config.external_workspace_enabled) {
+    return res.status(404).json({ message: 'Not Found' });
+  }
+  if (!hasWorkspaceCommandToken(
+    config.external_workspace_token,
+    req.header('X-LibreChat-Workspace-Token'),
+  )) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+  next();
+});
+
 router.use((req: Request, res: Response, next: NextFunction) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   /* Checkpoint restore and additive file delivery stream tar.gz bodies, not JSON. */
   if (req.path === '/session/restore' || req.path === '/session/inputs') return next();
   if (!req.headers['content-type']?.startsWith('application/json')) {
     return res.status(415).json({ message: 'requests must be of type application/json' });
+  }
+  next();
+});
+
+/* A hosted-app image is a dedicated process host, not an execution runner.
+ * Keeping `/execute` structurally unavailable prevents a resident app and an
+ * NsJail job from sharing the pinned session UID/workspace concurrently. */
+router.use('/execute', (_req: Request, res: Response, next: NextFunction) => {
+  if (config.hosted_apps_enabled) {
+    return res.status(404).json({ message: 'Not Found' });
   }
   next();
 });
@@ -530,15 +564,20 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
             return new Set<string>();
           });
 
-        const generatedIds = new Set(job.getGeneratedFileIds());
-        const before = result.files.length;
-        result.files = result.files.filter(
-          f => !generatedIds.has(f.id) || uploaded.has(f.id),
+        const delivery = reconcileArtifactDelivery(
+          result.files,
+          job.getGeneratedFileIds(),
+          uploaded,
         );
-        const dropped = before - result.files.length;
-        if (dropped > 0) {
+        result.files = delivery.files;
+        result.artifact_delivery = delivery.artifact_delivery;
+        if (delivery.artifact_delivery) {
           logger.warn(
-            { job: job.uuid, dropped, kept: result.files.length },
+            {
+              job: job.uuid,
+              dropped: delivery.artifact_delivery.failed,
+              kept: result.files.length,
+            },
             'Pruned files from response because upload did not reach file_server',
           );
         }
@@ -596,6 +635,40 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
       language: metricsLanguage,
       outcome: metricsOutcome,
       durationSeconds: (performance.now() - started) / 1000,
+    });
+  }
+});
+
+router.post('/workspace/execute', express.json({ limit: '256kb' }), async (req: Request, res: Response) => {
+  let binding;
+  try {
+    binding = parseSessionBindingFromHeader(req.headers[RUNTIME_SESSION_ID_HEADER]);
+  } catch (error) {
+    return res.status(400).json({
+      message: error instanceof Error ? error.message : 'Invalid runtime session',
+    });
+  }
+  if (!binding) {
+    return res.status(400).json({ message: 'X-Runtime-Session-Id is required' });
+  }
+  if (!bindSessionWorkspace(binding)) {
+    return res.status(409).json({
+      error: 'session_workspace_dirty',
+      message: 'Runner is bound to a different runtime session',
+    });
+  }
+  try {
+    return res.status(200).json(await executeWorkspaceCommand(req.body, {
+      workspaceRoot: config.external_workspace_root,
+    }));
+  } catch (error) {
+    if (error instanceof WorkspaceCommandRequestError) {
+      return res.status(400).json({ message: error.message });
+    }
+    logger.error({ err: error }, 'Sandboxed workspace command failed');
+    return res.status(500).json({
+      error: 'sandbox_execution_failed',
+      message: 'Sandboxed workspace command failed',
     });
   }
 });
@@ -669,23 +742,102 @@ function bindSessionFromHeader(req: Request): SessionBindFailure | null {
   return null;
 }
 
-/* Express 4 (pinned) does NOT auto-forward rejected route-handler promises, so
- * `.catch(next)` is required or a rejection (e.g. session.ownership()) hangs the
- * request and surfaces as an unhandled rejection instead of a 5xx. */
+/* `.catch(next)` hands rejections (e.g. session.ownership()) to the error
+ * middleware so they surface as a 5xx. Express 5 auto-forwards rejected
+ * route-handler promises too, so this is now belt-and-braces; it was strictly
+ * required under the previously pinned Express 4, where a rejection instead
+ * hung the request and surfaced as an unhandled rejection. */
 router.get('/session/checkpoint', (req: Request, res: Response, next: NextFunction) => {
   const failure = bindSessionFromHeader(req);
   if (failure) {
     return res.status(failure.status).json(failure.body);
   }
-  return streamSessionCheckpoint(res).catch(next);
+  const checkpoint = (): Promise<void> => streamSessionCheckpoint(res);
+  return (config.hosted_apps_enabled
+    ? hostedAppSupervisor.withQuiescedWorkspace(checkpoint)
+    : checkpoint()
+  ).catch(error => hostedAppFailure(error, res, next));
 });
 router.post('/session/restore', (req: Request, res: Response, next: NextFunction) => {
   const failure = bindSessionFromHeader(req);
   if (failure) {
     return res.status(failure.status).json(failure.body);
   }
-  return restoreSessionCheckpoint(req, res).catch(next);
+  const restore = (): Promise<void> => restoreSessionCheckpoint(req, res);
+  return (config.hosted_apps_enabled
+    ? hostedAppSupervisor.withQuiescedWorkspace(restore)
+    : restore()
+  ).catch(error => hostedAppFailure(error, res, next));
 });
+
+function requireHostedAppTarget(
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+): Response | void {
+  if (!config.hosted_apps_enabled) {
+    return res.status(404).json({ message: 'Not Found' });
+  }
+  next();
+}
+
+function hostedAppFailure(
+  error: unknown,
+  res: Response,
+  next: NextFunction,
+): Response | void {
+  if (error instanceof HostedAppError) {
+    return res.status(error.status).json({ error: error.code, message: error.message });
+  }
+  next(error);
+}
+
+/* Dedicated Lambda MicroVM resident-server adapter. The control plane first
+ * restores an immutable session checkpoint into this VM, then starts exactly
+ * one foreground process. Preview traffic uses a separate AWS token restricted
+ * to `hosted_app_port`; these control routes stay on the runner port. */
+router.post(
+  '/hosted-app/start',
+  requireHostedAppTarget,
+  express.json({ limit: '64kb' }),
+  (req: Request, res: Response, next: NextFunction) => {
+    const failure = bindSessionFromHeader(req);
+    if (failure) return res.status(failure.status).json(failure.body);
+    return hostedAppSupervisor.start(req.body)
+      .then(status => res.status(200).json(status))
+      .catch(error => hostedAppFailure(error, res, next));
+  },
+);
+
+router.get(
+  '/hosted-app/status',
+  requireHostedAppTarget,
+  (req: Request, res: Response) => {
+    const failure = bindSessionFromHeader(req);
+    if (failure) return res.status(failure.status).json(failure.body);
+    const status = hostedAppSupervisor.status();
+    if (!status) {
+      return res.status(404).json({
+        error: 'hosted_app_not_running',
+        message: 'No hosted app has been started',
+      });
+    }
+    return res.status(200).json(status);
+  },
+);
+
+router.post(
+  '/hosted-app/stop',
+  requireHostedAppTarget,
+  express.json({ limit: '1kb' }),
+  (req: Request, res: Response, next: NextFunction) => {
+    const failure = bindSessionFromHeader(req);
+    if (failure) return res.status(failure.status).json(failure.body);
+    return hostedAppSupervisor.stop()
+      .then(status => status ? res.status(200).json(status) : res.status(204).send())
+      .catch(error => hostedAppFailure(error, res, next));
+  },
+);
 /**
  * Input delivery for backends whose sandbox cannot reach the file server.
  *

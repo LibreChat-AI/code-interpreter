@@ -8,6 +8,11 @@ function expressRouteLabel(req: Request): string {
   return 'unmatched';
 }
 
+export function httpMetricPath(req: Request, res: Response): string {
+  const override = res.locals?.codeapiMetricPath;
+  return typeof override === 'string' && override.length > 0 ? override : req.path;
+}
+
 export function httpMetricsMiddleware(req: Request, res: Response, next: NextFunction): void {
   const start = httpLatencyStartMs();
   let recorded = false;
@@ -22,7 +27,7 @@ export function httpMetricsMiddleware(req: Request, res: Response, next: NextFun
     recordHttpRequest({
       method: req.method,
       route: expressRouteLabel(req),
-      rawPath: req.path,
+      rawPath: httpMetricPath(req, res),
       statusCode,
       durationSeconds,
     });

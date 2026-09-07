@@ -1,6 +1,7 @@
 import express, { Router, type Request, type Response } from 'express';
 import { logger } from '../logger';
 import { bindSessionWorkspace, parseSessionBinding, unbindSessionWorkspace } from '../session-workspace';
+import { hostedAppSupervisor } from '../hosted-app';
 
 /**
  * AWS Lambda MicroVM hook endpoints. The platform POSTs to
@@ -97,7 +98,12 @@ lifecycleRouter.post('/suspend', ackHook('suspend'));
 
 lifecycleRouter.post('/terminate', (_req: Request, res: Response) => {
   logger.info({ hook: 'terminate' }, 'MicroVM lifecycle hook invoked');
-  void unbindSessionWorkspace().catch((err) => logger.error({ err }, 'Failed to unbind session workspace on terminate'));
+  /* Stop before resetting the workspace so a resident process cannot race the
+   * recursive session cleanup. The platform does not need to wait for this
+   * best-effort cleanup before destroying the whole MicroVM. */
+  void hostedAppSupervisor.shutdown()
+    .then(() => unbindSessionWorkspace())
+    .catch((err) => logger.error({ err }, 'Failed to stop hosted app on terminate'));
   return res.status(200).json({ hook: 'terminate', status: 'ok' });
 });
 
