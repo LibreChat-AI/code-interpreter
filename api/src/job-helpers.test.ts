@@ -12,6 +12,7 @@ import {
   inputsLiveUnder,
   mapWithConcurrency,
   mimeTypeFor,
+  filterExtraEnvVars,
 } from './job';
 import type { Runtime } from './runtime';
 import type { TFile } from './job';
@@ -40,6 +41,17 @@ function makeRuntime(overrides: Partial<Runtime> & { language: string; pkgdir: s
     ...overrides,
   };
 }
+
+describe('filterExtraEnvVars', () => {
+  it('prevents callers from overriding internal RTK controls', () => {
+    expect(filterExtraEnvVars({
+      CODEAPI_SHELL_OUTPUT_FILTER: 'rtk',
+      RTK_DB_PATH: '/mnt/data/history.db',
+      RTK_TEE: '1',
+      USER_VALUE: 'allowed',
+    })).toEqual({ USER_VALUE: 'allowed' });
+  });
+});
 
 describe('resolveOriginalName', () => {
   function responseWithHeader(value?: string): Response {

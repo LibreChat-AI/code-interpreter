@@ -11,6 +11,10 @@ import {
 import { Languages } from './enum';
 import { createPayload } from './payload';
 import type { AuthenticatedRequest } from './types';
+import {
+  resolveShellOutputFilter,
+  ShellOutputFilterError,
+} from '../../shared/shell-output-filter';
 
 describe('node language configuration', () => {
   it('resolves Node.js aliases', () => {
@@ -55,6 +59,35 @@ describe('node language configuration', () => {
         },
       ],
     });
+  });
+});
+
+describe('request-scoped shell output filtering', () => {
+  it('propagates an opted-in RTK filter to the Bash sandbox payload', () => {
+    const req = {
+      body: {
+        lang: 'bash',
+        code: 'git status',
+        shell_output_filter: 'rtk',
+      },
+    } as unknown as AuthenticatedRequest;
+
+    expect(createPayload({ req, session_id: 'session-bash' })).toMatchObject({
+      language: 'bash',
+      version: '5.2.0',
+      shell_output_filter: 'rtk',
+    });
+  });
+
+  it('keeps omitted filters raw by leaving the wire field absent', () => {
+    expect(resolveShellOutputFilter(undefined, 'bash')).toBeUndefined();
+  });
+
+  it('rejects unknown filters and non-Bash runtimes', () => {
+    expect(() => resolveShellOutputFilter('compact', 'bash')).toThrow(ShellOutputFilterError);
+    expect(() => resolveShellOutputFilter('rtk', 'python')).toThrow(
+      'shell_output_filter is only supported for Bash executions',
+    );
   });
 });
 

@@ -43,6 +43,7 @@ export default {
         '../shared/telemetry-core.ts',
         '../packages/code/src/protocol.ts',
         '../packages/code/src/identity.ts',
+        '../shared/shell-output-filter.ts',
       ],
       sourceMap: true,
       declaration: false,

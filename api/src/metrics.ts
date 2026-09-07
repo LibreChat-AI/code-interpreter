@@ -1,5 +1,6 @@
 import client, { Counter, Gauge, Histogram, register } from 'prom-client';
 import type { NextFunction, Request, Response } from 'express';
+import type { ShellOutputFilter } from '../../shared/shell-output-filter';
 
 client.collectDefaultMetrics({ register });
 
@@ -27,6 +28,19 @@ export const sandboxExecutionDuration = new Histogram({
   help: 'Sandbox execution request duration in seconds',
   labelNames: ['language', 'outcome'] as const,
   buckets: [0.1, 0.5, 1, 2.5, 5, 10, 15, 30, 60, 120, 300],
+});
+
+export const sandboxShellOutputFilterExecutions = new Counter({
+  name: 'codeapi_sandbox_shell_output_filter_executions_total',
+  help: 'Total Bash sandbox executions by request-scoped output filter and outcome',
+  labelNames: ['shell_output_filter', 'outcome'] as const,
+});
+
+export const sandboxShellOutputBytes = new Histogram({
+  name: 'codeapi_sandbox_shell_output_bytes',
+  help: 'Bash sandbox output size by request-scoped output filter and stream',
+  labelNames: ['shell_output_filter', 'stream'] as const,
+  buckets: [0, 64, 256, 1024, 4096, 16_384, 65_536, 262_144, 1_048_576],
 });
 
 export const activeSandboxExecutions = new Gauge({
@@ -82,12 +96,36 @@ export function httpMetricsMiddleware(req: Request, res: Response, next: NextFun
 
 export function recordSandboxExecution(params: {
   language: string;
+  outputFilter?: ShellOutputFilter;
   outcome: 'success' | 'manifest_error' | 'bad_request' | 'validation_error' | 'execution_error';
   durationSeconds: number;
 }): void {
   const labels = { language: params.language || 'unknown', outcome: params.outcome };
   sandboxExecutions.inc(labels);
   sandboxExecutionDuration.observe(labels, params.durationSeconds);
+  if (params.language === 'bash') {
+    sandboxShellOutputFilterExecutions.inc({
+      shell_output_filter: params.outputFilter ?? 'raw',
+      outcome: params.outcome,
+    });
+  }
+}
+
+export function recordSandboxOutputBytes(params: {
+  language: string;
+  outputFilter: ShellOutputFilter;
+  stdout: string;
+  stderr: string;
+}): void {
+  if (params.language !== 'bash') return;
+  sandboxShellOutputBytes.observe(
+    { shell_output_filter: params.outputFilter, stream: 'stdout' },
+    Buffer.byteLength(params.stdout),
+  );
+  sandboxShellOutputBytes.observe(
+    { shell_output_filter: params.outputFilter, stream: 'stderr' },
+    Buffer.byteLength(params.stderr),
+  );
 }
 
 export async function metricsHandler(_req: Request, res: Response): Promise<void> {

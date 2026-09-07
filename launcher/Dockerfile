@@ -38,6 +38,17 @@ RUN gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
     && gcc -O2 -static -o /usr/local/bin/sandbox-rootfs-setup /tmp/rootfs-setup.c \
     && chmod 0111 /usr/local/bin/spec-guard /usr/local/bin/sandbox-rootfs-setup
 
+# Build RTK against the same Debian bookworm glibc baseline as the sandbox.
+FROM rust:1.91-bookworm AS rtk-builder
+
+ARG RTK_COMMIT=b34be37caf3796b69a50952a28e60e32b5daad43
+RUN git clone --depth 1 --branch v0.45.0 https://github.com/rtk-ai/rtk.git /rtk \
+    && cd /rtk \
+    && git checkout "$RTK_COMMIT" \
+    && test "$(git rev-parse HEAD)" = "$RTK_COMMIT" \
+    && cargo build --locked --release \
+    && ./target/release/rtk --version
+
 FROM oven/bun:1.3.14-debian AS sandbox-build
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -64,6 +75,7 @@ RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/sbin/nsjail
 COPY --from=nsjail-builder /usr/local/bin/spec-guard /usr/local/bin/spec-guard
+COPY --from=rtk-builder /rtk/target/release/rtk /usr/local/bin/rtk
 RUN chmod +x /usr/sbin/nsjail
 
 WORKDIR /sandbox_api
