@@ -48,6 +48,36 @@ const SAFE_CHILD_ENV_NAMES = new Set([
   'USER',
 ]);
 
+// Preserve the conventional proxy names, not arbitrary *_PROXY variables.
+// SRT owns their final values and may replace them with its filtered proxy.
+const PROXY_CHILD_ENV_NAMES = new Set([
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'no_proxy',
+]);
+
+// Windows resolves these names case-insensitively. Keep the exception
+// platform-specific so similarly named POSIX variables remain denied.
+const WINDOWS_CHILD_ENV_NAMES = new Set([
+  'SYSTEMROOT',
+  'SYSTEMDRIVE',
+  'WINDIR',
+  'COMSPEC',
+  'PATHEXT',
+  'TEMP',
+  'TMP',
+  'USERPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+]);
+
 let hostEnvironmentMutationQueue: Promise<void> = Promise.resolve();
 
 const TRUSTED_GIT_ENVIRONMENT = {
@@ -148,7 +178,7 @@ function boundedUtf8(buffer: Buffer, budget: number): string {
   return '';
 }
 
-function safeEnvironmentNames(
+function deniedEnvironmentNames(
   environment: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
 ): string[] {
@@ -157,7 +187,10 @@ function safeEnvironmentNames(
       const normalized = platform === 'win32' ? name.toUpperCase() : name;
       return (
         normalized.startsWith('LIBRECHAT_CODE_') ||
-        (!SAFE_CHILD_ENV_NAMES.has(normalized) && !normalized.startsWith('LC_'))
+        (!SAFE_CHILD_ENV_NAMES.has(normalized) &&
+          !PROXY_CHILD_ENV_NAMES.has(normalized) &&
+          !(platform === 'win32' && WINDOWS_CHILD_ENV_NAMES.has(normalized)) &&
+          !normalized.startsWith('LC_'))
       );
     })
     .sort();
@@ -272,7 +305,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           mode: 'deny' as const,
         })),
         envVars: [
-          ...safeEnvironmentNames(this.environment, this.platform)
+          ...deniedEnvironmentNames(this.environment, this.platform)
             .filter((name) => {
               const normalized = normalizedEnvironmentName(
                 name,
