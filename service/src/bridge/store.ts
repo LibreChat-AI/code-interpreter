@@ -796,12 +796,7 @@ export class RedisBridgeStore {
           args.finalize == null
             ? settlement
             : await args.finalize(settlement, registration);
-        await this.commitPendingWorkspace(
-          assignment,
-          settlement,
-          args.deadlineAtMs,
-          args.signal,
-        );
+        await this.commitPendingWorkspace(assignment, settlement);
         resultCommitted = true;
         return result;
       } catch (error) {
@@ -1450,22 +1445,30 @@ export class RedisBridgeStore {
     deadlineAtMs: number,
     signal: AbortSignal,
   ): Promise<CodeBridgeSettlement> {
-    while (!signal.aborted && Date.now() < deadlineAtMs) {
-      const raw = await boundedCommand(
-        this.redis.get(settlementKey(assignment.assignmentId)),
-        Math.max(
-          1,
-          Math.min(this.redisCommandTimeoutMs, deadlineAtMs - Date.now()),
-        ),
-        'Bridge settlement poll',
-        signal,
-      );
-      if (raw != null) return JSON.parse(raw) as CodeBridgeSettlement;
-      await delay(POLL_INTERVAL_MS, signal);
+    let pollError: unknown;
+    try {
+      while (!signal.aborted && Date.now() < deadlineAtMs) {
+        const raw = await boundedCommand(
+          this.redis.get(settlementKey(assignment.assignmentId)),
+          Math.max(
+            1,
+            Math.min(this.redisCommandTimeoutMs, deadlineAtMs - Date.now()),
+          ),
+          'Bridge settlement poll',
+          signal,
+        );
+        if (raw != null) return JSON.parse(raw) as CodeBridgeSettlement;
+        await delay(POLL_INTERVAL_MS, signal);
+      }
+    } catch (error) {
+      // A failed/aborted poll does not cancel Redis work. Arbitrate with
+      // settlement before returning an error, even when the caller is gone.
+      pollError = error;
     }
     const closeKeys = [
       assignmentKey(assignment.assignmentId),
       settlementKey(assignment.assignmentId),
+      assignmentDeadlineKey(assignment.assignmentId),
     ];
     if (assignment.runtimeSessionId !== undefined) {
       closeKeys.push(
@@ -1475,10 +1478,14 @@ export class RedisBridgeStore {
         ),
       );
     }
+    // The deadline key is also the fulfillment gate checked by settle().
+    // Keep acknowledged assignment metadata for late clean rejection recovery,
+    // but atomically revoke fulfillment when no settlement has won yet.
     const closeScript = [
       'local settlement = redis.call(\'GET\', KEYS[2])',
       'if settlement then return settlement end',
-      'if #KEYS == 3 and redis.call(\'GET\', KEYS[3]) == ARGV[1] then return nil end',
+      'redis.call(\'DEL\', KEYS[3])',
+      'if #KEYS == 4 and redis.call(\'GET\', KEYS[4]) == ARGV[1] then return nil end',
       'redis.call(\'DEL\', KEYS[1])',
       'return nil',
     ].join('\n');
@@ -1494,6 +1501,9 @@ export class RedisBridgeStore {
     );
     if (finalSettlement != null) {
       return JSON.parse(String(finalSettlement)) as CodeBridgeSettlement;
+    }
+    if (pollError != null && !signal.aborted && Date.now() < deadlineAtMs) {
+      throw pollError;
     }
     throw new BridgeStoreError(
       'ASSIGNMENT_EXPIRED',
@@ -1619,8 +1629,6 @@ export class RedisBridgeStore {
   private async commitPendingWorkspace(
     assignment: StoredAssignment,
     settlement: AnyCodeBridgeSettlement,
-    deadlineAtMs: number,
-    signal: AbortSignal,
   ): Promise<void> {
     if (
       assignment.runtimeSessionId === undefined ||
@@ -1646,12 +1654,10 @@ export class RedisBridgeStore {
           ),
           assignment.assignmentId,
         ),
-        Math.max(
-          1,
-          Math.min(this.redisCommandTimeoutMs, deadlineAtMs - Date.now()),
-        ),
+        // Once settlement wins, caller cancellation must not prevent its
+        // workspace commit. Redis availability still has a bounded budget.
+        this.redisCommandTimeoutMs,
         'Bridge workspace commit',
-        signal,
       ),
     );
     if (committed !== 1) {
