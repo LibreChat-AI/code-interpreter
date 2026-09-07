@@ -1,5 +1,6 @@
 import type {
   SandboxBackend,
+  SandboxBackendErrorCode,
   SandboxExecuteContext,
   SandboxRawResponse,
   SandboxTransportRequest,
@@ -10,6 +11,23 @@ import { env } from '../config';
 import { bridgeStore } from '../bridge';
 import { BridgeStoreError } from '../bridge/store';
 import { SandboxBackendError } from './types';
+
+// Every store failure needs an explicit recovery classification. New store
+// codes must not silently fall through to a retryable worker outage.
+const bridgeErrorCodes = {
+  WORKER_OFFLINE: 'BRIDGE_WORKER_OFFLINE',
+  WORKER_UNAUTHORIZED: 'BRIDGE_WORKER_UNAUTHORIZED',
+  WORKER_BUSY: 'BRIDGE_WORKER_BUSY',
+  ASSIGNMENT_EXPIRED: 'BRIDGE_DEADLINE_EXCEEDED',
+  ASSIGNMENT_FENCED: 'BRIDGE_ASSIGNMENT_FENCED',
+  ASSIGNMENT_NOT_FOUND: 'BRIDGE_ASSIGNMENT_NOT_FOUND',
+  WORKER_FENCED: 'BRIDGE_WORKER_FENCED',
+  WORKER_QUARANTINED: 'BRIDGE_WORKER_QUARANTINED',
+  WORKSPACE_QUARANTINED: 'BRIDGE_WORKSPACE_QUARANTINED',
+  WORKER_MISMATCH: 'BRIDGE_WORKER_MISMATCH',
+  ASSIGNMENT_INVALID: 'BRIDGE_ASSIGNMENT_INVALID',
+  RESULT_INVALID: 'BRIDGE_RESULT_INVALID',
+} satisfies Record<BridgeStoreError['code'], SandboxBackendErrorCode>;
 
 export class RemoteBridgeSandboxBackend implements SandboxBackend {
   readonly name = 'remote-bridge' as const;
@@ -63,32 +81,11 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
       return settlement.result as SandboxRawResponse;
     } catch (error) {
       if (!(error instanceof BridgeStoreError)) throw error;
-      if (error.code === 'WORKER_UNAUTHORIZED') {
-        throw new SandboxBackendError(
-          'BRIDGE_WORKER_UNAUTHORIZED',
-          error.message,
-          error,
-        );
-      }
-      if (error.code === 'WORKER_BUSY') {
-        throw new SandboxBackendError(
-          'BRIDGE_WORKER_BUSY',
-          error.message,
-          error,
-        );
-      }
-      if (error.code === 'ASSIGNMENT_EXPIRED') {
-        throw new SandboxBackendError(
-          'BRIDGE_DEADLINE_EXCEEDED',
-          error.message,
-          error,
-        );
-      }
       throw new SandboxBackendError(
-        'BRIDGE_WORKER_OFFLINE',
+        bridgeErrorCodes[error.code],
         error.message,
         error,
-        true,
+        error.code === 'WORKER_OFFLINE',
       );
     }
   }
