@@ -1157,202 +1157,213 @@ async function listWorkspaceFiles(
     .filter((segment) => segment.length > 0 && segment !== '.')
     .join('/');
   const requestedResultPath = normalizedRequestedResultPath || undefined;
-  const afterPath = request.afterPath;
+  let afterPath = request.afterPath;
 
-  const candidates: Array<{ filesystemPath: string; resultPath: string }> = [];
-  let truncated = false;
-  let pending: Buffer = Buffer.alloc(0);
-  let stoppedForLimit = false;
-  await new Promise<void>((resolvePromise, reject) => {
-    const args = [
-      '--files',
-      '--no-config',
-      '--no-follow',
-      '--no-messages',
-      '--sort',
-      'path',
-      '--null',
-    ];
-    if (portableCanonicalListPath !== '.') {
-      args.push(
-        '--glob',
-        canonicalTargetIsDirectory
-          ? `${portableCanonicalListPath}/**`
-          : portableCanonicalListPath,
-      );
-    }
-    args.push('--', '.');
-    const child = spawn(
-      'rg',
-      args,
-      { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] },
-    );
-    let aborted = false;
-    let timedOut = false;
-    const abort = () => {
-      aborted = true;
-      child.kill();
-    };
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill();
-    }, Math.max(0, deadline - Date.now()));
-    const cleanup = () => {
-      clearTimeout(timeout);
-      signal?.removeEventListener('abort', abort);
-    };
-    const pathDecoder = new TextDecoder('utf-8', {
-      fatal: true,
-      ignoreBOM: true,
-    });
-    const consumePath = (rawPath: Buffer) => {
-      if (rawPath.length === 0 || stoppedForLimit) return;
-      let path: string;
-      try {
-        path = pathDecoder.decode(rawPath);
-      } catch {
-        return;
+  for (;;) {
+    await withinListDeadline(Promise.resolve(), signal, deadline);
+    const candidates: Array<{ filesystemPath: string; resultPath: string }> = [];
+    let truncated = false;
+    let pending: Buffer = Buffer.alloc(0);
+    let stoppedForLimit = false;
+    await new Promise<void>((resolvePromise, reject) => {
+      const args = [
+        '--files',
+        '--no-config',
+        '--no-follow',
+        '--no-messages',
+        '--sort',
+        'path',
+        '--null',
+      ];
+      if (portableCanonicalListPath !== '.') {
+        args.push(
+          '--glob',
+          canonicalTargetIsDirectory
+            ? `${portableCanonicalListPath}/**`
+            : portableCanonicalListPath,
+        );
       }
-      if (!Buffer.from(path).equals(rawPath)) return;
-      if (candidates.length === maxResults + BRIDGE_WORKSPACE_LIST_MAX_RESULTS) {
-        truncated = true;
-        stoppedForLimit = true;
+      args.push('--', '.');
+      const child = spawn(
+        'rg',
+        args,
+        { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      let aborted = false;
+      let timedOut = false;
+      const abort = () => {
+        aborted = true;
         child.kill();
-        return;
-      }
-      const portablePath = sep === '\\' ? path.split(sep).join('/') : path;
-      const normalizedPath = portablePath.startsWith('./')
-        ? portablePath.slice(2)
-        : portablePath;
-      const resultPath =
-        requestedResultPath == null
-          ? normalizedPath
-          : portableCanonicalListPath === '.'
-            ? `${requestedResultPath}/${normalizedPath}`
-            : normalizedPath === portableCanonicalListPath ||
-                normalizedPath.startsWith(`${portableCanonicalListPath}/`)
-              ? `${requestedResultPath}${normalizedPath.slice(portableCanonicalListPath.length)}`
-              : normalizedPath;
-      if (!isSafePortableRelativePath(resultPath)) return;
-      if (
-        afterPath !== undefined &&
-        comparePortableRelativePaths(resultPath, afterPath) <= 0
-      ) {
-        return;
-      }
-      candidates.push({ filesystemPath: normalizedPath, resultPath });
-    };
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        child.kill();
+      }, Math.max(0, deadline - Date.now()));
+      const cleanup = () => {
+        clearTimeout(timeout);
+        signal?.removeEventListener('abort', abort);
+      };
+      const pathDecoder = new TextDecoder('utf-8', {
+        fatal: true,
+        ignoreBOM: true,
+      });
+      const consumePath = (rawPath: Buffer) => {
+        if (rawPath.length === 0 || stoppedForLimit) return;
+        let path: string;
+        try {
+          path = pathDecoder.decode(rawPath);
+        } catch {
+          return;
+        }
+        if (!Buffer.from(path).equals(rawPath)) return;
+        if (candidates.length === maxResults + BRIDGE_WORKSPACE_LIST_MAX_RESULTS) {
+          truncated = true;
+          stoppedForLimit = true;
+          child.kill();
+          return;
+        }
+        const portablePath = sep === '\\' ? path.split(sep).join('/') : path;
+        const normalizedPath = portablePath.startsWith('./')
+          ? portablePath.slice(2)
+          : portablePath;
+        const resultPath =
+          requestedResultPath == null
+            ? normalizedPath
+            : portableCanonicalListPath === '.'
+              ? `${requestedResultPath}/${normalizedPath}`
+              : normalizedPath === portableCanonicalListPath ||
+                  normalizedPath.startsWith(`${portableCanonicalListPath}/`)
+                ? `${requestedResultPath}${normalizedPath.slice(portableCanonicalListPath.length)}`
+                : normalizedPath;
+        if (!isSafePortableRelativePath(resultPath)) return;
+        if (
+          afterPath !== undefined &&
+          comparePortableRelativePaths(resultPath, afterPath) <= 0
+        ) {
+          return;
+        }
+        candidates.push({ filesystemPath: normalizedPath, resultPath });
+      };
 
-    child.stdout.on('data', (chunk: Buffer) => {
-      pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
-      let delimiter = pending.indexOf(0);
-      while (delimiter >= 0) {
-        consumePath(pending.subarray(0, delimiter));
-        pending = pending.subarray(delimiter + 1);
-        delimiter = pending.indexOf(0);
-      }
-    });
-    child.once('error', () => {
-      cleanup();
-      reject(
-        new WorkspaceToolError(
-          'Workspace listing unavailable',
-          'LIST_UNAVAILABLE',
-        ),
-      );
-    });
-    child.once('close', (code) => {
-      cleanup();
-      consumePath(pending);
-      if (aborted) {
-        reject(
-          new WorkspaceToolError(
-            'Workspace tool execution aborted',
-            'EXECUTION_ABORTED',
-          ),
-        );
-      } else if (timedOut) {
-        reject(
-          new WorkspaceToolError('Workspace listing timed out', 'LIST_TIMEOUT'),
-        );
-      } else if (stoppedForLimit || code === 0 || code === 1) {
-        resolvePromise();
-      } else {
+      child.stdout.on('data', (chunk: Buffer) => {
+        pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
+        let delimiter = pending.indexOf(0);
+        while (delimiter >= 0) {
+          consumePath(pending.subarray(0, delimiter));
+          pending = pending.subarray(delimiter + 1);
+          delimiter = pending.indexOf(0);
+        }
+      });
+      child.once('error', () => {
+        cleanup();
         reject(
           new WorkspaceToolError(
             'Workspace listing unavailable',
             'LIST_UNAVAILABLE',
           ),
         );
-      }
+      });
+      child.once('close', (code) => {
+        cleanup();
+        consumePath(pending);
+        if (aborted) {
+          reject(
+            new WorkspaceToolError(
+              'Workspace tool execution aborted',
+              'EXECUTION_ABORTED',
+            ),
+          );
+        } else if (timedOut) {
+          reject(
+            new WorkspaceToolError('Workspace listing timed out', 'LIST_TIMEOUT'),
+          );
+        } else if (stoppedForLimit || code === 0 || code === 1) {
+          resolvePromise();
+        } else {
+          reject(
+            new WorkspaceToolError(
+              'Workspace listing unavailable',
+              'LIST_UNAVAILABLE',
+            ),
+          );
+        }
+      });
     });
-  });
 
-  const paths: string[] = [];
-  const seenPaths = new Set<string>();
-  for (const candidate of candidates) {
-    let canonicalPath: string;
-    try {
-      canonicalPath = await withinListDeadline(
-        realpath(resolveWorkspacePath(root, candidate.filesystemPath)),
-        signal,
-        deadline,
-      );
-    } catch (error) {
-      if (error instanceof WorkspaceToolError) throw error;
+    const paths: string[] = [];
+    const seenPaths = new Set<string>();
+    for (const candidate of candidates) {
+      let canonicalPath: string;
+      try {
+        canonicalPath = await withinListDeadline(
+          realpath(resolveWorkspacePath(root, candidate.filesystemPath)),
+          signal,
+          deadline,
+        );
+      } catch (error) {
+        if (error instanceof WorkspaceToolError) throw error;
+        continue;
+      }
+      if (!isWithinRoot(root, canonicalPath)) {
+        continue;
+      }
+      const reportedPath = resolveWorkspacePath(root, candidate.resultPath);
+      try {
+        const reportedPathStat = await withinListDeadline(
+          lstat(reportedPath),
+          signal,
+          deadline,
+        );
+        if (reportedPathStat.isSymbolicLink()) continue;
+        const canonicalReportedPath = await withinListDeadline(
+          realpath(reportedPath),
+          signal,
+          deadline,
+        );
+        if (canonicalReportedPath !== canonicalPath) continue;
+      } catch (error) {
+        if (error instanceof WorkspaceToolError) throw error;
+        continue;
+      }
+      let regularFile = false;
+      try {
+        regularFile = (
+          await withinListDeadline(stat(canonicalPath), signal, deadline)
+        ).isFile();
+      } catch (error) {
+        if (error instanceof WorkspaceToolError) throw error;
+        continue;
+      }
+      if (!regularFile || seenPaths.has(candidate.resultPath)) continue;
+      if (paths.length === maxResults) {
+        truncated = true;
+        break;
+      }
+      seenPaths.add(candidate.resultPath);
+      paths.push(candidate.resultPath);
+    }
+
+    if (truncated && paths.length === 0) {
+      // A scan window can consist entirely of vanished files or symlinks.
+      // Advance the internal scan cursor, not the public page cursor, and
+      // keep the original deadline and per-window candidate limit.
+      afterPath = candidates[candidates.length - 1].resultPath;
       continue;
     }
-    if (!isWithinRoot(root, canonicalPath)) {
-      continue;
-    }
-    const reportedPath = resolveWorkspacePath(root, candidate.resultPath);
-    try {
-      const reportedPathStat = await withinListDeadline(
-        lstat(reportedPath),
-        signal,
-        deadline,
-      );
-      if (reportedPathStat.isSymbolicLink()) continue;
-      const canonicalReportedPath = await withinListDeadline(
-        realpath(reportedPath),
-        signal,
-        deadline,
-      );
-      if (canonicalReportedPath !== canonicalPath) continue;
-    } catch (error) {
-      if (error instanceof WorkspaceToolError) throw error;
-      continue;
-    }
-    let regularFile = false;
-    try {
-      regularFile = (
-        await withinListDeadline(stat(canonicalPath), signal, deadline)
-      ).isFile();
-    } catch (error) {
-      if (error instanceof WorkspaceToolError) throw error;
-      continue;
-    }
-    if (!regularFile || seenPaths.has(candidate.resultPath)) continue;
-    if (paths.length === maxResults) {
-      truncated = true;
-      break;
-    }
-    seenPaths.add(candidate.resultPath);
-    paths.push(candidate.resultPath);
+
+    return {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'list_files',
+      workspaceId: request.workspaceId,
+      paths,
+      truncated,
+      ...(truncated && paths.length > 0
+        ? { nextAfterPath: paths[paths.length - 1] }
+        : {}),
+    };
   }
-
-  return {
-    protocolVersion: BRIDGE_PROTOCOL_VERSION,
-    operation: 'list_files',
-    workspaceId: request.workspaceId,
-    paths,
-    truncated,
-    ...(truncated && paths.length > 0
-      ? { nextAfterPath: paths[paths.length - 1] }
-      : {}),
-  };
 }
 
 async function withinListDeadline<T>(
@@ -1360,6 +1371,9 @@ async function withinListDeadline<T>(
   signal: AbortSignal | undefined,
   deadline: number,
 ): Promise<T> {
+  // The filesystem operation has already started. Observe its rejection even
+  // when cancellation or the deadline prevents us from waiting for it.
+  void operation.catch(() => undefined);
   if (signal?.aborted) {
     throw new WorkspaceToolError(
       'Workspace tool execution aborted',
