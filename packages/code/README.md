@@ -53,6 +53,14 @@ Use `--identity <path>` while pairing and
 `LIBRECHAT_CODE_IDENTITY_FILE=<path>` while running to override the identity
 file location.
 
+The identity file itself must not be a bind-mount target: saving a paired
+credential atomically replaces that entry. Mount its containing directory
+instead. Pairing preflight checks `/proc/self/mountinfo` before redeeming the
+one-time code and fails closed if mount information cannot be verified (including
+a mount table larger than 4 MiB). Existing identity reads remain supported.
+The check describes the current mount namespace; administrators must keep mount
+configuration stable during pairing.
+
 ## Native BYOM sandbox (default)
 
 The MVP command sandbox runs directly on the user's chosen laptop or VM. It

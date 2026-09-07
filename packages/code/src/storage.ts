@@ -14,6 +14,8 @@ import { dirname, join, resolve } from 'node:path';
 import { BRIDGE_PROTOCOL_VERSION, BridgeProtocolError } from './protocol.js';
 import { assertPrivateStorageAncestors, assertPrivateStorageSupported } from './private-storage.js';
 
+import { assertIdentityIsNotMountPoint } from './identity-mount.js';
+
 import type { PairedBridgeWorkerIdentity } from './pairing.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -287,7 +289,10 @@ async function assertIdentityDestinationIsReplaceable(
   try {
     metadata = await lstat(path);
   } catch (error) {
-    if (isMissingPathError(error)) return;
+    if (isMissingPathError(error)) {
+      await assertIdentityIsNotMountPoint(path);
+      return;
+    }
     throw error;
   }
   if (metadata.isDirectory()) {
@@ -295,6 +300,7 @@ async function assertIdentityDestinationIsReplaceable(
       `Bridge identity path ${path} is a directory. Point --identity at a file.`,
     );
   }
+  await assertIdentityIsNotMountPoint(path);
   const uid = process.platform === 'win32' ? undefined : process.getuid?.();
   if (uid === undefined || uid === 0 || metadata.uid === uid) return;
   /* Ownership only blocks `rename` under the sticky bit, and owning the
@@ -412,6 +418,7 @@ export async function saveBridgeIdentity(
   await assertWriteContainerPrivate(path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await assertWriteContainerPrivate(path);
+  await assertIdentityDestinationIsReplaceable(path);
   const temporaryPath = `${path}.${randomBytes(8).toString('hex')}.tmp`;
   try {
     const file = await open(temporaryPath, 'wx', 0o600);
