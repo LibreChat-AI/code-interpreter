@@ -1,8 +1,8 @@
 import { constants } from 'node:fs';
 import { createHash, createPrivateKey, sign } from 'node:crypto';
-import { open, realpath, stat } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { assertPrivateStorageSupported } from './private-storage.js';
+import { assertPrivateStorageAncestors, assertPrivateStorageSupported } from './private-storage.js';
 
 export const GITHUB_CREDENTIAL_ENV_NAME = 'LIBRECHAT_CODE_GITHUB_AUTHORIZATION';
 export const GITHUB_ALLOWED_DOMAINS = [
@@ -46,23 +46,7 @@ function assertPositiveIdentifier(name: string, value: string): void {
 
 async function readPrivateKey(path: string): Promise<string> {
   assertPrivateStorageSupported();
-  if (process.platform !== 'win32') {
-    const directory = await stat(await realpath(dirname(path)));
-    const uid = process.getuid?.();
-    if (uid !== undefined && directory.uid !== uid && directory.uid !== 0) {
-      throw new Error(
-        'GitHub App private key directory must be owned by this user or root',
-      );
-    }
-    const mode = directory.mode & 0o7777;
-    const protectedByStickyBit =
-      (mode & 0o1000) !== 0 && (directory.uid === uid || directory.uid === 0);
-    if ((mode & 0o022) !== 0 && !protectedByStickyBit) {
-      throw new Error(
-        'GitHub App private key directory must not be writable by group or other users',
-      );
-    }
-  }
+  await assertPrivateStorageAncestors(dirname(path));
 
   const handle = await open(
     path,

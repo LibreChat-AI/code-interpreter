@@ -43,6 +43,12 @@ Use storage on a native Linux filesystem, not a Windows drive under `/mnt`.
 Support for these platforms requires a native ACL verifier; `chmod` alone is
 not sufficient.
 
+Every storage ancestor, including intermediate symlink entries and targets, must
+be owned by this account or root and must not allow group/other writes unless
+protected by the sticky bit. A private directory inside a shared writable parent
+is insufficient: that parent can replace the directory. This also applies when
+loading GitHub App keys or clearing quarantine state.
+
 Use `--identity <path>` while pairing and
 `LIBRECHAT_CODE_IDENTITY_FILE=<path>` while running to override the identity
 file location.
