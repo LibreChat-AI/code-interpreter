@@ -29,6 +29,13 @@ import {
   WorkspaceToolError,
 } from './workspace.js';
 
+import {
+  BRIDGE_WORKSPACE_COMMAND_MAX_BYTES,
+  BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
+  BRIDGE_WORKSPACE_COMMAND_MAX_OUTPUT_BYTES,
+} from './protocol.js';
+import type { WorkspaceToolRequest } from './protocol.js';
+
 const execFileAsync = promisify(execFile);
 
 test('reads a bounded range from a registered local workspace', async (t) => {
@@ -2017,4 +2024,107 @@ test('rejects empty, duplicate, and unknown sandbox workspace registration', asy
         error instanceof WorkspaceToolError && error.code === 'REGISTRATION_INVALID',
     );
   }
+});
+
+
+test('validates sandbox workspace requests before either executor is invoked', async () => {
+  const commands: WorkspaceToolRequest[] = [];
+  const delegated: WorkspaceToolRequest[] = [];
+  const tools = new SandboxWorkspaceTools({
+    workspaceTools: {
+      capabilities: {
+        protocolVersion: 1,
+        operations: ['read_file'],
+        workspaces: [{ id: 'primary' }],
+      },
+      async execute(request) {
+        delegated.push(request);
+        throw new Error('Unexpected delegation');
+      },
+    },
+    commandWorkspaces: ['primary'],
+    commandSandbox: {
+      async execute(request) {
+        commands.push(request);
+        return {
+          protocolVersion: 1,
+          operation: 'execute_command',
+          workspaceId: request.workspaceId,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          truncated: false,
+          timedOut: false,
+        };
+      },
+    },
+  });
+  const command = {
+    protocolVersion: 1 as const,
+    operation: 'execute_command' as const,
+    workspaceId: 'primary',
+    command: 'pwd',
+  };
+  const malformed: unknown[] = [
+    null, undefined, [], 'execute_command', {},
+    { ...command, protocolVersion: 2 },
+    { ...command, workspaceId: '' },
+    { ...command, operation: 'unknown' },
+    { ...command, command: undefined },
+    { ...command, command: 123 },
+    { ...command, command: '   ' },
+    { ...command, command: 'echo\0secret' },
+    { ...command, command: '\ud800' },
+    { ...command, command: 'a'.repeat(BRIDGE_WORKSPACE_COMMAND_MAX_BYTES + 1) },
+    { ...command, command: 'é'.repeat(BRIDGE_WORKSPACE_COMMAND_MAX_BYTES / 2 + 1) },
+    { ...command, cwd: '../outside' },
+    { ...command, cwd: '/tmp' },
+    { ...command, env: { UNSAFE: 'value' } },
+    { protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: '../outside' },
+  ];
+  for (const [field, maximum] of [
+    ['timeoutMs', BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS],
+    ['maxOutputBytes', BRIDGE_WORKSPACE_COMMAND_MAX_OUTPUT_BYTES],
+  ] as const) {
+    for (const value of [0, -1, 1.5, NaN, Infinity, '1', null, maximum + 1]) {
+      malformed.push({ ...command, [field]: value });
+    }
+  }
+  for (const request of malformed) {
+    await assert.rejects(
+      tools.execute(request as WorkspaceToolRequest),
+      (error: unknown) =>
+        error instanceof WorkspaceToolError &&
+        error.code === 'INVALID_REQUEST' &&
+        error.mutationMayHaveCommitted === false,
+    );
+    assert.deepEqual(commands, []);
+    assert.deepEqual(delegated, []);
+  }
+  for (const request of [
+    command,
+    { ...command, timeoutMs: 1, maxOutputBytes: 1 },
+    {
+      ...command,
+      command: 'é'.repeat(BRIDGE_WORKSPACE_COMMAND_MAX_BYTES / 2),
+      cwd: 'src',
+      timeoutMs: BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
+      maxOutputBytes: BRIDGE_WORKSPACE_COMMAND_MAX_OUTPUT_BYTES,
+    },
+  ]) {
+    await tools.execute(request);
+    assert.equal(commands.at(-1), request);
+  }
+  assert.equal(commands.length, 3);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    tools.execute(command, controller.signal),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'EXECUTION_ABORTED' &&
+      error.mutationMayHaveCommitted === false,
+  );
+  assert.equal(commands.length, 3);
+  assert.deepEqual(delegated, []);
 });
