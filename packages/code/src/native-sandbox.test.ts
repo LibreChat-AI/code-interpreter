@@ -552,3 +552,100 @@ test('maps platform-native exit statuses into the bridge protocol range', async 
   const result = await sandbox.execute(request);
   assert.equal(result.exitCode, 1);
 });
+
+test('cleans allocated command state exactly once on every execution exit', async (t) => {
+  for (const outcome of [
+    'abort-before-spawn',
+    'spawn-throw',
+    'close',
+    'error',
+    'abort-after-spawn',
+    'timeout',
+    'wrap-throw',
+  ] as const) {
+    for (const cleanupThrows of [false, true]) {
+      await t.test(`${outcome}, cleanup throws: ${cleanupThrows}`, async (t) => {
+        const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+        t.after(() => rm(root, { recursive: true, force: true }));
+        const controller = new AbortController();
+        let cleanupCalls = 0;
+        let spawnCalls = 0;
+        let allocated = false;
+        const fake = fakeManager({
+          async beforeWrap() {
+            if (outcome === 'wrap-throw') throw new Error('wrap failed');
+            allocated = true;
+            if (outcome === 'abort-before-spawn') controller.abort();
+          },
+        });
+        fake.manager.cleanupAfterCommand = () => {
+          cleanupCalls += 1;
+          assert.equal(allocated, true);
+          allocated = false;
+          if (cleanupThrows) throw new Error('cleanup failed');
+        };
+        const sandbox = new NativeSrtWorkspaceCommandSandbox({
+          workspaceRoot: root,
+          manager: fake.manager,
+          spawnCommand() {
+            spawnCalls += 1;
+            assert.equal(allocated, true);
+            if (outcome === 'spawn-throw') throw new Error('spawn failed');
+            const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+            let closeQueued = false;
+            const close = () => {
+              if (!closeQueued) {
+                closeQueued = true;
+                queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+              }
+              return true;
+            };
+            Object.assign(child, {
+              stdin: new PassThrough(),
+              stdout: new PassThrough(),
+              stderr: new PassThrough(),
+              pid: undefined,
+              kill: close,
+            });
+            queueMicrotask(() => {
+              assert.equal(cleanupCalls, 0);
+              if (outcome === 'error') {
+                child.emit('error', new Error('spawn failed'));
+              } else if (outcome === 'abort-after-spawn') {
+                controller.abort();
+              } else if (outcome === 'close') {
+                child.emit('close', 0, null);
+              }
+            });
+            return child;
+          },
+        });
+        const execution = sandbox.execute(
+          { ...request, timeoutMs: 10 },
+          controller.signal,
+        );
+        if (outcome === 'close' || outcome === 'timeout') {
+          const result = await execution;
+          assert.equal(result.exitCode, outcome === 'close' ? 0 : null);
+          assert.equal(result.timedOut, outcome === 'timeout');
+        } else {
+          await assert.rejects(execution, (error: unknown) =>
+            error instanceof WorkspaceToolError &&
+            error.code === (outcome.startsWith('abort')
+              ? 'EXECUTION_ABORTED'
+              : 'COMMAND_UNAVAILABLE') &&
+            error.mutationMayHaveCommitted === (outcome === 'abort-after-spawn'),
+          );
+        }
+        assert.equal(
+          spawnCalls,
+          outcome === 'abort-before-spawn' || outcome === 'wrap-throw' ? 0 : 1,
+        );
+        assert.equal(cleanupCalls, outcome === 'wrap-throw' ? 0 : 1);
+        assert.equal(allocated, false);
+        await sandbox.close();
+        assert.equal(fake.reset, true);
+      });
+    }
+  }
+});
