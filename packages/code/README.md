@@ -35,6 +35,14 @@ LIBRECHAT_CODE_SANDBOX_ENDPOINT=http://127.0.0.1:2000/api/v2 \
 librechat-code run
 ```
 
+Credential and quarantine storage currently requires Linux (including WSL2),
+where ownership and POSIX mode/ACL-mask checks can establish owner-only access.
+Native Windows and macOS fail closed before pairing-code redemption, credential
+loads, or storage mutations because their extended ACLs cannot yet be verified.
+Use storage on a native Linux filesystem, not a Windows drive under `/mnt`.
+Support for these platforms requires a native ACL verifier; `chmod` alone is
+not sufficient.
+
 Use `--identity <path>` while pairing and
 `LIBRECHAT_CODE_IDENTITY_FILE=<path>` while running to override the identity
 file location.
@@ -110,8 +118,9 @@ read only by the trusted worker, which mints and refreshes short-lived
 installation tokens. A personal access token is supported as a fallback with
 `LIBRECHAT_CODE_GITHUB_TOKEN`, but the GitHub App is the safer default because
 its repository access and permissions can be narrowly installed and revoked.
-Native Windows currently requires token mode because the worker cannot
-reliably validate private-key ACLs there; use WSL2 for GitHub App mode.
+Native Windows and macOS credential storage are unavailable until native ACL
+verification is implemented; use Linux or WSL2. This also applies to GitHub App
+private keys.
 
 Git receives authentication through process-scoped `GIT_CONFIG_*` variables.
 The same isolated config supplies the standard Git LFS filters; hosts using LFS

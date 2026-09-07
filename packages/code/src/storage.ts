@@ -14,6 +14,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 import { BRIDGE_PROTOCOL_VERSION, BridgeProtocolError } from './protocol.js';
+import { assertPrivateStorageSupported } from './private-storage.js';
 
 import type { PairedBridgeWorkerIdentity } from './pairing.js';
 
@@ -168,12 +169,8 @@ export function defaultWorkspaceQuarantinePath(
  * Symlinks are resolved: a link's own mode is always `0777` and ignored by the
  * kernel, so the file the bytes live in is what counts.
  *
- * This reads POSIX mode bits, which is not the whole access story everywhere.
- * A Linux POSIX ACL surfaces its mask in the group bits and so is caught, but
- * a macOS extended ACL inherited from the parent directory is invisible here
- * and survives `chmod`, and Windows is exempt entirely. Establishing owner-only
- * storage on those needs real ACL inspection; until then this verifies what the
- * mode can express and nothing more.
+ * Linux POSIX ACL masks are reflected in group mode bits. Platforms whose
+ * ACLs cannot be verified are rejected at the storage entry points.
  */
 async function groupOrOtherAccessMode(
   path: string,
@@ -310,6 +307,7 @@ async function assertOwnerOnlyPath(
 export async function ensurePrivateWorkspaceDirectory(
   path: string,
 ): Promise<void> {
+  assertPrivateStorageSupported();
   await mkdir(path, { recursive: true, mode: 0o700 });
   const metadata = await lstat(path);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
@@ -390,6 +388,7 @@ async function assertSiblingPublishable(path: string): Promise<void> {
 export async function assertIdentityPathIsPrivate(
   path: string,
 ): Promise<IdentityPathReservation> {
+  assertPrivateStorageSupported();
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await assertIdentityDestinationIsReplaceable(path);
   let created = false;
@@ -452,6 +451,7 @@ export async function saveBridgeIdentity(
   path: string,
   identity: PairedBridgeWorkerIdentity,
 ): Promise<void> {
+  assertPrivateStorageSupported();
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${randomBytes(8).toString('hex')}.tmp`;
   try {
@@ -492,6 +492,7 @@ export async function saveWorkspaceMutationQuarantine(
   path: string,
   record: WorkspaceMutationQuarantineRecord,
 ): Promise<void> {
+  assertPrivateStorageSupported();
   await ensureDurableDirectory(dirname(path));
   const file = await open(path, 'wx', 0o600);
   try {
@@ -521,6 +522,7 @@ export async function saveWorkspaceMutationQuarantine(
 export async function loadWorkspaceMutationQuarantine(
   path: string,
 ): Promise<WorkspaceMutationQuarantineRecord | undefined> {
+  assertPrivateStorageSupported();
   /* A marker another account can rewrite is not a control: it could be cleared
    * to resume mutations, or forged to wedge the worker under a foreign owner. */
   let content: string;
@@ -553,6 +555,7 @@ export async function clearWorkspaceMutationQuarantine(
   path: string,
   ownerId?: string,
 ): Promise<void> {
+  assertPrivateStorageSupported();
   if (ownerId != null) {
     const record = await loadWorkspaceMutationQuarantine(path);
     if (record == null || record.ownerId !== ownerId) {
@@ -586,6 +589,7 @@ export async function assertWorkspaceMutationQuarantineOwner(
 export async function loadBridgeIdentity(
   path: string,
 ): Promise<PairedBridgeWorkerIdentity> {
+  assertPrivateStorageSupported();
   /* An identity written before this check, or by an older release, is still a
    * private key other local accounts can read. Refuse it rather than booting. */
   const content = await readGuardedFile(

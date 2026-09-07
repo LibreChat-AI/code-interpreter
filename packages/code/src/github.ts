@@ -2,6 +2,7 @@ import { constants } from 'node:fs';
 import { createHash, createPrivateKey, sign } from 'node:crypto';
 import { open, realpath, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { assertPrivateStorageSupported } from './private-storage.js';
 
 export const GITHUB_CREDENTIAL_ENV_NAME = 'LIBRECHAT_CODE_GITHUB_AUTHORIZATION';
 export const GITHUB_ALLOWED_DOMAINS = [
@@ -44,6 +45,7 @@ function assertPositiveIdentifier(name: string, value: string): void {
 }
 
 async function readPrivateKey(path: string): Promise<string> {
+  assertPrivateStorageSupported();
   if (process.platform !== 'win32') {
     const directory = await stat(await realpath(dirname(path)));
     const uid = process.getuid?.();
