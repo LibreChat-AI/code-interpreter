@@ -1663,6 +1663,12 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
     request: WorkspaceToolRequest,
     signal?: AbortSignal,
   ): Promise<WorkspaceToolResult> {
+    if (!isWorkspaceToolRequest(request)) {
+      throw new WorkspaceToolError(
+        'Invalid workspace tool request',
+        'INVALID_REQUEST',
+      );
+    }
     if (request.operation !== 'execute_command') {
       return this.options.workspaceTools.execute(request, signal);
     }
