@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import {
   basename,
   dirname,
@@ -11,7 +11,17 @@ import {
   sep,
 } from 'node:path';
 import { constants as fsConstants } from 'node:fs';
-import { access, realpath, stat } from 'node:fs/promises';
+import {
+  access,
+  chmod,
+  lstat,
+  mkdtemp,
+  open,
+  readdir,
+  realpath,
+  rm,
+  stat,
+} from 'node:fs/promises';
 
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 
@@ -21,6 +31,11 @@ import {
   BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS,
   isWorkspaceToolRequest,
 } from './protocol.js';
+import {
+  assertPrivateStorageAcl,
+  assertPrivateStorageAncestors,
+  removePrivateStorageAcl,
+} from './private-storage.js';
 import { WorkspaceToolError } from './workspace.js';
 
 import type {
@@ -95,6 +110,17 @@ const {
   GIT_CONFIG_COUNT: TRUSTED_GIT_CONFIG_COUNT,
   ...TRUSTED_GIT_CONFIG_ENTRIES
 } = TRUSTED_GIT_ENVIRONMENT;
+
+const NATIVE_SANDBOX_SCRATCH_PREFIX = 'librechat-code-srt-';
+// SRT grants these shared compatibility paths by default. A worker-specific
+// TMPDIR must also deny them or separate worker processes can exchange files.
+const SRT_SHARED_SCRATCH_PATHS = ['/tmp/claude', '/private/tmp/claude'];
+const SRT_SCRATCH_SELECTOR_NAMES = [
+  'CLAUDE_CODE_TMPDIR',
+  'CLAUDE_TMPDIR',
+] as const;
+// Capture this before any command wrapper can temporarily mutate process.env.
+const HOST_TEMPORARY_ROOT = tmpdir();
 
 interface NativeSandboxManager {
   isSupportedPlatform(): boolean;
@@ -211,6 +237,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private readonly platform: NodeJS.Platform;
   private initialized?: Promise<void>;
   private canonicalRoot?: string;
+  private scratchDirectory?: string;
 
   constructor(
     private readonly options: NativeSrtWorkspaceCommandSandboxOptions,
@@ -230,6 +257,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     if (this.initialized) return this.initialized;
     this.initialized = this.initializeOnce().catch(async (error) => {
       await this.manager.reset().catch(() => undefined);
+      await this.removeScratchDirectory().catch(() => undefined);
       this.initialized = undefined;
       throw error;
     });
@@ -266,6 +294,26 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         'REGISTRATION_INVALID',
       );
     }
+    const sharedScratchPaths = await Promise.all(
+      (this.platform === 'win32' ? [] : SRT_SHARED_SCRATCH_PATHS).map(
+        canonicalPath,
+      ),
+    );
+    const inheritedWritablePaths = [
+      ...sharedScratchPaths,
+      ...(await Promise.all(
+        [join(home, '.npm', '_logs'), join(home, '.claude', 'debug')].map(
+          canonicalPath,
+        ),
+      )),
+    ];
+    const deniedInheritedWritablePaths = [...new Set(inheritedWritablePaths)];
+    if (deniedInheritedWritablePaths.some((path) => isWithin(path, root))) {
+      throw new WorkspaceToolError(
+        'Native sandbox workspace cannot be inside an inherited writable path',
+        'REGISTRATION_INVALID',
+      );
+    }
     const dependencies = await this.manager.checkDependenciesAsync();
     if (dependencies.errors.length > 0) {
       throw new WorkspaceToolError(
@@ -283,6 +331,17 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         );
       }
     }
+    const canonicalScratchDirectory =
+      await this.createScratchDirectory(sharedScratchPaths);
+    if (
+      canonicalScratchDirectory &&
+      isWithin(root, canonicalScratchDirectory)
+    ) {
+      throw new WorkspaceToolError(
+        'Native sandbox workspace cannot contain worker scratch storage',
+        'REGISTRATION_INVALID',
+      );
+    }
     const config: SandboxRuntimeConfig = {
       network: {
         allowedDomains: [...(this.options.allowedDomains ?? [])],
@@ -293,10 +352,21 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         ...(this.options.maskedEnvironment ? { tlsTerminate: {} } : {}),
       },
       filesystem: {
-        denyRead: [home],
-        allowRead: [root],
-        allowWrite: [root],
-        denyWrite: protectedPaths,
+        denyRead: [
+          home,
+          ...sharedScratchPaths.filter((path) =>
+            deniedInheritedWritablePaths.includes(path),
+          ),
+        ],
+        allowRead: [
+          root,
+          ...(canonicalScratchDirectory ? [canonicalScratchDirectory] : []),
+        ],
+        allowWrite: [
+          root,
+          ...(canonicalScratchDirectory ? [canonicalScratchDirectory] : []),
+        ],
+        denyWrite: [...protectedPaths, ...deniedInheritedWritablePaths],
         allowGitConfig: false,
       },
       credentials: {
@@ -305,7 +375,14 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           mode: 'deny' as const,
         })),
         envVars: [
-          ...deniedEnvironmentNames(this.environment, this.platform)
+          ...deniedEnvironmentNames(
+            {
+              ...this.environment,
+              CLAUDE_CODE_TMPDIR: '',
+              CLAUDE_TMPDIR: '',
+            },
+            this.platform,
+          )
             .filter((name) => {
               const normalized = normalizedEnvironmentName(
                 name,
@@ -388,6 +465,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         {
           ...TRUSTED_GIT_ENVIRONMENT,
           ...(credentialEnvironment ?? {}),
+          ...this.scratchSelectorEnvironment(),
         },
         () =>
           this.manager.wrapWithSandboxArgv(
@@ -476,6 +554,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             cwd,
             env: {
               ...wrapped.env,
+              ...this.scratchEnvironment(),
               ...TRUSTED_GIT_CONFIG_ENTRIES,
               GIT_CONFIG_COUNT:
                 wrapped.env.GIT_CONFIG_COUNT ?? TRUSTED_GIT_CONFIG_COUNT,
@@ -618,10 +697,126 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       : 1;
   }
 
+  private async createScratchDirectory(
+    sharedScratchPaths: string[],
+  ): Promise<string | undefined> {
+    // Windows SRT supplies the restricted account's private TEMP directory.
+    if (this.platform === 'win32') return undefined;
+    const canonicalTemporaryRoot = await canonicalPath(HOST_TEMPORARY_ROOT);
+    const sharedScratchRoot = sharedScratchPaths.find((path) =>
+      isWithin(path, canonicalTemporaryRoot),
+    );
+    const scratchDirectory = await mkdtemp(
+      join(
+        sharedScratchRoot
+          ? dirname(sharedScratchRoot)
+          : canonicalTemporaryRoot,
+        NATIVE_SANDBOX_SCRATCH_PREFIX,
+      ),
+    );
+    try {
+      await assertPrivateStorageAncestors(scratchDirectory);
+      const scratchHandle = await open(scratchDirectory, 'r');
+      try {
+        await removePrivateStorageAcl(scratchHandle, scratchDirectory);
+        await scratchHandle.chmod(0o700);
+        await assertPrivateStorageAcl(
+          scratchHandle,
+          scratchDirectory,
+          true,
+        );
+        if (((await scratchHandle.stat()).mode & 0o777) !== 0o700) {
+          throw new Error('Native sandbox scratch directory is not private');
+        }
+      } finally {
+        await scratchHandle.close();
+      }
+      this.scratchDirectory = await realpath(scratchDirectory);
+      return this.scratchDirectory;
+    } catch (error) {
+      await rm(scratchDirectory, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+      throw error;
+    }
+  }
+
+  private scratchEnvironment(): NodeJS.ProcessEnv {
+    const scratchDirectory = this.scratchDirectory;
+    if (!scratchDirectory) return {};
+    return this.platform === 'win32'
+      ? {
+          TMPDIR: scratchDirectory,
+          TEMP: scratchDirectory,
+          TMP: scratchDirectory,
+        }
+      : { TMPDIR: scratchDirectory };
+  }
+
+  private scratchSelectorEnvironment(): NodeJS.ProcessEnv {
+    const scratchDirectory = this.scratchDirectory;
+    if (!scratchDirectory) return {};
+    return Object.fromEntries(
+      SRT_SCRATCH_SELECTOR_NAMES.map((name) => [name, scratchDirectory]),
+    );
+  }
+
+  private async removeScratchDirectory(): Promise<void> {
+    const scratchDirectory = this.scratchDirectory;
+    if (!scratchDirectory) return;
+    try {
+      await rm(scratchDirectory, { recursive: true, force: true });
+    } catch {
+      await this.restoreScratchTraversal(scratchDirectory);
+      await rm(scratchDirectory, { recursive: true, force: true });
+    }
+    this.scratchDirectory = undefined;
+  }
+
+  private async restoreScratchTraversal(root: string): Promise<void> {
+    const pending = [root];
+    for (let index = 0; index < pending.length; index += 1) {
+      const directory = pending[index];
+      const metadata = await lstat(directory).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return undefined;
+          throw error;
+        },
+      );
+      if (!metadata?.isDirectory()) continue;
+      // Commands own their scratch contents and may remove all directory mode
+      // bits. Restore traversal before opening the directory with O_NOFOLLOW.
+      await chmod(directory, 0o700);
+      let handle;
+      try {
+        handle = await open(
+          directory,
+          fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+        );
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (['ENOENT', 'ELOOP', 'ENOTDIR'].includes(code ?? '')) continue;
+        throw error;
+      }
+      try {
+        if (!(await handle.stat()).isDirectory()) continue;
+      } finally {
+        await handle.close();
+      }
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) pending.push(join(directory, entry.name));
+      }
+    }
+  }
+
   async close(): Promise<void> {
-    if (!this.initialized) return;
-    await this.manager.reset();
-    this.initialized = undefined;
-    this.canonicalRoot = undefined;
+    if (!this.initialized && !this.scratchDirectory) return;
+    try {
+      if (this.initialized) await this.manager.reset();
+    } finally {
+      this.initialized = undefined;
+      this.canonicalRoot = undefined;
+      await this.removeScratchDirectory();
+    }
   }
 }

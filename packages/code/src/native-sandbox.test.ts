@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   access,
@@ -6,6 +7,7 @@ import {
   mkdir,
   realpath,
   rm,
+  stat,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
@@ -34,6 +36,7 @@ function fakeManager(
     beforeWrap?: () => Promise<void>;
     appendGitSafeDirectory?: boolean;
     inheritedGitEnvironment?: Record<string, string>;
+    initializeError?: Error;
     wrappedEnvironment?: NodeJS.ProcessEnv;
   } = {},
 ) {
@@ -41,6 +44,7 @@ function fakeManager(
   let reset = false;
   let credentialSeenDuringWrap: string | undefined;
   let gitLfsRequiredSeenDuringWrap: string | undefined;
+  let scratchSelectorSeenDuringWrap: string | undefined;
   const manager = {
     isSupportedPlatform: () => true,
     async checkDependenciesAsync() {
@@ -48,11 +52,13 @@ function fakeManager(
     },
     async initialize(value: SandboxRuntimeConfig) {
       config = value;
+      if (options.initializeError) throw options.initializeError;
     },
     async wrapWithSandboxArgv(command: string) {
       await options.beforeWrap?.();
       credentialSeenDuringWrap = process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
       gitLfsRequiredSeenDuringWrap = process.env.GIT_CONFIG_VALUE_3;
+      scratchSelectorSeenDuringWrap = process.env.CLAUDE_CODE_TMPDIR;
       const ambientGitEnvironment = Object.fromEntries(
         Object.entries(process.env).filter(
           ([name, value]) => name.startsWith('GIT_CONFIG_') && value != null,
@@ -105,6 +111,9 @@ function fakeManager(
     get gitLfsRequiredSeenDuringWrap() {
       return gitLfsRequiredSeenDuringWrap;
     },
+    get scratchSelectorSeenDuringWrap() {
+      return scratchSelectorSeenDuringWrap;
+    },
   };
 }
 
@@ -133,21 +142,185 @@ test('initializes SRT with a default-deny network and scrubbed worker credential
     join(await realpath(tmpdir()), 'librechat-code-identity.json'),
   );
   const canonicalHome = await realpath(homedir());
+  const scratchDirectory = fake.config?.filesystem.allowWrite[1];
+  assert.equal(typeof scratchDirectory, 'string');
   assert.deepEqual(fake.config?.network.allowedDomains, []);
   assert.equal(fake.config?.network.strictAllowlist, true);
   assert.equal(fake.config?.network.allowAllUnixSockets, false);
-  assert.deepEqual(fake.config?.filesystem.allowRead, [canonicalRoot]);
-  assert.deepEqual(fake.config?.filesystem.allowWrite, [canonicalRoot]);
+  assert.deepEqual(fake.config?.filesystem.allowRead, [
+    canonicalRoot,
+    scratchDirectory,
+  ]);
+  assert.deepEqual(fake.config?.filesystem.allowWrite, [
+    canonicalRoot,
+    scratchDirectory,
+  ]);
+  assert.equal((await stat(scratchDirectory!)).mode & 0o777, 0o700);
   assert.ok(fake.config?.filesystem.denyRead.includes(canonicalHome));
   assert.ok(fake.config?.filesystem.denyWrite.includes(canonicalIdentity));
+  assert.ok(
+    fake.config?.filesystem.denyWrite.some((path) =>
+      path.endsWith('/tmp/claude'),
+    ),
+  );
   const denied = fake.config?.credentials?.envVars?.map(({ name }) => name);
   assert.ok(denied?.includes('LIBRECHAT_CODE_WORKER_TOKEN'));
   assert.ok(denied?.includes('AWS_SECRET_ACCESS_KEY'));
   assert.ok(!denied?.includes('PATH'));
   assert.ok(denied?.includes('Path'));
   assert.ok(denied?.includes('lc_api_token'));
+  assert.ok(denied?.includes('CLAUDE_CODE_TMPDIR'));
+  assert.ok(denied?.includes('CLAUDE_TMPDIR'));
   await sandbox.close();
   assert.equal(fake.reset, true);
+  await assert.rejects(access(scratchDirectory!));
+});
+
+test('provides an isolated scratch directory to commands and restores the host environment', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const originalTmpdir = process.env.TMPDIR;
+  const originalSrtTmpdir = process.env.CLAUDE_CODE_TMPDIR;
+  const originalLegacySrtTmpdir = process.env.CLAUDE_TMPDIR;
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fake.manager,
+  });
+
+  const result = await sandbox.execute({
+    ...request,
+    maxOutputBytes: 1_024,
+    command: 'touch "$TMPDIR/probe" && printf %s "$TMPDIR"',
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /librechat-code-srt-/);
+  await access(join(result.stdout, 'probe'));
+  assert.equal(fake.scratchSelectorSeenDuringWrap, result.stdout);
+  assert.equal(process.env.TMPDIR, originalTmpdir);
+  assert.equal(process.env.CLAUDE_CODE_TMPDIR, originalSrtTmpdir);
+  assert.equal(process.env.CLAUDE_TMPDIR, originalLegacySrtTmpdir);
+  await sandbox.close();
+  await assert.rejects(access(result.stdout));
+});
+
+test('removes scratch storage when SRT initialization fails', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager({ initializeError: new Error('init failed') });
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fake.manager,
+  });
+
+  await assert.rejects(sandbox.prepare(), /init failed/);
+  const scratchDirectory = fake.config?.filesystem.allowWrite[1];
+  assert.equal(typeof scratchDirectory, 'string');
+  await assert.rejects(access(scratchDirectory!));
+  assert.equal(fake.reset, true);
+});
+
+test('rejects workspaces nested inside SRT shared scratch storage', async (t) => {
+  if (process.platform === 'win32') return;
+  const sharedRoot = '/tmp/claude';
+  await mkdir(sharedRoot, { recursive: true });
+  const root = await mkdtemp(join(sharedRoot, 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fakeManager().manager,
+  });
+
+  await assert.rejects(
+    sandbox.prepare(),
+    (error: WorkspaceToolError) =>
+      error.code === 'REGISTRATION_INVALID' &&
+      /inherited writable path/.test(error.message),
+  );
+});
+
+test('rejects a workspace that contains worker scratch storage', async () => {
+  if (process.platform === 'win32') return;
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: tmpdir(),
+    manager: fakeManager().manager,
+  });
+
+  await assert.rejects(
+    sandbox.prepare(),
+    (error: WorkspaceToolError) =>
+      error.code === 'REGISTRATION_INVALID' &&
+      /contain worker scratch storage/.test(error.message),
+  );
+  await sandbox.close();
+});
+
+test('keeps concurrent sandbox scratch directories independent', async (t) => {
+  const firstRoot = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  const secondRoot = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(firstRoot, { recursive: true, force: true }));
+  t.after(() => rm(secondRoot, { recursive: true, force: true }));
+  let releaseWrap!: () => void;
+  let wrapStarted!: () => void;
+  const wrapStartedPromise = new Promise<void>((resolve) => {
+    wrapStarted = resolve;
+  });
+  const holdWrap = new Promise<void>((resolve) => {
+    releaseWrap = resolve;
+  });
+  const firstFake = fakeManager({
+    async beforeWrap() {
+      wrapStarted();
+      await holdWrap;
+    },
+  });
+  const secondFake = fakeManager();
+  const firstSandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: firstRoot,
+    manager: firstFake.manager,
+  });
+  const secondSandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: secondRoot,
+    manager: secondFake.manager,
+  });
+  const firstExecution = firstSandbox.execute({
+    ...request,
+    command: 'printf first',
+  });
+  await wrapStartedPromise;
+  await secondSandbox.prepare();
+  const firstScratch = firstFake.config?.filesystem.allowWrite[1];
+  const secondScratch = secondFake.config?.filesystem.allowWrite[1];
+  assert.equal(typeof firstScratch, 'string');
+  assert.equal(typeof secondScratch, 'string');
+  assert.notEqual(firstScratch, secondScratch);
+  assert.ok(!secondScratch!.startsWith(`${firstScratch}/`));
+  releaseWrap();
+  await firstExecution;
+  await firstSandbox.close();
+  await access(secondScratch!);
+  await secondSandbox.close();
+});
+
+test('removes scratch storage after a command revokes traversal permissions', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fakeManager().manager,
+  });
+
+  const result = await sandbox.execute({
+    ...request,
+    command:
+      'printf %s "$TMPDIR"; mkdir "$TMPDIR/locked"; touch "$TMPDIR/locked/file"; chmod 000 "$TMPDIR/locked" "$TMPDIR"',
+  });
+
+  assert.equal(result.exitCode, 0);
+  await sandbox.close();
+  await assert.rejects(access(result.stdout));
 });
 
 const proxyEnvironment = {
@@ -586,16 +759,26 @@ test('terminates detached command descendants before returning', async (t) => {
 test('reports cancellation after command start as a potentially committed mutation', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
+  let commandStarted!: () => void;
+  const commandStartedPromise = new Promise<void>((resolve) => {
+    commandStarted = resolve;
+  });
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
     workspaceRoot: root,
     manager: fakeManager().manager,
+    spawnCommand(command, args, options) {
+      const child = spawn(command, [...args], options);
+      commandStarted();
+      return child;
+    },
   });
   const controller = new AbortController();
   const execution = sandbox.execute(
     { ...request, command: 'sleep 30' },
     controller.signal,
   );
-  setTimeout(() => controller.abort(), 25);
+  await commandStartedPromise;
+  controller.abort();
 
   await assert.rejects(
     execution,
