@@ -3,9 +3,8 @@ import { Router } from 'express';
 import type { RequestHandler, Response } from 'express';
 import type { AuthenticatedRequest } from '../types';
 import type { RedisBridgeStore } from '../bridge/store';
-import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 
-import logger from '../logger';
+import { getWorkspaceToolOutcome } from './outcome';
 import { getPrincipalOrReject } from '../auth/principal';
 import { BridgeStoreError } from '../bridge/store';
 import { checkServiceShutDown } from '../lifecycle';
@@ -48,47 +47,27 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
   router.post(
     '/workspace-tools/execute',
     asyncRoute(async (req, res) => {
-      const startedAt = performance.now();
-      const target: { operation?: WorkspaceToolRequest['operation']; workerId?: string } = {};
-      let errorCode: string | undefined;
-      let dispatchStartedAt: number | undefined;
+      const outcome = getWorkspaceToolOutcome(res);
       const deadlineBudgetMs = Math.max(1, options.timeoutMs ?? 30_000);
-      const logOutcome = (): void => {
-        res.removeListener('finish', logOutcome);
-        res.removeListener('close', logOutcome);
-        const finished = res.writableFinished;
-        const now = performance.now();
-        logger.log(finished && res.statusCode < 400 ? 'info' : 'warn', 'Workspace tool request completed', {
-          route: '/workspace-tools/execute',
-          ...target,
-          status: finished ? res.statusCode : undefined,
-          outcome: finished ? 'completed' : 'disconnected',
-          errorCode,
-          durationMs: Math.round(now - startedAt),
-          dispatchDurationMs: dispatchStartedAt == null ? undefined : Math.round(now - dispatchStartedAt),
-          deadlineBudgetMs,
-        });
-      };
-      res.once('finish', logOutcome);
-      res.once('close', logOutcome);
+      outcome.deadlineBudgetMs = deadlineBudgetMs;
       const principal = getPrincipalOrReject(req, res);
       if (!principal) {
-        errorCode = 'UNAUTHENTICATED';
+        outcome.errorCode = 'UNAUTHENTICATED';
         return;
       }
       if ((options.isShuttingDown ?? checkServiceShutDown)()) {
-        errorCode = 'SERVICE_SHUTTING_DOWN';
+        outcome.errorCode = 'SERVICE_SHUTTING_DOWN';
         res.status(503).json({ error: 'Service is shutting down' });
         return;
       }
       if (!isWorkspaceToolRequest(req.body)) {
-        errorCode = 'INVALID_WORKSPACE_TOOL_REQUEST';
+        outcome.errorCode = 'INVALID_WORKSPACE_TOOL_REQUEST';
         res.status(400).json({
           error: 'Invalid workspace tool request',
         });
         return;
       }
-      target.operation = req.body.operation;
+      outcome.operation = req.body.operation;
 
       let selection: { workerId: string; explicit: boolean } | undefined;
       try {
@@ -101,20 +80,20 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
         });
       } catch (error) {
         if (error instanceof BridgeWorkerSelectionError) {
-          errorCode = 'WORKER_SELECTION_REJECTED';
+          outcome.errorCode = 'WORKER_SELECTION_REJECTED';
           res.status(error.status).json({ error: error.message });
           return;
         }
         throw error;
       }
       if (selection == null) {
-        errorCode = 'WORKSPACE_BACKEND_UNAVAILABLE';
+        outcome.errorCode = 'WORKSPACE_BACKEND_UNAVAILABLE';
         res.status(503).json({
           error: 'Workspace tools require the remote-bridge backend',
         });
         return;
       }
-      target.workerId = selection.workerId;
+      outcome.workerId = selection.workerId;
 
       const controller = new AbortController();
       const abort = (): void => controller.abort();
@@ -124,7 +103,8 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
       };
       res.once('close', abortClosedResponse);
       try {
-        dispatchStartedAt = performance.now();
+        outcome.dispatchPending = true;
+        const dispatchStartedAt = performance.now();
         const settlement = await options.store.dispatchWorkspaceTool({
           workerId: selection.workerId,
           tenantId: principal.tenantId,
@@ -133,9 +113,11 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
           request: req.body,
           deadlineAtMs: Date.now() + deadlineBudgetMs,
           signal: controller.signal,
+        }).finally(() => {
+          outcome.dispatchDurationMs = Math.round(performance.now() - dispatchStartedAt);
         });
         if (settlement.status === 'rejected') {
-          errorCode = settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED';
+          outcome.errorCode = settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED';
           let status = 422;
           if (
             settlement.errorCode === 'SEARCH_TIMEOUT' ||
@@ -165,16 +147,18 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
         res.status(200).json(settlement.result);
       } catch (error) {
         if (error instanceof BridgeStoreError) {
-          errorCode = error.code;
+          outcome.errorCode = error.code;
           res.status(bridgeStoreStatus(error)).json({
             error: error.message,
             code: error.code,
           });
           return;
         }
-        errorCode = 'INTERNAL_ERROR';
+        outcome.errorCode = 'INTERNAL_ERROR';
         throw error;
       } finally {
+        outcome.dispatchPending = false;
+        outcome.flush();
         req.removeListener('aborted', abort);
         res.removeListener('close', abortClosedResponse);
       }

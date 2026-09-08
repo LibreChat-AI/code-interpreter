@@ -3,17 +3,23 @@ import type { Server } from 'node:http';
 
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import express, { json } from 'express';
+import rateLimitFactory from 'express-rate-limit';
 
 import logger from '../logger';
+import { env } from '../config';
+import { apiKeyAuth } from '../middleware/auth';
+import { workspaceToolOutcomeLogging } from './outcome';
 import { applyPrincipal } from '../auth/principal';
 import { BridgeStoreError } from '../bridge/store';
 import { bridgeStoreStatus, createWorkspaceToolsRouter } from './router';
 
 let server: Server | undefined;
+let logCompleted: ReturnType<typeof Promise.withResolvers<void>>;
 let logSpy: ReturnType<typeof spyOn<typeof logger, 'log'>>;
 
 beforeEach(() => {
-  logSpy = spyOn(logger, 'log').mockReturnValue(logger);
+  logCompleted = Promise.withResolvers<void>();
+  logSpy = spyOn(logger, 'log').mockImplementation(() => { logCompleted.resolve(); return logger; });
 });
 
 afterEach(() => {
@@ -170,6 +176,11 @@ test('dispatches an authenticated workspace tool request to the principal-bound 
   let dispatchArgs: Record<string, unknown> | undefined;
   const app = express();
   app.use(json());
+  app.use((_req, res, next) => {
+    const send = res.json.bind(res);
+    res.json = (body): typeof res => { setTimeout(() => send(body), 120); return res; };
+    next();
+  });
   app.use((req, _res, next) => {
     applyPrincipal(req, {
       userId: 'user-1',
@@ -231,6 +242,8 @@ test('dispatches an authenticated workspace tool request to the principal-bound 
   });
 
   expect(response.status).toBe(200);
+  const timing = Reflect.get(logSpy.mock.calls[0], 2) as { durationMs: number; dispatchDurationMs: number };
+  expect(timing.durationMs - timing.dispatchDurationMs).toBeGreaterThanOrEqual(100);
   expect(logSpy).toHaveBeenCalledTimes(1);
   expect(logSpy).toHaveBeenCalledWith(
     'info',
@@ -394,6 +407,7 @@ test('logs a disconnected dispatch once without inventing HTTP 200', async () =>
   const app = express();
   const started = Promise.withResolvers<void>();
   const closed = Promise.withResolvers<void>();
+  const settlementGate = Promise.withResolvers<void>();
   let dispatchAborted = false;
   let closeConnection = (): void => { throw new Error('connection not ready'); };
   app.use(json());
@@ -416,7 +430,7 @@ test('logs a disconnected dispatch once without inventing HTTP 200', async () =>
               'abort',
               () => {
                 dispatchAborted = true;
-                reject(new BridgeStoreError('ASSIGNMENT_EXPIRED', 'caller left'));
+                void settlementGate.promise.then(() => reject(new BridgeStoreError('ASSIGNMENT_EXPIRED', 'caller left')));
               },
               { once: true },
             );
@@ -441,15 +455,63 @@ test('logs a disconnected dispatch once without inventing HTTP 200', async () =>
   await expect(response).rejects.toThrow();
   await closed.promise;
   expect(dispatchAborted).toBe(true);
+  expect(logSpy).not.toHaveBeenCalled();
+  settlementGate.resolve();
+  await logCompleted.promise;
   expect(logSpy).toHaveBeenCalledTimes(1);
   expect(logSpy).toHaveBeenCalledWith(
     'warn',
     'Workspace tool request completed',
     expect.objectContaining({
       outcome: 'disconnected',
+      errorCode: 'ASSIGNMENT_EXPIRED',
       status: undefined,
       operation: 'list_files',
       workerId: 'user-worker',
     }),
   );
+});
+
+test.each(['auth', 'limit'] as const)('logs requests rejected by upstream %s middleware', async (stage) => {
+  const originalLocalMode = env.LOCAL_MODE;
+  const originalProvider = process.env.CODEAPI_AUTH_PROVIDER;
+  env.LOCAL_MODE = false;
+  process.env.CODEAPI_AUTH_PROVIDER = 'librechat-jwt';
+  try {
+    const app = express();
+    app.use('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
+    app.use(json());
+    if (stage === 'auth') app.use(apiKeyAuth);
+    else app.use(rateLimitFactory({ windowMs: 60_000, max: 1 }));
+    let reachedHandler = false;
+    app.post('/v1/workspace-tools/execute', (_req, res) => {
+      reachedHandler = true;
+      res.json({ ok: true });
+    });
+    server = createServer(app);
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+    const request = (): Promise<Response> => fetch(`http://127.0.0.1:${address.port}/v1/workspace-tools/execute`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    if (stage === 'limit') {
+      await (await request()).text();
+      logSpy.mockClear();
+      reachedHandler = false;
+    }
+    const response = await request();
+    await response.text();
+    expect(response.status).toBe(stage === 'auth' ? 401 : 429);
+    expect(reachedHandler).toBe(false);
+    expect(logSpy.mock.calls.filter(([, message]) => message === 'Workspace tool request completed')).toHaveLength(1);
+    expect(logSpy).toHaveBeenCalledWith('warn', 'Workspace tool request completed', expect.objectContaining({
+      status: response.status, errorCode: stage === 'auth' ? 'UNAUTHENTICATED' : 'RATE_LIMITED',
+      dispatchDurationMs: undefined, outcome: 'completed',
+    }));
+  } finally {
+    env.LOCAL_MODE = originalLocalMode;
+    if (originalProvider == null) delete process.env.CODEAPI_AUTH_PROVIDER;
+    else process.env.CODEAPI_AUTH_PROVIDER = originalProvider;
+  }
 });

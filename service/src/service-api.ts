@@ -7,6 +7,7 @@ import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
 import bridgeRouter from './bridge';
 import workspaceToolsRouter from './workspace-tools';
+import { workspaceToolOutcomeLogging } from './workspace-tools/outcome';
 import { connection } from './queue';
 import { env } from './config';
 import logger from './logger';
@@ -14,6 +15,7 @@ import hostedAppRouter from './hosted-app/router';
 import { hostedAppPreviewGateway } from './hosted-app/preview-gateway';
 
 const app = express();
+app.use('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(executionProfileMiddleware);
