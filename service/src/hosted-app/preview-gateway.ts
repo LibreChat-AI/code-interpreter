@@ -49,6 +49,40 @@ function reject(res: Response, status: number, message: string): Response {
   return res.status(status).type('text/plain').send(message);
 }
 
+/**
+ * End the cross-site navigation before loading the app. A SameSite=Strict
+ * cookie set on a cross-site HTTP redirect can remain excluded for the whole
+ * redirect chain. Loading this small document first makes its navigation to
+ * `/` originate from the preview site while keeping the cookie Strict.
+ */
+export function sendHostedAppPreviewAuthorizationHandoff(
+  res: Response,
+  sessionToken: string,
+  maxAge: number,
+): Response {
+  res.setHeader('Set-Cookie', [
+    `${COOKIE_NAME}=${encodeURIComponent(sessionToken)}`,
+    'Path=/',
+    'HttpOnly',
+    'Secure',
+    'SameSite=Strict',
+    `Max-Age=${maxAge}`,
+  ].join('; '));
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(200).type('html').send([
+    '<!doctype html>',
+    '<html><head>',
+    '<meta charset="utf-8">',
+    '<meta name="referrer" content="no-referrer">',
+    '<meta http-equiv="refresh" content="0;url=/">',
+    '<title>Opening preview</title>',
+    '</head><body>',
+    '<script>location.replace("/")</script>',
+    '<p><a href="/">Continue to preview</a></p>',
+    '</body></html>',
+  ].join(''));
+}
+
 export async function hostedAppPreviewGateway(
   req: Request,
   res: Response,
@@ -111,16 +145,7 @@ export async function hostedAppPreviewGateway(
         expiresAt,
       }, previewKey());
       const maxAge = Math.max(1, Math.floor((expiresAt - Date.now()) / 1_000));
-      res.setHeader('Set-Cookie', [
-        `${COOKIE_NAME}=${encodeURIComponent(sessionToken)}`,
-        'Path=/',
-        'HttpOnly',
-        'Secure',
-        'SameSite=Strict',
-        `Max-Age=${maxAge}`,
-      ].join('; '));
-      res.setHeader('Cache-Control', 'no-store');
-      res.redirect(303, '/');
+      sendHostedAppPreviewAuthorizationHandoff(res, sessionToken, maxAge);
       return;
     }
 

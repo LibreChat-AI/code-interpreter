@@ -232,7 +232,10 @@ Content-Type: application/json
 ```
 
 `GET /v1/hosted-apps/:app_id?runtime_session_hint=...` returns status and a
-fresh five-minute `preview_url`; `DELETE` on the same resource terminates the
+fresh five-minute `preview_url`; the authorization response loads a minimal
+same-origin handoff page before opening the app so the first request includes
+the host-only `SameSite=Strict` preview cookie even when LibreChat is on another
+site. `DELETE` on the same resource terminates the
 lease. A revision is immutable. Retrying the identical spec reasserts the
 resident process; changing code or launch settings requires a new revision and
 captures a new exact checkpoint. An ambiguous provider launch is replayed only
