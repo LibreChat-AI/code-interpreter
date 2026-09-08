@@ -242,7 +242,7 @@ test('dispatches an authenticated workspace tool request to the principal-bound 
   });
 
   expect(response.status).toBe(200);
-  const timing = Reflect.get(logSpy.mock.calls[0], 2) as { durationMs: number; dispatchDurationMs: number };
+  const timing = logSpy.mock.calls[0].at(-1) as { durationMs: number; dispatchDurationMs: number };
   expect(timing.durationMs - timing.dispatchDurationMs).toBeGreaterThanOrEqual(100);
   expect(logSpy).toHaveBeenCalledTimes(1);
   expect(logSpy).toHaveBeenCalledWith(
