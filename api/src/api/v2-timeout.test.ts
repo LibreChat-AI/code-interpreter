@@ -56,7 +56,7 @@ test('caps execution at the effective language runtime limit without rejecting l
       body: JSON.stringify({ language, version: '1.0.0', run_timeout: input, files: [{ name: 'main.txt', content: 'test' }] }),
     });
     expect(response.status, await response.text()).toBe(200);
-    expect(observed.at(-1)).toBe(expected);
+    expect(observed[observed.length - 1]).toBe(expected);
   }
 });
 
