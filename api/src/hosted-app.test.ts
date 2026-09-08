@@ -337,7 +337,9 @@ describe('HostedAppSupervisor', () => {
 
     expect(error).toBeInstanceOf(HostedAppError);
     expect(error.code).toBe('hosted_app_start_failed');
+    expect(error.message).toBe('hosted app exited');
     expect(supervisor.status()?.state).toBe('failed');
+    expect(supervisor.status()?.message).toBe('hosted app exited');
   });
 
   test('serializes quiesced workspace access and rejects it while an app is running', async () => {
@@ -424,9 +426,63 @@ describe('HostedAppSupervisor', () => {
     expect(error).toBeInstanceOf(HostedAppError);
     expect(error.code).toBe('hosted_app_cleanup_failed');
     expect(error.status).toBe(503);
+    expect(supervisor.status()).toMatchObject({
+      state: 'failed',
+      message: 'hosted app cleanup failed',
+    });
 
     permitCleanup = true;
-    await supervisor.shutdown();
+    const recovered = await supervisor.stop();
+    expect(recovered).toMatchObject({ state: 'stopped' });
+    expect(recovered).not.toHaveProperty('message');
+  });
+
+  test('allows checkpoint and restore to retry cleanup after stop fails', async () => {
+    const root = await workspace();
+    let permitCleanup = false;
+    const fixture = dependencies(root, {
+      killCgroup: async () => {
+        if (!permitCleanup) throw new Error('cgroup remains populated');
+      },
+    });
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    await supervisor.start(request());
+    await expect(supervisor.stop()).rejects.toMatchObject({
+      code: 'hosted_app_cleanup_failed',
+      status: 503,
+    });
+    const operations: string[] = [];
+
+    await expect(supervisor.withQuiescedWorkspace(async () => {
+      operations.push('unsafe checkpoint');
+    })).rejects.toMatchObject({
+      code: 'hosted_app_cleanup_failed',
+      status: 503,
+    });
+    expect(operations).toEqual([]);
+
+    permitCleanup = true;
+    await supervisor.withQuiescedWorkspace(async () => { operations.push('checkpoint'); });
+    await supervisor.withQuiescedWorkspace(async () => { operations.push('restore'); });
+
+    expect(operations).toEqual(['checkpoint', 'restore']);
+    expect(fixture.cgroupKills).toHaveLength(3);
+  });
+
+  test('surfaces replacement cleanup failure as retryable without spawning', async () => {
+    const root = await workspace();
+    const fixture = dependencies(root, {
+      killCgroup: async () => { throw new Error('cgroup remains populated'); },
+    });
+    const supervisor = new HostedAppSupervisor(fixture.deps);
+    await supervisor.start(request());
+
+    const error = await supervisor.start(request({ revision: 'rev-2' })).catch(value => value);
+
+    expect(error).toBeInstanceOf(HostedAppError);
+    expect(error).toMatchObject({ code: 'hosted_app_cleanup_failed', status: 503 });
+    expect(supervisor.status()?.state).toBe('failed');
+    expect(fixture.spawns).toHaveLength(1);
   });
 
   test('fails workspace mutation closed until a failed app cgroup is drained', async () => {

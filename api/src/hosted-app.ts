@@ -458,18 +458,7 @@ export class HostedAppSupervisor {
   }
 
   async stop(): Promise<HostedAppStatus | undefined> {
-    return this.serialize(async () => {
-      try {
-        return await this.stopImpl();
-      } catch (error) {
-        logger.error({ err: error }, 'Hosted-app stop cleanup failed');
-        throw new HostedAppError(
-          'hosted_app_cleanup_failed',
-          'the hosted app could not be stopped safely',
-          503,
-        );
-      }
-    });
+    return this.serialize(() => this.stopImpl());
   }
 
   async shutdown(): Promise<void> {
@@ -729,42 +718,62 @@ export class HostedAppSupervisor {
   private async stopImpl(preserveActive = false): Promise<HostedAppStatus | undefined> {
     const active = this.active;
     if (!active) return undefined;
-    const child = active.process;
-    if (!child?.pid) {
+    try {
+      const child = active.process;
+      if (!child?.pid) {
+        await this.deps.killCgroup();
+        active.cgroupDrained = true;
+        active.status.state = 'stopped';
+        if (!preserveActive) delete active.status.message;
+        active.status.exited_at ??= this.deps.now().toISOString();
+        if (!preserveActive) this.active = undefined;
+        return publicStatus(active);
+      }
+
+      active.status.state = 'stopping';
+      this.deps.killProcessGroup(child.pid, 'SIGTERM');
+      const exited = new Promise<boolean>(resolve => child.once('exit', () => resolve(true)));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<boolean>(resolve => {
+        timer = setTimeout(() => resolve(false), config.hosted_app_stop_timeout_ms);
+        timer.unref?.();
+      });
+      const stopped = await Promise.race([exited, timedOut]);
+      if (timer) clearTimeout(timer);
+      if (!stopped && active.process?.pid) {
+        await this.deps.killCgroup();
+        await Promise.race([
+          new Promise<void>(resolve => child.once('exit', () => resolve())),
+          new Promise<void>(resolve => setTimeout(resolve, config.hosted_app_stop_timeout_ms)),
+        ]);
+      }
+      /* Always sweep the cgroup: the tracked parent may have exited cleanly
+       * while a daemonized descendant stayed alive in a different process group. */
       await this.deps.killCgroup();
       active.cgroupDrained = true;
       active.status.state = 'stopped';
+      if (!preserveActive) delete active.status.message;
       active.status.exited_at ??= this.deps.now().toISOString();
+      const status = publicStatus(active);
       if (!preserveActive) this.active = undefined;
-      return publicStatus(active);
+      return status;
+    } catch (error) {
+      /* Keep the failed record so checkpoint/restore can retry the cgroup
+       * sweep. A `stopping` record would permanently reject those operations
+       * before they reach the recoverable cleanup path. */
+      active.cgroupDrained = false;
+      active.status.state = 'failed';
+      active.status.message = 'hosted app cleanup failed';
+      logger.error(
+        { err: error, appId: active.request.app_id },
+        'Hosted-app stop cleanup failed',
+      );
+      throw new HostedAppError(
+        'hosted_app_cleanup_failed',
+        'the hosted app could not be stopped safely',
+        503,
+      );
     }
-
-    active.status.state = 'stopping';
-    this.deps.killProcessGroup(child.pid, 'SIGTERM');
-    const exited = new Promise<boolean>(resolve => child.once('exit', () => resolve(true)));
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<boolean>(resolve => {
-      timer = setTimeout(() => resolve(false), config.hosted_app_stop_timeout_ms);
-      timer.unref?.();
-    });
-    const stopped = await Promise.race([exited, timedOut]);
-    if (timer) clearTimeout(timer);
-    if (!stopped && active.process?.pid) {
-      await this.deps.killCgroup();
-      await Promise.race([
-        new Promise<void>(resolve => child.once('exit', () => resolve())),
-        new Promise<void>(resolve => setTimeout(resolve, config.hosted_app_stop_timeout_ms)),
-      ]);
-    }
-    /* Always sweep the cgroup: the tracked parent may have exited cleanly
-     * while a daemonized descendant stayed alive in a different process group. */
-    await this.deps.killCgroup();
-    active.cgroupDrained = true;
-    active.status.state = 'stopped';
-    active.status.exited_at ??= this.deps.now().toISOString();
-    const status = publicStatus(active);
-    if (!preserveActive) this.active = undefined;
-    return status;
   }
 }
 
