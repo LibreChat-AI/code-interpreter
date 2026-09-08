@@ -15,7 +15,7 @@ const identity = { protocolVersion: 1 as const, workerId: 'worker',
 const quarantine = { version: 1 as const, workerId: 'worker', workspaceId: 'primary',
   reason: 'uncertain mutation', quarantinedAt: '2026-01-01T00:00:00Z' };
 
-for (const unsupported of ['win32', 'darwin', 'freebsd']) {
+for (const unsupported of ['win32', 'freebsd']) {
   test(`${unsupported} refuses storage before creation, reads, or deletion`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'private-storage-'));
     t.after(() => rm(root, { recursive: true, force: true }));
@@ -39,7 +39,7 @@ for (const unsupported of ['win32', 'darwin', 'freebsd']) {
 test('GitHub App credentials also reject unsupported ACL verification before signing or fetching', async t => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   t.after(() => Object.defineProperty(process, 'platform', platform));
-  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+  Object.defineProperty(process, 'platform', { ...platform, value: 'freebsd' });
   let fetched = false;
   const provider = new GitHubAppCredentialProvider({
     appId: '1', installationId: '1', privateKeyPath: '/must-not-be-read',

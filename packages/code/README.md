@@ -35,13 +35,20 @@ LIBRECHAT_CODE_SANDBOX_ENDPOINT=http://127.0.0.1:2000/api/v2 \
 librechat-code run
 ```
 
-Credential and quarantine storage currently requires Linux (including WSL2),
-where ownership and POSIX mode/ACL-mask checks can establish owner-only access.
-Native Windows and macOS fail closed before pairing-code redemption, credential
-loads, or storage mutations because their extended ACLs cannot yet be verified.
-Use storage on a native Linux filesystem, not a Windows drive under `/mnt`.
-Support for these platforms requires a native ACL verifier; `chmod` alone is
-not sufficient.
+Credential and quarantine storage supports macOS and Linux (including WSL2).
+On macOS, native descriptor-based ACL calls remove inherited ACLs from new
+credential/state files before writing secrets and verify the result. Reads reject
+ACL-exposed identities and GitHub App keys; ancestor checks reject ACL write
+grants that could permit replacement. Existing sharing ACLs on parent directories
+are never silently removed. Default application-owned workspace directories have
+their ACLs removed and modes restricted to `0700`.
+
+macOS requires the packaged Koffi native dependency (prebuilt for Apple Silicon
+and Intel); no Python interpreter or local compiler is needed with those builds.
+If it cannot load or ACL inspection fails, storage fails closed before pairing.
+Native Windows remains explicitly unsupported until DACL removal and verification
+are implemented. Use WSL2 with storage on a native Linux filesystem, not a Windows
+drive under `/mnt`. Linux retains ownership and POSIX mode/ACL-mask checks.
 
 Every storage ancestor, including intermediate symlink entries and targets, must
 be owned by this account or root and must not allow group/other writes unless
@@ -132,8 +139,8 @@ read only by the trusted worker, which mints and refreshes short-lived
 installation tokens. A personal access token is supported as a fallback with
 `LIBRECHAT_CODE_GITHUB_TOKEN`, but the GitHub App is the safer default because
 its repository access and permissions can be narrowly installed and revoked.
-Native Windows and macOS credential storage are unavailable until native ACL
-verification is implemented; use Linux or WSL2. This also applies to GitHub App
+Native Windows credential storage is unavailable until native DACL removal and
+verification are implemented; use macOS, Linux, or WSL2. This also applies to GitHub App
 private keys.
 
 Git receives authentication through process-scoped `GIT_CONFIG_*` variables.

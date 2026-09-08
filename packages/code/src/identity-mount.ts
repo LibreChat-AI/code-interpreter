@@ -1,4 +1,4 @@
-import { open, realpath } from 'node:fs/promises';
+import { lstat, open, realpath } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 import { BridgeProtocolError } from './protocol.js';
@@ -30,6 +30,19 @@ export function identityIsMountPoint(mountinfo: string, entryPath: string): bool
 export async function assertIdentityIsNotMountPoint(path: string): Promise<void> {
   // Resolve the parent, not the leaf: rename replaces a leaf symlink itself.
   const entryPath = join(await realpath(dirname(path)), basename(path));
+  if (process.platform === 'darwin') {
+    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    // A missing entry cannot be mounted; rename replaces a symlink itself.
+    if (metadata === undefined || metadata.isSymbolicLink()) return;
+    const { macOsMountPoint } = await import('./macos-storage.js');
+    if (await realpath(macOsMountPoint(entryPath)) === entryPath) {
+      throw new BridgeProtocolError(`Bridge identity path ${path} is a mount point and cannot be atomically replaced.`);
+    }
+    return;
+  }
   let content: string;
   try {
     const handle = await open('/proc/self/mountinfo', 'r');
