@@ -11,7 +11,17 @@ import {
   sep,
 } from 'node:path';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdtemp, open, realpath, rm, stat } from 'node:fs/promises';
+import {
+  access,
+  chmod,
+  lstat,
+  mkdtemp,
+  open,
+  readdir,
+  realpath,
+  rm,
+  stat,
+} from 'node:fs/promises';
 
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 
@@ -109,6 +119,8 @@ const SRT_SCRATCH_SELECTOR_NAMES = [
   'CLAUDE_CODE_TMPDIR',
   'CLAUDE_TMPDIR',
 ] as const;
+// Capture this before any command wrapper can temporarily mutate process.env.
+const HOST_TEMPORARY_ROOT = tmpdir();
 
 interface NativeSandboxManager {
   isSupportedPlatform(): boolean;
@@ -295,11 +307,13 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         ),
       )),
     ];
-    const deniedInheritedWritablePaths = [
-      ...new Set(inheritedWritablePaths),
-    ].filter(
-      (path) => !isWithin(root, path) && !isWithin(path, root),
-    );
+    const deniedInheritedWritablePaths = [...new Set(inheritedWritablePaths)];
+    if (deniedInheritedWritablePaths.some((path) => isWithin(path, root))) {
+      throw new WorkspaceToolError(
+        'Native sandbox workspace cannot be inside an inherited writable path',
+        'REGISTRATION_INVALID',
+      );
+    }
     const dependencies = await this.manager.checkDependenciesAsync();
     if (dependencies.errors.length > 0) {
       throw new WorkspaceToolError(
@@ -319,6 +333,15 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     }
     const canonicalScratchDirectory =
       await this.createScratchDirectory(sharedScratchPaths);
+    if (
+      canonicalScratchDirectory &&
+      isWithin(root, canonicalScratchDirectory)
+    ) {
+      throw new WorkspaceToolError(
+        'Native sandbox workspace cannot contain worker scratch storage',
+        'REGISTRATION_INVALID',
+      );
+    }
     const config: SandboxRuntimeConfig = {
       network: {
         allowedDomains: [...(this.options.allowedDomains ?? [])],
@@ -443,7 +466,6 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           ...TRUSTED_GIT_ENVIRONMENT,
           ...(credentialEnvironment ?? {}),
           ...this.scratchSelectorEnvironment(),
-          ...this.scratchEnvironment(),
         },
         () =>
           this.manager.wrapWithSandboxArgv(
@@ -680,7 +702,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   ): Promise<string | undefined> {
     // Windows SRT supplies the restricted account's private TEMP directory.
     if (this.platform === 'win32') return undefined;
-    const canonicalTemporaryRoot = await canonicalPath(tmpdir());
+    const canonicalTemporaryRoot = await canonicalPath(HOST_TEMPORARY_ROOT);
     const sharedScratchRoot = sharedScratchPaths.find((path) =>
       isWithin(path, canonicalTemporaryRoot),
     );
@@ -741,9 +763,50 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
 
   private async removeScratchDirectory(): Promise<void> {
     const scratchDirectory = this.scratchDirectory;
-    this.scratchDirectory = undefined;
     if (!scratchDirectory) return;
-    await rm(scratchDirectory, { recursive: true, force: true });
+    try {
+      await rm(scratchDirectory, { recursive: true, force: true });
+    } catch {
+      await this.restoreScratchTraversal(scratchDirectory);
+      await rm(scratchDirectory, { recursive: true, force: true });
+    }
+    this.scratchDirectory = undefined;
+  }
+
+  private async restoreScratchTraversal(root: string): Promise<void> {
+    const pending = [root];
+    for (let index = 0; index < pending.length; index += 1) {
+      const directory = pending[index];
+      const metadata = await lstat(directory).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return undefined;
+          throw error;
+        },
+      );
+      if (!metadata?.isDirectory()) continue;
+      // Commands own their scratch contents and may remove all directory mode
+      // bits. Restore traversal before opening the directory with O_NOFOLLOW.
+      await chmod(directory, 0o700);
+      let handle;
+      try {
+        handle = await open(
+          directory,
+          fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+        );
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (['ENOENT', 'ELOOP', 'ENOTDIR'].includes(code ?? '')) continue;
+        throw error;
+      }
+      try {
+        if (!(await handle.stat()).isDirectory()) continue;
+      } finally {
+        await handle.close();
+      }
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) pending.push(join(directory, entry.name));
+      }
+    }
   }
 
   async close(): Promise<void> {

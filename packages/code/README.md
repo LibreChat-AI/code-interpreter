@@ -94,8 +94,10 @@ owner-only scratch directory and grants SRT access to that exact directory
 without opening the host temporary-directory root. Commands receive it through
 `TMPDIR`, and orderly worker shutdown removes it. SRT's shared compatibility
 scratch path is explicitly denied. Windows uses the restricted SRT account's
-isolated profile and temporary directory instead. Each command and its
-descendants run inside SRT with:
+isolated profile and temporary directory instead. A workspace registration is
+rejected if it sits inside SRT's shared scratch path or is broad enough to
+contain worker scratch storage. Each command and its descendants run inside
+SRT with:
 
 - write access restricted to the one canonical registered workspace and the
   worker's private scratch directory;

@@ -221,6 +221,108 @@ test('removes scratch storage when SRT initialization fails', async (t) => {
   assert.equal(fake.reset, true);
 });
 
+test('rejects workspaces nested inside SRT shared scratch storage', async (t) => {
+  if (process.platform === 'win32') return;
+  const sharedRoot = '/tmp/claude';
+  await mkdir(sharedRoot, { recursive: true });
+  const root = await mkdtemp(join(sharedRoot, 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fakeManager().manager,
+  });
+
+  await assert.rejects(
+    sandbox.prepare(),
+    (error: WorkspaceToolError) =>
+      error.code === 'REGISTRATION_INVALID' &&
+      /inherited writable path/.test(error.message),
+  );
+});
+
+test('rejects a workspace that contains worker scratch storage', async () => {
+  if (process.platform === 'win32') return;
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: tmpdir(),
+    manager: fakeManager().manager,
+  });
+
+  await assert.rejects(
+    sandbox.prepare(),
+    (error: WorkspaceToolError) =>
+      error.code === 'REGISTRATION_INVALID' &&
+      /contain worker scratch storage/.test(error.message),
+  );
+  await sandbox.close();
+});
+
+test('keeps concurrent sandbox scratch directories independent', async (t) => {
+  const firstRoot = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  const secondRoot = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(firstRoot, { recursive: true, force: true }));
+  t.after(() => rm(secondRoot, { recursive: true, force: true }));
+  let releaseWrap!: () => void;
+  let wrapStarted!: () => void;
+  const wrapStartedPromise = new Promise<void>((resolve) => {
+    wrapStarted = resolve;
+  });
+  const holdWrap = new Promise<void>((resolve) => {
+    releaseWrap = resolve;
+  });
+  const firstFake = fakeManager({
+    async beforeWrap() {
+      wrapStarted();
+      await holdWrap;
+    },
+  });
+  const secondFake = fakeManager();
+  const firstSandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: firstRoot,
+    manager: firstFake.manager,
+  });
+  const secondSandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: secondRoot,
+    manager: secondFake.manager,
+  });
+  const firstExecution = firstSandbox.execute({
+    ...request,
+    command: 'printf first',
+  });
+  await wrapStartedPromise;
+  await secondSandbox.prepare();
+  const firstScratch = firstFake.config?.filesystem.allowWrite[1];
+  const secondScratch = secondFake.config?.filesystem.allowWrite[1];
+  assert.equal(typeof firstScratch, 'string');
+  assert.equal(typeof secondScratch, 'string');
+  assert.notEqual(firstScratch, secondScratch);
+  assert.ok(!secondScratch!.startsWith(`${firstScratch}/`));
+  releaseWrap();
+  await firstExecution;
+  await firstSandbox.close();
+  await access(secondScratch!);
+  await secondSandbox.close();
+});
+
+test('removes scratch storage after a command revokes traversal permissions', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fakeManager().manager,
+  });
+
+  const result = await sandbox.execute({
+    ...request,
+    command:
+      'printf %s "$TMPDIR"; mkdir "$TMPDIR/locked"; touch "$TMPDIR/locked/file"; chmod 000 "$TMPDIR/locked" "$TMPDIR"',
+  });
+
+  assert.equal(result.exitCode, 0);
+  await sandbox.close();
+  await assert.rejects(access(result.stdout));
+});
+
 const proxyEnvironment = {
   HTTP_PROXY: 'http://upstream.invalid:8080',
   HTTPS_PROXY: 'http://upstream.invalid:8080',
