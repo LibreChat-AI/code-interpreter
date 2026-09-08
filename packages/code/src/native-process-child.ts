@@ -30,6 +30,8 @@ const shutdown = () => {
 };
 process.on('disconnect', shutdown);
 process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+process.on('SIGHUP', shutdown);
 process.on('message', async (raw: unknown) => {
   if (shuttingDown) return;
   const message = raw as {
