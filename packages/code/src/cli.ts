@@ -27,7 +27,7 @@ import {
   EndpointRuntimeSupervisor,
 } from './runtime.js';
 import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
-import { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
+import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import {
   GITHUB_ALLOWED_DOMAINS,
   GITHUB_CREDENTIAL_ENV_NAME,
@@ -659,7 +659,7 @@ async function run(
         });
   const nativeCommandSandbox =
     allowWorkspaceCommands && commandSandboxMode === 'native-srt'
-      ? new NativeSrtWorkspaceCommandSandbox({
+      ? new NativeProcessWorkspaceCommandSandbox({
           workspaceRoot: canonicalWorkerDirectory!,
           protectedPaths: [
             identityPath,
@@ -738,6 +738,7 @@ async function run(
     await github.provider?.getCredential(controller.signal);
     await nativeCommandSandbox?.prepare();
   } catch (error) {
+    await nativeCommandSandbox?.close().catch(() => undefined);
     await fileRelaySupervisor?.stop().catch(() => undefined);
     throw error;
   }

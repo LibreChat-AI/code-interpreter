@@ -98,6 +98,22 @@ native workspaces need separate worker processes, not multiple instances of
 the default manager in one process. This lifecycle guard does not enable
 parallel assignments on a single bridge worker.
 
+The CLI hosts the native manager in a persistent, dedicated Node executor
+process. It does not inherit the bridge credential, arbitrary host environment,
+or Node loader/debugger options. Workspace policy and per-command masked
+credentials travel over private parent/child IPC, never command-line arguments.
+The bridge retains pairing and GitHub App identity management. Cancellation is
+addressed to the active command; executor loss after dispatch is treated as an
+uncertain mutation and is never automatically replayed. Restarting a worker
+still requires its existing quarantine checks. Native platform limitations on
+hard descendant teardown continue to apply.
+
+Embedding applications can use `NativeProcessWorkspaceCommandSandbox` from
+`@librechat/code` for separate native managers in one host application, with
+`prepare()`, `execute()`, and `close()`. Each instance is serial and must be
+closed by its owner. The bridge scheduler remains serial until negotiated
+execution slots and workspace-scoped quarantine are supported end to end.
+
 The bridge worker remains outside the sandbox so it can maintain its outbound
 Code API connection. On macOS and Linux, each worker process creates an
 owner-only scratch directory and grants SRT access to that exact directory
