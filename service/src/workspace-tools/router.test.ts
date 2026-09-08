@@ -14,6 +14,7 @@ import { hostedAppPreviewGateway } from '../hosted-app/preview-gateway';
 import { applyPrincipal } from '../auth/principal';
 import { BridgeStoreError } from '../bridge/store';
 import { bridgeStoreStatus, createWorkspaceToolsRouter } from './router';
+import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 
 let server: Server | undefined;
 let logCompleted: ReturnType<typeof Promise.withResolvers<void>>;
@@ -33,6 +34,46 @@ afterEach(() => {
 test('maps invalid worker results to an upstream failure', () => {
   expect(bridgeStoreStatus(new BridgeStoreError('RESULT_INVALID', 'invalid worker result'))).toBe(502);
   expect(bridgeStoreStatus(new BridgeStoreError('WORKER_QUEUE_FULL', 'queue full'))).toBe(429);
+});
+
+test.each<[WorkspaceToolRequest, number, number?]>([
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 300_000 }, 305_000, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 6000, 1000],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, 600_000],
+])('separates the admission deadline from execution budget for %j', async (request, expectedExecution, ceiling) => {
+  const app = express();
+  app.use(json());
+  app.use((req, _res, next) => {
+    applyPrincipal(req, { userId: 'user-1', tenantId: 'tenant-1', principalSource: 'librechat_jwt', codeWorkerId: 'user-worker' });
+    next();
+  });
+  let executionBudget: number | undefined;
+  let queueRemaining: number | undefined;
+  let commandTimeout: number | undefined;
+  app.use(createWorkspaceToolsRouter({
+    backend: 'remote-bridge', configuredWorkerId: 'user-worker', dynamicWorkers: false,
+    timeoutMs: ceiling,
+    store: { async dispatchWorkspaceTool(args) {
+      executionBudget = args.executionTimeoutMs;
+      if (args.request.operation === 'execute_command') commandTimeout = args.request.timeoutMs;
+      queueRemaining = args.deadlineAtMs - Date.now();
+      return { protocolVersion: 1, generation: 1, leaseToken: 'lease', incarnationId: 'incarnation', status: 'rejected', error: 'fixture' };
+    } },
+  }));
+  server = createServer(app);
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Missing listener');
+  const response = await fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+  });
+  await response.json();
+  expect(executionBudget).toBe(expectedExecution);
+  if (request.operation === 'execute_command') expect(commandTimeout).toBe(expectedExecution - 5000);
+  expect(queueRemaining).toBeGreaterThan(29_000);
+  expect(queueRemaining).toBeLessThanOrEqual(30_000);
 });
 
 test('rejects new workspace dispatches while the service is shutting down', async () => {
@@ -167,7 +208,7 @@ test.each([
       operation: 'search_text',
       workerId: 'user-worker',
       dispatchDurationMs: expect.any(Number),
-      deadlineBudgetMs: 30_000,
+      deadlineBudgetMs: 60_000,
     }),
   );
   await expect(response.json()).resolves.toMatchObject({
@@ -330,7 +371,7 @@ test.each([
       status: expectedStatus,
       errorCode,
       outcome: 'completed',
-      deadlineBudgetMs: 300_000,
+      deadlineBudgetMs: 60_000,
       dispatchDurationMs: expect.any(Number),
     }),
   );
