@@ -89,9 +89,15 @@ Windows. Startup fails before worker registration when the platform or its
 dependencies are unavailable. There is no unsandboxed command fallback.
 
 The bridge worker remains outside the sandbox so it can maintain its outbound
-Code API connection. Each command and its descendants run inside SRT with:
+Code API connection. Each worker process creates an owner-only scratch
+directory and grants SRT access to that exact directory without opening the
+host temporary-directory root. Commands receive it through `TMPDIR` (`TEMP`
+and `TMP` are also set on Windows), and worker shutdown removes it. SRT's
+shared compatibility scratch path is explicitly denied. Each command and its
+descendants run inside SRT with:
 
-- write access restricted to the one canonical registered workspace;
+- write access restricted to the one canonical registered workspace and the
+  worker's private scratch directory;
 - read access denied to the worker's home directory except for that workspace;
 - paired identity and mutation-quarantine files explicitly denied;
 - `LIBRECHAT_CODE_*` and nonessential inherited environment variables removed;
