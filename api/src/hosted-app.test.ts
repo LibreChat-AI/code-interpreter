@@ -337,7 +337,9 @@ describe('HostedAppSupervisor', () => {
 
     expect(error).toBeInstanceOf(HostedAppError);
     expect(error.code).toBe('hosted_app_start_failed');
+    expect(error.message).toBe('hosted app exited');
     expect(supervisor.status()?.state).toBe('failed');
+    expect(supervisor.status()?.message).toBe('hosted app exited');
   });
 
   test('serializes quiesced workspace access and rejects it while an app is running', async () => {

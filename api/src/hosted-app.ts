@@ -724,7 +724,7 @@ export class HostedAppSupervisor {
         await this.deps.killCgroup();
         active.cgroupDrained = true;
         active.status.state = 'stopped';
-        delete active.status.message;
+        if (!preserveActive) delete active.status.message;
         active.status.exited_at ??= this.deps.now().toISOString();
         if (!preserveActive) this.active = undefined;
         return publicStatus(active);
@@ -752,7 +752,7 @@ export class HostedAppSupervisor {
       await this.deps.killCgroup();
       active.cgroupDrained = true;
       active.status.state = 'stopped';
-      delete active.status.message;
+      if (!preserveActive) delete active.status.message;
       active.status.exited_at ??= this.deps.now().toISOString();
       const status = publicStatus(active);
       if (!preserveActive) this.active = undefined;
