@@ -33,6 +33,7 @@ function fixture(
 ) {
   const child = new EventEmitter() as ChildProcess;
   let options: ForkOptions | undefined;
+  let killCalls = 0;
   const messages: Record<string, any>[] = [];
   Object.assign(child, {
     connected: true,
@@ -54,11 +55,15 @@ function fixture(
       return true;
     },
     kill() {
+      killCalls += 1;
       child.emit('exit', 1);
       return true;
     },
   });
   return {
+    get killCalls() {
+      return killCalls;
+    },
     child,
     messages,
     get options() {
@@ -302,6 +307,11 @@ test('executor preserves bounded startup diagnostics and conventional host setti
   await assert.rejects(
     sandbox.prepare(),
     /dependencies are unavailable: bubblewrap/,
+  );
+  assert.equal(
+    fake.killCalls,
+    1,
+    'failed prepare must terminate without caller cleanup',
   );
   await sandbox.close();
 });

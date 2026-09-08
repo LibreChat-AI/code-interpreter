@@ -196,7 +196,11 @@ export class NativeProcessWorkspaceCommandSandbox
       },
       30_000,
       false,
-    );
+    ).catch((error) => {
+      this.failed = true;
+      this.terminate();
+      throw error;
+    });
   }
 
   async execute(
