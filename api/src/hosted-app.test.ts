@@ -430,7 +430,9 @@ describe('HostedAppSupervisor', () => {
     });
 
     permitCleanup = true;
-    await supervisor.shutdown();
+    const recovered = await supervisor.stop();
+    expect(recovered).toMatchObject({ state: 'stopped' });
+    expect(recovered).not.toHaveProperty('message');
   });
 
   test('allows checkpoint and restore to retry cleanup after stop fails', async () => {
