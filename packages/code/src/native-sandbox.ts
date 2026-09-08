@@ -139,6 +139,13 @@ interface NativeSandboxManager {
   reset(): Promise<void>;
 }
 
+// SRT's default manager is process-global, including its policy and cleanup
+// state. Distinct workspace objects must not reconfigure the same manager.
+const managerOwners = new WeakMap<
+  NativeSandboxManager,
+  NativeSrtWorkspaceCommandSandbox
+>();
+
 type SpawnCommand = (
   command: string,
   args: readonly string[],
@@ -238,6 +245,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private initialized?: Promise<void>;
   private canonicalRoot?: string;
   private scratchDirectory?: string;
+  private execution?: Promise<WorkspaceExecuteCommandResult>;
+  private closing?: Promise<void>;
+  private resetFailed = false;
 
   constructor(
     private readonly options: NativeSrtWorkspaceCommandSandboxOptions,
@@ -254,10 +264,27 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   }
 
   private async initialize(): Promise<void> {
+    if (this.closing || this.resetFailed) {
+      throw new WorkspaceToolError(
+        'Native sandbox is closing or requires cleanup',
+        'COMMAND_UNAVAILABLE',
+      );
+    }
     if (this.initialized) return this.initialized;
+    const owner = managerOwners.get(this.manager);
+    if (owner && owner !== this) {
+      throw new WorkspaceToolError(
+        'Native sandbox manager already belongs to another workspace; use a separate worker process',
+        'COMMAND_UNAVAILABLE',
+      );
+    }
+    managerOwners.set(this.manager, this);
     this.initialized = this.initializeOnce().catch(async (error) => {
-      await this.manager.reset().catch(() => undefined);
+      await this.manager.reset().catch(() => {
+        this.resetFailed = true;
+      });
       await this.removeScratchDirectory().catch(() => undefined);
+      if (!this.resetFailed) managerOwners.delete(this.manager);
       this.initialized = undefined;
       throw error;
     });
@@ -417,6 +444,25 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   }
 
   async execute(
+    request: WorkspaceExecuteCommandRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceExecuteCommandResult> {
+    if (this.execution || this.closing) {
+      throw new WorkspaceToolError(
+        'Native sandbox already has an active command or is closing',
+        'COMMAND_UNAVAILABLE',
+      );
+    }
+    const execution = this.executeExclusive(request, signal);
+    this.execution = execution;
+    try {
+      return await execution;
+    } finally {
+      this.execution = undefined;
+    }
+  }
+
+  private async executeExclusive(
     request: WorkspaceExecuteCommandRequest,
     signal?: AbortSignal,
   ): Promise<WorkspaceExecuteCommandResult> {
@@ -810,13 +856,28 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   }
 
   async close(): Promise<void> {
-    if (!this.initialized && !this.scratchDirectory) return;
+    if (this.closing) return this.closing;
+    const closing = this.closeExclusive();
+    this.closing = closing;
     try {
-      if (this.initialized) await this.manager.reset();
+      await closing;
     } finally {
-      this.initialized = undefined;
-      this.canonicalRoot = undefined;
-      await this.removeScratchDirectory();
+      this.closing = undefined;
     }
+  }
+
+  private async closeExclusive(): Promise<void> {
+    // Never reset proxy/credential state or remove scratch beneath a live child.
+    await this.execution?.catch(() => undefined);
+    await this.initialized?.catch(() => undefined);
+    if (managerOwners.get(this.manager) === this) {
+      this.resetFailed = true;
+      await this.manager.reset();
+      this.resetFailed = false;
+      managerOwners.delete(this.manager);
+    }
+    this.initialized = undefined;
+    this.canonicalRoot = undefined;
+    await this.removeScratchDirectory();
   }
 }
