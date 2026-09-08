@@ -92,7 +92,7 @@ process.on('message', async (raw: unknown) => {
         error instanceof WorkspaceToolError
           ? error.code
           : 'COMMAND_UNAVAILABLE',
-      ...(message.type === 'prepare' && error instanceof WorkspaceToolError
+      ...(error instanceof WorkspaceToolError
         ? { errorMessage: error.message.slice(0, 1024) }
         : {}),
       mutation:

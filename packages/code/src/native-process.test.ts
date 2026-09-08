@@ -276,11 +276,14 @@ test('executor shutdown receipt fences reuse before the OS exit event', async ()
 
 test('executor preserves bounded startup diagnostics and conventional host settings', async () => {
   assert.deepEqual(
-    nativeExecutorEnvironment({
-      HTTPS_PROXY: 'http://proxy:8080',
-      PATHEXT: '.EXE',
-      NODE_OPTIONS: 'unsafe',
-    }),
+    nativeExecutorEnvironment(
+      {
+        HTTPS_PROXY: 'http://proxy:8080',
+        PATHEXT: '.EXE',
+        NODE_OPTIONS: 'unsafe',
+      },
+      'win32',
+    ),
     { HTTPS_PROXY: 'http://proxy:8080', PATHEXT: '.EXE' },
   );
   const fake = fixture(undefined, (child, message) =>
@@ -301,4 +304,67 @@ test('executor preserves bounded startup diagnostics and conventional host setti
     /dependencies are unavailable: bubblewrap/,
   );
   await sandbox.close();
+});
+
+test('executor matches POSIX names exactly and folds names only on Windows', () => {
+  const env = {
+    PATH: '/bin',
+    Path: 'private',
+    home: 'private',
+    Temp: 'private',
+    PATHEXT: 'private',
+    https_proxy: 'http://proxy:8080',
+    custom_PROXY: 'private',
+  };
+  assert.deepEqual(nativeExecutorEnvironment(env, 'linux'), {
+    PATH: '/bin',
+    https_proxy: 'http://proxy:8080',
+  });
+  assert.deepEqual(
+    nativeExecutorEnvironment({ Path: 'C:\\bin', Temp: 'C:\\temp' }, 'win32'),
+    { Path: 'C:\\bin', Temp: 'C:\\temp' },
+  );
+});
+
+test('executor classifies every pre-dispatch setup failure as mutation-atomic', async () => {
+  for (const failure of ['fork', 'credential', 'wrapper', 'abort'] as const) {
+    const fake = fixture();
+    const controller = new AbortController();
+    const sandbox = new NativeProcessWorkspaceCommandSandbox(
+      {
+        workspaceRoot: '/workspace',
+        maskedEnvironment: {
+          variables: [],
+          async resolve() {
+            if (failure === 'abort') controller.abort();
+            if (failure === 'credential' || failure === 'abort')
+              throw new Error('private provider error');
+            return {};
+          },
+          wrapCommand(command) {
+            if (failure === 'wrapper') throw new Error('wrapper failed');
+            return command;
+          },
+        },
+      },
+      failure === 'fork'
+        ? () => {
+            throw new Error('fork failed');
+          }
+        : fake.fork,
+    );
+    await assert.rejects(
+      sandbox.execute(request, controller.signal),
+      (error: unknown) =>
+        error instanceof WorkspaceToolError &&
+        !error.mutationMayHaveCommitted &&
+        error.code ===
+          (failure === 'abort' ? 'EXECUTION_ABORTED' : 'COMMAND_UNAVAILABLE'),
+    );
+    assert.equal(
+      fake.messages.some((m) => m.type === 'execute'),
+      false,
+    );
+    await sandbox.close();
+  }
 });

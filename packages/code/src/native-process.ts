@@ -19,22 +19,12 @@ export type NativeProcessSandboxOptions = Omit<
  * In particular, never inherit NODE_OPTIONS, bridge identity, or app secrets. */
 export function nativeExecutorEnvironment(
   source: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv {
   const allowed = new Set([
     'PATH',
     'HOME',
-    'USERPROFILE',
-    'SYSTEMROOT',
-    'WINDIR',
-    'COMSPEC',
-    'TEMP',
-    'TMP',
     'TMPDIR',
-    'LOCALAPPDATA',
-    'APPDATA',
-    'PROGRAMDATA',
-    'PROGRAMFILES',
-    'PROGRAMFILES(X86)',
     'LANG',
     'LC_ALL',
     'LC_CTYPE',
@@ -44,18 +34,41 @@ export function nativeExecutorEnvironment(
     'TERM',
     'COLORTERM',
     'NO_COLOR',
-    'SYSTEMDRIVE',
-    'PATHEXT',
-    'HOMEDRIVE',
-    'HOMEPATH',
     'HTTP_PROXY',
     'HTTPS_PROXY',
     'ALL_PROXY',
     'NO_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'all_proxy',
+    'no_proxy',
   ]);
+  if (platform === 'win32') {
+    for (const name of [
+      'USERPROFILE',
+      'SYSTEMROOT',
+      'WINDIR',
+      'COMSPEC',
+      'TEMP',
+      'TMP',
+      'LOCALAPPDATA',
+      'APPDATA',
+      'PROGRAMDATA',
+      'PROGRAMFILES',
+      'PROGRAMFILES(X86)',
+      'SYSTEMDRIVE',
+      'PATHEXT',
+      'HOMEDRIVE',
+      'HOMEPATH',
+    ]) {
+      allowed.add(name);
+    }
+  }
   return Object.fromEntries(
     Object.entries(source).filter(
-      ([name, value]) => value != null && allowed.has(name.toUpperCase()),
+      ([name, value]) =>
+        value != null &&
+        allowed.has(platform === 'win32' ? name.toUpperCase() : name),
     ),
   );
 }
@@ -145,7 +158,6 @@ export class NativeProcessWorkspaceCommandSandbox
             : 'COMMAND_UNAVAILABLE';
         pending.reject(
           new WorkspaceToolError(
-            !pending.mutation &&
             typeof message.errorMessage === 'string' &&
             message.errorMessage.length <= 1024
               ? message.errorMessage
@@ -214,14 +226,30 @@ export class NativeProcessWorkspaceCommandSandbox
   ): Promise<WorkspaceExecuteCommandResult> {
     if (signal?.aborted)
       throw new WorkspaceToolError('Command aborted', 'EXECUTION_ABORTED');
-    await this.prepare();
-    const credentials = await this.options.maskedEnvironment?.resolve(signal);
-    if (signal?.aborted)
-      throw new WorkspaceToolError('Command aborted', 'EXECUTION_ABORTED');
-    const wrappedCommand = this.options.maskedEnvironment?.wrapCommand?.(
-      request.command,
-      process.platform,
-    );
+    let credentials: Record<string, string> | undefined;
+    let wrappedCommand: string | undefined;
+    try {
+      await this.prepare();
+      if (signal?.aborted) throw new Error('aborted');
+      credentials = await this.options.maskedEnvironment?.resolve(signal);
+      if (signal?.aborted) throw new Error('aborted');
+      wrappedCommand = this.options.maskedEnvironment?.wrapCommand?.(
+        request.command,
+        process.platform,
+      );
+      if (signal?.aborted) throw new Error('aborted');
+    } catch (error) {
+      // No execute RPC has been sent: setup, token refresh and wrapping cannot
+      // have mutated the workspace. Do not quarantine it for setup failures.
+      if (signal?.aborted)
+        throw new WorkspaceToolError('Command aborted', 'EXECUTION_ABORTED');
+      throw error instanceof WorkspaceToolError
+        ? new WorkspaceToolError(error.message, error.code, false)
+        : new WorkspaceToolError(
+            'Native executor setup failed before dispatch',
+            'COMMAND_UNAVAILABLE',
+          );
+    }
     const result = await this.rpc(
       'execute',
       { request, credentials, wrappedCommand },
