@@ -79,6 +79,7 @@ describe('RemoteBridgeSandboxBackend', () => {
     WORKER_OFFLINE: ['BRIDGE_WORKER_OFFLINE', true, 503, 'Code environment is offline'],
     WORKER_UNAUTHORIZED: ['BRIDGE_WORKER_UNAUTHORIZED', false, 403, 'Code environment is not authorized for this tenant'],
     WORKER_BUSY: ['BRIDGE_WORKER_BUSY', false, 409, 'Code environment is busy'],
+    WORKER_QUEUE_FULL: ['BRIDGE_WORKER_BUSY', false, 409, 'Code environment is busy'],
     ASSIGNMENT_EXPIRED: ['BRIDGE_DEADLINE_EXCEEDED', false, 504, 'Code environment execution timed out'],
     ASSIGNMENT_FENCED: ['BRIDGE_ASSIGNMENT_FENCED', false, 409, 'Code environment assignment is fenced; inspect the execution before retrying'],
     ASSIGNMENT_NOT_FOUND: ['BRIDGE_ASSIGNMENT_NOT_FOUND', false, 409, 'Code environment assignment is no longer available; inspect the execution before retrying'],

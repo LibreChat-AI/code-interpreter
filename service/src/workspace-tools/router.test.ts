@@ -32,6 +32,7 @@ afterEach(() => {
 
 test('maps invalid worker results to an upstream failure', () => {
   expect(bridgeStoreStatus(new BridgeStoreError('RESULT_INVALID', 'invalid worker result'))).toBe(502);
+  expect(bridgeStoreStatus(new BridgeStoreError('WORKER_QUEUE_FULL', 'queue full'))).toBe(429);
 });
 
 test('rejects new workspace dispatches while the service is shutting down', async () => {

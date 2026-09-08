@@ -18,6 +18,7 @@ import {
   isWorkspaceToolResult,
 } from '../../../packages/code/src/protocol';
 import type { BridgeWorkerBinding } from './pairing';
+import { BridgeAdmissionQueue } from './admission';
 
 const PREFIX = 'codeapi:bridge:v1';
 const POLL_INTERVAL_MS = 100;
@@ -43,6 +44,7 @@ export class BridgeStoreError extends Error {
       | 'WORKER_OFFLINE'
       | 'WORKER_UNAUTHORIZED'
       | 'WORKER_BUSY'
+      | 'WORKER_QUEUE_FULL'
       | 'ASSIGNMENT_EXPIRED'
       | 'ASSIGNMENT_FENCED'
       | 'ASSIGNMENT_NOT_FOUND'
@@ -684,18 +686,42 @@ export class RedisBridgeStore {
     const lockIncarnationId = registration.incarnationId;
     let assignment: StoredAssignment | undefined;
     let resultCommitted = false;
+    const admission = args.workspaceRequest == null
+      ? undefined
+      : new BridgeAdmissionQueue(this.redis);
     try {
-      const locked = await this.dispatchCommand(
-        () =>
-          this.acquireLock(
-            args.workerId,
-            assignmentId,
-            lockIncarnationId,
-            ttlSeconds,
-          ),
+      if (admission != null && !(await this.dispatchCommand(
+        () => admission.enter(args.workerId, assignmentId, args.deadlineAtMs),
         args,
-        'Bridge assignment lock acquisition',
-      );
+        'Bridge admission enqueue',
+      ))) {
+        throw new BridgeStoreError('WORKER_QUEUE_FULL', 'Bridge worker pending request limit reached');
+      }
+      let locked = false;
+      do {
+        if (admission != null && !(await this.dispatchCommand(
+          () => admission.isHead(args.workerId, assignmentId),
+          args,
+          'Bridge admission position',
+        ))) {
+          await delay(Math.min(POLL_INTERVAL_MS, args.deadlineAtMs - Date.now()), args.signal);
+          continue;
+        }
+        locked = await this.dispatchCommand(
+          () =>
+            this.acquireLock(
+              args.workerId,
+              assignmentId,
+              lockIncarnationId,
+              ttlSeconds,
+            ),
+          args,
+          'Bridge assignment lock acquisition',
+        );
+        if (!locked && admission != null) {
+          await delay(Math.min(POLL_INTERVAL_MS, args.deadlineAtMs - Date.now()), args.signal);
+        }
+      } while (!locked && admission != null);
       if (!locked) {
         throw new BridgeStoreError(
           'WORKER_BUSY',
@@ -703,6 +729,25 @@ export class RedisBridgeStore {
         );
       }
       this.assertDispatchActive(args.signal, args.deadlineAtMs);
+      if (admission != null) {
+        // Waiting must not transfer accepted work to a replacement machine or identity.
+        const current = await this.dispatchCommand(
+          () => this.dispatchableRegistration(args.workerId),
+          args,
+          'Bridge admitted worker validation',
+        );
+        if (
+          current == null ||
+          current.registration.incarnationId !== registration.incarnationId ||
+          current.registration.identityId !== registration.identityId ||
+          current.registration.binding?.tenantId !== registration.binding?.tenantId
+        ) {
+          throw new BridgeStoreError('WORKER_OFFLINE', 'Bridge worker changed while the request was waiting');
+        }
+        if (!supportsWorkspaceTool(current.registration, args.workspaceRequest!)) {
+          throw new BridgeStoreError('WORKER_MISMATCH', 'Bridge worker capabilities changed while the request was waiting');
+        }
+      }
       const generation = await this.dispatchCommand(
         () => this.redis.incr(generationKey(args.workerId)),
         args,
@@ -748,6 +793,12 @@ export class RedisBridgeStore {
           'Bridge assignment enqueue',
         );
         if (queued) break;
+        if (admission != null) {
+          throw new BridgeStoreError(
+            'WORKER_FENCED',
+            'Bridge worker changed before the waiting request could be dispatched',
+          );
+        }
         const replacement = await this.dispatchCommand(
           () => this.dispatchableRegistration(args.workerId),
           args,
@@ -810,6 +861,14 @@ export class RedisBridgeStore {
         throw error;
       }
     } finally {
+      if (admission != null) {
+        // Expiry remains the fallback if Redis is unavailable during cancellation.
+        await boundedCommand(
+          admission.leave(args.workerId, assignmentId),
+          this.redisCommandTimeoutMs,
+          'Bridge admission cleanup',
+        ).catch(() => undefined);
+      }
       if (resultCommitted) {
         try {
           await this.cleanupWithRetry(args.workerId, assignmentId, assignment);
