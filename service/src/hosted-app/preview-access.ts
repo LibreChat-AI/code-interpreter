@@ -142,3 +142,12 @@ export function hostedAppPreviewAuthorizeUrl(
   origin.searchParams.set('token', token);
   return origin.toString();
 }
+
+export function hostedAppRequestHostname(host: string | undefined): string | undefined {
+  if (host == null || host.length === 0 || /[\s/@\\]/.test(host)) return undefined;
+  try {
+    return new URL(`http://${host}`).hostname;
+  } catch {
+    return undefined;
+  }
+}

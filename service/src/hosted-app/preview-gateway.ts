@@ -5,6 +5,7 @@ import { readRuntimeSessionRecord } from '../runtime-session/registry';
 import { HostedAppControlPlaneError } from './control-plane';
 import {
   hostedAppRuntimeIdFromHostname,
+  hostedAppRequestHostname,
   HostedAppPreviewAccessError,
   hostedAppPreviewOwnerBinding,
   signHostedAppPreviewAccess,
@@ -15,16 +16,6 @@ import { applyHostedAppPreviewSecurityHeaders } from './proxy-policy';
 
 const COOKIE_NAME = '__Host-codeapi-app';
 const PREVIEW_COOKIE_TTL_MS = 60 * 60_000;
-
-function rawHostname(req: Request): string | undefined {
-  const host = req.headers.host;
-  if (!host || /[\s/@\\]/.test(host)) return undefined;
-  try {
-    return new URL(`http://${host}`).hostname;
-  } catch {
-    return undefined;
-  }
-}
 
 function cookie(req: Request, name: string): string | undefined {
   for (const item of (req.headers.cookie ?? '').split(';')) {
@@ -55,7 +46,7 @@ export async function hostedAppPreviewGateway(
   next: NextFunction,
 ): Promise<void> {
   if (!env.HOSTED_APPS_ENABLED || !env.HOSTED_APP_PREVIEW_ORIGIN) return next();
-  const hostname = rawHostname(req);
+  const hostname = hostedAppRequestHostname(req.headers.host);
   const runtimeId = hostname
     ? hostedAppRuntimeIdFromHostname(hostname, env.HOSTED_APP_PREVIEW_ORIGIN)
     : undefined;

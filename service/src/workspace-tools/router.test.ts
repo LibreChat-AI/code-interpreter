@@ -9,6 +9,8 @@ import logger from '../logger';
 import { env } from '../config';
 import { apiKeyAuth } from '../middleware/auth';
 import { workspaceToolOutcomeLogging } from './outcome';
+import { executionProfileMiddleware } from '../middleware/execution-profile';
+import { hostedAppPreviewGateway } from '../hosted-app/preview-gateway';
 import { applyPrincipal } from '../auth/principal';
 import { BridgeStoreError } from '../bridge/store';
 import { bridgeStoreStatus, createWorkspaceToolsRouter } from './router';
@@ -513,5 +515,50 @@ test.each(['auth', 'limit'] as const)('logs requests rejected by upstream %s mid
     env.LOCAL_MODE = originalLocalMode;
     if (originalProvider == null) delete process.env.CODEAPI_AUTH_PROVIDER;
     else process.env.CODEAPI_AUTH_PROVIDER = originalProvider;
+  }
+});
+
+test.each([
+  ['preview', undefined, 401, undefined],
+  ['preview', 'stateful', 409, undefined],
+  ['api', 'stateful', 409, 'execution_profile_mismatch'],
+  ['api', 'invalid', 400, 'invalid_execution_profile'],
+] as const)('classifies %s host traffic with expected profile %s', async (hostKind, expectedProfile, status, errorCode) => {
+  const saved = { enabled: env.HOSTED_APPS_ENABLED, origin: env.HOSTED_APP_PREVIEW_ORIGIN, profile: env.EXECUTION_PROFILE };
+  env.HOSTED_APPS_ENABLED = true;
+  env.HOSTED_APP_PREVIEW_ORIGIN = 'https://apps.example.test';
+  env.EXECUTION_PROFILE = 'default';
+  try {
+    const app = express();
+    app.use('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
+    app.use(executionProfileMiddleware);
+    app.use(hostedAppPreviewGateway);
+    app.use(json());
+    app.post('/v1/workspace-tools/execute', (_req, res) => { res.sendStatus(200); });
+    server = createServer(app);
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/workspace-tools/execute`, {
+      method: 'POST', headers: {
+        'Content-Type': 'application/json',
+        Host: hostKind === 'preview' ? `happ-${'a'.repeat(40)}.apps.example.test` : 'api.example.test',
+        ...(expectedProfile == null ? {} : { 'X-CodeAPI-Expected-Profile': expectedProfile }),
+      }, body: '{}',
+    });
+    await response.text();
+    expect(response.status).toBe(status);
+    if (hostKind === 'preview') {
+      expect(logSpy).not.toHaveBeenCalled();
+    } else {
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      expect(logSpy).toHaveBeenCalledWith('warn', 'Workspace tool request completed', expect.objectContaining({
+        status, errorCode, dispatchDurationMs: undefined,
+      }));
+    }
+  } finally {
+    env.HOSTED_APPS_ENABLED = saved.enabled;
+    env.HOSTED_APP_PREVIEW_ORIGIN = saved.origin;
+    env.EXECUTION_PROFILE = saved.profile;
   }
 });

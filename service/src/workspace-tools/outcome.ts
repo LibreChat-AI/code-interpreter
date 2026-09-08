@@ -1,6 +1,8 @@
 import type { RequestHandler, Response } from 'express';
 import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 import logger from '../logger';
+import { env } from '../config';
+import { hostedAppRequestHostname, hostedAppRuntimeIdFromHostname } from '../hosted-app/preview-access';
 
 interface WorkspaceToolOutcome {
   operation?: WorkspaceToolRequest['operation'];
@@ -60,7 +62,17 @@ export function getWorkspaceToolOutcome(res: Response): WorkspaceToolOutcome {
   return outcome;
 }
 
+export function recordWorkspaceToolRejection(res: Response, errorCode: string): void {
+  const outcome = outcomes.get(res);
+  if (outcome != null) outcome.errorCode = errorCode;
+}
+
+/** Classify raw Host like the preview gateway without moving the earlier profile guard. */
 export const workspaceToolOutcomeLogging: RequestHandler = (req, res, next): void => {
-  if (req.method === 'POST') getWorkspaceToolOutcome(res);
+  if (req.method !== 'POST') return next();
+  const hostname = hostedAppRequestHostname(req.headers.host);
+  if (env.HOSTED_APPS_ENABLED && env.HOSTED_APP_PREVIEW_ORIGIN && hostname != null &&
+    hostedAppRuntimeIdFromHostname(hostname, env.HOSTED_APP_PREVIEW_ORIGIN) != null) return next();
+  getWorkspaceToolOutcome(res);
   next();
 };
