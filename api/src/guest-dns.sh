@@ -2,6 +2,10 @@
 # The guest root may be read-only. Bake the link, populate its target only
 # after /run is mounted, and leave direct NsJail/Lambda resolvers untouched.
 
+# launcher/entrypoint.sh joins resolver directives with this separator because
+# the handoff rides the guest kernel command line, which cannot carry newlines.
+RESOLV_FIELD_SEPARATOR='|'
+
 prepare_guest_dns() {
     local root="$1"
     mkdir -p "$root/run"
@@ -12,18 +16,20 @@ prepare_guest_dns() {
 configure_guest_dns() {
     local root="${1:-}"
     local target="$root/run/codeapi-resolver"
+    local resolv_conf="${SANDBOX_RESOLV_CONF:-}"
+    resolv_conf="${resolv_conf//"$RESOLV_FIELD_SEPARATOR"/$'\n'}"
     if [ ! -L "$root/etc/resolv.conf" ] || \
         [ "$(readlink "$root/etc/resolv.conf")" != '../run/codeapi-resolver/resolv.conf' ]; then
         return 0
     fi
-    if ! printf '%s\n' "${SANDBOX_RESOLV_CONF:-}" | grep -Eq '^[[:space:]]*nameserver[[:space:]]+[^[:space:]#]'; then
+    if ! printf '%s\n' "$resolv_conf" | grep -Eq '^[[:space:]]*nameserver[[:space:]]+[^[:space:]#]'; then
         echo 'ERROR: KVM guest requires resolver configuration from launcher-entrypoint.sh' >&2
         return 1
     fi
     # A fresh, root-owned directory prevents a sandbox UID from replacing DNS
     # configuration in the runtime mount. Never reuse a pre-existing entry.
     (umask 077; mkdir "$target") || return 1
-    printf '%s\n' "$SANDBOX_RESOLV_CONF" > "$target/resolv.conf" || return 1
+    printf '%s\n' "$resolv_conf" > "$target/resolv.conf" || return 1
     chmod 600 "$target/resolv.conf" || return 1
     unset SANDBOX_RESOLV_CONF
 }

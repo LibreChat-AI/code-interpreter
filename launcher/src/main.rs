@@ -479,6 +479,92 @@ fn is_allowed_guest_env_key(key: &str, egress_gateway_enabled: bool) -> bool {
     false
 }
 
+/// The guest kernel keeps at most this many command-line bytes (`COMMAND_LINE_SIZE`
+/// on x86-64 and aarch64). libkrun on x86-64 assembles a longer line without
+/// complaint and the kernel silently drops the tail, which carries the guest
+/// environment and the `-- <args>` epilog.
+const GUEST_CMDLINE_LIMIT: usize = 2048;
+/// libkrun's own entries ahead of the environment: its default kernel
+/// parameters, `init=/init.krun`, `KRUN_INIT`, the block-root and rlimit
+/// entries and `tsi_hijack`. About 260 bytes for this launcher; the reserve
+/// leaves headroom for libkrun to grow.
+const LIBKRUN_CMDLINE_RESERVE: usize = 384;
+
+/// libkrun wraps each entry in double quotes and joins them with spaces.
+fn quoted_cmdline_len<'a>(items: impl Iterator<Item = &'a str>) -> usize {
+    items.map(|item| item.len() + 3).sum()
+}
+
+/// libkrun hands the guest its environment on the kernel command line, one
+/// double-quoted `KEY=VALUE` token per entry. linux-loader rejects anything
+/// outside printable ASCII with an `InvalidAscii` panic before boot. The guest
+/// kernel's `next_arg()` then toggles quoting on every double quote inside the
+/// token, ends it at the first unquoted space, and strips a leading quote from
+/// the value, so an entry only survives when its quotes balance, no space is
+/// left unquoted, and the value does not open with a quote.
+fn guest_env_entry_problem(key: &str, value: &str) -> Option<String> {
+    let mut in_quote = true;
+    for (offset, byte) in value.bytes().enumerate() {
+        match byte {
+            b'"' => in_quote = !in_quote,
+            b' ' if !in_quote => {
+                return Some(format!(
+                    "{key} has a space at offset {offset} outside balanced double quotes; the guest kernel splits the entry there"
+                ));
+            }
+            b' '..=b'~' => {}
+            _ => {
+                return Some(format!(
+                    "{key} contains byte 0x{byte:02x} at offset {offset}; guest environment entries travel on the kernel command line as single-line printable ASCII"
+                ));
+            }
+        }
+    }
+    if !in_quote {
+        return Some(format!(
+            "{key} has unbalanced double quotes; the guest kernel merges the next entry into it"
+        ));
+    }
+    if value.starts_with('"') {
+        return Some(format!(
+            "{key} starts with a double quote, which the guest kernel strips from the value"
+        ));
+    }
+    None
+}
+
+fn guest_cmdline_problem(env: &[(String, String)], args: &[String]) -> Option<String> {
+    if let Some(problem) = env
+        .iter()
+        .find_map(|(key, value)| guest_env_entry_problem(key, value))
+    {
+        return Some(problem);
+    }
+
+    let entries: Vec<String> = env.iter().map(|(key, value)| format!("{key}={value}")).collect();
+    let env_bytes = quoted_cmdline_len(entries.iter().map(String::as_str));
+    let args_bytes = " -- ".len() + quoted_cmdline_len(args.iter().map(String::as_str));
+    let budget = GUEST_CMDLINE_LIMIT.saturating_sub(LIBKRUN_CMDLINE_RESERVE + args_bytes);
+    if env_bytes <= budget {
+        return None;
+    }
+
+    let mut sizes: Vec<(&str, usize)> = env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.len()))
+        .collect();
+    sizes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let largest: Vec<String> = sizes
+        .iter()
+        .take(3)
+        .map(|(key, len)| format!("{key} ({len} bytes)"))
+        .collect();
+    Some(format!(
+        "guest environment needs {env_bytes} bytes on the kernel command line but only {budget} fit under the {GUEST_CMDLINE_LIMIT}-byte kernel limit; largest entries: {}",
+        largest.join(", ")
+    ))
+}
+
 fn main() {
     let vcpus: u8 = env::var("LAUNCHER_VCPUS")
         .ok()
@@ -528,19 +614,28 @@ fn main() {
     let egress_gateway_enabled = env::var("EGRESS_GATEWAY_URL")
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
-    let env_strs: Vec<CString> = env::vars()
+    let guest_env: Vec<(String, String)> = env::vars()
         .filter(|(k, _)| !k.starts_with("LAUNCHER_"))
         .filter(|(k, _)| is_allowed_guest_env_key(k, egress_gateway_enabled))
+        .collect();
+    // krun_set_exec supplies argv[0]; this array contains arguments only.
+    let guest_args: Vec<String> = vec![
+        "/sandbox_api/guest-dns.sh".into(),
+        "--exec".into(),
+        exec_path.clone(),
+    ];
+    if let Some(problem) = guest_cmdline_problem(&guest_env, &guest_args) {
+        eprintln!("[launcher] ERROR: {problem}");
+        process::exit(1);
+    }
+
+    let env_strs: Vec<CString> = guest_env
+        .iter()
         .map(|(k, v)| cstr(&format!("{k}={v}")))
         .collect();
     let env_ptrs = null_term(&env_strs);
 
-    // krun_set_exec supplies argv[0]; this array contains arguments only.
-    let argv_strs: Vec<CString> = vec![
-        cstr("/sandbox_api/guest-dns.sh"),
-        cstr("--exec"),
-        cstr(&exec_path),
-    ];
+    let argv_strs: Vec<CString> = guest_args.iter().map(|arg| cstr(arg)).collect();
     let argv_ptrs = null_term(&argv_strs);
 
     let rlimit_strs: Vec<CString> = vec![guest_nofile_rlimit(nofile_target)];
@@ -618,7 +713,95 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{desired_nofile_soft_limit, guest_nofile_rlimit, is_allowed_guest_env_key};
+    use super::{
+        desired_nofile_soft_limit, guest_cmdline_problem, guest_nofile_rlimit,
+        is_allowed_guest_env_key, GUEST_CMDLINE_LIMIT, LIBKRUN_CMDLINE_RESERVE,
+    };
+
+    fn guest_args() -> Vec<String> {
+        vec![
+            "/sandbox_api/guest-dns.sh".into(),
+            "--exec".into(),
+            "/sandbox_api/entrypoint.sh".into(),
+        ]
+    }
+
+    fn env(entries: &[(&str, &str)]) -> Vec<(String, String)> {
+        entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn guest_cmdline_accepts_single_line_printable_env() {
+        let env = env(&[
+            ("SANDBOX_RESOLV_CONF", "nameserver 127.0.0.11|options ndots:0"),
+            ("EGRESS_GATEWAY_URL", "http://egress_gateway:3190"),
+            ("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"),
+        ]);
+        assert_eq!(guest_cmdline_problem(&env, &guest_args()), None);
+    }
+
+    #[test]
+    fn guest_cmdline_rejects_multi_line_resolv_conf_before_libkrun() {
+        let env = env(&[("SANDBOX_RESOLV_CONF", "# Generated by Docker Engine.\nnameserver 127.0.0.11\noptions ndots:0")]);
+        let problem = guest_cmdline_problem(&env, &guest_args()).expect("newline must be rejected");
+        assert!(problem.starts_with("SANDBOX_RESOLV_CONF contains byte 0x0a at offset "), "{problem}");
+    }
+
+    #[test]
+    fn guest_cmdline_rejects_control_and_non_ascii_bytes() {
+        for value in ["a\tb", "caf\u{e9}", "\u{7f}", "a\rb", "\u{1b}[0m"] {
+            let env = env(&[("SANDBOX_LIMIT_OVERRIDES", value)]);
+            let problem = guest_cmdline_problem(&env, &guest_args()).expect("non-printable bytes must be rejected");
+            assert!(problem.starts_with("SANDBOX_LIMIT_OVERRIDES contains byte 0x"), "{problem}");
+        }
+    }
+
+    #[test]
+    fn guest_cmdline_keeps_quotes_the_kernel_parser_preserves() {
+        for value in ["{\"python\":{\"run_timeout\":30}}", "{\"python\": {\"run_timeout\": 30}}", "plain words with spaces"] {
+            let env = env(&[("SANDBOX_LIMIT_OVERRIDES", value)]);
+            assert_eq!(guest_cmdline_problem(&env, &guest_args()), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn guest_cmdline_rejects_quotes_that_split_or_merge_kernel_tokens() {
+        let cases = [
+            ("{\"a b\":1}", "SANDBOX_LIMIT_OVERRIDES has a space at offset 3 outside balanced double quotes;"),
+            ("say \"hi", "SANDBOX_LIMIT_OVERRIDES has unbalanced double quotes;"),
+            ("\"quoted\"", "SANDBOX_LIMIT_OVERRIDES starts with a double quote,"),
+        ];
+        for (value, expected) in cases {
+            let env = env(&[("SANDBOX_LIMIT_OVERRIDES", value)]);
+            let problem = guest_cmdline_problem(&env, &guest_args()).expect(value);
+            assert!(problem.starts_with(expected), "{problem}");
+        }
+    }
+
+    #[test]
+    fn guest_cmdline_rejects_env_that_overflows_the_kernel_limit() {
+        let key = "SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY";
+        let big = "A".repeat(1_700);
+        let env = env(&[(key, big.as_str()), ("SANDBOX_RESOLV_CONF", "nameserver 127.0.0.11")]);
+        let problem = guest_cmdline_problem(&env, &guest_args()).expect("oversized env must be rejected");
+        assert!(problem.contains(&format!("under the {GUEST_CMDLINE_LIMIT}-byte kernel limit")), "{problem}");
+        assert!(problem.contains(&format!("largest entries: {key} (1700 bytes), SANDBOX_RESOLV_CONF (21 bytes)")), "{problem}");
+    }
+
+    #[test]
+    fn guest_cmdline_budget_accounts_for_libkrun_reserve_and_args() {
+        let args = guest_args();
+        let args_bytes = " -- ".len() + args.iter().map(|arg| arg.len() + 3).sum::<usize>();
+        let budget = GUEST_CMDLINE_LIMIT - LIBKRUN_CMDLINE_RESERVE - args_bytes;
+        let key = "SANDBOX_LIMIT_OVERRIDES";
+        let exact = "A".repeat(budget - key.len() - "=".len() - 3);
+        assert_eq!(guest_cmdline_problem(&env(&[(key, exact.as_str())]), &args), None);
+        let over = format!("{exact}A");
+        assert!(guest_cmdline_problem(&env(&[(key, over.as_str())]), &args).is_some());
+    }
 
     #[test]
     fn guest_env_allowlist_blocks_control_plane_and_secret_vars() {

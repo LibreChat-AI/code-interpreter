@@ -153,6 +153,15 @@ read-only root disk does not need modification at boot. Rebuild the runner
 image to pick up this layout change. A missing resolver handoff fails startup
 rather than leaving the guest with an unrelated public DNS server.
 
+libkrun delivers the guest environment on the kernel command line, which only
+carries single-line printable ASCII and is capped at 2048 bytes by the guest
+kernel. The launcher entrypoint therefore forwards only the `nameserver`,
+`search`, `domain`, `options` and `sortlist` directives, joined by `|`, and the
+guest wrapper expands them back into `/etc/resolv.conf` lines. The launcher
+rejects any forwarded variable that would not survive that trip (control
+characters, non-ASCII bytes, quoting the kernel would split, or an oversized
+environment) with a named error instead of a libkrun panic and restart loop.
+
 To validate a deployment, execute code that creates a file in `/mnt/data`,
 confirm the response includes its file reference, and download it. Recreate the
 egress gateway with a different container IP while leaving the runner alive,

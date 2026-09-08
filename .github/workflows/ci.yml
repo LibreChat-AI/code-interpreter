@@ -48,6 +48,24 @@ jobs:
           docker buildx build --check -f api/Dockerfile .
           docker buildx build --check -f docker/Dockerfile.worker-sandbox .
 
+  launcher-unit-tests:
+    name: Launcher Unit Tests
+    runs-on: ubuntu-latest
+    container: fedora:43
+    defaults:
+      run:
+        working-directory: launcher
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install Rust and libkrun
+        # Mirrors launcher/Dockerfile's builder stage; libkrun is only packaged
+        # for Fedora, and the guest-environment checks link against it.
+        run: dnf install -y --setopt=install_weak_deps=False rust cargo libkrun-devel gcc
+
+      - name: Cargo tests
+        run: cargo test
+
   api-unit-tests:
     name: API Unit Tests
     runs-on: ubuntu-latest
