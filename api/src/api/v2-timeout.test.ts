@@ -50,7 +50,7 @@ test('caps execution at the effective language runtime limit without rejecting l
   Job.prototype.prime = async function () { observed.push(this.timeouts.run); };
   Job.prototype.execute = async function () { return {} as Awaited<ReturnType<Job['execute']>>; };
   Job.prototype.cleanup = async function () {};
-  for (const [input, expected] of [[25000, 15000], [15000, 15000], [1000, 1000], [null, 15000], [undefined, 15000]]) {
+  for (const [input, expected] of [[25000, 15000], [15000, 15000], [1000, 1000], [null, 15000], [undefined, 15000]] as const) {
     const response = await fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ language, version: '1.0.0', run_timeout: input, files: [{ name: 'main.txt', content: 'test' }] }),
