@@ -573,6 +573,7 @@ export class RedisBridgeStore {
     requireTenantBinding?: boolean;
     request: WorkspaceToolRequest;
     deadlineAtMs: number;
+    executionTimeoutMs?: number;
     signal: AbortSignal;
   }): Promise<CodeBridgeWorkspaceSettlement> {
     if (!isWorkspaceToolRequest(args.request)) {
@@ -614,12 +615,20 @@ export class RedisBridgeStore {
     workspaceRequest?: WorkspaceToolRequest;
     runtimeSessionId?: string;
     deadlineAtMs: number;
+    executionTimeoutMs?: number;
     signal: AbortSignal;
     finalize?: (
       settlement: CodeBridgeSettlement,
       registration: RegisteredBridgeWorker,
     ) => Promise<CodeBridgeSettlement>;
   }): Promise<CodeBridgeSettlement> {
+    if (args.executionTimeoutMs !== undefined && (
+      args.workspaceRequest == null ||
+      !Number.isSafeInteger(args.executionTimeoutMs) ||
+      args.executionTimeoutMs < 1 || args.executionTimeoutMs > 305_000
+    )) {
+      throw new BridgeStoreError('ASSIGNMENT_INVALID', 'Invalid workspace execution budget');
+    }
     this.assertDispatchActive(args.signal, args.deadlineAtMs);
     const dispatchable = await this.dispatchCommand(
       () => this.dispatchableRegistration(args.workerId),
@@ -682,7 +691,8 @@ export class RedisBridgeStore {
 
     const assignmentId = randomBytes(18).toString('base64url');
     const leaseToken = randomBytes(32).toString('base64url');
-    const ttlSeconds = assignmentTtlSeconds(args.deadlineAtMs);
+    // The lock is acquired before admission finishes; it must outlive the later execution deadline.
+    const ttlSeconds = assignmentTtlSeconds(args.deadlineAtMs + (args.executionTimeoutMs ?? 0));
     const lockIncarnationId = registration.incarnationId;
     let assignment: StoredAssignment | undefined;
     let resultCommitted = false;
@@ -747,6 +757,10 @@ export class RedisBridgeStore {
         if (!supportsWorkspaceTool(current.registration, args.workspaceRequest!)) {
           throw new BridgeStoreError('WORKER_MISMATCH', 'Bridge worker capabilities changed while the request was waiting');
         }
+      }
+      this.assertDispatchActive(args.signal, args.deadlineAtMs);
+      if (args.executionTimeoutMs !== undefined) {
+        args = { ...args, deadlineAtMs: Date.now() + args.executionTimeoutMs };
       }
       const generation = await this.dispatchCommand(
         () => this.redis.incr(generationKey(args.workerId)),

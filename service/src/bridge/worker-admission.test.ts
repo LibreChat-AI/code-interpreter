@@ -37,11 +37,13 @@ function dispatch(
   path: string,
   controller = new AbortController(),
   budgetMs = 5000,
+  executionTimeoutMs?: number,
 ): ReturnType<RedisBridgeStore['dispatchWorkspaceTool']> {
   return store.dispatchWorkspaceTool({
     workerId,
     signal: controller.signal,
     deadlineAtMs: Date.now() + budgetMs,
+    executionTimeoutMs,
     request: {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       operation: 'read_file',
@@ -111,7 +113,7 @@ test('an expired queued call never reaches the worker and does not strand later 
   const first = dispatch('first');
   const assignment = await store.lease(workerId, incarnationId, 1000);
   await expect(
-    dispatch('expired', new AbortController(), 25),
+    dispatch('expired', new AbortController(), 25, 1000),
   ).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
   const third = dispatch('third');
   await settle(assignment);
@@ -141,4 +143,30 @@ test('a queued request is rejected if the worker withdraws its capability', asyn
   await first;
   await expect(second).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
   expect(await store.lease(workerId, incarnationId, 50)).toBeUndefined();
+});
+
+test('execution receives a fresh budget after waiting and the lock covers long commands', async () => {
+  await register();
+  const first = dispatch('first');
+  const active = await store.lease(workerId, incarnationId, 1000);
+  const second = dispatch('second', new AbortController(), 1000, 305_000);
+  await new Promise(resolve => setTimeout(resolve, 150));
+  await settle(active);
+  await first;
+  const next = await store.lease(workerId, incarnationId, 1000);
+  expect(next).toBeDefined();
+  expect(Date.parse(next!.expiresAt) - Date.now()).toBeGreaterThan(304_000);
+  expect(await redis.pttl(`codeapi:bridge:v1:worker:${workerId}:lock`)).toBeGreaterThan(305_000);
+  await settle(next);
+  await second;
+});
+
+test('execution expires independently of an unused queue allowance', async () => {
+  await register();
+  const completion = dispatch('short', new AbortController(), 5000, 150);
+  void completion.catch(() => undefined);
+  const assignment = await store.lease(workerId, incarnationId, 1000);
+  expect(assignment).toBeDefined();
+  expect(Date.parse(assignment!.expiresAt) - Date.now()).toBeLessThanOrEqual(150);
+  await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
 });
