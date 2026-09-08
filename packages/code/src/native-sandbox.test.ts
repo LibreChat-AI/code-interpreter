@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   access,
@@ -656,16 +657,26 @@ test('terminates detached command descendants before returning', async (t) => {
 test('reports cancellation after command start as a potentially committed mutation', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
+  let commandStarted!: () => void;
+  const commandStartedPromise = new Promise<void>((resolve) => {
+    commandStarted = resolve;
+  });
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
     workspaceRoot: root,
     manager: fakeManager().manager,
+    spawnCommand(command, args, options) {
+      const child = spawn(command, [...args], options);
+      commandStarted();
+      return child;
+    },
   });
   const controller = new AbortController();
   const execution = sandbox.execute(
     { ...request, command: 'sleep 30' },
     controller.signal,
   );
-  setTimeout(() => controller.abort(), 25);
+  await commandStartedPromise;
+  controller.abort();
 
   await assert.rejects(
     execution,
