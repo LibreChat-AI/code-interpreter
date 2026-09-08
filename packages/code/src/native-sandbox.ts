@@ -317,46 +317,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         );
       }
     }
-    const canonicalTemporaryRoot = await canonicalPath(tmpdir());
-    const sharedScratchRoot = sharedScratchPaths.find((path) =>
-      isWithin(path, canonicalTemporaryRoot),
-    );
-    const scratchDirectory = await mkdtemp(
-      join(
-        sharedScratchRoot
-          ? dirname(sharedScratchRoot)
-          : canonicalTemporaryRoot,
-        NATIVE_SANDBOX_SCRATCH_PREFIX,
-      ),
-    );
-    let canonicalScratchDirectory: string;
-    try {
-      if (this.platform !== 'win32') {
-        await assertPrivateStorageAncestors(scratchDirectory);
-        const scratchHandle = await open(scratchDirectory, 'r');
-        try {
-          await removePrivateStorageAcl(scratchHandle, scratchDirectory);
-          await scratchHandle.chmod(0o700);
-          await assertPrivateStorageAcl(
-            scratchHandle,
-            scratchDirectory,
-            true,
-          );
-          if (((await scratchHandle.stat()).mode & 0o777) !== 0o700) {
-            throw new Error('Native sandbox scratch directory is not private');
-          }
-        } finally {
-          await scratchHandle.close();
-        }
-      }
-      canonicalScratchDirectory = await realpath(scratchDirectory);
-      this.scratchDirectory = canonicalScratchDirectory;
-    } catch (error) {
-      await rm(scratchDirectory, { recursive: true, force: true }).catch(
-        () => undefined,
-      );
-      throw error;
-    }
+    const canonicalScratchDirectory =
+      await this.createScratchDirectory(sharedScratchPaths);
     const config: SandboxRuntimeConfig = {
       network: {
         allowedDomains: [...(this.options.allowedDomains ?? [])],
@@ -373,8 +335,14 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             deniedInheritedWritablePaths.includes(path),
           ),
         ],
-        allowRead: [root, canonicalScratchDirectory],
-        allowWrite: [root, canonicalScratchDirectory],
+        allowRead: [
+          root,
+          ...(canonicalScratchDirectory ? [canonicalScratchDirectory] : []),
+        ],
+        allowWrite: [
+          root,
+          ...(canonicalScratchDirectory ? [canonicalScratchDirectory] : []),
+        ],
         denyWrite: [...protectedPaths, ...deniedInheritedWritablePaths],
         allowGitConfig: false,
       },
@@ -705,6 +673,50 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       code <= 255
       ? code
       : 1;
+  }
+
+  private async createScratchDirectory(
+    sharedScratchPaths: string[],
+  ): Promise<string | undefined> {
+    // Windows SRT supplies the restricted account's private TEMP directory.
+    if (this.platform === 'win32') return undefined;
+    const canonicalTemporaryRoot = await canonicalPath(tmpdir());
+    const sharedScratchRoot = sharedScratchPaths.find((path) =>
+      isWithin(path, canonicalTemporaryRoot),
+    );
+    const scratchDirectory = await mkdtemp(
+      join(
+        sharedScratchRoot
+          ? dirname(sharedScratchRoot)
+          : canonicalTemporaryRoot,
+        NATIVE_SANDBOX_SCRATCH_PREFIX,
+      ),
+    );
+    try {
+      await assertPrivateStorageAncestors(scratchDirectory);
+      const scratchHandle = await open(scratchDirectory, 'r');
+      try {
+        await removePrivateStorageAcl(scratchHandle, scratchDirectory);
+        await scratchHandle.chmod(0o700);
+        await assertPrivateStorageAcl(
+          scratchHandle,
+          scratchDirectory,
+          true,
+        );
+        if (((await scratchHandle.stat()).mode & 0o777) !== 0o700) {
+          throw new Error('Native sandbox scratch directory is not private');
+        }
+      } finally {
+        await scratchHandle.close();
+      }
+      this.scratchDirectory = await realpath(scratchDirectory);
+      return this.scratchDirectory;
+    } catch (error) {
+      await rm(scratchDirectory, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+      throw error;
+    }
   }
 
   private scratchEnvironment(): NodeJS.ProcessEnv {

@@ -89,11 +89,12 @@ Windows. Startup fails before worker registration when the platform or its
 dependencies are unavailable. There is no unsandboxed command fallback.
 
 The bridge worker remains outside the sandbox so it can maintain its outbound
-Code API connection. Each worker process creates an owner-only scratch
-directory and grants SRT access to that exact directory without opening the
-host temporary-directory root. Commands receive it through `TMPDIR` (`TEMP`
-and `TMP` are also set on Windows), and worker shutdown removes it. SRT's
-shared compatibility scratch path is explicitly denied. Each command and its
+Code API connection. On macOS and Linux, each worker process creates an
+owner-only scratch directory and grants SRT access to that exact directory
+without opening the host temporary-directory root. Commands receive it through
+`TMPDIR`, and orderly worker shutdown removes it. SRT's shared compatibility
+scratch path is explicitly denied. Windows uses the restricted SRT account's
+isolated profile and temporary directory instead. Each command and its
 descendants run inside SRT with:
 
 - write access restricted to the one canonical registered workspace and the
