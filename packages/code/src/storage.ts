@@ -225,7 +225,15 @@ async function readGuardedFile(
 }
 
 async function assertOwnerOnlyFile(handle: FileHandle, path: string): Promise<void> {
-  const mode = (await handle.stat()).mode & 0o777;
+  const metadata = await handle.stat();
+  const self = process.getuid?.();
+  if (self !== undefined && !isTrustedOwner(metadata.uid, self)) {
+    throw new BridgeProtocolError(
+      `${path} is owned by another account (uid ${metadata.uid}), ` +
+        'which can rewrite it. Keep worker credentials on a path this account owns.',
+    );
+  }
+  const mode = metadata.mode & 0o777;
   if ((mode & 0o077) !== 0) {
     throw new BridgeProtocolError(
       `Cannot restrict ${path} to owner-only access (mode ${mode.toString(8)}). ` +
