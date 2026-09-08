@@ -1,18 +1,25 @@
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import express, { json } from 'express';
 
+import logger from '../logger';
 import { applyPrincipal } from '../auth/principal';
 import { BridgeStoreError } from '../bridge/store';
 import { bridgeStoreStatus, createWorkspaceToolsRouter } from './router';
 
 let server: Server | undefined;
+let logSpy: ReturnType<typeof spyOn<typeof logger, 'log'>>;
+
+beforeEach(() => {
+  logSpy = spyOn(logger, 'log').mockReturnValue(logger);
+});
 
 afterEach(() => {
   server?.close();
   server = undefined;
+  logSpy.mockRestore();
 });
 
 test('maps invalid worker results to an upstream failure', () => {
@@ -66,6 +73,16 @@ test('rejects new workspace dispatches while the service is shutting down', asyn
 
   expect(response.status).toBe(503);
   expect(dispatched).toBe(false);
+  expect(logSpy).toHaveBeenCalledTimes(1);
+  expect(logSpy).toHaveBeenCalledWith(
+    'warn',
+    'Workspace tool request completed',
+    expect.objectContaining({
+      status: 503,
+      errorCode: 'SERVICE_SHUTTING_DOWN',
+      outcome: 'completed',
+    }),
+  );
 });
 
 test.each([
@@ -131,7 +148,22 @@ test.each([
   });
 
   expect(response.status).toBe(expectedStatus);
-  await expect(response.json()).resolves.toMatchObject({ code: errorCode });
+  expect(logSpy).toHaveBeenCalledTimes(1);
+  expect(logSpy).toHaveBeenCalledWith(
+    'warn',
+    'Workspace tool request completed',
+    expect.objectContaining({
+      status: expectedStatus,
+      errorCode,
+      operation: 'search_text',
+      workerId: 'user-worker',
+      dispatchDurationMs: expect.any(Number),
+      deadlineBudgetMs: 30_000,
+    }),
+  );
+  await expect(response.json()).resolves.toMatchObject({
+    code: errorCode,
+  });
 });
 
 test('dispatches an authenticated workspace tool request to the principal-bound worker', async () => {
@@ -199,6 +231,19 @@ test('dispatches an authenticated workspace tool request to the principal-bound 
   });
 
   expect(response.status).toBe(200);
+  expect(logSpy).toHaveBeenCalledTimes(1);
+  expect(logSpy).toHaveBeenCalledWith(
+    'info',
+    'Workspace tool request completed',
+    expect.objectContaining({
+      status: 200,
+      operation: 'read_file',
+      workerId: 'user-worker',
+      outcome: 'completed',
+    }),
+  );
+  expect(JSON.stringify(logSpy.mock.calls)).not.toContain('# LibreChat');
+  expect(JSON.stringify(logSpy.mock.calls)).not.toContain('tenant-1');
   await expect(response.json()).resolves.toMatchObject({
     operation: 'read_file',
     content: '# LibreChat',
@@ -209,4 +254,202 @@ test('dispatches an authenticated workspace tool request to the principal-bound 
     requireTenantBinding: true,
     request,
   });
+});
+
+test.each([
+  ['WORKER_UNAUTHORIZED', 403],
+  ['ASSIGNMENT_INVALID', 400],
+  ['RESULT_INVALID', 502],
+  ['ASSIGNMENT_EXPIRED', 504],
+  ['WORKER_OFFLINE', 503],
+  ['WORKER_BUSY', 503],
+  ['WORKER_MISMATCH', 409],
+] as const)('logs store rejection %s with actual HTTP %i', async (errorCode, expectedStatus) => {
+  const app = express();
+  app.use(json());
+  app.use((req, _res, next) => {
+    applyPrincipal(req, {
+      userId: 'user-1',
+      tenantId: 'tenant-1',
+      principalSource: 'librechat_jwt',
+      codeWorkerId: 'user-worker',
+    });
+    next();
+  });
+  app.use(
+    createWorkspaceToolsRouter({
+      backend: 'remote-bridge',
+      configuredWorkerId: 'user-worker',
+      dynamicWorkers: true,
+      timeoutMs: 300_000,
+      store: {
+        async dispatchWorkspaceTool() {
+          throw new BridgeStoreError(errorCode, 'private diagnostic details');
+        },
+      },
+    }),
+  );
+  server = createServer(app);
+  await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+  const response = await fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      protocolVersion: 1,
+      operation: 'list_files',
+      workspaceId: 'primary',
+    }),
+  });
+  expect(response.status).toBe(expectedStatus);
+  await response.text();
+  expect(logSpy).toHaveBeenCalledTimes(1);
+  expect(logSpy).toHaveBeenCalledWith(
+    'warn',
+    'Workspace tool request completed',
+    expect.objectContaining({
+      operation: 'list_files',
+      workerId: 'user-worker',
+      status: expectedStatus,
+      errorCode,
+      outcome: 'completed',
+      deadlineBudgetMs: 300_000,
+      dispatchDurationMs: expect.any(Number),
+    }),
+  );
+  expect(JSON.stringify(logSpy.mock.calls)).not.toContain('private diagnostic details');
+});
+
+test.each([
+  ['unauthenticated', 401, 'UNAUTHENTICATED'],
+  ['invalid request', 400, 'INVALID_WORKSPACE_TOOL_REQUEST'],
+  ['selection denied', 403, 'WORKER_SELECTION_REJECTED'],
+  ['invalid worker', 400, 'WORKER_SELECTION_REJECTED'],
+  ['no backend', 503, 'WORKSPACE_BACKEND_UNAVAILABLE'],
+] as const)('logs early %s without dispatching', async (scenario, status, errorCode) => {
+  const app = express();
+  app.use(json());
+  app.use((req, _res, next) => {
+    const workerId = scenario === 'invalid worker' ? 'bad/worker' : 'user-worker';
+    if (scenario !== 'unauthenticated')
+      applyPrincipal(req, {
+        userId: 'user-1',
+        tenantId: 'tenant-1',
+        principalSource: 'librechat_jwt',
+        codeWorkerId:
+          scenario === 'no backend' ? undefined : workerId,
+      });
+    next();
+  });
+  app.use(
+    createWorkspaceToolsRouter({
+      backend: scenario === 'no backend' ? 'http' : 'remote-bridge',
+      configuredWorkerId: 'user-worker',
+      dynamicWorkers: true,
+      store: {
+        async dispatchWorkspaceTool() {
+          throw new Error('Must not dispatch');
+        },
+      },
+    }),
+  );
+  server = createServer(app);
+  await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+  const response = await fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(scenario === 'selection denied' ? { 'X-LibreChat-Code-Worker-ID': 'forged-worker' } : {}),
+    },
+    body: JSON.stringify(
+      scenario === 'invalid request'
+        ? { operation: 'private-untrusted-operation' }
+        : {
+          protocolVersion: 1,
+          operation: 'list_files',
+          workspaceId: 'primary',
+        },
+    ),
+  });
+  expect(response.status).toBe(status);
+  await response.text();
+  expect(logSpy).toHaveBeenCalledTimes(1);
+  expect(logSpy).toHaveBeenCalledWith(
+    'warn',
+    'Workspace tool request completed',
+    expect.objectContaining({
+      status,
+      errorCode,
+      dispatchDurationMs: undefined,
+    }),
+  );
+  expect(JSON.stringify(logSpy.mock.calls)).not.toContain('forged-worker');
+  expect(JSON.stringify(logSpy.mock.calls)).not.toContain('private-untrusted-operation');
+});
+
+test('logs a disconnected dispatch once without inventing HTTP 200', async () => {
+  const app = express();
+  const started = Promise.withResolvers<void>();
+  const closed = Promise.withResolvers<void>();
+  let dispatchAborted = false;
+  let closeConnection = (): void => { throw new Error('connection not ready'); };
+  app.use(json());
+  app.use((req, res, next) => {
+    applyPrincipal(req, { userId: 'user-1', tenantId: 'tenant-1', principalSource: 'librechat_jwt', codeWorkerId: 'user-worker' });
+    closeConnection = (): void => { res.destroy(); };
+    res.once('close', () => closed.resolve());
+    next();
+  });
+  app.use(
+    createWorkspaceToolsRouter({
+      backend: 'remote-bridge',
+      configuredWorkerId: 'user-worker',
+      dynamicWorkers: true,
+      store: {
+        async dispatchWorkspaceTool({ signal }) {
+          started.resolve();
+          return await new Promise((_resolve, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => {
+                dispatchAborted = true;
+                reject(new BridgeStoreError('ASSIGNMENT_EXPIRED', 'caller left'));
+              },
+              { once: true },
+            );
+          });
+        },
+      },
+    }),
+  );
+  server = createServer(app);
+  await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+  const controller = new AbortController();
+  const response = fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: controller.signal,
+    body: JSON.stringify({ protocolVersion: 1, operation: 'list_files', workspaceId: 'primary' }),
+  });
+  await started.promise;
+  closeConnection();
+  await expect(response).rejects.toThrow();
+  await closed.promise;
+  expect(dispatchAborted).toBe(true);
+  expect(logSpy).toHaveBeenCalledTimes(1);
+  expect(logSpy).toHaveBeenCalledWith(
+    'warn',
+    'Workspace tool request completed',
+    expect.objectContaining({
+      outcome: 'disconnected',
+      status: undefined,
+      operation: 'list_files',
+      workerId: 'user-worker',
+    }),
+  );
 });
