@@ -20,6 +20,7 @@ import serviceRouter from './service/router';
 import programmaticRouter from './service/programmatic-router';
 import bridgeRouter from './bridge';
 import workspaceToolsRouter from './workspace-tools';
+import { workspaceToolOutcomeLogging } from './workspace-tools/outcome';
 import { connection } from './queue';
 import { metricsHandler } from './metrics';
 import { httpMetricsMiddleware } from './middleware/httpMetrics';
@@ -33,6 +34,7 @@ import { hostedAppPreviewGateway } from './hosted-app/preview-gateway';
 const { LOCAL_MODE: isLocalMode } = env;
 
 const app = express();
+app.post('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(traceHttpRequest('codeapi.api.request'));

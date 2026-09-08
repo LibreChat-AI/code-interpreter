@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import { env } from '../config';
+import { recordWorkspaceToolRejection } from '../workspace-tools/outcome';
 import {
   checkExecutionProfileExpectation,
   EXECUTION_PROFILE_HEADER,
@@ -48,5 +49,6 @@ export function executionProfileMiddleware(
       ? 'mismatch'
       : 'invalid',
   });
+  recordWorkspaceToolRejection(res, expectation.body.error);
   res.status(expectation.status).json(expectation.body);
 }
