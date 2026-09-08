@@ -15,7 +15,7 @@ if (!process.send) throw new Error('Native executor requires IPC');
 function reply(message: object): void {
   if (!process.connected) return;
   try {
-    process.send?.(message, () => undefined);
+    process.send?.({ ...message, fatal: shuttingDown }, () => undefined);
   } catch {
     /* Parent was lost. */
   }
@@ -92,6 +92,9 @@ process.on('message', async (raw: unknown) => {
         error instanceof WorkspaceToolError
           ? error.code
           : 'COMMAND_UNAVAILABLE',
+      ...(message.type === 'prepare' && error instanceof WorkspaceToolError
+        ? { errorMessage: error.message.slice(0, 1024) }
+        : {}),
       mutation:
         error instanceof WorkspaceToolError
           ? error.mutationMayHaveCommitted

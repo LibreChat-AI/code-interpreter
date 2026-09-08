@@ -29,6 +29,7 @@ const result = {
 
 function fixture(
   execute?: (child: EventEmitter, message: Record<string, any>) => void,
+  prepare?: (child: EventEmitter, message: Record<string, any>) => void,
 ) {
   const child = new EventEmitter() as ChildProcess;
   let options: ForkOptions | undefined;
@@ -39,6 +40,8 @@ function fixture(
       messages.push(message);
       callback(null);
       queueMicrotask(() => {
+        if (message.type === 'prepare' && prepare)
+          return prepare(child, message);
         if (message.type === 'execute' && execute)
           return execute(child, message);
         if (message.type === 'cancel') return;
@@ -247,6 +250,55 @@ test('executor startup loss is not reported as an applied mutation', async () =>
   assert.equal(
     fake.messages.some((m) => m.type === 'execute'),
     false,
+  );
+  await sandbox.close();
+});
+
+test('executor shutdown receipt fences reuse before the OS exit event', async () => {
+  const fake = fixture((child, message) =>
+    child.emit('message', {
+      id: message.id,
+      ok: false,
+      fatal: true,
+      mutation: true,
+      code: 'EXECUTION_ABORTED',
+    }),
+  );
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    { workspaceRoot: '/workspace' },
+    fake.fork,
+  );
+  await assert.rejects(sandbox.execute(request));
+  await assert.rejects(sandbox.execute(request), /unavailable/);
+  assert.equal(fake.messages.filter((m) => m.type === 'execute').length, 1);
+  await sandbox.close();
+});
+
+test('executor preserves bounded startup diagnostics and conventional host settings', async () => {
+  assert.deepEqual(
+    nativeExecutorEnvironment({
+      HTTPS_PROXY: 'http://proxy:8080',
+      PATHEXT: '.EXE',
+      NODE_OPTIONS: 'unsafe',
+    }),
+    { HTTPS_PROXY: 'http://proxy:8080', PATHEXT: '.EXE' },
+  );
+  const fake = fixture(undefined, (child, message) =>
+    child.emit('message', {
+      id: message.id,
+      ok: false,
+      mutation: false,
+      code: 'COMMAND_UNAVAILABLE',
+      errorMessage: 'Native sandbox dependencies are unavailable: bubblewrap',
+    }),
+  );
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    { workspaceRoot: '/workspace' },
+    fake.fork,
+  );
+  await assert.rejects(
+    sandbox.prepare(),
+    /dependencies are unavailable: bubblewrap/,
   );
   await sandbox.close();
 });

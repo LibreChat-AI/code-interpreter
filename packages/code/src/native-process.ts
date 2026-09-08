@@ -15,7 +15,7 @@ export type NativeProcessSandboxOptions = Omit<
   'manager' | 'spawnCommand' | 'platform'
 >;
 
-/** Only operating-system discovery variables cross into the trusted executor.
+/** Only OS discovery and conventional proxy settings cross into the executor.
  * In particular, never inherit NODE_OPTIONS, bridge identity, or app secrets. */
 export function nativeExecutorEnvironment(
   source: NodeJS.ProcessEnv,
@@ -38,6 +38,20 @@ export function nativeExecutorEnvironment(
     'LANG',
     'LC_ALL',
     'LC_CTYPE',
+    'LOGNAME',
+    'USER',
+    'SHELL',
+    'TERM',
+    'COLORTERM',
+    'NO_COLOR',
+    'SYSTEMDRIVE',
+    'PATHEXT',
+    'HOMEDRIVE',
+    'HOMEPATH',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'ALL_PROXY',
+    'NO_PROXY',
   ]);
   return Object.fromEntries(
     Object.entries(source).filter(
@@ -57,6 +71,7 @@ export class NativeProcessWorkspaceCommandSandbox
   private active?: Promise<WorkspaceExecuteCommandResult>;
   private closing?: Promise<void>;
   private failed = false;
+  private terminationTimer?: ReturnType<typeof setTimeout>;
   private pending?: {
     id: string;
     resolve(value: unknown): void;
@@ -107,6 +122,8 @@ export class NativeProcessWorkspaceCommandSandbox
         result?: unknown;
         mutation?: unknown;
         code?: unknown;
+        errorMessage?: unknown;
+        fatal?: unknown;
       };
       if (
         !message ||
@@ -116,6 +133,7 @@ export class NativeProcessWorkspaceCommandSandbox
         return;
       const pending = this.pending;
       if (!pending) return;
+      if (message.fatal === true) this.failed = true;
       if (message.ok === true) pending.resolve(message.result);
       else {
         const code =
@@ -127,7 +145,11 @@ export class NativeProcessWorkspaceCommandSandbox
             : 'COMMAND_UNAVAILABLE';
         pending.reject(
           new WorkspaceToolError(
-            'Native executor request failed',
+            !pending.mutation &&
+            typeof message.errorMessage === 'string' &&
+            message.errorMessage.length <= 1024
+              ? message.errorMessage
+              : 'Native executor request failed',
             code,
             pending.mutation && message.mutation !== false,
           ),
@@ -207,9 +229,16 @@ export class NativeProcessWorkspaceCommandSandbox
       true,
       signal,
     );
+    if (signal?.aborted) {
+      throw new WorkspaceToolError(
+        'Command aborted',
+        'EXECUTION_ABORTED',
+        true,
+      );
+    }
     if (!isWorkspaceToolResult(request, result)) {
       this.failed = true;
-      this.child?.kill();
+      this.terminate();
       throw this.unavailable(true);
     }
     return result as WorkspaceExecuteCommandResult;
@@ -228,23 +257,35 @@ export class NativeProcessWorkspaceCommandSandbox
     const child = this.child;
     let timer: ReturnType<typeof setTimeout>;
     const abort = () => {
-      if (child.connected) child.send({ type: 'cancel', id }, () => undefined);
+      try {
+        if (child.connected)
+          child.send({ type: 'cancel', id }, () => undefined);
+      } catch {
+        this.failed = true;
+        this.terminate();
+      }
     };
     try {
       return await new Promise((resolve, reject) => {
         this.pending = { id, resolve, reject, mutation };
         timer = setTimeout(() => {
           this.failed = true;
-          child.kill();
+          this.terminate();
           reject(this.unavailable(mutation));
         }, timeoutMs);
         signal?.addEventListener('abort', abort, { once: true });
-        child.send({ type, id, ...payload }, (error) => {
-          if (error) {
-            this.failed = true;
-            reject(this.unavailable(mutation));
-          }
-        });
+        const sendFailed = () => {
+          this.failed = true;
+          this.terminate();
+          reject(this.unavailable(mutation));
+        };
+        try {
+          child.send({ type, id, ...payload }, (error) => {
+            if (error) sendFailed();
+          });
+        } catch {
+          sendFailed();
+        }
         if (signal?.aborted) abort();
       });
     } finally {
@@ -268,7 +309,17 @@ export class NativeProcessWorkspaceCommandSandbox
         await this.rpc('close', {}, 10_000, false);
     } finally {
       this.failed = true;
-      this.child?.kill();
+      this.terminate();
     }
+  }
+
+  private terminate(): void {
+    const child = this.child;
+    if (!child || this.terminationTimer) return;
+    // Give SRT time to abort/reap its command, then bound executor shutdown.
+    this.terminationTimer = setTimeout(() => child.kill('SIGKILL'), 6000);
+    this.terminationTimer.unref();
+    child.once('exit', () => clearTimeout(this.terminationTimer));
+    child.kill('SIGTERM');
   }
 }
