@@ -133,6 +133,8 @@ export type ExecuteResponse = {
 };
 
 export interface RequestBody {
+  /** Optional positive runtime cap in milliseconds, clamped to JOB_TIMEOUT. */
+  timeout?: number;
   code: string;
   lang: string;
   args?: string[];

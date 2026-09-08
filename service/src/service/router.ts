@@ -25,7 +25,7 @@ import { Jobs, Languages } from '../enum';
 import { FileRefAuthorizationError, authorizeRequestedFiles } from './file-authorization';
 import { createUploadSessionRegistrar } from './upload-session';
 import { recordSessionOwnership } from '../session-ownership';
-import { prepareSandboxJobSecurity } from '../sandbox-egress';
+import { normalizeProgrammaticTimeoutMs, prepareSandboxJobSecurity } from '../sandbox-egress';
 import {
   BridgeWorkerSelectionError,
   CODEAPI_BRIDGE_WORKER_HEADER,
@@ -147,6 +147,14 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
     return res.status(400).json({ error: `Unsupported language: ${rawLang}` });
   }
 
+  // An omitted cap keeps the worker's existing language-specific default.
+  let timeout: number | undefined;
+  try {
+    if (body.timeout != null) timeout = normalizeProgrammaticTimeoutMs(body.timeout);
+  } catch (error) {
+    return res.status(400).json({ error: (error as Error).message });
+  }
+
   let bridgeWorkerId: string | undefined;
   try {
     const bridgeSelection = resolveBridgeWorkerSelection({
@@ -250,6 +258,7 @@ router.post('/exec', executionLimiter, async (req: t.AuthenticatedRequest, res) 
       isPyPlot,
       session_id,
     });
+    if (timeout != null) rawPayload.run_timeout = timeout;
     const sandboxSecurity = prepareSandboxJobSecurity({
       req,
       executionId: execution_id,
