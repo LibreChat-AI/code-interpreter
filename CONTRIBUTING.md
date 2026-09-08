@@ -7,7 +7,7 @@ Thanks for your interest in Code Interpreter!
 This repository is published from an internal ClickHouse monorepo, which is
 the source of truth. Internal changes that are not already public are mirrored
 here as a snapshot commit on the `sync/main` branch (spot them by the
-`Source: ClickHouse/ai@<sha>` trailer); a maintainer merges the resulting sync
+`Source: ClickHouse/ai@<sha>` trailer); a maintainer merges the resulting sync <!-- leak-check:allow -->
 pull request to release it to `main`.
 
 Practical consequences:
