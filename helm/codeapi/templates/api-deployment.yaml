@@ -51,7 +51,7 @@ spec:
             {{- end }}
             # Redis connection
             - name: REDIS_HOST
-              value: {{ include "codeapi.redis.host" . }}
+              value: {{ include "codeapi.redis.host" . | quote }}
             - name: REDIS_PORT
               value: {{ include "codeapi.redis.port" . | quote }}
             - name: REDIS_PASSWORD
@@ -59,6 +59,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "codeapi.fullname" . }}-secrets
                   key: redis-password
+            - name: USE_REDIS_CLUSTER
+              value: {{ include "codeapi.redis.clusterEnabled" . | quote }}
+            {{- include "codeapi.redis.tlsEnv" . | nindent 12 }}
             - name: CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH
               valueFrom:
                 configMapKeyRef:
@@ -101,6 +104,14 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
+          {{- with (include "codeapi.redis.caVolumeMount" . | trim) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
+      {{- with (include "codeapi.redis.caVolume" . | trim) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

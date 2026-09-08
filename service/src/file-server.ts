@@ -1,6 +1,5 @@
 import b from 'busboy';
 import path from 'path';
-import IORedis from 'ioredis';
 import express from 'express';
 import { Client } from 'minio';
 import { nanoid } from 'nanoid';
@@ -8,7 +7,6 @@ import { PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
 import type { BucketItem, BucketItemStat, ClientOptions } from 'minio';
 import type { Readable } from 'stream';
-import type * as tls from 'tls';
 import type * as t from './types';
 import { metricsHandler, fileUploads, fileDownloads } from './metrics';
 import { httpMetricsMiddleware } from './middleware/httpMetrics';
@@ -16,7 +14,7 @@ import { internalServiceAuthEnabled, requireInternalServiceAuth } from './intern
 import { shutdownTelemetry, traceHttpRequest } from './telemetry';
 import logger from './fileServerLogger';
 import { env } from './config';
-import { redisKeepAliveOptions } from './redis-options';
+import { createRedisConnection } from './redis-connection';
 import {
   contentDispositionForOriginalFilename,
   decodeOriginalFilename,
@@ -98,35 +96,15 @@ async function createMinioClient(): Promise<Client> {
 let minioClient: Client;
 let storageInitialized = false;
 
-const useAltDnsLookup = process.env.REDIS_USE_ALTERNATIVE_DNS_LOOKUP === 'true';
-
-const redisClient = new IORedis({
-  host: process.env.REDIS_HOST ?? 'redis',
-  port: Number(process.env.REDIS_PORT) || 6379,
-  password: process.env.REDIS_PASSWORD,
+const redisClient = createRedisConnection({
   enableReadyCheck: false,
-  tls: process.env.REDIS_TLS === 'true' ? {
-    // For self-signed certificates
-    rejectUnauthorized: false
-  } as tls.ConnectionOptions : undefined,
-  connectTimeout: 10000,
-  ...redisKeepAliveOptions(),
   maxRetriesPerRequest: 3,
   retryStrategy(times: number): number {
-    const delay = Math.min(times * 500, 2000);
-    return delay;
+    return Math.min(times * 500, 2000);
   },
   reconnectOnError(err: Error): boolean {
-    const targetError = 'READONLY';
-    if (err.message.includes(targetError)) {
-      return true;
-    }
-    return false;
+    return err.message.includes('READONLY');
   },
-  // Alternative DNS lookup for AWS ElastiCache TLS connections
-  ...(useAltDnsLookup
-    ? { dnsLookup: (address: string, callback: (err: Error | null, addr: string) => void): void => callback(null, address) }
-    : {})
 });
 
 redisClient.on('error', (err) => {
