@@ -195,6 +195,7 @@ function githubCredentials(): {
         appId: appId!,
         installationId: installationId!,
         privateKeyPath: privateKeyPath!,
+        host,
         apiUrl,
       }),
     };

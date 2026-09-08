@@ -158,8 +158,13 @@ authentication is configured. The worker identity, GitHub App key path, token
 source variables, and mutation-quarantine record remain denied to sandboxed
 commands.
 
-For GitHub Enterprise Server, set `LIBRECHAT_CODE_GITHUB_HOST` to its hostname
-and `LIBRECHAT_CODE_GITHUB_API_URL` to its HTTPS API base URL. GitHub
+For GitHub Enterprise Server, set `LIBRECHAT_CODE_GITHUB_HOST` to its hostname.
+App authentication defaults to `https://<host>/api/v3`; GitHub.com continues to
+use `https://api.github.com`. Set `LIBRECHAT_CODE_GITHUB_API_URL` to override
+the HTTPS API base URL, including a custom port or path. Its hostname must
+match the configured Git host (with `api.github.com` corresponding to
+`github.com`), and it must not contain credentials, a query, or a fragment.
+App token requests do not follow redirects. GitHub
 authentication currently requires the `native-srt` command sandbox. Every
 clone, commit, or push command still crosses LibreChat's tool-approval policy;
 the credential boundary does not grant approval by itself.

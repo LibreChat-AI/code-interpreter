@@ -371,3 +371,44 @@ test('CLI treats a whitespace-only file relay upstream as disabled', () => {
     /LIBRECHAT_CODE_(?:EXECUTION_MANIFEST_PUBLIC_KEY|FILE_RELAY_IMAGE) is required/,
   );
 });
+
+test('CLI host-only enterprise configuration sends App JWTs to GHES, never GitHub.com', async (t) => {
+  const { generateKeyPairSync } = await import('node:crypto');
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const directory = await mkdtemp(join(tmpdir(), 'cli-ghes-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const privateKeyPath = join(directory, 'app.pem');
+  const preload = join(directory, 'fetch.mjs');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await writeFile(privateKeyPath, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  await writeFile(preload, `
+    globalThis.fetch = async (input) => {
+      console.error('GITHUB_REQUEST:' + String(input));
+      throw new Error('test stopped before network delivery');
+    };
+  `);
+  const result = spawnSync(process.execPath, [
+    '--import', preload, fileURLToPath(new URL('./cli.js', import.meta.url)),
+  ], {
+    encoding: 'utf8', timeout: 10000,
+    env: {
+      ...process.env,
+      LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+      LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+      LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+      LIBRECHAT_CODE_WORKER_DIR: directory,
+      LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS: 'true',
+      LIBRECHAT_CODE_GITHUB_TOKEN: undefined,
+      LIBRECHAT_CODE_GITHUB_APP_ID: '123',
+      LIBRECHAT_CODE_GITHUB_INSTALLATION_ID: '456',
+      LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE: privateKeyPath,
+      LIBRECHAT_CODE_GITHUB_HOST: 'GitHub.Example.Test',
+      LIBRECHAT_CODE_GITHUB_API_URL: undefined,
+    },
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /GITHUB_REQUEST:https:\/\/github\.example\.test\/api\/v3\/app\/installations\/456\/access_tokens/);
+  assert.doesNotMatch(result.stderr, /GITHUB_REQUEST:https:\/\/api\.github\.com/);
+});
