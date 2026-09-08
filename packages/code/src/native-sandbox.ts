@@ -121,6 +121,7 @@ const SRT_SCRATCH_SELECTOR_NAMES = [
 ] as const;
 // Capture this before any command wrapper can temporarily mutate process.env.
 const HOST_TEMPORARY_ROOT = tmpdir();
+const HOST_HOME_DIRECTORY = homedir();
 
 interface NativeSandboxManager {
   isSupportedPlatform(): boolean;
@@ -278,8 +279,19 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         'COMMAND_UNAVAILABLE',
       );
     }
-    const home = await canonicalPath(this.options.homeDirectory ?? homedir());
-    if (isWithin(root, home)) {
+    const protectedHomes = [
+      ...new Set(
+        await Promise.all(
+          [
+            HOST_HOME_DIRECTORY,
+            ...(this.options.homeDirectory
+              ? [this.options.homeDirectory]
+              : []),
+          ].map(canonicalPath),
+        ),
+      ),
+    ];
+    if (protectedHomes.some((home) => isWithin(root, home))) {
       throw new WorkspaceToolError(
         'Native sandbox workspace cannot contain the worker home directory',
         'REGISTRATION_INVALID',
@@ -302,9 +314,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     const inheritedWritablePaths = [
       ...sharedScratchPaths,
       ...(await Promise.all(
-        [join(home, '.npm', '_logs'), join(home, '.claude', 'debug')].map(
-          canonicalPath,
-        ),
+        protectedHomes.flatMap((home) => [
+          canonicalPath(join(home, '.npm', '_logs')),
+          canonicalPath(join(home, '.claude', 'debug')),
+        ]),
       )),
     ];
     const deniedInheritedWritablePaths = [...new Set(inheritedWritablePaths)];
@@ -353,7 +366,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       },
       filesystem: {
         denyRead: [
-          home,
+          ...protectedHomes,
           ...sharedScratchPaths.filter((path) =>
             deniedInheritedWritablePaths.includes(path),
           ),

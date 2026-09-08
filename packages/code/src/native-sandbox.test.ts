@@ -37,6 +37,7 @@ function fakeManager(
     appendGitSafeDirectory?: boolean;
     inheritedGitEnvironment?: Record<string, string>;
     initializeError?: Error;
+    resetError?: Error;
     wrappedEnvironment?: NodeJS.ProcessEnv;
   } = {},
 ) {
@@ -95,6 +96,7 @@ function fakeManager(
     cleanupAfterCommand() {},
     async reset() {
       reset = true;
+      if (options.resetError) throw options.resetError;
     },
   };
   return {
@@ -217,6 +219,23 @@ test('removes scratch storage when SRT initialization fails', async (t) => {
   await assert.rejects(sandbox.prepare(), /init failed/);
   const scratchDirectory = fake.config?.filesystem.allowWrite[1];
   assert.equal(typeof scratchDirectory, 'string');
+  await assert.rejects(access(scratchDirectory!));
+  assert.equal(fake.reset, true);
+});
+
+test('removes scratch storage when SRT reset fails', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager({ resetError: new Error('reset failed') });
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fake.manager,
+  });
+  await sandbox.prepare();
+  const scratchDirectory = fake.config?.filesystem.allowWrite[1];
+  assert.equal(typeof scratchDirectory, 'string');
+
+  await assert.rejects(sandbox.close(), /reset failed/);
   await assert.rejects(access(scratchDirectory!));
   assert.equal(fake.reset, true);
 });
@@ -680,6 +699,7 @@ test('refuses workspace roots that expose worker home or control files', async (
   await assert.rejects(
     new NativeSrtWorkspaceCommandSandbox({
       workspaceRoot: homedir(),
+      homeDirectory: join(root, 'alternate-home'),
       manager: fakeManager().manager,
     }).prepare(),
     /cannot contain the worker home directory/i,
