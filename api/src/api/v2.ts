@@ -253,7 +253,7 @@ function getJob(
   const {
     session_id, language, version, args, stdin, files,
     compile_memory_limit, run_memory_limit,
-    run_timeout, compile_timeout,
+    compile_timeout,
     run_cpu_time, compile_cpu_time,
     env_vars,
   } = body;
@@ -288,7 +288,12 @@ function getJob(
     throw { message: 'files must include at least one runnable source file' };
   }
 
-  validateConstraints(body, rt);
+  // A runtime timeout is a cap, not a request to exceed the runtime's own
+  // limit. Resolve it here, where language/package overrides are available.
+  const runTimeout = typeof body.run_timeout === 'number' && rt.timeouts.run > 0
+    ? Math.min(body.run_timeout, rt.timeouts.run)
+    : body.run_timeout;
+  validateConstraints({ ...body, run_timeout: runTimeout }, rt);
 
   /* Session mode is per-request opt-in: only run in the persistent workspace
    * when THIS request carried a valid X-Runtime-Session-Id. A headerless or
@@ -329,7 +334,7 @@ function getJob(
     stdin: stdin ?? '',
     files,
     timeouts: {
-      run: run_timeout ?? rt.timeouts.run,
+      run: runTimeout ?? rt.timeouts.run,
       compile: compile_timeout ?? rt.timeouts.compile,
     },
     cpu_times: {

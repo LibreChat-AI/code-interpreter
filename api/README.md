@@ -109,3 +109,15 @@ curl -s http://localhost:2000/api/v2/execute \
   -H 'Content-Type: application/json' \
   -d '{"language":"python","version":"3.14.4","files":[{"content":"print(42)"}]}' | jq
 ```
+
+### Requested runtime caps
+
+`POST /api/v2/execute` treats `run_timeout` as an upper bound in milliseconds.
+A request above the effective runtime limit is clamped to that limit, including
+language and package overrides. Smaller caps are preserved, and omission uses
+the runtime default. Compile, CPU, and memory constraints retain their existing
+validation behavior.
+
+Roll out this sandbox behavior before enabling timeout forwarding in the
+service's plain `/exec` handler. Older sandboxes reject caps above their local
+runtime limit; older services remain compatible with updated sandboxes.
