@@ -152,6 +152,7 @@ RUN bun install --frozen-lockfile --production
 COPY --from=sandbox-builder /app/.build ./.build
 COPY api/config ./config
 COPY api/src/entrypoint.sh ./entrypoint.sh
+COPY api/src/guest-dns.sh ./guest-dns.sh
 RUN chmod +x ./entrypoint.sh
 
 RUN mkdir -p /pkgs /tmp/sandbox
@@ -200,7 +201,8 @@ COPY --from=sandbox-rootfs / /sandbox-rootfs/
 COPY --from=package-builder /pkgs /sandbox-rootfs/pkgs
 COPY docker/build-rootfs-image.sh /usr/local/bin/build-rootfs-image.sh
 
-RUN sed -i '/^cgroup_mem_swap_max/d' /sandbox-rootfs/sandbox_api/config/sandbox.cfg
+RUN sed -i '/^cgroup_mem_swap_max/d' /sandbox-rootfs/sandbox_api/config/sandbox.cfg \
+    && bash /sandbox-rootfs/sandbox_api/guest-dns.sh --prepare-rootfs /sandbox-rootfs
 RUN chmod +x /usr/local/bin/build-rootfs-image.sh \
     && /usr/local/bin/build-rootfs-image.sh /sandbox-rootfs /sandbox-rootfs.img
 
@@ -236,7 +238,7 @@ ENV PATH="/root/.bun/bin:${PATH}"
 COPY --from=launcher-builder /launcher/target/release/sandbox-launcher /usr/local/bin/launcher
 COPY --from=nsjail-builder /usr/local/bin/sandbox-rootfs-setup /sandbox-rootfs-setup
 
-# --- Launcher entrypoint (DNS resolution + socat relay before VM boot) ---
+# --- Launcher entrypoint (resolver configuration before VM boot) ---
 COPY launcher/entrypoint.sh /usr/local/bin/launcher-entrypoint.sh
 COPY docker/start-direct-sandbox.sh /usr/local/bin/start-direct-sandbox.sh
 RUN chmod +x /usr/local/bin/launcher-entrypoint.sh /usr/local/bin/start-direct-sandbox.sh
@@ -268,6 +270,7 @@ FROM worker-sandbox-base AS worker-sandbox-legacy
 COPY --from=sandbox-rootfs / /sandbox-rootfs/
 
 RUN sed -i '/^cgroup_mem_swap_max/d' /sandbox-rootfs/sandbox_api/config/sandbox.cfg \
+    && bash /sandbox-rootfs/sandbox_api/guest-dns.sh --prepare-rootfs /sandbox-rootfs \
     && mkdir -p /host-packages
 
 # KVM production default. The package tree is part of the read-only block root,

@@ -31,6 +31,9 @@ jobs:
       - name: Block-root package delivery
         run: tests/block_root_package_delivery.sh
 
+      - name: KVM guest resolver handoff
+        run: tests/kvm_guest_dns.sh
+
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
 

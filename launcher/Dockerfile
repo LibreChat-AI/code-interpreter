@@ -93,6 +93,7 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
     2>/dev/null || true
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
+COPY api/src/guest-dns.sh ./guest-dns.sh
 RUN chmod +x ./entrypoint.sh
 
 # ============================================================================
@@ -132,7 +133,8 @@ COPY --from=nsjail-builder /usr/local/bin/sandbox-rootfs-setup /sandbox-rootfs-s
 
 COPY --from=sandbox-build / /sandbox-rootfs/
 
-RUN sed -i '/^cgroup_mem_swap_max/d' /sandbox-rootfs/sandbox_api/config/sandbox.cfg
+RUN sed -i '/^cgroup_mem_swap_max/d' /sandbox-rootfs/sandbox_api/config/sandbox.cfg \
+    && bash /sandbox-rootfs/sandbox_api/guest-dns.sh --prepare-rootfs /sandbox-rootfs
 
 RUN mkdir -p /host-packages
 
