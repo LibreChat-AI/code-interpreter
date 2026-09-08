@@ -88,6 +88,16 @@ bubblewrap plus seccomp on Linux, and the SRT restricted-account helper on
 Windows. Startup fails before worker registration when the platform or its
 dependencies are unavailable. There is no unsandboxed command fallback.
 
+The native SRT manager owns process-global policy, proxy, and cleanup state.
+Only one sandbox instance may own a manager, and that instance accepts one
+command at a time. Overlapping calls fail before a second command starts;
+they are not queued inside the sandbox. `close()` waits for the active command
+and initialization before resetting the manager and removing scratch. A failed
+reset keeps ownership fenced until a later `close()` succeeds. Independent
+native workspaces need separate worker processes, not multiple instances of
+the default manager in one process. This lifecycle guard does not enable
+parallel assignments on a single bridge worker.
+
 The bridge worker remains outside the sandbox so it can maintain its outbound
 Code API connection. On macOS and Linux, each worker process creates an
 owner-only scratch directory and grants SRT access to that exact directory

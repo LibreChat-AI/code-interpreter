@@ -117,6 +117,130 @@ function fakeManager(
   };
 }
 
+test('exclusive lifecycle rejects a second workspace sharing an SRT manager', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager();
+  const first = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fake.manager,
+  });
+  const second = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fake.manager,
+  });
+  t.after(() => first.close());
+  t.after(() => second.close());
+  await first.prepare();
+  await assert.rejects(
+    second.prepare(),
+    /already belongs to another workspace/,
+  );
+  await second.close();
+  assert.equal(
+    fake.reset,
+    false,
+    'a rejected owner must not reset the live manager',
+  );
+  assert.equal((await first.execute(request)).stdout, 'hello');
+  await first.close();
+  await second.prepare();
+  assert.equal((await second.execute(request)).stdout, 'hello');
+});
+
+test('exclusive lifecycle rejects overlapping commands and waits before resetting', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let entered!: () => void;
+  const wrapping = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const fake = fakeManager({
+    beforeWrap: async () => {
+      entered();
+      await gate;
+    },
+  });
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fake.manager,
+  });
+  t.after(() => sandbox.close());
+  const execution = sandbox.execute(request);
+  await wrapping;
+  await assert.rejects(sandbox.execute(request), /active command/);
+  const closing = sandbox.close();
+  const secondClose = sandbox.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fake.reset, false);
+  await assert.rejects(sandbox.prepare(), /closing/);
+  release();
+  assert.equal((await execution).stdout, 'hello');
+  await Promise.all([closing, secondClose]);
+  assert.equal(fake.reset, true);
+});
+
+test('exclusive lifecycle retains ownership after a failed reset until cleanup succeeds', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager();
+  let failReset = true;
+  fake.manager.reset = async () => {
+    if (failReset) throw new Error('reset failed');
+  };
+  const first = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fake.manager,
+  });
+  const second = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fake.manager,
+  });
+  await first.prepare();
+  await assert.rejects(first.close(), /reset failed/);
+  await assert.rejects(first.execute(request), /requires cleanup/);
+  await assert.rejects(second.prepare(), /already belongs/);
+  failReset = false;
+  await first.close();
+  await second.prepare();
+  await second.close();
+});
+
+test('exclusive lifecycle waits for initialization before resetting the manager', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager();
+  let entered!: () => void;
+  const initializing = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  fake.manager.initialize = async () => {
+    entered();
+    await gate;
+  };
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fake.manager,
+  });
+  const preparing = sandbox.prepare();
+  await initializing;
+  const closing = sandbox.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fake.reset, false);
+  release();
+  await preparing;
+  await closing;
+  assert.equal(fake.reset, true);
+});
+
 test('initializes SRT with a default-deny network and scrubbed worker credentials', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   const identity = join(tmpdir(), 'librechat-code-identity.json');
