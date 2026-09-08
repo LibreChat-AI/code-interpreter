@@ -119,7 +119,7 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     if (apiUrl.protocol !== 'https:' || apiUrl.username || apiUrl.password) {
       throw new Error('GitHub API URL must be an HTTPS URL without credentials');
     }
-    if (apiUrl.search || apiUrl.hash) {
+    if (/[?#]/.test(apiUrl.href)) {
       throw new Error('GitHub API URL must not contain a query or fragment');
     }
     const apiHost = apiUrl.hostname === 'api.github.com' ? 'github.com' : apiUrl.hostname;

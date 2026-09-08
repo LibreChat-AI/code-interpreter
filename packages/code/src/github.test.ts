@@ -267,6 +267,7 @@ test('invalid or mismatched App endpoints are refused before any private key acc
     'https://api.github.com', 'https://other.example.test/api/v3',
     'http://github.example.test/api/v3', 'https://user:password@github.example.test/api/v3',
     'https://github.example.test/api/v3?query=1', 'https://github.example.test/api/v3#fragment',
+    'https://github.example.test/api/v3?', 'https://github.example.test/api/v3#',
   ]) {
     assert.throws(() => new GitHubAppCredentialProvider({
       appId: '123', installationId: '456', privateKeyPath: '/must-not-be-read',
