@@ -29,6 +29,8 @@ export interface GitHubAppCredentialProviderOptions {
   installationId: string;
   privateKeyPath: string;
   apiUrl?: string;
+  /** Git HTTPS hostname; non-public hosts default to the GHES /api/v3 base. */
+  host?: string;
   fetch?: typeof globalThis.fetch;
   now?: () => Date;
   platform?: NodeJS.Platform;
@@ -95,6 +97,7 @@ function createAppJwt(appId: string, privateKey: string, now: Date): string {
 
 export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
   private cached?: GitHubCredential;
+  private readonly apiUrl: string;
 
   constructor(private readonly options: GitHubAppCredentialProviderOptions) {
     if ((options.platform ?? process.platform) === 'win32') {
@@ -107,14 +110,23 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       'GitHub App installation ID',
       options.installationId,
     );
-    if (options.apiUrl != null) {
-      const apiUrl = new URL(options.apiUrl);
-      if (apiUrl.protocol !== 'https:' || apiUrl.username || apiUrl.password) {
-        throw new Error(
-          'GitHub API URL must be an HTTPS URL without credentials',
-        );
-      }
+    const host = options.host == null ? undefined : normalizeGitHubHost(options.host);
+    const apiUrl = new URL(options.apiUrl ?? (
+      host != null && host !== 'github.com'
+        ? `https://${host}/api/v3`
+        : 'https://api.github.com'
+    ));
+    if (apiUrl.protocol !== 'https:' || apiUrl.username || apiUrl.password) {
+      throw new Error('GitHub API URL must be an HTTPS URL without credentials');
     }
+    if (apiUrl.search || apiUrl.hash) {
+      throw new Error('GitHub API URL must not contain a query or fragment');
+    }
+    const apiHost = apiUrl.hostname === 'api.github.com' ? 'github.com' : apiUrl.hostname;
+    if (host != null && host !== apiHost) {
+      throw new Error('LIBRECHAT_CODE_GITHUB_HOST must match the GitHub App API hostname');
+    }
+    this.apiUrl = apiUrl.href.replace(/\/+$/, '');
   }
 
   async getCredential(signal?: AbortSignal): Promise<GitHubCredential> {
@@ -127,15 +139,12 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     }
     const privateKey = await readPrivateKey(this.options.privateKeyPath);
     const jwt = createAppJwt(this.options.appId, privateKey, now);
-    const apiUrl = (this.options.apiUrl ?? 'https://api.github.com').replace(
-      /\/+$/,
-      '',
-    );
     const request = this.options.fetch ?? globalThis.fetch;
     const response = await request(
-      `${apiUrl}/app/installations/${this.options.installationId}/access_tokens`,
+      `${this.apiUrl}/app/installations/${this.options.installationId}/access_tokens`,
       {
         method: 'POST',
+        redirect: 'error',
         headers: {
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${jwt}`,

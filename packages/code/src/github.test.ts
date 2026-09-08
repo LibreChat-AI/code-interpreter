@@ -229,3 +229,48 @@ test('allows the GitHub LFS object delivery hosts', () => {
   assert.ok(GITHUB_ALLOWED_DOMAINS.includes('*.githubusercontent.com'));
   assert.ok(GITHUB_ALLOWED_DOMAINS.includes('github-cloud.s3.amazonaws.com'));
 });
+
+test('App JWT requests use the resolved public or enterprise endpoint', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'github-endpoint-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const privateKeyPath = join(directory, 'app.pem');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await writeFile(privateKeyPath, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  for (const [host, apiUrl, expected] of [
+    [undefined, undefined, 'https://api.github.com'],
+    ['GitHub.COM', undefined, 'https://api.github.com'],
+    ['GitHub.Example.Test', undefined, 'https://github.example.test/api/v3'],
+    [undefined, 'https://github.example.test/api/v3/', 'https://github.example.test/api/v3'],
+    ['github.example.test', 'https://github.example.test:8443/custom/api/', 'https://github.example.test:8443/custom/api'],
+  ]) {
+    let calls = 0;
+    const provider = new GitHubAppCredentialProvider({
+      appId: '123', installationId: '456', privateKeyPath, host, apiUrl,
+      now: () => new Date('2030-01-01T00:00:00Z'),
+      fetch: async (input, init) => {
+        calls++;
+        assert.equal(String(input), `${expected}/app/installations/456/access_tokens`);
+        assert.equal(init?.method, 'POST');
+        assert.equal(init?.redirect, 'error');
+        assert.match(new Headers(init?.headers).get('authorization')!, /^Bearer eyJ/);
+        return new Response(JSON.stringify({ token: 'ghs_abcdefghijklmnopqrstuvwxyz', expires_at: '2030-01-01T01:00:00Z' }), { status: 201 });
+      },
+    });
+    await provider.getCredential();
+    await provider.getCredential();
+    assert.equal(calls, 1);
+  }
+});
+
+test('invalid or mismatched App endpoints are refused before any private key access', () => {
+  for (const apiUrl of [
+    'https://api.github.com', 'https://other.example.test/api/v3',
+    'http://github.example.test/api/v3', 'https://user:password@github.example.test/api/v3',
+    'https://github.example.test/api/v3?query=1', 'https://github.example.test/api/v3#fragment',
+  ]) {
+    assert.throws(() => new GitHubAppCredentialProvider({
+      appId: '123', installationId: '456', privateKeyPath: '/must-not-be-read',
+      host: 'github.example.test', apiUrl,
+    }), /must match|HTTPS URL without credentials|query or fragment/);
+  }
+});
