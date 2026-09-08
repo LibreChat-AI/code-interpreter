@@ -138,6 +138,17 @@ components:
         - code
         - lang
       properties:
+        timeout:
+          type: number
+          nullable: true
+          minimum: 0
+          exclusiveMinimum: true
+          description: >-
+            Optional runtime cap in milliseconds. Positive finite values are
+            rounded up to whole milliseconds and clamped to JOB_TIMEOUT, then
+            to the sandbox's effective language runtime limit. Omitted or null
+            values preserve the worker's runtime default. This caps execution,
+            not queueing or request transport time.
         code:
           type: string
         lang:
