@@ -8,11 +8,12 @@ import {
   rm,
   stat,
 } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 import { BRIDGE_PROTOCOL_VERSION, BridgeProtocolError } from './protocol.js';
-import { assertPrivateStorageAncestors, assertPrivateStorageSupported } from './private-storage.js';
+import { assertPrivateStorageAcl, removePrivateStorageAcl, assertPrivateStorageAncestors, assertPrivateStorageSupported } from './private-storage.js';
 
 import { assertIdentityIsNotMountPoint } from './identity-mount.js';
 
@@ -160,28 +161,6 @@ export function defaultWorkspaceQuarantinePath(
   );
 }
 
-/**
- * Verify a path really is owner-only. `chmod` reports success without effect on
- * mounts that do not implement POSIX permissions - notably WSL2 DrvFs
- * (`/mnt/<drive>`), where the result stays world-accessible - so a credential
- * that cannot be protected must fail closed rather than appear protected.
- *
- * Symlinks are resolved: a link's own mode is always `0777` and ignored by the
- * kernel, so the file the bytes live in is what counts.
- *
- * Linux POSIX ACL masks are reflected in group mode bits. Platforms whose
- * ACLs cannot be verified are rejected at the storage entry points.
- */
-async function groupOrOtherAccessMode(
-  path: string,
-): Promise<number | undefined> {
-  if (process.platform === 'win32') return undefined;
-  /* Resolve symlinks: the bytes live at the target, and a link's own mode is
-   * always 0777 and ignored by the kernel. */
-  const mode = (await stat(path)).mode & 0o777;
-  return (mode & 0o077) === 0 ? undefined : mode;
-}
-
 /** Publishing replaces the entry itself; reading also follows its target. */
 async function assertWriteContainerPrivate(path: string): Promise<void> {
   await assertPrivateStorageAncestors(dirname(path), true);
@@ -238,24 +217,31 @@ async function readGuardedFile(
       const mode = stats.mode & 0o777;
       if ((mode & 0o077) !== 0) throw new BridgeProtocolError(exposed(mode.toString(8)));
     }
+    await assertPrivateStorageAcl(handle, path);
     return await handle.readFile('utf8');
   } finally {
     await handle.close();
   }
 }
 
-async function assertOwnerOnlyPath(
-  path: string,
-  reportedPath: string = path,
-): Promise<void> {
-  const mode = await groupOrOtherAccessMode(path);
-  if (mode === undefined) return;
-  throw new BridgeProtocolError(
-    `Cannot restrict ${reportedPath} to owner-only access (mode ${mode.toString(8)}). ` +
-      'Filesystems that ignore POSIX permissions, such as Windows drives mounted ' +
-      'under /mnt, cannot protect worker credentials or workspaces. Use a path on a ' +
-      'native Linux filesystem.',
-  );
+async function assertOwnerOnlyFile(handle: FileHandle, path: string): Promise<void> {
+  const mode = (await handle.stat()).mode & 0o777;
+  if ((mode & 0o077) !== 0) {
+    throw new BridgeProtocolError(
+      `Cannot restrict ${path} to owner-only access (mode ${mode.toString(8)}). ` +
+      'Use a native macOS or Linux filesystem that enforces permissions, not a Windows drive under /mnt.',
+    );
+  }
+  await assertPrivateStorageAcl(handle, path);
+}
+
+async function assertOwnerOnlyPath(path: string): Promise<void> {
+  const handle = await open(path, 'r');
+  try {
+    await assertOwnerOnlyFile(handle, path);
+  } finally {
+    await handle.close();
+  }
 }
 
 export async function ensurePrivateWorkspaceDirectory(
@@ -272,7 +258,14 @@ export async function ensurePrivateWorkspaceDirectory(
   /* This directory is application-owned by contract; a pre-existing one under
    * another account lets that owner alter workspace inputs and results. */
   await assertOwnedByWorker(path);
-  await chmod(path, 0o700);
+  const directory = await open(path, 'r');
+  try {
+    await removePrivateStorageAcl(directory, path);
+    await directory.chmod(0o700);
+    await assertPrivateStorageAcl(directory, path);
+  } finally {
+    await directory.close();
+  }
   await assertOwnerOnlyPath(path);
 }
 
@@ -333,7 +326,14 @@ export interface IdentityPathReservation {
 async function assertSiblingPublishable(path: string): Promise<void> {
   const probePath = `${path}.${randomBytes(8).toString('hex')}.probe`;
   try {
-    await (await open(probePath, 'wx', 0o600)).close();
+    const probe = await open(probePath, 'wx', 0o600);
+    try {
+      await removePrivateStorageAcl(probe, path);
+      await probe.chmod(0o600);
+      await assertOwnerOnlyFile(probe, path);
+    } finally {
+      await probe.close();
+    }
   } catch (error) {
     throw new BridgeProtocolError(
       `Cannot create a temporary file beside ${path} (${
@@ -363,8 +363,9 @@ export async function assertIdentityPathIsPrivate(
     const reserved = await open(path, 'wx', 0o600);
     try {
       created = true;
+      await removePrivateStorageAcl(reserved, path);
       await reserved.chmod(0o600);
-      await assertOwnerOnlyPath(path);
+      await assertOwnerOnlyFile(reserved, path);
       reservedInode = (await reserved.stat({ bigint: true })).ino;
     } finally {
       await reserved.close();
@@ -423,8 +424,9 @@ export async function saveBridgeIdentity(
   try {
     const file = await open(temporaryPath, 'wx', 0o600);
     try {
+      await removePrivateStorageAcl(file, path);
       await file.chmod(0o600);
-      await assertOwnerOnlyPath(temporaryPath, path);
+      await assertOwnerOnlyFile(file, path);
       await file.writeFile(`${JSON.stringify(identity, null, 2)}\n`, 'utf8');
       await file.sync();
     } finally {
@@ -465,8 +467,9 @@ export async function saveWorkspaceMutationQuarantine(
   const file = await open(path, 'wx', 0o600);
   try {
     try {
+      await removePrivateStorageAcl(file, path);
       await file.chmod(0o600);
-      await assertOwnerOnlyPath(path);
+      await assertOwnerOnlyFile(file, path);
       await assertWriteContainerPrivate(path);
       await file.writeFile(`${JSON.stringify(record, null, 2)}\n`, 'utf8');
       await file.sync();
@@ -500,7 +503,7 @@ export async function loadWorkspaceMutationQuarantine(
       (mode) =>
         `Workspace quarantine ${path} is accessible beyond its owner (mode ${mode}). ` +
         'Another local account could clear or forge it. Keep worker state on a ' +
-        'native Linux filesystem.',
+        'native macOS or Linux filesystem.',
     );
     await assertReadPathPrivate(path);
   } catch (error) {
@@ -566,7 +569,7 @@ export async function loadBridgeIdentity(
     (mode) =>
       `Bridge identity ${path} is accessible beyond its owner (mode ${mode}). ` +
       'Treat its private key as compromised: revoke the worker and pair again with an ' +
-      'identity path on a native Linux filesystem.',
+      'identity path on a native macOS or Linux filesystem.',
   );
   /* After the file's own verdict, so an exposed mode keeps its diagnosis. */
   await assertReadPathPrivate(path);

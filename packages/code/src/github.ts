@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { createHash, createPrivateKey, sign } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { assertPrivateStorageAncestors, assertPrivateStorageSupported } from './private-storage.js';
+import { assertPrivateStorageAcl, assertPrivateStorageAncestors, assertPrivateStorageSupported } from './private-storage.js';
 
 export const GITHUB_CREDENTIAL_ENV_NAME = 'LIBRECHAT_CODE_GITHUB_AUTHORIZATION';
 export const GITHUB_ALLOWED_DOMAINS = [
@@ -69,6 +69,7 @@ async function readPrivateKey(path: string): Promise<string> {
         'GitHub App private key must not be accessible by group or other users',
       );
     }
+    await assertPrivateStorageAcl(handle, path);
     return await handle.readFile('utf8');
   } finally {
     await handle.close();

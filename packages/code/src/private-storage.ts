@@ -1,20 +1,41 @@
-import { lstat, readlink } from 'node:fs/promises';
+import { lstat, open, readlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { dirname, isAbsolute } from 'node:path';
 
 import { BridgeProtocolError } from './protocol.js';
 
-/** Linux POSIX ACL masks are reflected in group mode bits. macOS extended
- * ACLs and Windows DACLs are not: chmod/stat alone cannot establish privacy.
- * Fail before creating files, reading credentials, or redeeming pairing codes
- * until a native verifier can inspect the actual opened object's ACLs.
- */
+/** Linux exposes POSIX ACL masks in mode bits; macOS needs native ACL calls. */
 export function assertPrivateStorageSupported(): void {
-  if (process.platform !== 'linux' || process.getuid === undefined) {
+  if (!['linux', 'darwin'].includes(process.platform) || process.getuid === undefined) {
     throw new BridgeProtocolError(
       'Owner-only storage ACL verification is unavailable on this platform. ' +
-      'Worker credentials, GitHub App keys, and quarantine state require Linux ' +
-      '(including WSL2) with storage on a native Linux filesystem, not /mnt.',
+      'Native Windows is unsupported until DACL removal and verification are implemented. ' +
+      'Use macOS or Linux (including WSL2 with a native Linux filesystem, not /mnt).',
     );
+  }
+}
+
+async function macOsStorage() {
+  try {
+    return await import('./macos-storage.js');
+  } catch {
+    throw new BridgeProtocolError('macOS ACL verification is unavailable: reinstall @librechat/code with its Koffi native dependency.');
+  }
+}
+
+export async function assertPrivateStorageAcl(
+  handle: FileHandle, path: string, directory = false,
+): Promise<void> {
+  if (process.platform === 'darwin') {
+    (await macOsStorage()).verifyMacOsAcl(handle.fd, path, directory);
+  }
+}
+
+/** Only application-owned files/directories may have their ACLs removed. */
+export async function removePrivateStorageAcl(handle: FileHandle, path: string): Promise<void> {
+  if (process.platform === 'darwin') {
+    (await macOsStorage()).removeMacOsAcl(handle.fd, path);
   }
 }
 
@@ -54,6 +75,18 @@ export async function assertPrivateStorageAncestors(
       continue;
     }
     if (metadata.isDirectory()) {
+      if (process.platform === 'darwin') {
+        const handle = await open(current, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const opened = await handle.stat();
+          if (opened.dev !== metadata.dev || opened.ino !== metadata.ino) {
+            throw new BridgeProtocolError(`Storage directory changed during ACL verification: ${current}`);
+          }
+          await assertPrivateStorageAcl(handle, current, true);
+        } finally {
+          await handle.close();
+        }
+      }
       const mode = metadata.mode & 0o7777;
       if ((mode & 0o022) !== 0 && (mode & 0o1000) === 0) {
         throw new BridgeProtocolError(

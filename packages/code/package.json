@@ -60,6 +60,7 @@
     "node": ">=20.11"
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.75"
+    "@anthropic-ai/sandbox-runtime": "0.0.75",
+    "koffi": "3.2.1"
   }
 }
