@@ -21,7 +21,7 @@ cmp "$TEST_DIR/expected" "$TEST_DIR/guest/etc/resolv.conf"
 
 # A fresh boot can use Kubernetes DNS/search paths without rebuilding the root.
 rm -rf "$TEST_DIR/guest/run/codeapi-resolver"
-SANDBOX_RESOLV_CONF=$'nameserver 10.96.0.10\nsearch tenant.svc.cluster.local svc.cluster.local cluster.local\noptions ndots:5'
+SANDBOX_RESOLV_CONF=$'nameserver 10.96.0.10\nsearch tenant.svc.cluster.local svc.cluster.local cluster.local\noptions ndots:5' # leak-check:allow
 printf '%s\n' "$SANDBOX_RESOLV_CONF" > "$TEST_DIR/expected"
 configure_guest_dns "$TEST_DIR/guest"
 cmp "$TEST_DIR/expected" "$TEST_DIR/guest/etc/resolv.conf"
@@ -29,7 +29,7 @@ cmp "$TEST_DIR/expected" "$TEST_DIR/guest/etc/resolv.conf"
 # The launcher entrypoint joins directives with a separator so the handoff
 # survives the kernel command line; the guest expands it back into lines.
 rm -rf "$TEST_DIR/guest/run/codeapi-resolver"
-SANDBOX_RESOLV_CONF='nameserver 10.96.0.10|search tenant.svc.cluster.local svc.cluster.local cluster.local|options ndots:5'
+SANDBOX_RESOLV_CONF='nameserver 10.96.0.10|search tenant.svc.cluster.local svc.cluster.local cluster.local|options ndots:5' # leak-check:allow
 configure_guest_dns "$TEST_DIR/guest"
 cmp "$TEST_DIR/expected" "$TEST_DIR/guest/etc/resolv.conf"
 [[ ! -v SANDBOX_RESOLV_CONF ]]
@@ -134,9 +134,9 @@ cmp "$TEST_DIR/expected" "$TEST_DIR/guest/etc/resolv.conf"
 
 # Kubernetes resolvers: tabs, CRLF, trailing spaces, and unknown keywords are
 # normalized away; search domains and options survive intact.
-printf 'nameserver\t10.96.0.10  \r\nsearch   tenant.svc.cluster.local svc.cluster.local cluster.local\n; resolver comment\nlookup file bind\noptions ndots:5\n' > "$TEST_DIR/k8s-resolv.conf"
+printf 'nameserver\t10.96.0.10  \r\nsearch   tenant.svc.cluster.local svc.cluster.local cluster.local\n; resolver comment\nlookup file bind\noptions ndots:5\n' > "$TEST_DIR/k8s-resolv.conf" # leak-check:allow
 run_entrypoint "$TEST_DIR/k8s-resolv.conf"
-[[ "$(cat "$TEST_DIR/forwarded")" == 'nameserver 10.96.0.10|search tenant.svc.cluster.local svc.cluster.local cluster.local|options ndots:5' ]]
+[[ "$(cat "$TEST_DIR/forwarded")" == 'nameserver 10.96.0.10|search tenant.svc.cluster.local svc.cluster.local cluster.local|options ndots:5' ]] # leak-check:allow
 
 # The runner's own resolver must round-trip through the same reference.
 run_entrypoint /etc/resolv.conf
