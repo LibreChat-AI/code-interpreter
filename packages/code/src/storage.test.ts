@@ -1,5 +1,17 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, open, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -137,6 +149,135 @@ test('paired identity is persisted atomically with owner-only permissions', asyn
 
     assert.deepEqual(await loadBridgeIdentity(path), identity);
     assert.equal((await stat(path)).mode & 0o777, 0o600);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('identity saves validate permissions on the open temporary file', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'librechat-code-save-race-'));
+  const path = join(directory, 'identity.json');
+  const displaced = join(directory, 'displaced.tmp');
+  const identity = {
+    protocolVersion: 1 as const,
+    workerId: 'vm-1',
+    codeApiUrl: 'https://code.example/v1',
+    credential: 'must-not-be-written',
+    expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    publicKey: 'public-key',
+    privateKey: 'private-key',
+  };
+  try {
+    const probe = await open(directory, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      chmod(mode: number): Promise<void>;
+    };
+    await probe.close();
+    const originalChmod = fileHandlePrototype.chmod;
+    let swapped = false;
+    t.mock.method(
+      fileHandlePrototype,
+      'chmod',
+      async function (this: FileHandle, mode: number) {
+        if (mode !== 0o600 || swapped) return originalChmod.call(this, mode);
+        swapped = true;
+        await originalChmod.call(this, 0o666);
+        const temporary = (await readdir(directory)).find((name) =>
+          name.endsWith('.tmp'),
+        );
+        assert.ok(temporary);
+        const temporaryPath = join(directory, temporary);
+        await rename(temporaryPath, displaced);
+        await writeFile(temporaryPath, 'owner-only decoy', { mode: 0o600 });
+      },
+    );
+
+    await assert.rejects(
+      saveBridgeIdentity(path, identity),
+      /Cannot restrict .*identity\.json.*mode 666/,
+    );
+    assert.equal(await readFile(displaced, 'utf8'), '');
+    assert.equal((await stat(displaced)).mode & 0o777, 0o666);
+    await assert.rejects(stat(path), { code: 'ENOENT' });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('pairing reservations validate permissions on the open destination', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'librechat-code-reserve-race-'));
+  const path = join(directory, 'identity.json');
+  const displaced = join(directory, 'displaced.json');
+  try {
+    const probe = await open(directory, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      chmod(mode: number): Promise<void>;
+    };
+    await probe.close();
+    const originalChmod = fileHandlePrototype.chmod;
+    let swapped = false;
+    t.mock.method(
+      fileHandlePrototype,
+      'chmod',
+      async function (this: FileHandle, mode: number) {
+        if (mode !== 0o600 || swapped) return originalChmod.call(this, mode);
+        swapped = true;
+        await originalChmod.call(this, 0o666);
+        await rename(path, displaced);
+        await writeFile(path, 'owner-only decoy', { mode: 0o600 });
+      },
+    );
+
+    await assert.rejects(
+      assertIdentityPathIsPrivate(path),
+      /Cannot restrict .*identity\.json.*mode 666/,
+    );
+    assert.equal(await readFile(displaced, 'utf8'), '');
+    assert.equal((await stat(displaced)).mode & 0o777, 0o666);
+    await assert.rejects(stat(path), { code: 'ENOENT' });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('quarantine saves validate permissions on the open marker file', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'librechat-code-quarantine-race-'));
+  const path = join(directory, 'quarantine.json');
+  const displaced = join(directory, 'displaced.json');
+  const record = {
+    version: 1 as const,
+    workerId: 'vm-1',
+    workspaceId: 'primary',
+    quarantinedAt: new Date().toISOString(),
+    reason: 'must-not-be-written',
+  };
+  try {
+    const probe = await open(directory, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      chmod(mode: number): Promise<void>;
+    };
+    await probe.close();
+    const originalChmod = fileHandlePrototype.chmod;
+    let swapped = false;
+    t.mock.method(
+      fileHandlePrototype,
+      'chmod',
+      async function (this: FileHandle, mode: number) {
+        if (mode !== 0o600 || swapped) return originalChmod.call(this, mode);
+        swapped = true;
+        await originalChmod.call(this, 0o666);
+        await rename(path, displaced);
+        await writeFile(path, 'owner-only decoy', { mode: 0o600 });
+      },
+    );
+
+    await assert.rejects(
+      saveWorkspaceMutationQuarantine(path, record),
+      /Cannot restrict .*quarantine\.json.*mode 666/,
+    );
+    assert.equal(await readFile(displaced, 'utf8'), '');
+    assert.equal((await stat(displaced)).mode & 0o777, 0o666);
+    await assert.rejects(stat(path), { code: 'ENOENT' });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
