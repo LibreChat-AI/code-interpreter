@@ -34,7 +34,7 @@ import { hostedAppPreviewGateway } from './hosted-app/preview-gateway';
 const { LOCAL_MODE: isLocalMode } = env;
 
 const app = express();
-app.use('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
+app.post('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(traceHttpRequest('codeapi.api.request'));

@@ -20,6 +20,7 @@ const earlyErrorCodes: Record<number, string> = {
   401: 'UNAUTHENTICATED',
   403: 'AUTHORIZATION_REJECTED',
   413: 'REQUEST_TOO_LARGE',
+  415: 'UNSUPPORTED_MEDIA_TYPE',
   429: 'RATE_LIMITED',
   500: 'INTERNAL_ERROR',
 };

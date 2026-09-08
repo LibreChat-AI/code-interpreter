@@ -481,7 +481,7 @@ test.each(['auth', 'limit'] as const)('logs requests rejected by upstream %s mid
   process.env.CODEAPI_AUTH_PROVIDER = 'librechat-jwt';
   try {
     const app = express();
-    app.use('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
+    app.post('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
     app.use(json());
     if (stage === 'auth') app.use(apiKeyAuth);
     else app.use(rateLimitFactory({ windowMs: 60_000, max: 1 }));
@@ -530,7 +530,7 @@ test.each([
   env.EXECUTION_PROFILE = 'default';
   try {
     const app = express();
-    app.use('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
+    app.post('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
     app.use(executionProfileMiddleware);
     app.use(hostedAppPreviewGateway);
     app.use(json());
@@ -561,4 +561,49 @@ test.each([
     env.HOSTED_APP_PREVIEW_ORIGIN = saved.origin;
     env.EXECUTION_PROFILE = saved.profile;
   }
+});
+
+test.each([
+  ['POST', '/v1/workspace-tools/execute', true],
+  ['POST', '/v1/workspace-tools/execute/?attempt=1', true],
+  ['POST', '/v1/workspace-tools/execute/unknown', false],
+  ['POST', '/v1/workspace-tools/execute-extra', false],
+  ['GET', '/v1/workspace-tools/execute', false],
+] as const)('logs only workspace endpoint traffic: %s %s', async (method, path, shouldLog) => {
+  const app = express();
+  app.post('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
+  app.use((_req, res) => { res.sendStatus(401); });
+  server = createServer(app);
+  await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+  const response = await fetch(`http://127.0.0.1:${address.port}${path}`, { method });
+  await response.text();
+  expect(response.status).toBe(401);
+  expect(logSpy).toHaveBeenCalledTimes(shouldLog ? 1 : 0);
+});
+
+test.each([
+  ['unsupported encoding', 'application/json', 'unsupported', '{}', 415, 'UNSUPPORTED_MEDIA_TYPE'],
+  ['unsupported charset', 'application/json; charset=iso-8859-1', 'identity', '{}', 415, 'UNSUPPORTED_MEDIA_TYPE'],
+  ['invalid json', 'application/json', 'identity', '{', 400, 'INVALID_REQUEST'],
+  ['oversized json', 'application/json', 'identity', JSON.stringify({ content: 'x'.repeat(100) }), 413, 'REQUEST_TOO_LARGE'],
+] as const)('classifies parser rejection: %s', async (_scenario, contentType, encoding, body, status, errorCode) => {
+  const app = express();
+  app.post('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
+  app.use(json({ limit: 32 }));
+  app.post('/v1/workspace-tools/execute', (_req, res) => { res.sendStatus(200); });
+  server = createServer(app);
+  await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+  const response = await fetch(`http://127.0.0.1:${address.port}/v1/workspace-tools/execute`, {
+    method: 'POST', headers: { 'Content-Type': contentType, 'Content-Encoding': encoding }, body,
+  });
+  await response.text();
+  expect(response.status).toBe(status);
+  expect(logSpy).toHaveBeenCalledTimes(1);
+  expect(logSpy).toHaveBeenCalledWith('warn', 'Workspace tool request completed', expect.objectContaining({
+    status, errorCode, dispatchDurationMs: undefined, outcome: 'completed',
+  }));
 });

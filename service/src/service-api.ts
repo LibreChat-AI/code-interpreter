@@ -15,7 +15,7 @@ import hostedAppRouter from './hosted-app/router';
 import { hostedAppPreviewGateway } from './hosted-app/preview-gateway';
 
 const app = express();
-app.use('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
+app.post('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(executionProfileMiddleware);
