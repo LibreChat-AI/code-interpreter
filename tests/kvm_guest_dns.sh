@@ -99,6 +99,9 @@ for name, count in [('api/Dockerfile', 2), ('docker/Dockerfile.worker-sandbox', 
 text = (root / 'launcher/src/main.rs').read_text()
 assert '"SANDBOX_RESOLV_CONF"' in text.split('const ALLOW_EXACT:')[1].split('];')[0]
 argv = text.split('let argv_strs:')[1].split('let argv_ptrs:')[0]
+# libkrun init supplies argv[0]. Repeating the binary here makes Bash try to
+# interpret /bin/bash itself as a shell script instead of the DNS wrapper.
+assert 'cstr("/bin/bash")' not in argv
 assert 'cstr("/sandbox_api/guest-dns.sh")' in argv
 assert 'cstr("--exec")' in argv and 'cstr(&exec_path)' in argv
 assert 'let exec_c = cstr("/bin/bash")' in text

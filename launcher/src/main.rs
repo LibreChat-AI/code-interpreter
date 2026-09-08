@@ -535,8 +535,8 @@ fn main() {
         .collect();
     let env_ptrs = null_term(&env_strs);
 
+    // krun_set_exec supplies argv[0]; this array contains arguments only.
     let argv_strs: Vec<CString> = vec![
-        cstr("/bin/bash"),
         cstr("/sandbox_api/guest-dns.sh"),
         cstr("--exec"),
         cstr(&exec_path),
