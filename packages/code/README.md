@@ -39,7 +39,8 @@ Credential and quarantine storage supports macOS and Linux (including WSL2).
 On macOS, native descriptor-based ACL calls remove inherited ACLs from new
 credential/state files before writing secrets and verify the result. Reads reject
 ACL-exposed identities and GitHub App keys; ancestor checks reject ACL write
-grants that could permit replacement. Existing sharing ACLs on parent directories
+grants and inheritable allow entries before any child is created. Removing an
+ACL after creation cannot revoke descriptors opened while the grant existed. Existing sharing ACLs on parent directories
 are never silently removed. Default application-owned workspace directories have
 their ACLs removed and modes restricted to `0700`.
 

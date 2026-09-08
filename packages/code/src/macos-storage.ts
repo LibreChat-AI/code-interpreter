@@ -6,6 +6,8 @@ const ACL_TYPE_EXTENDED = 0x100;
 const ACL_EXTENDED_ALLOW = 1;
 const ACL_EXTENDED_DENY = 2;
 const ACL_NEXT_ENTRY = -1;
+const ACL_ENTRY_FILE_INHERIT = 1 << 5;
+const ACL_ENTRY_DIRECTORY_INHERIT = 1 << 6;
 const lib = koffi.load('/usr/lib/libSystem.B.dylib');
 const getAcl = lib.func('void *acl_get_fd_np(int fd, int type)');
 const setAcl = lib.func('int acl_set_fd_np(int fd, void *acl, int type)');
@@ -14,7 +16,10 @@ const freeAcl = lib.func('int acl_free(void *acl)');
 const getEntry = lib.func('int acl_get_entry(void *acl, int index, _Out_ void **entry)');
 const getTag = lib.func('int acl_get_tag_type(void *entry, _Out_ int *tag)');
 const getMask = lib.func('int acl_get_permset_mask_np(void *entry, _Out_ uint64_t *mask)');
-// Only read/list, search/execute, and metadata reads are safe on ancestors.
+const getFlags = lib.func('int acl_get_flagset_np(void *entry, _Out_ void **flags)');
+const getFlag = lib.func('int acl_get_flag_np(void *flags, int flag)');
+// Only non-inheritable read/list, search/execute, and metadata reads are safe.
+// Removing an inherited grant after open cannot revoke an attacker's held fd.
 const ANCESTOR_READ_PERMISSIONS = (1 << 1) | (1 << 3) | (1 << 7) | (1 << 9) | (1 << 11);
 
 function unavailable(): never {
@@ -38,9 +43,14 @@ export function verifyMacOsAcl(fd: number, path: string, directory = false, empt
       }
       const tag = [0];
       const mask = [0];
-      if (getTag(entry[0], tag) !== 0 || getMask(entry[0], mask) !== 0) unavailable();
+      const flags = [null];
+      if (getTag(entry[0], tag) !== 0 || getMask(entry[0], mask) !== 0 ||
+        getFlags(entry[0], flags) !== 0) unavailable();
+      const fileInherit = getFlag(flags[0], ACL_ENTRY_FILE_INHERIT);
+      const directoryInherit = getFlag(flags[0], ACL_ENTRY_DIRECTORY_INHERIT);
+      if (fileInherit < 0 || directoryInherit < 0) unavailable();
       if (empty || (tag[0] !== ACL_EXTENDED_DENY &&
-        (tag[0] !== ACL_EXTENDED_ALLOW || !directory ||
+        (tag[0] !== ACL_EXTENDED_ALLOW || !directory || fileInherit || directoryInherit ||
           (BigInt(mask[0]) & ~BigInt(ANCESTOR_READ_PERMISSIONS)) !== 0n))) {
         throw new BridgeProtocolError(
           `macOS ACL grants access beyond owner-only storage at ${path}. ` +

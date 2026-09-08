@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import fs, { chmod, mkdtemp, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import fs, { chmod, mkdtemp, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,10 +25,10 @@ async function grant(path: string, permissions: string): Promise<void> {
 }
 
 // Real kernel ACLs: chmod(0600) alone leaves these grants effective.
-test('macOS removes inherited ACLs before publishing identity and quarantine state', mac, async t => {
+test('macOS removes inherited deny ACLs before publishing identity and quarantine state', mac, async t => {
   const root = await mkdtemp(join(tmpdir(), 'macos-acl-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  await grant(root, 'read,readattr,readextattr,readsecurity,file_inherit,directory_inherit');
+  await exec('/bin/chmod', ['+a', 'everyone deny read,file_inherit,directory_inherit,only_inherit', root]);
   let guardedWrites = 0;
   const originalOpen = fs.open;
   fs.open = (async (...args: Parameters<typeof fs.open>) => {
@@ -131,4 +131,36 @@ test('macOS checks mount status without procfs', mac, async () => {
   const { macOsMountPoint } = await import('./macos-storage.js');
   assert.equal(macOsMountPoint('/'), '/');
   assert.throws(() => macOsMountPoint('/nonexistent-macos-acl-test'), /Cannot verify macOS identity mount/);
+});
+
+
+test('macOS rejects inheritable allow ACLs before creating any storage inode', mac, async t => {
+  for (const inheritance of ['file_inherit', 'directory_inherit', 'file_inherit,only_inherit']) {
+    await t.test(inheritance, async t => {
+      const root = await mkdtemp(join(tmpdir(), 'macos-inherited-acl-'));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      const existing = join(root, 'existing.json');
+      await saveBridgeIdentity(existing, identity);
+      await chmod(root, 0o755);
+      await grant(root, `read,search,${inheritance}`);
+      let creates = 0;
+      const originalOpen = fs.open;
+      fs.open = (async (...args: Parameters<typeof fs.open>) => {
+        if (args[1] === 'wx') creates += 1;
+        return originalOpen(...args);
+      }) as typeof fs.open;
+      syncBuiltinESMExports();
+      t.after(() => { fs.open = originalOpen; syncBuiltinESMExports(); });
+      const path = join(root, 'nested', 'identity.json');
+      for (const action of [
+        () => assertIdentityPathIsPrivate(path),
+        () => assertIdentityPathIsPrivate(existing),
+        () => saveBridgeIdentity(path, identity),
+        () => saveWorkspaceMutationQuarantine(path, quarantine),
+        () => ensurePrivateWorkspaceDirectory(join(root, 'workspace')),
+      ]) await assert.rejects(action(), /macOS ACL grants/);
+      assert.equal(creates, 0);
+      assert.deepEqual(await readdir(root), ['existing.json']);
+    });
+  }
 });
