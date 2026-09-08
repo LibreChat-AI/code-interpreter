@@ -102,6 +102,8 @@ const {
 } = TRUSTED_GIT_ENVIRONMENT;
 
 const NATIVE_SANDBOX_SCRATCH_PREFIX = 'librechat-code-srt-';
+// SRT grants these shared compatibility paths by default. A worker-specific
+// TMPDIR must also deny them or separate worker processes can exchange files.
 const SRT_SHARED_SCRATCH_PATHS = ['/tmp/claude', '/private/tmp/claude'];
 const SRT_SCRATCH_SELECTOR_NAMES = [
   'CLAUDE_CODE_TMPDIR',
