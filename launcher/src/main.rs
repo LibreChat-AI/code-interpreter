@@ -424,6 +424,7 @@ fn is_allowed_guest_env_key(key: &str, egress_gateway_enabled: bool) -> bool {
         "SANDBOX_EXECUTE_BODY_LIMIT",
         "SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY",
         "SANDBOX_FORWARD_TARGET",
+        "SANDBOX_RESOLV_CONF",
         "SANDBOX_LIMIT_OVERRIDES",
         "SANDBOX_LOG_LEVEL",
         "SANDBOX_MAX_CONCURRENT_JOBS",
@@ -518,7 +519,8 @@ fn main() {
     let root_device_c = cstr(&root_device);
     let root_fstype_c = cstr(&root_fstype);
     let root_options_c = cstr(&root_options);
-    let exec_c = cstr(&exec_path);
+    // Always initialize guest DNS, including when LAUNCHER_EXEC overrides the API.
+    let exec_c = cstr("/bin/bash");
 
     let port_map_strs = vec![cstr("2000:2000")];
     let port_map_ptrs = null_term(&port_map_strs);
@@ -533,7 +535,12 @@ fn main() {
         .collect();
     let env_ptrs = null_term(&env_strs);
 
-    let argv_strs: Vec<CString> = vec![cstr(&exec_path)];
+    // krun_set_exec supplies argv[0]; this array contains arguments only.
+    let argv_strs: Vec<CString> = vec![
+        cstr("/sandbox_api/guest-dns.sh"),
+        cstr("--exec"),
+        cstr(&exec_path),
+    ];
     let argv_ptrs = null_term(&argv_strs);
 
     let rlimit_strs: Vec<CString> = vec![guest_nofile_rlimit(nofile_target)];
@@ -645,6 +652,7 @@ mod tests {
             "SANDBOX_DISABLE_NETWORKING",
             "SANDBOX_ALLOWED_LOCAL_NETWORK_PORT",
             "SANDBOX_FORWARD_TARGET",
+            "SANDBOX_RESOLV_CONF",
             "SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY",
             "SANDBOX_RUN_TIMEOUT",
             "NSJAIL_CONFIG",

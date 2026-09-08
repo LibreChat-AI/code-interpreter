@@ -148,6 +148,7 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
     2>/dev/null || true
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
+COPY api/src/guest-dns.sh ./guest-dns.sh
 COPY api/src/hosted-app-launcher.sh /usr/local/bin/codeapi-hosted-app-launcher
 RUN chmod +x ./entrypoint.sh /usr/local/bin/codeapi-hosted-app-launcher
 
@@ -266,7 +267,8 @@ COPY --from=sandbox-build / /sandbox-rootfs/
 COPY --from=package-builder /pkgs /sandbox-rootfs/pkgs
 COPY docker/build-rootfs-image.sh /usr/local/bin/build-rootfs-image.sh
 
-RUN sed -i '/^cgroup_mem_swap_max/d' /sandbox-rootfs/sandbox_api/config/sandbox.cfg
+RUN sed -i '/^cgroup_mem_swap_max/d' /sandbox-rootfs/sandbox_api/config/sandbox.cfg \
+    && bash /sandbox-rootfs/sandbox_api/guest-dns.sh --prepare-rootfs /sandbox-rootfs
 RUN chmod +x /usr/local/bin/build-rootfs-image.sh \
     && /usr/local/bin/build-rootfs-image.sh /sandbox-rootfs /sandbox-rootfs.img
 
@@ -284,7 +286,8 @@ FROM sandbox-runner-base AS sandbox-runner
 
 COPY --from=sandbox-build / /sandbox-rootfs/
 
-RUN sed -i '/^cgroup_mem_swap_max/d' /sandbox-rootfs/sandbox_api/config/sandbox.cfg
+RUN sed -i '/^cgroup_mem_swap_max/d' /sandbox-rootfs/sandbox_api/config/sandbox.cfg \
+    && bash /sandbox-rootfs/sandbox_api/guest-dns.sh --prepare-rootfs /sandbox-rootfs
 
 RUN mkdir -p /host-packages
 
