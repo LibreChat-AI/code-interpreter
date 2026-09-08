@@ -125,8 +125,12 @@ jobs:
         run: bun run test
 
   code-package-tests:
-    name: Code Package Tests
+    name: Code Package Tests (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['20.11.0', '22.21.0', '24.16.0']
     defaults:
       run:
         working-directory: packages/code
@@ -135,9 +139,7 @@ jobs:
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          # The suite fails 47 worker tests on Node 22 despite the package's
-          # ">=20.11" engines range, so CI pins the version it is green on.
-          node-version: 24.16.0
+          node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: packages/code/package-lock.json
 

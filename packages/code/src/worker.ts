@@ -1647,7 +1647,6 @@ export class BridgeWorker {
       signal?.addEventListener('abort', abortRequest, { once: true });
     }
     const timeout = setTimeout(abortRequest, timeoutMs);
-    timeout.unref?.();
     try {
       return await this.request<T>(url, body, controller.signal);
     } finally {
