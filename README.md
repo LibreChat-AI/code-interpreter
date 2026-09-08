@@ -147,7 +147,8 @@ KVM guests use the runner container's `/etc/resolv.conf`, including Docker's
 embedded resolver or Kubernetes nameservers and search domains. The launcher
 preserves service hostnames instead of pinning their startup IP addresses.
 Both baked and directory rootfs images contain a resolver symlink whose target
-is populated in private runtime storage after the guest mounts `/tmp`; the
+is populated by a guest wrapper in private `/run` runtime storage before any
+`LAUNCHER_EXEC` executable starts; the
 read-only root disk does not need modification at boot. Rebuild the runner
 image to pick up this layout change. A missing resolver handoff fails startup
 rather than leaving the guest with an unrelated public DNS server.

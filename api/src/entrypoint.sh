@@ -33,10 +33,6 @@ else
     echo "WARNING: tmpfs mount on /tmp failed — falling back to rootfs"
 fi
 
-# Populate the baked resolver link after mounting writable guest runtime state.
-source "$(dirname "$0")/guest-dns.sh"
-configure_guest_dns
-
 # Create directories needed by NsJail
 mkdir -p /tmp/sandbox
 chown 0:0 /tmp/sandbox 2>/dev/null || true

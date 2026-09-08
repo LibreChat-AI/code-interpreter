@@ -519,7 +519,8 @@ fn main() {
     let root_device_c = cstr(&root_device);
     let root_fstype_c = cstr(&root_fstype);
     let root_options_c = cstr(&root_options);
-    let exec_c = cstr(&exec_path);
+    // Always initialize guest DNS, including when LAUNCHER_EXEC overrides the API.
+    let exec_c = cstr("/bin/bash");
 
     let port_map_strs = vec![cstr("2000:2000")];
     let port_map_ptrs = null_term(&port_map_strs);
@@ -534,7 +535,12 @@ fn main() {
         .collect();
     let env_ptrs = null_term(&env_strs);
 
-    let argv_strs: Vec<CString> = vec![cstr(&exec_path)];
+    let argv_strs: Vec<CString> = vec![
+        cstr("/bin/bash"),
+        cstr("/sandbox_api/guest-dns.sh"),
+        cstr("--exec"),
+        cstr(&exec_path),
+    ];
     let argv_ptrs = null_term(&argv_strs);
 
     let rlimit_strs: Vec<CString> = vec![guest_nofile_rlimit(nofile_target)];
