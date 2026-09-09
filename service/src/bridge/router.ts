@@ -330,10 +330,10 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     }),
   );
 
-  router.post(
+router.post(
   '/workers/register',
-    workerAuth,
-    asyncRoute(async (req, res) => {
+  workerAuth,
+  asyncRoute(async (req, res) => {
     const registration = req.body as unknown;
     if (
       !isRecord(registration) ||
@@ -384,21 +384,21 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         ? { binding: authorization.binding }
         : {}),
     };
-      try {
+    try {
       const registrationGeneration = await options.store.register(
         trustedRegistration,
         authorization,
       );
-        res.json({
-          protocolVersion: BRIDGE_PROTOCOL_VERSION,
-          workerId: registration.workerId,
-          incarnationId: registration.incarnationId,
+      res.json({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: registration.workerId,
+        incarnationId: registration.incarnationId,
         registrationGeneration,
         registeredAt: new Date().toISOString(),
         leaseTtlMs: 60_000,
-          workspaceLeaseSlots: options.store.workspaceLeaseCapacity(
-            registration.capabilities.workspaceLeaseSlots,
-          ),
+      workspaceLeaseSlots: options.store.workspaceLeaseCapacity(
+        registration.capabilities.workspaceLeaseSlots,
+      ),
         supportedWorkspaceToolOperations: [
           'read_file',
           'search_text',
@@ -412,16 +412,16 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         supportedWorkspaceEditFileModes: ['single', 'batch'],
         supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
         supportedWorkspaceListFileFeatures: ['after_path'],
-        });
-      } catch (error) {
-        if (error instanceof BridgeStoreError) {
-          sendStoreError(error, res);
-          return;
-        }
-        throw error;
+      });
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
       }
-    }),
-  );
+      throw error;
+    }
+  }),
+);
 
 router.post(
   '/workers/:workerId/ready',
@@ -519,55 +519,53 @@ router.post(
   }),
 );
 
-  router.post(
+router.post(
   '/workers/:workerId/lease',
-    workerAuth,
-    asyncRoute(async (req, res) => {
+  workerAuth,
+  asyncRoute(async (req, res) => {
     const requestStartedAtMs = Date.now();
-      const workerId = req.params.workerId;
-      const body = isRecord(req.body) ? req.body : {};
+    const workerId = req.params.workerId;
+    const body = isRecord(req.body) ? req.body : {};
     const requestedWait = Number(body.waitMs ?? 25_000);
-      if (
+    if (
       !validWorkerId(workerId) ||
       body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
       !validIncarnationId(body.incarnationId) ||
       !Number.isFinite(requestedWait) ||
       requestedWait < 0 ||
-        (body.workspaceLeaseSlot !== undefined &&
-          (!Number.isSafeInteger(body.workspaceLeaseSlot) ||
-            Number(body.workspaceLeaseSlot) < 0 ||
-            Number(body.workspaceLeaseSlot) >= 8))
-      ) {
+      (body.workspaceLeaseSlot !== undefined &&
+        (!Number.isSafeInteger(body.workspaceLeaseSlot) ||
+          Number(body.workspaceLeaseSlot) < 0 ||
+          Number(body.workspaceLeaseSlot) >= 8))
+    ) {
       res.status(400).json({ error: 'Invalid bridge lease request' });
       return;
     }
-      if (!configuredWorker(workerId)) {
-        res.status(403).json({
-          error: 'Worker is not authorized for this Code API deployment',
-        });
-        return;
-      }
-      try {
+    if (!configuredWorker(workerId)) {
+      res.status(403).json({
+        error: 'Worker is not authorized for this Code API deployment',
+      });
+      return;
+    }
+    try {
       const leaseController = new AbortController();
       const abortLease = (): void => leaseController.abort();
       req.once('aborted', abortLease);
       res.once('close', abortLease);
       let assignment: CodeBridgeAssignment | undefined;
-        try {
-          assignment = await options.store.lease(
-            workerId,
-            body.incarnationId,
+      try {
+        assignment = await options.store.lease(
+          workerId,
+          body.incarnationId,
           Math.min(requestedWait, MAX_LEASE_WAIT_MS),
-            leaseController.signal,
-            (
-              res.locals.bridgeWorkerAuthorization as
-                | { identityId: string }
-                | undefined
-            )?.identityId,
-            body.workspaceLeaseSlot === undefined
-              ? undefined
-              : Number(body.workspaceLeaseSlot),
-          );
+          leaseController.signal,
+          (
+            res.locals.bridgeWorkerAuthorization as
+              | { identityId: string }
+              | undefined
+          )?.identityId,
+          body.workspaceLeaseSlot === undefined ? undefined : Number(body.workspaceLeaseSlot),
+        );
         if (leaseController.signal.aborted) {
           if (assignment != null) await options.store.returnLease(assignment);
           return;
@@ -577,19 +575,19 @@ router.post(
           serverElapsedMs: Math.max(0, Date.now() - requestStartedAtMs),
           assignment,
         });
-        } finally {
+      } finally {
         req.off('aborted', abortLease);
         res.off('close', abortLease);
       }
-      } catch (error) {
-        if (error instanceof BridgeStoreError) {
-          sendStoreError(error, res);
-          return;
-        }
-        throw error;
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
       }
-    }),
-  );
+      throw error;
+    }
+  }),
+);
 
 router.post(
   '/workers/:workerId/assignments/:assignmentId/ack',
@@ -639,55 +637,55 @@ router.post(
   }),
 );
 
-  router.post(
-    [
-  '/workers/:workerId/assignments/:assignmentId/settle',
-      '/workers/:workerId/assignments/:assignmentId/quarantine',
-    ],
-    workerAuth,
-    asyncRoute(async (req, res) => {
+router.post(
+  [
+    '/workers/:workerId/assignments/:assignmentId/settle',
+    '/workers/:workerId/assignments/:assignmentId/quarantine',
+  ],
+  workerAuth,
+  asyncRoute(async (req, res) => {
     const settlement = req.body as unknown;
     if (!isSettlement(settlement)) {
       res.status(400).json({ error: 'Invalid bridge settlement' });
       return;
     }
-      try {
+    try {
       const settlementController = new AbortController();
       const abortSettlement = (): void => settlementController.abort();
       req.once('aborted', abortSettlement);
       res.once('close', abortSettlement);
-        try {
-          await options.store.settle(
-            req.params.workerId,
-            req.params.assignmentId,
-            settlement,
-            settlementController.signal,
-            (
-              res.locals.bridgeWorkerAuthorization as
-                | { identityId: string }
-                | undefined
-            )?.identityId,
-            req.path.endsWith('/quarantine'),
-          );
+      try {
+        await options.store.settle(
+          req.params.workerId,
+          req.params.assignmentId,
+          settlement,
+          settlementController.signal,
+          (
+            res.locals.bridgeWorkerAuthorization as
+              | { identityId: string }
+              | undefined
+          )?.identityId,
+          req.path.endsWith('/quarantine'),
+        );
         if (!settlementController.signal.aborted) {
           res.json({
             protocolVersion: BRIDGE_PROTOCOL_VERSION,
             accepted: true,
           });
         }
-        } finally {
+      } finally {
         req.off('aborted', abortSettlement);
         res.off('close', abortSettlement);
       }
-      } catch (error) {
-        if (error instanceof BridgeStoreError) {
-          sendStoreError(error, res);
-          return;
-        }
-        throw error;
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        sendStoreError(error, res);
+        return;
       }
-    }),
-  );
+      throw error;
+    }
+  }),
+);
 
 router.post(
   '/workers/:workerId/assignments/:assignmentId/cancellation',
@@ -745,6 +743,7 @@ router.post(
       }
     }),
   );
+
 
   return router;
 }

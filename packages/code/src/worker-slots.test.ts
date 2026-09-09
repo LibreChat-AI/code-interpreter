@@ -128,3 +128,55 @@ for (const cancelled of [false, true]) {
     assert.equal(internals.activeWorkspaceAssignments.get('a')?.id, 'previous');
   });
 }
+
+test('a local cleanup handoff preserves the new assignment owner and remaining budget', async () => {
+  const worker = new BridgeWorker({
+    codeApiUrl: 'http://localhost:1',
+    token: 'fixture',
+    workerId: 'worker',
+    sandboxEndpoint: 'http://localhost:2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'fixture',
+      runtimes: [],
+    },
+  });
+  const internals = worker as unknown as {
+    activeWorkspaceAssignments: Map<
+      string,
+      { id: string; done: Promise<void> }
+    >;
+    executeOwned: (assignment: BridgeAssignment) => Promise<void>;
+  };
+  let release!: () => void;
+  internals.activeWorkspaceAssignments.set('a', {
+    id: 'previous',
+    done: new Promise<void>((resolve) => {
+      release = resolve;
+    }),
+  });
+  let executed = false;
+  internals.executeOwned = async (assignment) => {
+    executed = true;
+    assert.equal(internals.activeWorkspaceAssignments.get('a')?.id, 'next');
+    assert.ok(assignment.remainingMs! < 1000 && assignment.remainingMs! > 0);
+  };
+  const pending = worker.executeAndSettle({
+    assignmentId: 'next',
+    executionKind: 'workspace_tool',
+    remainingMs: 1000,
+    request: {
+      protocolVersion: 1,
+      workspaceId: 'a',
+      operation: 'read_file',
+      path: 'test.txt',
+    },
+  } as BridgeAssignment);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(executed, false);
+  internals.activeWorkspaceAssignments.delete('a');
+  release();
+  await pending;
+  assert.equal(executed, true);
+  assert.equal(internals.activeWorkspaceAssignments.size, 0);
+});

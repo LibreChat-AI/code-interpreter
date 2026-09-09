@@ -1054,7 +1054,8 @@ export class BridgeWorker {
           error instanceof BridgeProtocolError &&
           (error.status === 401 || error.status === 403);
         const credentialRemainingMs =
-          Date.parse(identity.expiresAt) - (Date.now() + serverClockOffsetMs);
+          Date.parse(identity.expiresAt) -
+          (Date.now() + serverClockOffsetMs);
         if (terminal || credentialRemainingMs <= 0) throw error;
         await abortableDelay(
           Math.min(
@@ -1630,9 +1631,7 @@ export class BridgeWorker {
       return await lease.execute({ body, headers, signal });
     }
     if (lease.endpoint == null) {
-      throw new BridgeProtocolError(
-        'Runtime lease does not provide an execution transport',
-      );
+      throw new BridgeProtocolError('Runtime lease does not provide an execution transport');
     }
     const endpoint = lease.endpoint.replace(/\/+$/, '');
     const response = await this.fetchImpl(`${endpoint}/execute`, {

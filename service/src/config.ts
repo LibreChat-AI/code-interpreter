@@ -81,12 +81,11 @@ export function checkpointPipelineBudgetMs(
     checkpointTimeoutMs,
     CHECKPOINT_METADATA_TIMEOUT_CAP_MS,
   );
-  return ( launchTimeoutMs
+  return launchTimeoutMs
     + 2 * checkpointTimeoutMs
     + 2 * metadataTimeoutMs
     + POST_EXEC_CHECKPOINT_REGISTRY_COMMANDS
-      * RUNTIME_SESSION_REDIS_COMMAND_TIMEOUT_MS
-  );
+      * RUNTIME_SESSION_REDIS_COMMAND_TIMEOUT_MS;
 }
 
 /** BullMQ's `timestamp` is the enqueue time. Anchor the worker deadline to it
@@ -113,11 +112,10 @@ export function jobCompletionWaitTimeoutMs(
   backendCleanupTimeoutMs: number,
   egressRevokeTimeoutMs: number,
 ): number {
-  return ( jobTimeoutMs
+  return jobTimeoutMs
     + backendCleanupTimeoutMs
     + egressRevokeTimeoutMs
-    + WORKER_COMPLETION_OVERHEAD_MS
-  );
+    + WORKER_COMPLETION_OVERHEAD_MS;
 }
 
 export function parseArnList(raw: string | undefined): string[] | undefined {
@@ -240,10 +238,9 @@ export function resolveEgressGrantTtlSeconds(rawTtlSeconds: string | undefined, 
 const lambdaMicrovmNumericConfig = resolveLambdaMicrovmNumericConfig(process.env);
 
 export function hostedAppOperationTimeoutMs(): number {
-  return ( env.CHECKPOINT_TIMEOUT_MS * 9
+  return env.CHECKPOINT_TIMEOUT_MS * 9
     + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 7
-    + env.HOSTED_APP_START_TIMEOUT_MS + 30_000
-  );
+    + env.HOSTED_APP_START_TIMEOUT_MS + 30_000;
 }
 
 function configuredNumber(raw: string | undefined, fallback: number): number {

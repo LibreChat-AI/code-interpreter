@@ -12,7 +12,7 @@ const incarnationId = 'concurrent-incarnation';
 afterEach(async () => {
   await redis.flushall();
 });
-async function register() {
+async function register(workspaceLeaseSlots = 2) {
   const generation = await store.register({
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
     workerId,
@@ -22,7 +22,7 @@ async function register() {
       runtimes: [],
       sandboxProfile: 'native-srt',
       requiresReadyConfirmation: true,
-      workspaceLeaseSlots: 2,
+      workspaceLeaseSlots,
       workspaceTools: {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         operations: ['read_file'],
@@ -96,6 +96,50 @@ test('store routes simultaneous roots through separate acknowledged slots', asyn
   ).toBeNull();
 });
 
+test('a replica never dispatches above its own configured ceiling', async () => {
+  await register();
+  const serialReplica = new RedisBridgeStore(redis, 60, 1000, 1);
+  await expect(
+    serialReplica.dispatchWorkspaceTool({
+      workerId,
+      signal: new AbortController().signal,
+      deadlineAtMs: Date.now() + 1000,
+      request: {
+        protocolVersion: 1,
+        operation: 'read_file',
+        workspaceId: 'a',
+        path: 'file.txt',
+      },
+    }),
+  ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+  await expect(
+    serialReplica.lease(workerId, incarnationId, 0, undefined, undefined, 1),
+  ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+  expect(
+    await redis.get(`codeapi:bridge:v1:worker:${workerId}:lock`),
+  ).toBeNull();
+});
+
+test('capacity changes require the active slots to drain', async () => {
+  await register();
+  const pending = dispatch('a');
+  const assignment = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  await expect(register(1)).rejects.toMatchObject({ code: 'WORKER_BUSY' });
+  await settle(assignment);
+  await pending;
+  await register(1);
+  expect(
+    (await store.workerStatus(workerId)).capabilities?.workspaceLeaseSlots,
+  ).toBe(1);
+});
+
 test('same-root work waits while another root progresses', async () => {
   await register();
   const a = dispatch('a');
@@ -137,38 +181,93 @@ test('same-root work waits while another root progresses', async () => {
 test('queued cancellation never leases and does not block another root', async () => {
   await register();
   const a = dispatch('a');
-  const first = (await store.lease(workerId, incarnationId, 1000, undefined, undefined, 0))!;
+  const first = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
   const controller = new AbortController();
   const cancelled = dispatch('a', controller.signal);
   const queue = `codeapi:bridge:v1:worker:${workerId}:admission`;
-  for (let i = 0; i < 100 && await redis.zcard(queue) < 2; i++) {
-    await new Promise(resolve => setTimeout(resolve, 5));
+  for (let i = 0; i < 100 && (await redis.zcard(queue)) < 2; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
   expect(await redis.zcard(queue)).toBe(2);
   controller.abort();
   await expect(cancelled).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
   const b = dispatch('b');
-  const second = (await store.lease(workerId, incarnationId, 1000, undefined, undefined, 1))!;
+  const second = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    1,
+  ))!;
   expect(second.request).toMatchObject({ workspaceId: 'b' });
-  await settle(first); await settle(second); await Promise.all([a, b]);
-  expect(await store.lease(workerId, incarnationId, 0, undefined, undefined, 0)).toBeUndefined();
+  await settle(first);
+  await settle(second);
+  await Promise.all([a, b]);
+  expect(
+    await store.lease(workerId, incarnationId, 0, undefined, undefined, 0),
+  ).toBeUndefined();
 });
 
 test('late quarantine releases its slot after caller cancellation and retains only its root fence', async () => {
   await register();
   const controller = new AbortController();
   const a = dispatch('a', controller.signal);
-  const first = (await store.lease(workerId, incarnationId, 1000, undefined, undefined, 0))!;
-  await store.acknowledgeLease(workerId, incarnationId, first.assignmentId, first.generation, first.leaseToken);
+  const first = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  await store.acknowledgeLease(
+    workerId,
+    incarnationId,
+    first.assignmentId,
+    first.generation,
+    first.leaseToken,
+  );
   controller.abort();
   await expect(a).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
-  await store.settle(workerId, first.assignmentId, { protocolVersion: 1,
-    incarnationId, generation: first.generation, leaseToken: first.leaseToken,
-    status: 'rejected', error: 'uncertain mutation' }, undefined, undefined, true);
-  expect(await redis.get(`codeapi:bridge:v1:worker:${workerId}:lock`)).toBeNull();
+  await store.settle(
+    workerId,
+    first.assignmentId,
+    {
+      protocolVersion: 1,
+      incarnationId,
+      generation: first.generation,
+      leaseToken: first.leaseToken,
+      status: 'rejected',
+      error: 'uncertain mutation',
+    },
+    undefined,
+    undefined,
+    true,
+  );
+  expect(
+    await redis.get(`codeapi:bridge:v1:worker:${workerId}:lock`),
+  ).toBeNull();
   const b = dispatch('b');
-  const next = (await store.lease(workerId, incarnationId, 1000, undefined, undefined, 0))!;
+  const next = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
   expect(next.request).toMatchObject({ workspaceId: 'b' });
-  await settle(next); await b;
-  await expect(dispatch('a')).rejects.toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
+  await settle(next);
+  await b;
+  await expect(dispatch('a')).rejects.toMatchObject({
+    code: 'WORKSPACE_QUARANTINED',
+  });
 });
