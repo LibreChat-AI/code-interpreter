@@ -4,7 +4,12 @@ import { RedisBridgePairingStore } from './pairing';
 import { createBridgeRouter } from './router';
 import { RedisBridgeStore } from './store';
 
-export const bridgeStore = new RedisBridgeStore(connection);
+export const bridgeStore = new RedisBridgeStore(
+  connection,
+  undefined,
+  undefined,
+  env.BRIDGE_MAX_WORKSPACE_LEASE_SLOTS,
+);
 export const bridgePairings = new RedisBridgePairingStore(connection);
 
 export default createBridgeRouter({

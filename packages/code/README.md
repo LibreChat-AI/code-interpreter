@@ -520,3 +520,51 @@ with `librechat-code reset-workspace <runtime-session-id>`. The command uses the
 configured worker credentials, registers a fresh incarnation, and only clears
 the server fence when no assignment is active. Run it while the normal worker
 process is stopped, then restart the normal worker after the command exits.
+
+### Opt-in concurrent native workspaces
+
+Code API defaults to **one execution slot**. To allow independent native roots
+to execute concurrently, configure `CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS=2`
+on every Code API replica and start an updated worker with:
+
+```sh
+librechat-code run \
+  --worker-dir /projects/first \
+  --workspace second=/projects/second \
+  --workspace-lease-slots 2 \
+  --allow-workspace-writes \
+  --allow-workspace-commands
+```
+
+Keep the existing URL, pairing/identity, and network policy configuration.
+The primary root keeps its configured workspace ID (default `primary`). Repeat
+`--workspace id=path` to add named roots, up to the protocol's 32-root limit.
+Roots must already exist and must not overlap or alias one another. Commands
+retain the selected root's sandbox boundary, not a shared parent-directory grant.
+
+`LIBRECHAT_CODE_WORKSPACE_LEASE_SLOTS` is the equivalent worker setting. Both
+ceilings must be integers from 1 to 8; the lower ceiling wins. An older Code API
+without the negotiation receipt keeps the worker on the serial protocol. Deploy
+the updated API to all replicas before enabling slots on workers. A capacity
+change while work is active fails closed; stop and drain the worker before
+changing it.
+
+Different roots can run concurrently; requests targeting the **same root remain
+serialized**, even across chats or agents. This is root-level exclusion, not
+file-level locking. Assign separate project/worktree roots for independent work.
+The admission queue remains bounded at 32 requests per worker. An idle SRT process
+cache is bounded by the local slot setting and evicts only idle executors. Runtime
+sandbox assignments continue through the exclusive legacy lane; this does not
+enable concurrent Docker/NsJail sessions or bypass any approval/network policy.
+
+An uncertain mutation or executor failure leaves an assignment-owned local guard
+and a server-side fence for that root. Healthy roots can continue. The worker
+does not replay the failed command. To recover a quarantined native root:
+
+1. Stop the worker and inspect or restore the affected directory.
+2. Run `librechat-code clear-workspace-quarantine --worker-dir /projects/second --workspace-id second` using the same deployment/identity configuration.
+3. Run the normal worker command with all its root/slot options plus `--reset-workspace-quarantine second`. This verifies the local guard is cleared, resets the server fence, then exits.
+4. Restart the normal worker command without the reset option.
+
+The workspace selector in LibreChat must preserve these registered IDs. Adding
+roots here does not grant a principal access or change an agent's selected root.
