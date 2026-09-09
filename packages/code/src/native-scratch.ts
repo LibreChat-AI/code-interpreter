@@ -1,5 +1,5 @@
 import { constants as fsConstants } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { opendir } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 
 import koffi from 'koffi';
@@ -16,6 +16,12 @@ const fchmodat = lib?.func(
 );
 const AT_SYMLINK_NOFOLLOW = process.platform === 'darwin' ? 0x0020 : 0x0100;
 const O_EVTONLY = 0x8000;
+// Recovery is a last-resort shutdown path over an attacker-controlled tree.
+// Keep both its memory use and its descriptor-relative reopen work bounded.
+const MAX_SCRATCH_DIRECTORIES = 10_000;
+const MAX_SCRATCH_ENTRIES = 100_000;
+const MAX_SCRATCH_DEPTH = 128;
+const MAX_SCRATCH_COMPONENT_VISITS = 16_384;
 const IGNORED_ENTRY_ERRNOS = new Set([
   koffi.os.errno.ENOENT,
   koffi.os.errno.ELOOP,
@@ -80,10 +86,12 @@ async function openRelativeDirectory(
   rootFd: number,
   components: string[],
   hooks: ScratchTraversalHooks,
+  consumeComponentVisit: () => void,
 ): Promise<number | undefined> {
   let currentFd = rootFd;
   try {
     for (const component of components) {
+      consumeComponentVisit();
       await hooks.afterEntryInspected?.(currentFd, component);
       if (!restoreEntryMode(currentFd, component)) {
         if (currentFd !== rootFd) {
@@ -122,16 +130,40 @@ export async function restoreScratchTraversal(
   await root.chmod(0o700);
   await removePrivateStorageAcl(root, 'native sandbox scratch root');
   const pending: string[][] = [[]];
+  let componentVisits = 0;
+  const consumeComponentVisit = () => {
+    componentVisits += 1;
+    if (componentVisits > MAX_SCRATCH_COMPONENT_VISITS) {
+      throw new Error('Native sandbox scratch cleanup exceeded its work limit');
+    }
+  };
+  let entriesInspected = 0;
   for (let index = 0; index < pending.length; index += 1) {
     const components = pending[index];
     const directoryFd = components.length === 0
       ? root.fd
-      : await openRelativeDirectory(root.fd, components, hooks);
+      : await openRelativeDirectory(
+          root.fd,
+          components,
+          hooks,
+          consumeComponentVisit,
+        );
     if (directoryFd === undefined) continue;
     try {
-      const entries = await readdir(descriptorPath(directoryFd), { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory()) pending.push([...components, entry.name]);
+      const directory = await opendir(descriptorPath(directoryFd));
+      for await (const entry of directory) {
+        entriesInspected += 1;
+        if (entriesInspected > MAX_SCRATCH_ENTRIES) {
+          throw new Error('Native sandbox scratch cleanup exceeded its entry limit');
+        }
+        if (!entry.isDirectory()) continue;
+        if (components.length >= MAX_SCRATCH_DEPTH) {
+          throw new Error('Native sandbox scratch cleanup exceeded its depth limit');
+        }
+        if (pending.length >= MAX_SCRATCH_DIRECTORIES) {
+          throw new Error('Native sandbox scratch cleanup exceeded its directory limit');
+        }
+        pending.push([...components, entry.name]);
       }
     } finally {
       if (directoryFd !== root.fd) closeDirectory(directoryFd);

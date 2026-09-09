@@ -748,6 +748,11 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   ): Promise<string | undefined> {
     // Windows SRT supplies the restricted account's private TEMP directory.
     if (this.platform === 'win32') return undefined;
+    if (this.scratchDirectory || this.scratchHandle) {
+      throw new Error(
+        'Native sandbox scratch cleanup is still pending; close the sandbox before reinitializing',
+      );
+    }
     const canonicalTemporaryRoot = await canonicalPath(HOST_TEMPORARY_ROOT);
     const sharedScratchRoot = sharedScratchPaths.find((path) =>
       isWithin(path, canonicalTemporaryRoot),

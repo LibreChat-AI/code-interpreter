@@ -502,12 +502,12 @@ test('scratch traversal removes command-created Darwin ACLs', async (t) => {
   await assert.rejects(access(result.stdout));
 });
 
-test('scratch traversal bounds descriptors across a deep tree', async (t) => {
+test('scratch traversal bounds descriptors and work across a deep tree', async (t) => {
   if (process.platform === 'win32') return;
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-scratch-depth-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const directories = [root];
-  for (let depth = 0; depth < 300; depth += 1) {
+  for (let depth = 0; depth < 100; depth += 1) {
     directories.push(join(directories[directories.length - 1], 'd'));
     await mkdir(directories[directories.length - 1]);
   }
@@ -520,6 +520,52 @@ test('scratch traversal bounds descriptors across a deep tree', async (t) => {
   await restoreScratchTraversal(rootHandle);
 
   assert.equal((await stat(directories[directories.length - 1])).mode & 0o777, 0o700);
+});
+
+test('scratch traversal rejects trees beyond its recovery depth limit', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-scratch-depth-limit-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let directory = root;
+  for (let depth = 0; depth < 129; depth += 1) {
+    directory = join(directory, 'd');
+    await mkdir(directory);
+  }
+  const rootHandle = await open(root, 'r');
+  t.after(() => rootHandle.close());
+
+  await assert.rejects(
+    restoreScratchTraversal(rootHandle),
+    /scratch cleanup exceeded its depth limit/,
+  );
+});
+
+test('does not replace scratch state while cleanup remains pending', async (t) => {
+  if (process.platform === 'win32') return;
+  const workspace = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  const retained = await mkdtemp(join(tmpdir(), 'librechat-code-retained-'));
+  const retainedHandle = await open(retained, 'r');
+  t.after(() => retainedHandle.close());
+  t.after(() => rm(retained, { recursive: true, force: true }));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: workspace,
+    manager: fakeManager().manager,
+  });
+  const mutable = sandbox as unknown as {
+    scratchDirectory?: string;
+    scratchHandle?: typeof retainedHandle;
+    createScratchDirectory(paths: string[]): Promise<string | undefined>;
+  };
+  mutable.scratchDirectory = retained;
+  mutable.scratchHandle = retainedHandle;
+
+  await assert.rejects(
+    mutable.createScratchDirectory([]),
+    /scratch cleanup is still pending/,
+  );
+  assert.equal(mutable.scratchDirectory, retained);
+  assert.equal(mutable.scratchHandle, retainedHandle);
 });
 
 const proxyEnvironment = {
