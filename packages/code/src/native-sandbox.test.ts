@@ -1030,7 +1030,8 @@ test('reports cancellation after command start as a potentially committed mutati
     (error: unknown) =>
       error instanceof WorkspaceToolError &&
       error.code === 'EXECUTION_ABORTED' &&
-      error.mutationMayHaveCommitted === true,
+      error.mutationMayHaveCommitted === true &&
+      error.requiresQuarantine === false,
   );
 });
 
@@ -1157,7 +1158,9 @@ test('cleans allocated command state exactly once on every execution exit', asyn
             error.code === (outcome.startsWith('abort')
               ? 'EXECUTION_ABORTED'
               : 'COMMAND_UNAVAILABLE') &&
-            error.mutationMayHaveCommitted === (outcome === 'abort-after-spawn'),
+            error.mutationMayHaveCommitted === (outcome === 'abort-after-spawn') &&
+            error.requiresQuarantine ===
+              (outcome === 'abort-after-spawn' && process.platform === 'win32'),
           );
         }
         assert.equal(

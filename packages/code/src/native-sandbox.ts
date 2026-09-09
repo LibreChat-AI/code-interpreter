@@ -681,6 +681,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                 'Workspace command execution aborted',
                 'EXECUTION_ABORTED',
                 true,
+                // POSIX commands run in a detached process group, so its
+                // observed close follows a group-wide SIGKILL. The Windows
+                // fallback cannot yet prove descendant termination.
+                this.platform === 'win32',
               ),
             );
             return;
