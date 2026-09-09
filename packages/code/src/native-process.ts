@@ -134,6 +134,7 @@ export class NativeProcessWorkspaceCommandSandbox
         ok?: unknown;
         result?: unknown;
         mutation?: unknown;
+        requiresQuarantine?: unknown;
         code?: unknown;
         errorMessage?: unknown;
         fatal?: unknown;
@@ -164,6 +165,7 @@ export class NativeProcessWorkspaceCommandSandbox
               : 'Native executor request failed',
             code,
             pending.mutation && message.mutation !== false,
+            pending.mutation && message.requiresQuarantine !== false,
           ),
         );
       }

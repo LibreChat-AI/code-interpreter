@@ -179,13 +179,15 @@ test('executor cancellation targets the active request and preserves mutation ce
     ok: false,
     code: 'EXECUTION_ABORTED',
     mutation: true,
+    requiresQuarantine: false,
   });
   await assert.rejects(
     execution,
     (error: unknown) =>
       error instanceof WorkspaceToolError &&
       error.code === 'EXECUTION_ABORTED' &&
-      error.mutationMayHaveCommitted,
+      error.mutationMayHaveCommitted &&
+      !error.requiresQuarantine,
   );
   await sandbox.close();
 });

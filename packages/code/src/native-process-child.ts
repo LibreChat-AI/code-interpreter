@@ -101,6 +101,10 @@ process.on('message', async (raw: unknown) => {
         error instanceof WorkspaceToolError
           ? error.mutationMayHaveCommitted
           : true,
+      requiresQuarantine:
+        error instanceof WorkspaceToolError
+          ? error.requiresQuarantine
+          : true,
     });
   } finally {
     active = undefined;

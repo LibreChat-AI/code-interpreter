@@ -1562,7 +1562,7 @@ export class BridgeWorker {
           !(
             error instanceof WorkspaceToolError &&
             this.options.workspaceTools?.mutationFailuresAreAtomic === true &&
-            !error.mutationMayHaveCommitted
+            !error.requiresQuarantine
           ))
       ) {
         ambiguousWorkspaceMutationError = error;
