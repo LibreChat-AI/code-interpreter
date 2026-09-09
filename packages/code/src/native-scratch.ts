@@ -1,18 +1,21 @@
 import { constants as fsConstants } from 'node:fs';
-import { open, readdir } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 
 import koffi from 'koffi';
 
-// Resolve the process's POSIX symbols instead of naming glibc. BYOM workers
-// may run on musl-based distributions, while Darwin exposes the same symbol.
-const lib = ['darwin', 'linux'].includes(process.platform)
-  ? koffi.load(null)
-  : undefined;
+import { removePrivateStorageAcl } from './private-storage.js';
+
+const POSIX_PLATFORMS = new Set<NodeJS.Platform>(['darwin', 'linux']);
+const lib = POSIX_PLATFORMS.has(process.platform) ? koffi.load(null) : undefined;
+const openat = lib?.func('int openat(int dirfd, const char *path, int flags, uint32_t mode)');
+const closeFd = lib?.func('int close(int fd)');
+const fchmod = lib?.func('int fchmod(int fd, uint32_t mode)');
 const fchmodat = lib?.func(
   'int fchmodat(int dirfd, const char *path, uint32_t mode, int flags)',
 );
 const AT_SYMLINK_NOFOLLOW = process.platform === 'darwin' ? 0x0020 : 0x0100;
+const O_EVTONLY = 0x8000;
 const IGNORED_ENTRY_ERRNOS = new Set([
   koffi.os.errno.ENOENT,
   koffi.os.errno.ELOOP,
@@ -29,46 +32,109 @@ function descriptorPath(fd: number): string {
   return process.platform === 'linux' ? `/proc/self/fd/${fd}` : `/dev/fd/${fd}`;
 }
 
-function restoreEntryMode(directoryFd: number, name: string): boolean {
-  if (!fchmodat) {
+function requirePosixBindings(): void {
+  if (!openat || !closeFd || !fchmod || !fchmodat) {
     throw new Error('Descriptor-relative scratch cleanup is unavailable');
   }
-  if (fchmodat(directoryFd, name, 0o700, AT_SYMLINK_NOFOLLOW) === 0) {
-    return true;
-  }
-  const errno = koffi.errno();
-  if (IGNORED_ENTRY_ERRNOS.has(errno)) return false;
-  const error = new Error(
-    `Descriptor-relative scratch chmod failed with errno ${errno}`,
-  ) as NodeJS.ErrnoException;
-  error.errno = errno;
-  throw error;
 }
 
-/** Restores traversal without resolving a worker-controlled descendant through an ambient path. */
+function ignoredEntryError(): boolean {
+  return IGNORED_ENTRY_ERRNOS.has(koffi.errno());
+}
+
+function restoreEntryMode(directoryFd: number, name: string): boolean {
+  requirePosixBindings();
+  if (fchmodat!(directoryFd, name, 0o700, AT_SYMLINK_NOFOLLOW) === 0) return true;
+  if (ignoredEntryError()) return false;
+  throw new Error(`Descriptor-relative scratch chmod failed with errno ${koffi.errno()}`);
+}
+
+function openDirectoryAt(directoryFd: number, name: string): number | undefined {
+  requirePosixBindings();
+  const commonFlags = fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
+  const repairFlags = process.platform === 'darwin'
+    ? commonFlags | O_EVTONLY
+    : commonFlags | fsConstants.O_RDONLY;
+  const fd = openat!(directoryFd, name, repairFlags, 0);
+  if (fd >= 0) return fd;
+  if (ignoredEntryError()) return undefined;
+  throw new Error(`Descriptor-relative scratch open failed with errno ${koffi.errno()}`);
+}
+
+function closeDirectory(fd: number): void {
+  requirePosixBindings();
+  if (closeFd!(fd) !== 0) {
+    throw new Error(`Descriptor-relative scratch close failed with errno ${koffi.errno()}`);
+  }
+}
+
+async function repairDirectory(fd: number, label: string): Promise<void> {
+  requirePosixBindings();
+  if (fchmod!(fd, 0o700) !== 0) {
+    throw new Error(`Descriptor-relative scratch chmod failed with errno ${koffi.errno()}`);
+  }
+  await removePrivateStorageAcl({ fd }, label);
+}
+
+async function openRelativeDirectory(
+  rootFd: number,
+  components: string[],
+  hooks: ScratchTraversalHooks,
+): Promise<number | undefined> {
+  let currentFd = rootFd;
+  try {
+    for (const component of components) {
+      await hooks.afterEntryInspected?.(currentFd, component);
+      if (!restoreEntryMode(currentFd, component)) {
+        if (currentFd !== rootFd) {
+          const closingFd = currentFd;
+          currentFd = rootFd;
+          closeDirectory(closingFd);
+        }
+        return undefined;
+      }
+      const childFd = openDirectoryAt(currentFd, component);
+      if (currentFd !== rootFd) {
+        const closingFd = currentFd;
+        currentFd = rootFd;
+        closeDirectory(closingFd);
+      }
+      if (childFd === undefined) return undefined;
+      currentFd = childFd;
+      await repairDirectory(currentFd, `scratch directory ${components.join('/')}`);
+    }
+    return currentFd;
+  } catch (error) {
+    if (currentFd !== rootFd) closeDirectory(currentFd);
+    throw error;
+  }
+}
+
+/**
+ * Restores traversal without resolving worker-controlled descendants through
+ * ambient paths. Relative component lists retain no descriptors; reopening a
+ * path holds at most two descriptors and refuses replacement symlinks.
+ */
 export async function restoreScratchTraversal(
   root: FileHandle,
   hooks: ScratchTraversalHooks = {},
 ): Promise<void> {
   await root.chmod(0o700);
-  const entries = await readdir(descriptorPath(root.fd), { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    await hooks.afterEntryInspected?.(root.fd, entry.name);
-    if (!restoreEntryMode(root.fd, entry.name)) continue;
-    let child: FileHandle | undefined;
+  await removePrivateStorageAcl(root, 'native sandbox scratch root');
+  const pending: string[][] = [[]];
+  for (let index = 0; index < pending.length; index += 1) {
+    const components = pending[index];
+    const directoryFd = components.length === 0
+      ? root.fd
+      : await openRelativeDirectory(root.fd, components, hooks);
+    if (directoryFd === undefined) continue;
     try {
-      child = await open(
-        `${descriptorPath(root.fd)}/${entry.name}`,
-        fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
-      );
-      if (!(await child.stat()).isDirectory()) continue;
-      await restoreScratchTraversal(child, hooks);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (!['ENOENT', 'ELOOP', 'ENOTDIR'].includes(code ?? '')) throw error;
+      const entries = await readdir(descriptorPath(directoryFd), { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) pending.push([...components, entry.name]);
+      }
     } finally {
-      await child?.close();
+      if (directoryFd !== root.fd) closeDirectory(directoryFd);
     }
   }
 }

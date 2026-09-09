@@ -814,18 +814,20 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private async removeScratchDirectory(): Promise<void> {
     const scratchDirectory = this.scratchDirectory;
     if (!scratchDirectory) return;
+    const scratchHandle = this.scratchHandle;
+    if (!scratchHandle) {
+      throw new Error('Native sandbox scratch descriptor is unavailable');
+    }
     try {
       await rm(scratchDirectory, { recursive: true, force: true });
     } catch {
-      if (!this.scratchHandle) {
-        throw new Error('Native sandbox scratch descriptor is unavailable');
-      }
-      await restoreScratchTraversal(this.scratchHandle);
+      await restoreScratchTraversal(scratchHandle);
       await rm(scratchDirectory, { recursive: true, force: true });
-    } finally {
-      await this.scratchHandle?.close();
-      this.scratchHandle = undefined;
     }
+    // Retain both the descriptor and path when cleanup fails so close() can
+    // retry without falling back to an attacker-replaceable ambient path.
+    await scratchHandle.close();
+    this.scratchHandle = undefined;
     this.scratchDirectory = undefined;
   }
 
