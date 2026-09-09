@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BridgeWorker } from './worker.js';
-import type { BridgeWorkspaceToolCapabilities } from './protocol.js';
+import type {
+  BridgeAssignment,
+  BridgeWorkspaceToolCapabilities,
+} from './protocol.js';
 
 const capabilities: BridgeWorkspaceToolCapabilities = {
   protocolVersion: 1,
@@ -69,5 +72,59 @@ for (const receipt of [undefined, 1]) {
     await worker.run(controller.signal);
     assert.equal(leases, 1);
     await assert.rejects(worker.lease(undefined, 0), /negotiated capacity/);
+  });
+}
+
+for (const cancelled of [false, true]) {
+  test(`local cleanup wait rejects unexecuted work on ${cancelled ? 'cancellation' : 'expiry'}`, async () => {
+    const worker = new BridgeWorker({
+      codeApiUrl: 'http://localhost:1',
+      token: 'fixture',
+      workerId: 'worker',
+      sandboxEndpoint: 'http://localhost:2',
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'fixture',
+        runtimes: [],
+      },
+    });
+    // Exercise the handoff seam without involving the unrelated HTTP settlement retry loop.
+    const internals = worker as unknown as {
+      activeWorkspaceAssignments: Map<
+        string,
+        { id: string; done: Promise<void> }
+      >;
+      rejectUnexecutedAssignment: () => Promise<void>;
+      executeOwned: () => Promise<void>;
+    };
+    internals.activeWorkspaceAssignments.set('a', {
+      id: 'previous',
+      done: new Promise(() => {}),
+    });
+    let rejected = false;
+    internals.rejectUnexecutedAssignment = async () => {
+      rejected = true;
+    };
+    internals.executeOwned = async () => {
+      assert.fail('must not enter a root still cleaning up');
+    };
+    const controller = new AbortController();
+    if (cancelled) controller.abort();
+    await worker.executeAndSettle(
+      {
+        assignmentId: 'next',
+        executionKind: 'workspace_tool',
+        remainingMs: cancelled ? 60000 : 5,
+        request: {
+          protocolVersion: 1,
+          workspaceId: 'a',
+          operation: 'read_file',
+          path: 'test.txt',
+        },
+      } as BridgeAssignment,
+      controller.signal,
+    );
+    assert.equal(rejected, true);
+    assert.equal(internals.activeWorkspaceAssignments.get('a')?.id, 'previous');
   });
 }

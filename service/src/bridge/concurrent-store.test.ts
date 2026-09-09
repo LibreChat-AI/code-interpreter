@@ -133,3 +133,42 @@ test('same-root work waits while another root progresses', async () => {
   await settle(third!);
   await Promise.all([nextA, b]);
 });
+
+test('queued cancellation never leases and does not block another root', async () => {
+  await register();
+  const a = dispatch('a');
+  const first = (await store.lease(workerId, incarnationId, 1000, undefined, undefined, 0))!;
+  const controller = new AbortController();
+  const cancelled = dispatch('a', controller.signal);
+  const queue = `codeapi:bridge:v1:worker:${workerId}:admission`;
+  for (let i = 0; i < 100 && await redis.zcard(queue) < 2; i++) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  expect(await redis.zcard(queue)).toBe(2);
+  controller.abort();
+  await expect(cancelled).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  const b = dispatch('b');
+  const second = (await store.lease(workerId, incarnationId, 1000, undefined, undefined, 1))!;
+  expect(second.request).toMatchObject({ workspaceId: 'b' });
+  await settle(first); await settle(second); await Promise.all([a, b]);
+  expect(await store.lease(workerId, incarnationId, 0, undefined, undefined, 0)).toBeUndefined();
+});
+
+test('late quarantine releases its slot after caller cancellation and retains only its root fence', async () => {
+  await register();
+  const controller = new AbortController();
+  const a = dispatch('a', controller.signal);
+  const first = (await store.lease(workerId, incarnationId, 1000, undefined, undefined, 0))!;
+  await store.acknowledgeLease(workerId, incarnationId, first.assignmentId, first.generation, first.leaseToken);
+  controller.abort();
+  await expect(a).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  await store.settle(workerId, first.assignmentId, { protocolVersion: 1,
+    incarnationId, generation: first.generation, leaseToken: first.leaseToken,
+    status: 'rejected', error: 'uncertain mutation' }, undefined, undefined, true);
+  expect(await redis.get(`codeapi:bridge:v1:worker:${workerId}:lock`)).toBeNull();
+  const b = dispatch('b');
+  const next = (await store.lease(workerId, incarnationId, 1000, undefined, undefined, 0))!;
+  expect(next.request).toMatchObject({ workspaceId: 'b' });
+  await settle(next); await b;
+  await expect(dispatch('a')).rejects.toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
+});

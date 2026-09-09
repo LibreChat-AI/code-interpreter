@@ -81,3 +81,13 @@ test('slots reject invalid capacity and replaced incarnation', async () => {
   await redis.set(`${prefix}:incarnation`, 'replacement');
   await expect(slots.reserve(a)).rejects.toThrow('replaced');
 });
+
+test('releasing a long slot shortens the aggregate expiry to remaining work', async () => {
+  const a = await enqueue('a', 'root-a');
+  const b = { ...await enqueue('b', 'root-b'), expiresAtMs: Date.now() + 3000 };
+  await slots.reserve(a);
+  await slots.reserve(b);
+  expect(await redis.pttl(`${prefix}:lock`)).toBeGreaterThan(8000);
+  await slots.release(workerId, incarnationId, 'a');
+  expect(await redis.pttl(`${prefix}:lock`)).toBeLessThanOrEqual(3000);
+});

@@ -7,7 +7,10 @@ import type {
 } from './protocol.js';
 
 interface Entry {
-  sandbox: NativeProcessWorkspaceCommandSandbox;
+  sandbox: Pick<
+    NativeProcessWorkspaceCommandSandbox,
+    'prepare' | 'execute' | 'close'
+  >;
   busy: boolean;
 }
 
@@ -22,6 +25,10 @@ export class NativeWorkspaceCommandPool {
   constructor(
     private readonly roots: ReadonlyMap<string, NativeProcessSandboxOptions>,
     private readonly capacity: number,
+    private readonly createSandbox: (
+      options: NativeProcessSandboxOptions,
+    ) => Entry['sandbox'] = (options) =>
+      new NativeProcessWorkspaceCommandSandbox(options),
   ) {
     if (
       !Number.isSafeInteger(capacity) ||
@@ -61,7 +68,7 @@ export class NativeWorkspaceCommandPool {
           this.entries.delete(idle[0]);
         }
         entry = {
-          sandbox: new NativeProcessWorkspaceCommandSandbox(options),
+          sandbox: this.createSandbox(options),
           busy: false,
         };
       }
@@ -71,8 +78,17 @@ export class NativeWorkspaceCommandPool {
       this.entries.set(root, entry);
       return entry;
     });
-    this.allocation = pending.catch(() => undefined);
-    return pending;
+    const checked = pending.catch((error) => {
+      // Allocation/idle eviction precedes dispatch into the requested root.
+      // Do not turn a pool resource failure into an uncertain mutation there.
+      if (error instanceof WorkspaceToolError) throw error;
+      throw new WorkspaceToolError(
+        'Native executor allocation failed',
+        'COMMAND_UNAVAILABLE',
+      );
+    });
+    this.allocation = checked.catch(() => undefined);
+    return checked;
   }
 
   async prepare(): Promise<void> {

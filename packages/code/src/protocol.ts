@@ -390,7 +390,12 @@ const WORKSPACE_COMMAND_RESULT_KEYS = new Set([
   'truncated',
   'timedOut',
 ]);
-const WORKSPACE_SEARCH_MATCH_KEYS = new Set(['path', 'line', 'column', 'text']);
+const WORKSPACE_SEARCH_MATCH_KEYS = new Set([
+  'path',
+  'line',
+  'column',
+  'text',
+]);
 
 export interface BridgeWorkerCapabilities {
   /** Opt-in protocol: maximum concurrently leased independent workspace roots. */
@@ -551,8 +556,7 @@ export function isWorkspaceToolErrorCode(
 }
 
 export type BridgeSettlement<TResult = object> =
-  | BridgeFulfilledSettlement<TResult>
-  | BridgeRejectedSettlement;
+  BridgeFulfilledSettlement<TResult> | BridgeRejectedSettlement;
 
 export interface BridgeSettlementResponse {
   protocolVersion: BridgeProtocolVersion;
@@ -609,10 +613,7 @@ function normalizePortableRelativePath(value: string): string {
 }
 
 /** Compare path segments in ripgrep's sorted, depth-first traversal order. */
-export function comparePortableRelativePaths(
-  left: string,
-  right: string,
-): number {
+export function comparePortableRelativePaths(left: string, right: string): number {
   const encoder = new TextEncoder();
   const leftSegments = left.split('/');
   const rightSegments = right.split('/');
@@ -642,14 +643,9 @@ function isWithinRequestedPath(candidate: string, requested?: string): boolean {
   );
 }
 
-function isValidWorkspaceEditRequest(
-  request: Record<string, unknown>,
-): boolean {
+function isValidWorkspaceEditRequest(request: Record<string, unknown>): boolean {
   const hasBatch = request.edits !== undefined;
-  if (
-    hasBatch &&
-    (request.oldText !== undefined || request.newText !== undefined)
-  ) {
+  if (hasBatch && (request.oldText !== undefined || request.newText !== undefined)) {
     return false;
   }
   const edits = hasBatch
@@ -755,8 +751,7 @@ export function isWorkspaceToolRequest(
         isSafePortableRelativePath(request.path)) &&
       (request.afterPath === undefined ||
         (isSafePortableRelativePath(request.afterPath) &&
-          normalizePortableRelativePath(request.afterPath) ===
-            request.afterPath &&
+          normalizePortableRelativePath(request.afterPath) === request.afterPath &&
           isWithinRequestedPath(request.afterPath, request.path))) &&
       (request.maxResults === undefined ||
         (Number.isSafeInteger(request.maxResults) &&
@@ -843,16 +838,11 @@ export function isWorkspaceToolResult(
     const maxLines = request.maxLines ?? 200;
     const content = typeof result.content === 'string' ? result.content : null;
     const reportedLineCount =
-      Number.isSafeInteger(result.endLine) &&
-      Number(result.endLine) >= startLine - 1
+      Number.isSafeInteger(result.endLine) && Number(result.endLine) >= startLine - 1
         ? Number(result.endLine) - startLine + 1
         : -1;
     const actualLineCount =
-      content === null
-        ? -1
-        : content.length === 0
-          ? reportedLineCount
-          : content.split('\n').length;
+      content === null ? -1 : content.length === 0 ? reportedLineCount : content.split('\n').length;
     return (
       hasOnlyKeys(result, WORKSPACE_READ_RESULT_KEYS) &&
       result.path === request.path &&

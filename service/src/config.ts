@@ -8,35 +8,12 @@ import {
   resolveExecutionProfileSource,
 } from './execution-profile';
 
-export const languageConfig: Record<
-  Languages | string,
-  t.LanguageConfig | undefined
-> = {
-  [Languages.bash]: {
-    language: 'bash',
-    version: '5.2.0',
-    fileName: 'script.sh',
-  },
-  [Languages.js]: {
-    language: 'bun-js',
-    version: '1.3.14',
-    fileName: 'index.js',
-  },
-  [Languages.node]: {
-    language: 'node',
-    version: '24.15.0',
-    fileName: 'index.js',
-  },
-  [Languages.py]: {
-    language: 'python',
-    version: '3.14.4',
-    fileName: 'main.py',
-  },
-  [Languages.ts]: {
-    language: 'bun-ts',
-    version: '1.3.14',
-    fileName: 'main.ts',
-  },
+export const languageConfig: Record<Languages | string, t.LanguageConfig | undefined> = {
+  [Languages.bash]: { language: 'bash', version: '5.2.0', fileName: 'script.sh' },
+  [Languages.js]: { language: 'bun-js', version: '1.3.14', fileName: 'index.js' },
+  [Languages.node]: { language: 'node', version: '24.15.0', fileName: 'index.js' },
+  [Languages.py]: { language: 'python', version: '3.14.4', fileName: 'main.py' },
+  [Languages.ts]: { language: 'bun-ts', version: '1.3.14', fileName: 'main.ts' },
 };
 
 const languageAliases: Record<string, Languages> = {
@@ -72,12 +49,8 @@ export function resolveLanguage(lang: string): Languages | undefined {
 }
 
 const defaultJobTimeoutMs = Number(process.env.JOB_TIMEOUT) || 300000;
-const defaultMaxFileSize =
-  Number(process.env.MAX_FILE_SIZE) || 25 * 1024 * 1024;
-const defaultExecutionManifestTtlSeconds = Math.min(
-  Math.ceil((defaultJobTimeoutMs + 60000) / 1000),
-  600,
-);
+const defaultMaxFileSize = Number(process.env.MAX_FILE_SIZE) || 25 * 1024 * 1024;
+const defaultExecutionManifestTtlSeconds = Math.min(Math.ceil((defaultJobTimeoutMs + 60000) / 1000), 600);
 const EGRESS_GRANT_GRACE_MS = 10 * 60 * 1000;
 /** Object-store listing and marker writes are metadata operations, not
  * checkpoint transfers. Bound each tightly so the post-exec checkpoint
@@ -108,12 +81,11 @@ export function checkpointPipelineBudgetMs(
     checkpointTimeoutMs,
     CHECKPOINT_METADATA_TIMEOUT_CAP_MS,
   );
-  return (
-    launchTimeoutMs +
-    2 * checkpointTimeoutMs +
-    2 * metadataTimeoutMs +
-    POST_EXEC_CHECKPOINT_REGISTRY_COMMANDS *
-      RUNTIME_SESSION_REDIS_COMMAND_TIMEOUT_MS
+  return ( launchTimeoutMs
+    + 2 * checkpointTimeoutMs
+    + 2 * metadataTimeoutMs
+    + POST_EXEC_CHECKPOINT_REGISTRY_COMMANDS
+      * RUNTIME_SESSION_REDIS_COMMAND_TIMEOUT_MS
   );
 }
 
@@ -141,20 +113,16 @@ export function jobCompletionWaitTimeoutMs(
   backendCleanupTimeoutMs: number,
   egressRevokeTimeoutMs: number,
 ): number {
-  return (
-    jobTimeoutMs +
-    backendCleanupTimeoutMs +
-    egressRevokeTimeoutMs +
-    WORKER_COMPLETION_OVERHEAD_MS
+  return ( jobTimeoutMs
+    + backendCleanupTimeoutMs
+    + egressRevokeTimeoutMs
+    + WORKER_COMPLETION_OVERHEAD_MS
   );
 }
 
 export function parseArnList(raw: string | undefined): string[] | undefined {
   if (raw == null) return undefined;
-  const entries = raw
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
+  const entries = raw.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0);
   return entries.length > 0 ? entries : undefined;
 }
 
@@ -177,10 +145,7 @@ interface IntegerRange {
   max?: number;
 }
 
-const lambdaMicrovmNumericRanges: Record<
-  keyof LambdaMicrovmNumericConfig,
-  IntegerRange
-> = {
+const lambdaMicrovmNumericRanges: Record<keyof LambdaMicrovmNumericConfig, IntegerRange> = {
   LAMBDA_MICROVM_PORT: { min: 1, max: 65_535 },
   LAMBDA_MICROVM_MAX_DURATION_SECONDS: { min: 1, max: 28_800 },
   LAMBDA_MICROVM_IDLE_SECONDS: { min: 60, max: 28_800 },
@@ -217,20 +182,14 @@ export function resolveLambdaMicrovmNumericConfig(
 ): LambdaMicrovmNumericConfig {
   const read = (name: keyof LambdaMicrovmNumericConfig): number => {
     const raw = source[name];
-    return raw == null || raw.trim() === ''
-      ? lambdaMicrovmNumericDefaults[name]
-      : Number(raw);
+    return raw == null || raw.trim() === '' ? lambdaMicrovmNumericDefaults[name] : Number(raw);
   };
   return {
     LAMBDA_MICROVM_PORT: read('LAMBDA_MICROVM_PORT'),
-    LAMBDA_MICROVM_MAX_DURATION_SECONDS: read(
-      'LAMBDA_MICROVM_MAX_DURATION_SECONDS',
-    ),
+    LAMBDA_MICROVM_MAX_DURATION_SECONDS: read('LAMBDA_MICROVM_MAX_DURATION_SECONDS'),
     LAMBDA_MICROVM_IDLE_SECONDS: read('LAMBDA_MICROVM_IDLE_SECONDS'),
     LAMBDA_MICROVM_SUSPEND_SECONDS: read('LAMBDA_MICROVM_SUSPEND_SECONDS'),
-    LAMBDA_MICROVM_AUTH_TOKEN_TTL_SECONDS: read(
-      'LAMBDA_MICROVM_AUTH_TOKEN_TTL_SECONDS',
-    ),
+    LAMBDA_MICROVM_AUTH_TOKEN_TTL_SECONDS: read('LAMBDA_MICROVM_AUTH_TOKEN_TTL_SECONDS'),
     LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS: read('LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS'),
     LAMBDA_MICROVM_HEALTH_TIMEOUT_MS: read('LAMBDA_MICROVM_HEALTH_TIMEOUT_MS'),
     LAMBDA_MICROVM_LAUNCH_TPS: read('LAMBDA_MICROVM_LAUNCH_TPS'),
@@ -242,28 +201,18 @@ export function resolveLambdaMicrovmNumericConfig(
 export function lambdaMicrovmNumericConfigError(
   config: LambdaMicrovmNumericConfig,
 ): string | undefined {
-  for (const name of Object.keys(lambdaMicrovmNumericRanges) as Array<
-    keyof LambdaMicrovmNumericConfig
-  >) {
+  for (const name of Object.keys(lambdaMicrovmNumericRanges) as Array<keyof LambdaMicrovmNumericConfig>) {
     const value = config[name];
     const { min, max } = lambdaMicrovmNumericRanges[name];
-    if (
-      !Number.isSafeInteger(value) ||
-      value < min ||
-      (max != null && value > max)
-    ) {
-      const range =
-        max == null ? `at least ${min}` : `between ${min} and ${max}`;
+    if (!Number.isSafeInteger(value) || value < min || (max != null && value > max)) {
+      const range = max == null ? `at least ${min}` : `between ${min} and ${max}`;
       return `${name} must be a whole number ${range}`;
     }
   }
   return undefined;
 }
 
-export function resolvePositiveIntEnv(
-  raw: string | undefined,
-  defaultValue: number,
-): number {
+export function resolvePositiveIntEnv(raw: string | undefined, defaultValue: number): number {
   if (raw == null || raw.trim() === '') {
     return defaultValue;
   }
@@ -274,14 +223,8 @@ export function resolvePositiveIntEnv(
   return parsed;
 }
 
-export function resolveEgressGrantTtlSeconds(
-  rawTtlSeconds: string | undefined,
-  jobTimeoutMs: number,
-): number {
-  const defaultTtlSeconds = Math.max(
-    1,
-    Math.ceil((jobTimeoutMs + EGRESS_GRANT_GRACE_MS) / 1000),
-  );
+export function resolveEgressGrantTtlSeconds(rawTtlSeconds: string | undefined, jobTimeoutMs: number): number {
+  const defaultTtlSeconds = Math.max(1, Math.ceil((jobTimeoutMs + EGRESS_GRANT_GRACE_MS) / 1000));
   if (rawTtlSeconds == null || rawTtlSeconds.trim() === '') {
     return defaultTtlSeconds;
   }
@@ -294,16 +237,12 @@ export function resolveEgressGrantTtlSeconds(
   return Math.max(1, Math.ceil(configuredTtlSeconds));
 }
 
-const lambdaMicrovmNumericConfig = resolveLambdaMicrovmNumericConfig(
-  process.env,
-);
+const lambdaMicrovmNumericConfig = resolveLambdaMicrovmNumericConfig(process.env);
 
 export function hostedAppOperationTimeoutMs(): number {
-  return (
-    env.CHECKPOINT_TIMEOUT_MS * 9 +
-    env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 7 +
-    env.HOSTED_APP_START_TIMEOUT_MS +
-    30_000
+  return ( env.CHECKPOINT_TIMEOUT_MS * 9
+    + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS * 7
+    + env.HOSTED_APP_START_TIMEOUT_MS + 30_000
   );
 }
 
@@ -325,41 +264,39 @@ function configuredChoice<T extends string>(
 export function resolveSandboxBackend(
   raw: string | undefined,
 ): 'http' | 'lambda-microvm' | 'remote-bridge' {
-  return configuredChoice(raw, 'CODEAPI_SANDBOX_BACKEND', 'http', [
+  return configuredChoice(
+    raw,
+    'CODEAPI_SANDBOX_BACKEND',
     'http',
-    'lambda-microvm',
-    'remote-bridge',
-  ]);
+    ['http', 'lambda-microvm', 'remote-bridge'],
+  );
 }
 
 export function resolveRuntimeSessionMode(
   raw: string | undefined,
 ): 'stateless' | 'affinity' | 'strict' {
-  return configuredChoice(raw, 'CODEAPI_RUNTIME_SESSION_MODE', 'stateless', [
+  return configuredChoice(
+    raw,
+    'CODEAPI_RUNTIME_SESSION_MODE',
     'stateless',
-    'affinity',
-    'strict',
-  ]);
+    ['stateless', 'affinity', 'strict'],
+  );
 }
 
 export function resolveBridgeAuthMode(
   raw: string | undefined,
 ): 'static' | 'paired' {
-  return configuredChoice(raw, 'CODEAPI_BRIDGE_AUTH_MODE', 'static', [
+  return configuredChoice(
+    raw,
+    'CODEAPI_BRIDGE_AUTH_MODE',
     'static',
-    'paired',
-  ]);
+    ['static', 'paired'],
+  );
 }
 
-const sandboxBackend = resolveSandboxBackend(
-  process.env.CODEAPI_SANDBOX_BACKEND,
-);
-const runtimeSessionMode = resolveRuntimeSessionMode(
-  process.env.CODEAPI_RUNTIME_SESSION_MODE,
-);
-const bridgeAuthMode = resolveBridgeAuthMode(
-  process.env.CODEAPI_BRIDGE_AUTH_MODE,
-);
+const sandboxBackend = resolveSandboxBackend(process.env.CODEAPI_SANDBOX_BACKEND);
+const runtimeSessionMode = resolveRuntimeSessionMode(process.env.CODEAPI_RUNTIME_SESSION_MODE);
+const bridgeAuthMode = resolveBridgeAuthMode(process.env.CODEAPI_BRIDGE_AUTH_MODE);
 
 export const env = {
   PORT: process.env.SERVICE_PORT ?? 3112,
@@ -367,61 +304,26 @@ export const env = {
   HARDENED_SANDBOX_MODE: process.env.CODEAPI_HARDENED_SANDBOX_MODE === 'true',
   INSTANCE_ID: process.env.INSTANCE_ID ?? nanoid(),
   HTTP_JSON_LIMIT: process.env.CODEAPI_HTTP_JSON_LIMIT ?? '50mb',
-  SANDBOX_ENDPOINT:
-    process.env.SANDBOX_ENDPOINT ?? 'http://localhost:2000/api/v2',
+  SANDBOX_ENDPOINT: process.env.SANDBOX_ENDPOINT ?? 'http://localhost:2000/api/v2',
   EGRESS_GATEWAY_URL: process.env.EGRESS_GATEWAY_URL ?? '',
   FILE_SERVER_URL: process.env.FILE_SERVER_URL ?? 'http://localhost:3000',
-  TOOL_CALL_SERVER_URL:
-    process.env.TOOL_CALL_SERVER_URL ?? 'http://localhost:3033',
+  TOOL_CALL_SERVER_URL: process.env.TOOL_CALL_SERVER_URL ?? 'http://localhost:3033',
   EGRESS_GATEWAY_PORT: Number(process.env.EGRESS_GATEWAY_PORT) || 3190,
-  EGRESS_GATEWAY_FILE_SERVER_URL:
-    process.env.EGRESS_GATEWAY_FILE_SERVER_URL ??
-    process.env.FILE_SERVER_URL ??
-    'http://localhost:3000',
-  EGRESS_GATEWAY_TOOL_CALL_SERVER_URL:
-    process.env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL ??
-    process.env.TOOL_CALL_SERVER_URL ??
-    'http://localhost:3033',
-  EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES:
-    Number(process.env.EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES) || 1024 * 1024,
+  EGRESS_GATEWAY_FILE_SERVER_URL: process.env.EGRESS_GATEWAY_FILE_SERVER_URL ?? process.env.FILE_SERVER_URL ?? 'http://localhost:3000',
+  EGRESS_GATEWAY_TOOL_CALL_SERVER_URL: process.env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL ?? process.env.TOOL_CALL_SERVER_URL ?? 'http://localhost:3033',
+  EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES: Number(process.env.EGRESS_GATEWAY_MAX_TOOL_CALL_BYTES) || 1024 * 1024,
   // Per-entry / aggregate caps for PTC tool results persisted in `tool_history:` (see replay-state.ts).
-  PTC_MAX_TOOL_RESULT_BYTES: resolvePositiveIntEnv(
-    process.env.PTC_MAX_TOOL_RESULT_BYTES,
-    5_000_000,
-  ),
-  PTC_MAX_TOOL_HISTORY_TOTAL_BYTES: resolvePositiveIntEnv(
-    process.env.PTC_MAX_TOOL_HISTORY_TOTAL_BYTES,
-    40_000_000,
-  ),
-  EGRESS_GATEWAY_MAX_FILE_BYTES:
-    Number(
-      process.env.EGRESS_GATEWAY_MAX_FILE_BYTES ??
-        process.env.SANDBOX_MAX_FILE_SIZE,
-    ) || 10_000_000,
-  EGRESS_GATEWAY_MAX_PATH_LENGTH:
-    Number(
-      process.env.EGRESS_GATEWAY_MAX_PATH_LENGTH ??
-        process.env.SANDBOX_MAX_PATH_LENGTH,
-    ) || 256,
-  EGRESS_GATEWAY_MAX_NESTING_DEPTH:
-    Number(
-      process.env.EGRESS_GATEWAY_MAX_NESTING_DEPTH ??
-        process.env.SANDBOX_MAX_NESTING_DEPTH,
-    ) || 10,
-  EGRESS_GATEWAY_REQUEST_TIMEOUT_MS:
-    Number(process.env.EGRESS_GATEWAY_REQUEST_TIMEOUT_MS) || 30_000,
-  EGRESS_GATEWAY_REVOKE_TIMEOUT_MS:
-    Number(process.env.EGRESS_GATEWAY_REVOKE_TIMEOUT_MS) || 5_000,
-  EGRESS_LEDGER_REQUIRED:
-    process.env.CODEAPI_EGRESS_LEDGER_REQUIRED === 'true' ||
-    process.env.CODEAPI_HARDENED_SANDBOX_MODE === 'true',
-  EGRESS_LEDGER_TTL_GRACE_SECONDS:
-    Number(process.env.CODEAPI_EGRESS_LEDGER_TTL_GRACE_SECONDS) || 300,
+  PTC_MAX_TOOL_RESULT_BYTES: resolvePositiveIntEnv(process.env.PTC_MAX_TOOL_RESULT_BYTES, 5_000_000),
+  PTC_MAX_TOOL_HISTORY_TOTAL_BYTES: resolvePositiveIntEnv(process.env.PTC_MAX_TOOL_HISTORY_TOTAL_BYTES, 40_000_000),
+  EGRESS_GATEWAY_MAX_FILE_BYTES: Number(process.env.EGRESS_GATEWAY_MAX_FILE_BYTES ?? process.env.SANDBOX_MAX_FILE_SIZE) || 10_000_000,
+  EGRESS_GATEWAY_MAX_PATH_LENGTH: Number(process.env.EGRESS_GATEWAY_MAX_PATH_LENGTH ?? process.env.SANDBOX_MAX_PATH_LENGTH) || 256,
+  EGRESS_GATEWAY_MAX_NESTING_DEPTH: Number(process.env.EGRESS_GATEWAY_MAX_NESTING_DEPTH ?? process.env.SANDBOX_MAX_NESTING_DEPTH) || 10,
+  EGRESS_GATEWAY_REQUEST_TIMEOUT_MS: Number(process.env.EGRESS_GATEWAY_REQUEST_TIMEOUT_MS) || 30_000,
+  EGRESS_GATEWAY_REVOKE_TIMEOUT_MS: Number(process.env.EGRESS_GATEWAY_REVOKE_TIMEOUT_MS) || 5_000,
+  EGRESS_LEDGER_REQUIRED: process.env.CODEAPI_EGRESS_LEDGER_REQUIRED === 'true' || process.env.CODEAPI_HARDENED_SANDBOX_MODE === 'true',
+  EGRESS_LEDGER_TTL_GRACE_SECONDS: Number(process.env.CODEAPI_EGRESS_LEDGER_TTL_GRACE_SECONDS) || 300,
   EGRESS_GRANT_SECRET: process.env.CODEAPI_EGRESS_GRANT_SECRET ?? '',
-  EGRESS_GRANT_TTL_SECONDS: resolveEgressGrantTtlSeconds(
-    process.env.EGRESS_GRANT_TTL_SECONDS,
-    defaultJobTimeoutMs,
-  ),
+  EGRESS_GRANT_TTL_SECONDS: resolveEgressGrantTtlSeconds(process.env.EGRESS_GRANT_TTL_SECONDS, defaultJobTimeoutMs),
   PYTHON_CONCURRENCY: Number(process.env.PYTHON_CONCURRENCY) || 1,
   OTHER_CONCURRENCY: Number(process.env.OTHER_CONCURRENCY) || 8,
   JOB_WINDOW: Number(process.env.JOB_WINDOW) || 1000,
@@ -460,32 +362,22 @@ export const env = {
    *  working; multi-tenant deploys MUST set this to `true` before any tenant
    *  is multi-homed, otherwise a missing tenantId would silently bucket
    *  cross-tenant requests under the same `'legacy'` prefix. */
-  TENANT_ISOLATION_STRICT:
-    process.env.CODEAPI_TENANT_ISOLATION_STRICT === 'true',
+  TENANT_ISOLATION_STRICT: process.env.CODEAPI_TENANT_ISOLATION_STRICT === 'true',
   // Signed execution manifests. Prefer private/public key mode for split-runner
   // deployments so sandbox-runner receives only a verifier, not a signing secret.
-  EXECUTION_MANIFEST_PRIVATE_KEY:
-    process.env.CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY ?? '',
-  EXECUTION_MANIFEST_PUBLIC_KEY:
-    process.env.CODEAPI_EXECUTION_MANIFEST_PUBLIC_KEY ?? '',
+  EXECUTION_MANIFEST_PRIVATE_KEY: process.env.CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY ?? '',
+  EXECUTION_MANIFEST_PUBLIC_KEY: process.env.CODEAPI_EXECUTION_MANIFEST_PUBLIC_KEY ?? '',
   // Legacy HMAC fallback for non-split deployments. Do not mount into sandbox-runner.
-  EXECUTION_MANIFEST_SECRET:
-    process.env.CODEAPI_EXECUTION_MANIFEST_SECRET ?? '',
+  EXECUTION_MANIFEST_SECRET: process.env.CODEAPI_EXECUTION_MANIFEST_SECRET ?? '',
   EXECUTION_MANIFEST_TTL_SECONDS: Math.min(
-    Number(process.env.EXECUTION_MANIFEST_TTL_SECONDS) ||
-      defaultExecutionManifestTtlSeconds,
+    Number(process.env.EXECUTION_MANIFEST_TTL_SECONDS) || defaultExecutionManifestTtlSeconds,
     600,
   ),
-  EXECUTION_MANIFEST_MAX_UPLOAD_BYTES:
-    Number(process.env.EXECUTION_MANIFEST_MAX_UPLOAD_BYTES) ||
-    defaultMaxFileSize,
-  EXECUTION_MANIFEST_MAX_OUTPUT_FILES:
-    Number(process.env.EXECUTION_MANIFEST_MAX_OUTPUT_FILES) || 50,
-  EXECUTION_MANIFEST_MAX_REQUESTS:
-    Number(process.env.EXECUTION_MANIFEST_MAX_REQUESTS) || 1000,
+  EXECUTION_MANIFEST_MAX_UPLOAD_BYTES: Number(process.env.EXECUTION_MANIFEST_MAX_UPLOAD_BYTES) || defaultMaxFileSize,
+  EXECUTION_MANIFEST_MAX_OUTPUT_FILES: Number(process.env.EXECUTION_MANIFEST_MAX_OUTPUT_FILES) || 50,
+  EXECUTION_MANIFEST_MAX_REQUESTS: Number(process.env.EXECUTION_MANIFEST_MAX_REQUESTS) || 1000,
   // Redis - Alternative DNS Lookup for AWS ElastiCache TLS connections
-  REDIS_USE_ALTERNATIVE_DNS_LOOKUP:
-    process.env.REDIS_USE_ALTERNATIVE_DNS_LOOKUP === 'true',
+  REDIS_USE_ALTERNATIVE_DNS_LOOKUP: process.env.REDIS_USE_ALTERNATIVE_DNS_LOOKUP === 'true',
   /**
    * Programmatic Tool Calling execution model.
    * - `replay` (default): Temporal-style replay. Sandbox exits between round-trips;
@@ -496,9 +388,7 @@ export const env = {
    *   via a long-polling HTTP callback through the Tool Call Server. Retained as
    *   an explicit opt-in during rollout; scheduled for removal in a follow-up.
    */
-  PTC_MODE: (process.env.PTC_MODE === 'blocking' ? 'blocking' : 'replay') as
-    | 'replay'
-    | 'blocking',
+  PTC_MODE: (process.env.PTC_MODE === 'blocking' ? 'blocking' : 'replay') as 'replay' | 'blocking',
   PTC_DEBUG: process.env.PTC_DEBUG === 'true',
   /**
    * Sandbox execution backend.
@@ -548,20 +438,14 @@ export const env = {
   ),
   // Lambda MicroVM backend. Connector lists are comma-separated ARNs.
   LAMBDA_MICROVM_IMAGE_ARN: process.env.LAMBDA_MICROVM_IMAGE_ARN ?? '',
-  LAMBDA_MICROVM_IMAGE_VERSION:
-    process.env.LAMBDA_MICROVM_IMAGE_VERSION || undefined,
-  LAMBDA_MICROVM_EXECUTION_ROLE_ARN:
-    process.env.LAMBDA_MICROVM_EXECUTION_ROLE_ARN || undefined,
+  LAMBDA_MICROVM_IMAGE_VERSION: process.env.LAMBDA_MICROVM_IMAGE_VERSION || undefined,
+  LAMBDA_MICROVM_EXECUTION_ROLE_ARN: process.env.LAMBDA_MICROVM_EXECUTION_ROLE_ARN || undefined,
   /* Runtime VM stdout reaches CloudWatch only when RunMicrovm sends a logging
    * config AND an executionRoleArn is set — pairs with the role above. */
   LAMBDA_MICROVM_LOG_GROUP: process.env.LAMBDA_MICROVM_LOG_GROUP || undefined,
   LAMBDA_MICROVM_REGION: process.env.LAMBDA_MICROVM_REGION || undefined,
-  LAMBDA_MICROVM_INGRESS_CONNECTOR_ARNS: parseArnList(
-    process.env.LAMBDA_MICROVM_INGRESS_CONNECTOR_ARNS,
-  ),
-  LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS: parseArnList(
-    process.env.LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS,
-  ),
+  LAMBDA_MICROVM_INGRESS_CONNECTOR_ARNS: parseArnList(process.env.LAMBDA_MICROVM_INGRESS_CONNECTOR_ARNS),
+  LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS: parseArnList(process.env.LAMBDA_MICROVM_EGRESS_CONNECTOR_ARNS),
   ...lambdaMicrovmNumericConfig,
   /* CreateMicrovmAuthToken is minted per execute + per checkpoint; share a
    * fleet-wide budget so concurrent warm-session executes queue instead of
@@ -575,19 +459,14 @@ export const env = {
     process.env.CODEAPI_CHECKPOINT_MAX_BYTES,
     512 * 1024 * 1024,
   ),
-  CHECKPOINT_TIMEOUT_MS: configuredNumber(
-    process.env.CODEAPI_CHECKPOINT_TIMEOUT_MS,
-    60_000,
-  ),
-  CHECKPOINT_PREFIX:
-    process.env.CODEAPI_CHECKPOINT_PREFIX ?? 'rtsx-checkpoints/',
+  CHECKPOINT_TIMEOUT_MS: configuredNumber(process.env.CODEAPI_CHECKPOINT_TIMEOUT_MS, 60_000),
+  CHECKPOINT_PREFIX: process.env.CODEAPI_CHECKPOINT_PREFIX ?? 'rtsx-checkpoints/',
   /** Dedicated Lambda MicroVM resident-server fleet. This remains an explicit
    * stateful-stack capability; the ordinary/default HTTP profile never starts
    * or preserves application processes. */
   HOSTED_APPS_ENABLED: process.env.CODEAPI_HOSTED_APPS_ENABLED === 'true',
   HOSTED_APP_IMAGE_ARN: process.env.LAMBDA_MICROVM_APP_IMAGE_ARN ?? '',
-  HOSTED_APP_IMAGE_VERSION:
-    process.env.LAMBDA_MICROVM_APP_IMAGE_VERSION || undefined,
+  HOSTED_APP_IMAGE_VERSION: process.env.LAMBDA_MICROVM_APP_IMAGE_VERSION || undefined,
   /* These values are part of the pinned app-host image contract. RunMicrovm
    * cannot inject environment variables into the image, so exposing overrides
    * here would only make the control plane call ports the runner never opened. */
@@ -606,10 +485,8 @@ export const env = {
     900,
   ),
   HOSTED_APP_START_TIMEOUT_MS: 30_000 as number,
-  HOSTED_APP_CREDENTIAL_KEY:
-    process.env.CODEAPI_HOSTED_APP_CREDENTIAL_KEY ?? '',
-  HOSTED_APP_PREVIEW_ORIGIN:
-    process.env.CODEAPI_HOSTED_APP_PREVIEW_ORIGIN ?? '',
+  HOSTED_APP_CREDENTIAL_KEY: process.env.CODEAPI_HOSTED_APP_CREDENTIAL_KEY ?? '',
+  HOSTED_APP_PREVIEW_ORIGIN: process.env.CODEAPI_HOSTED_APP_PREVIEW_ORIGIN ?? '',
   HOSTED_APP_PREVIEW_SIGNING_KEY:
     process.env.CODEAPI_HOSTED_APP_PREVIEW_SIGNING_KEY ?? '',
 };
@@ -632,9 +509,7 @@ type PlanLimits = {
  * JSON object keyed by the `plan_id` JWT claim. Unknown or absent plan ids
  * fall back to the default tier, which is the only entry defined in code.
  */
-export function parsePlanLimits(
-  raw: string | undefined,
-): Record<string, PlanLimit> {
+export function parsePlanLimits(raw: string | undefined): Record<string, PlanLimit> {
   if (raw == null || raw.trim() === '') {
     return {};
   }
@@ -642,14 +517,10 @@ export function parsePlanLimits(
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error(
-      `CODEAPI_PLAN_LIMITS is not valid JSON: ${(error as Error).message}`,
-    );
+    throw new Error(`CODEAPI_PLAN_LIMITS is not valid JSON: ${(error as Error).message}`);
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(
-      'CODEAPI_PLAN_LIMITS must be a JSON object keyed by plan id',
-    );
+    throw new Error('CODEAPI_PLAN_LIMITS must be a JSON object keyed by plan id');
   }
   return parsed as Record<string, PlanLimit>;
 }
@@ -657,8 +528,7 @@ export function parsePlanLimits(
 export const planLimits: PlanLimits = {
   ...parsePlanLimits(process.env.CODEAPI_PLAN_LIMITS),
   default: {
-    run_memory_limit:
-      Number(process.env.SANDBOX_RUN_MEMORY_LIMIT) || default_run_memory_limit,
+    run_memory_limit: Number(process.env.SANDBOX_RUN_MEMORY_LIMIT) || default_run_memory_limit,
     max_file_size: env.MAX_FILE_SIZE,
   },
 };

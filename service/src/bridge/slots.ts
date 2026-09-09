@@ -113,14 +113,20 @@ export class BridgeWorkspaceSlots {
   ): Promise<void> {
     await this.redis.eval(
       [
+        'local latest = 0',
         `for slot = 0, ${MAX_WORKSPACE_LEASE_SLOTS - 1} do`,
-        "  local entry = redis.call('HMGET', KEYS[1], 'a:' .. slot, 'i:' .. slot)",
+        "  local entry = redis.call('HMGET', KEYS[1], 'a:' .. slot, 'i:' .. slot, 'e:' .. slot)",
         '  if entry[2] == ARGV[1] and entry[1] == ARGV[2] then',
         "    redis.call('HDEL', KEYS[1], 'a:' .. slot, 'i:' .. slot, 'w:' .. slot, 'e:' .. slot)",
+        '  elseif type(entry[1]) == "string" then latest = math.max(latest, tonumber(entry[3]))',
         '  end',
         'end',
         "if redis.call('HLEN', KEYS[1]) == 0 and redis.call('GET', KEYS[2]) == 'workspace-slots:' .. ARGV[1] then",
         "  redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])",
+        "elseif latest > 0 and redis.call('GET', KEYS[2]) == 'workspace-slots:' .. ARGV[1] then",
+        '  for _, key in ipairs(KEYS) do',
+        "    redis.call('PEXPIREAT', key, latest)",
+        '  end',
         'end',
         'return 1',
       ].join('\n'),

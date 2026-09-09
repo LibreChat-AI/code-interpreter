@@ -147,23 +147,21 @@ function workspaceCapabilitiesMatch(
     advertised.writeFileModes?.length === executor.writeFileModes?.length &&
     (advertised.writeFileModes?.every(
       (mode, index) => mode === executor.writeFileModes?.[index],
-    ) ??
-      executor.writeFileModes == null) &&
+    ) ?? executor.writeFileModes == null) &&
     advertised.editFileModes?.length === executor.editFileModes?.length &&
     (advertised.editFileModes?.every(
       (mode, index) => mode === executor.editFileModes?.[index],
-    ) ??
-      executor.editFileModes == null) &&
-    advertised.editFileFeatures?.length === executor.editFileFeatures?.length &&
+    ) ?? executor.editFileModes == null) &&
+    advertised.editFileFeatures?.length ===
+      executor.editFileFeatures?.length &&
     (advertised.editFileFeatures?.every(
       (feature, index) => feature === executor.editFileFeatures?.[index],
-    ) ??
-      executor.editFileFeatures == null) &&
-    advertised.listFileFeatures?.length === executor.listFileFeatures?.length &&
+    ) ?? executor.editFileFeatures == null) &&
+    advertised.listFileFeatures?.length ===
+      executor.listFileFeatures?.length &&
     (advertised.listFileFeatures?.every(
       (feature, index) => feature === executor.listFileFeatures?.[index],
-    ) ??
-      executor.listFileFeatures == null) &&
+    ) ?? executor.listFileFeatures == null) &&
     advertised.workspaces.length === executor.workspaces.length &&
     advertised.workspaces.every(
       (workspace, index) =>
@@ -175,8 +173,7 @@ function workspaceCapabilitiesMatch(
           (operation, operationIndex) =>
             operation ===
             executor.workspaces[index]?.operations?.[operationIndex],
-        ) ??
-          executor.workspaces[index]?.operations == null),
+        ) ?? executor.workspaces[index]?.operations == null),
     )
   );
 }
@@ -188,7 +185,8 @@ function registrationCompatibleCapabilities(
   if (
     workspaceTools == null ||
     (workspaceTools.operations.every(
-      (operation) => operation === 'read_file' || operation === 'search_text',
+      (operation) =>
+        operation === 'read_file' || operation === 'search_text',
     ) &&
       workspaceTools.workspaces.every(
         (workspace) => workspace.operations == null,
@@ -197,7 +195,8 @@ function registrationCompatibleCapabilities(
     return capabilities;
   }
   const operations = workspaceTools.operations.filter(
-    (operation) => operation === 'read_file' || operation === 'search_text',
+    (operation) =>
+      operation === 'read_file' || operation === 'search_text',
   );
   if (operations.length === 0) {
     const { workspaceTools: _workspaceTools, ...compatible } = capabilities;
@@ -206,9 +205,7 @@ function registrationCompatibleCapabilities(
   const workspaces = workspaceTools.workspaces.flatMap((workspace) => {
     if (
       workspace.operations != null &&
-      !operations.every((operation) =>
-        workspace.operations?.includes(operation),
-      )
+      !operations.every((operation) => workspace.operations?.includes(operation))
     ) {
       return [];
     }
@@ -1090,9 +1087,33 @@ export class BridgeWorker {
         );
       // A settlement can commit remotely before the local durable guard clears.
       // Keep the next lane out of the root until that cleanup has finished.
-      await active.done;
-      if (signal?.aborted)
-        throw signal.reason ?? new DOMException('aborted', 'AbortError');
+      const waitController = new AbortController();
+      const onAbort = (): void => waitController.abort();
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) waitController.abort();
+      let finished: boolean;
+      try {
+        finished = await Promise.race([
+          active.done.then(() => true),
+          abortableDelay(
+            Math.max(
+              0,
+              this.assignmentRemainingMs(assignment) - (Date.now() - waitingAt),
+            ),
+            waitController.signal,
+          ).then(() => false),
+        ]);
+      } finally {
+        waitController.abort();
+        signal?.removeEventListener('abort', onAbort);
+      }
+      if (!finished || signal?.aborted) {
+        await this.rejectUnexecutedAssignment(
+          assignment,
+          'Workspace cleanup wait ended before execution',
+        );
+        return;
+      }
     }
     let release!: () => void;
     if (root != null)
@@ -1251,7 +1272,8 @@ export class BridgeWorker {
         }
         const workspaceRequest = assignment.request;
         try {
-          await guard?.assertAvailable();
+          if (this.options.workspaceQuarantines != null)
+            await guard?.assertAvailable();
         } catch (error) {
           throw new BridgeWorkspaceQuarantinedError(
             'Workspace is quarantined',
