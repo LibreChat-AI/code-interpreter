@@ -4,11 +4,11 @@ import type { FileHandle } from 'node:fs/promises';
 
 import koffi from 'koffi';
 
-const lib = process.platform === 'darwin'
-  ? koffi.load('/usr/lib/libSystem.B.dylib')
-  : process.platform === 'linux'
-    ? koffi.load('libc.so.6')
-    : undefined;
+// Resolve the process's POSIX symbols instead of naming glibc. BYOM workers
+// may run on musl-based distributions, while Darwin exposes the same symbol.
+const lib = ['darwin', 'linux'].includes(process.platform)
+  ? koffi.load(null)
+  : undefined;
 const fchmodat = lib?.func(
   'int fchmodat(int dirfd, const char *path, uint32_t mode, int flags)',
 );
