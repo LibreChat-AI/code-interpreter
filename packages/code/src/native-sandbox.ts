@@ -13,15 +13,13 @@ import {
 import { constants as fsConstants } from 'node:fs';
 import {
   access,
-  chmod,
-  lstat,
   mkdtemp,
   open,
-  readdir,
   realpath,
   rm,
   stat,
 } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 
@@ -37,6 +35,7 @@ import {
   removePrivateStorageAcl,
 } from './private-storage.js';
 import { WorkspaceToolError } from './workspace.js';
+import { restoreScratchTraversal } from './native-scratch.js';
 
 import type {
   ChildProcessWithoutNullStreams,
@@ -245,6 +244,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private initialized?: Promise<void>;
   private canonicalRoot?: string;
   private scratchDirectory?: string;
+  private scratchHandle?: FileHandle;
   private execution?: Promise<WorkspaceExecuteCommandResult>;
   private closing?: Promise<void>;
   private resetFailed = false;
@@ -748,6 +748,11 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   ): Promise<string | undefined> {
     // Windows SRT supplies the restricted account's private TEMP directory.
     if (this.platform === 'win32') return undefined;
+    if (this.scratchDirectory || this.scratchHandle) {
+      throw new Error(
+        'Native sandbox scratch cleanup is still pending; close the sandbox before reinitializing',
+      );
+    }
     const canonicalTemporaryRoot = await canonicalPath(HOST_TEMPORARY_ROOT);
     const sharedScratchRoot = sharedScratchPaths.find((path) =>
       isWithin(path, canonicalTemporaryRoot),
@@ -774,12 +779,16 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         if (((await scratchHandle.stat()).mode & 0o777) !== 0o700) {
           throw new Error('Native sandbox scratch directory is not private');
         }
-      } finally {
+        this.scratchHandle = scratchHandle;
+      } catch (error) {
         await scratchHandle.close();
+        throw error;
       }
       this.scratchDirectory = await realpath(scratchDirectory);
       return this.scratchDirectory;
     } catch (error) {
+      await this.scratchHandle?.close().catch(() => undefined);
+      this.scratchHandle = undefined;
       await rm(scratchDirectory, { recursive: true, force: true }).catch(
         () => undefined,
       );
@@ -810,49 +819,21 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private async removeScratchDirectory(): Promise<void> {
     const scratchDirectory = this.scratchDirectory;
     if (!scratchDirectory) return;
+    const scratchHandle = this.scratchHandle;
+    if (!scratchHandle) {
+      throw new Error('Native sandbox scratch descriptor is unavailable');
+    }
     try {
       await rm(scratchDirectory, { recursive: true, force: true });
     } catch {
-      await this.restoreScratchTraversal(scratchDirectory);
+      await restoreScratchTraversal(scratchHandle);
       await rm(scratchDirectory, { recursive: true, force: true });
     }
+    // Retain both the descriptor and path when cleanup fails so close() can
+    // retry without falling back to an attacker-replaceable ambient path.
+    await scratchHandle.close();
+    this.scratchHandle = undefined;
     this.scratchDirectory = undefined;
-  }
-
-  private async restoreScratchTraversal(root: string): Promise<void> {
-    const pending = [root];
-    for (let index = 0; index < pending.length; index += 1) {
-      const directory = pending[index];
-      const metadata = await lstat(directory).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === 'ENOENT') return undefined;
-          throw error;
-        },
-      );
-      if (!metadata?.isDirectory()) continue;
-      // Commands own their scratch contents and may remove all directory mode
-      // bits. Restore traversal before opening the directory with O_NOFOLLOW.
-      await chmod(directory, 0o700);
-      let handle;
-      try {
-        handle = await open(
-          directory,
-          fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
-        );
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (['ENOENT', 'ELOOP', 'ENOTDIR'].includes(code ?? '')) continue;
-        throw error;
-      }
-      try {
-        if (!(await handle.stat()).isDirectory()) continue;
-      } finally {
-        await handle.close();
-      }
-      for (const entry of await readdir(directory, { withFileTypes: true })) {
-        if (entry.isDirectory()) pending.push(join(directory, entry.name));
-      }
-    }
   }
 
   async close(): Promise<void> {

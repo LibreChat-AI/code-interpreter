@@ -25,7 +25,7 @@ async function macOsStorage() {
 }
 
 export async function assertPrivateStorageAcl(
-  handle: FileHandle, path: string, directory = false,
+  handle: Pick<FileHandle, 'fd'>, path: string, directory = false,
 ): Promise<void> {
   if (process.platform === 'darwin') {
     (await macOsStorage()).verifyMacOsAcl(handle.fd, path, directory);
@@ -33,7 +33,10 @@ export async function assertPrivateStorageAcl(
 }
 
 /** Only application-owned files/directories may have their ACLs removed. */
-export async function removePrivateStorageAcl(handle: FileHandle, path: string): Promise<void> {
+export async function removePrivateStorageAcl(
+  handle: Pick<FileHandle, 'fd'>,
+  path: string,
+): Promise<void> {
   if (process.platform === 'darwin') {
     (await macOsStorage()).removeMacOsAcl(handle.fd, path);
   }
