@@ -3,11 +3,15 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   access,
+  chmod,
   mkdtemp,
   mkdir,
+  open,
   realpath,
+  rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
@@ -19,6 +23,7 @@ import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 import { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
+import { restoreScratchTraversal } from './native-scratch.js';
 import { WorkspaceToolError } from './workspace.js';
 
 const request = {
@@ -439,12 +444,128 @@ test('removes scratch storage after a command revokes traversal permissions', as
   const result = await sandbox.execute({
     ...request,
     command:
-      'printf %s "$TMPDIR"; mkdir "$TMPDIR/locked"; touch "$TMPDIR/locked/file"; chmod 000 "$TMPDIR/locked" "$TMPDIR"',
+      'printf %s "$TMPDIR"; mkdir -p "$TMPDIR/locked/deeper"; touch "$TMPDIR/locked/deeper/file"; chmod 000 "$TMPDIR/locked/deeper" "$TMPDIR/locked" "$TMPDIR"',
   });
 
   assert.equal(result.exitCode, 0);
   await sandbox.close();
   await assert.rejects(access(result.stdout));
+});
+
+test('scratch traversal never follows a descendant replaced after inspection', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-scratch-race-'));
+  const outside = await mkdtemp(join(tmpdir(), 'librechat-code-outside-'));
+  const descendant = join(root, 'locked');
+  const retired = join(root, 'retired');
+  const outsideChild = join(outside, 'child');
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await mkdir(descendant);
+  await mkdir(outsideChild);
+  await chmod(outside, 0o711);
+  await chmod(outsideChild, 0o711);
+  const rootHandle = await open(root, 'r');
+  t.after(() => rootHandle.close());
+  let swapped = false;
+
+  await restoreScratchTraversal(rootHandle, {
+    async afterEntryInspected(_directoryFd, name) {
+      if (name !== 'locked' || swapped) return;
+      swapped = true;
+      await rename(descendant, retired);
+      await symlink(outside, descendant, 'dir');
+    },
+  });
+
+  assert.equal(swapped, true);
+  assert.equal((await stat(outside)).mode & 0o777, 0o711);
+  assert.equal((await stat(outsideChild)).mode & 0o777, 0o711);
+});
+
+test('scratch traversal removes command-created Darwin ACLs', async (t) => {
+  if (process.platform !== 'darwin') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fakeManager().manager,
+  });
+  const result = await sandbox.execute({
+    ...request,
+    command:
+      'printf %s "$TMPDIR"; mkdir -p "$TMPDIR/locked/deeper"; touch "$TMPDIR/locked/deeper/file"; chmod +a "$USER deny list,search,delete_child" "$TMPDIR/locked" "$TMPDIR"; chmod 000 "$TMPDIR/locked" "$TMPDIR"',
+  });
+
+  assert.equal(result.exitCode, 0);
+  await sandbox.close();
+  await assert.rejects(access(result.stdout));
+});
+
+test('scratch traversal bounds descriptors and work across a deep tree', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-scratch-depth-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directories = [root];
+  for (let depth = 0; depth < 100; depth += 1) {
+    directories.push(join(directories[directories.length - 1], 'd'));
+    await mkdir(directories[directories.length - 1]);
+  }
+  for (const directory of directories.slice(1).reverse()) {
+    await chmod(directory, 0o000);
+  }
+  const rootHandle = await open(root, 'r');
+  t.after(() => rootHandle.close());
+
+  await restoreScratchTraversal(rootHandle);
+
+  assert.equal((await stat(directories[directories.length - 1])).mode & 0o777, 0o700);
+});
+
+test('scratch traversal rejects trees beyond its recovery depth limit', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-scratch-depth-limit-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let directory = root;
+  for (let depth = 0; depth < 129; depth += 1) {
+    directory = join(directory, 'd');
+    await mkdir(directory);
+  }
+  const rootHandle = await open(root, 'r');
+  t.after(() => rootHandle.close());
+
+  await assert.rejects(
+    restoreScratchTraversal(rootHandle),
+    /scratch cleanup exceeded its depth limit/,
+  );
+});
+
+test('does not replace scratch state while cleanup remains pending', async (t) => {
+  if (process.platform === 'win32') return;
+  const workspace = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  const retained = await mkdtemp(join(tmpdir(), 'librechat-code-retained-'));
+  const retainedHandle = await open(retained, 'r');
+  t.after(() => retainedHandle.close());
+  t.after(() => rm(retained, { recursive: true, force: true }));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: workspace,
+    manager: fakeManager().manager,
+  });
+  const mutable = sandbox as unknown as {
+    scratchDirectory?: string;
+    scratchHandle?: typeof retainedHandle;
+    createScratchDirectory(paths: string[]): Promise<string | undefined>;
+  };
+  mutable.scratchDirectory = retained;
+  mutable.scratchHandle = retainedHandle;
+
+  await assert.rejects(
+    mutable.createScratchDirectory([]),
+    /scratch cleanup is still pending/,
+  );
+  assert.equal(mutable.scratchDirectory, retained);
+  assert.equal(mutable.scratchHandle, retainedHandle);
 });
 
 const proxyEnvironment = {
