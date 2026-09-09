@@ -350,6 +350,7 @@ export class BridgeWorker {
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
   private mutationGuardArmed = false;
+  private readonly quarantinedWorkspaces = new Set<string>();
   private readonly activeWorkspaceAssignments = new Map<
     string,
     { id: string; done: Promise<void> }
@@ -673,6 +674,7 @@ export class BridgeWorker {
         DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
       signal,
     );
+    this.quarantinedWorkspaces.delete(workspaceId);
   }
 
   async lease(
@@ -1136,6 +1138,13 @@ export class BridgeWorker {
           };
     try {
       await this.executeOwned(adjusted, signal);
+    } catch (error) {
+      if (root != null && error instanceof BridgeWorkspaceQuarantinedError) {
+        // A failed unlink/fsync may have removed the durable marker already.
+        // Fence locally before releasing the handoff to the next root assignment.
+        this.quarantinedWorkspaces.add(root);
+      }
+      throw error;
     } finally {
       if (root != null) {
         this.activeWorkspaceAssignments.delete(root);
@@ -1273,6 +1282,9 @@ export class BridgeWorker {
         }
         const workspaceRequest = assignment.request;
         try {
+          if (this.quarantinedWorkspaces.has(workspaceRequest.workspaceId)) {
+            throw new Error('Workspace requires an explicit quarantine reset');
+          }
           if (this.options.workspaceQuarantines != null)
             await guard?.assertAvailable();
         } catch (error) {

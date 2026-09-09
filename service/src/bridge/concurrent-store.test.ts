@@ -271,3 +271,95 @@ test('late quarantine releases its slot after caller cancellation and retains on
     code: 'WORKSPACE_QUARANTINED',
   });
 });
+
+test('post-settlement fences are authenticated, idempotent, and invalidated by reset', async () => {
+  await register();
+  const pending = dispatch('a');
+  const assignment = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  await settle(assignment);
+  await pending; // Normal dispatch cleanup has removed the full assignment.
+  const receiptKey = `codeapi:bridge:v1:assignment:${assignment.assignmentId}:workspace-fence-owner`;
+  expect(await redis.ttl(receiptKey)).toBeGreaterThan(0);
+  expect(
+    JSON.parse((await redis.hget(receiptKey, 'metadata'))!),
+  ).not.toHaveProperty('request');
+  const resultKey = `codeapi:bridge:v1:assignment:${assignment.assignmentId}:settlement`;
+  const originalResult = await redis.get(resultKey);
+  const intent = {
+    protocolVersion: 1 as const,
+    incarnationId,
+    generation: assignment.generation,
+    leaseToken: assignment.leaseToken,
+    status: 'rejected' as const,
+    error: 'local cleanup failed after commit',
+  };
+  await expect(
+    store.settle(
+      workerId,
+      assignment.assignmentId,
+      { ...intent, leaseToken: 'forged' },
+      undefined,
+      undefined,
+      true,
+    ),
+  ).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+  await expect(
+    store.settle(
+      workerId,
+      assignment.assignmentId,
+      intent,
+      undefined,
+      'different-principal',
+      true,
+    ),
+  ).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+  await store.settle(
+    workerId,
+    assignment.assignmentId,
+    intent,
+    undefined,
+    undefined,
+    true,
+  );
+  await store.settle(
+    workerId,
+    assignment.assignmentId,
+    intent,
+    undefined,
+    undefined,
+    true,
+  );
+  expect(await redis.get(resultKey)).toBe(originalResult);
+  await expect(dispatch('a')).rejects.toMatchObject({
+    code: 'WORKSPACE_QUARANTINED',
+  });
+  await store.resetWorkspace(workerId, incarnationId, 'native-workspace:a');
+  await expect(
+    store.settle(
+      workerId,
+      assignment.assignmentId,
+      intent,
+      undefined,
+      undefined,
+      true,
+    ),
+  ).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+  const next = dispatch('a');
+  const nextAssignment = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  await settle(nextAssignment);
+  await next;
+});

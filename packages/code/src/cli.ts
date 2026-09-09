@@ -531,9 +531,7 @@ async function run(
   const rootIdentities = await Promise.all(
     roots.map((root) => stat(root.root)),
   );
-  const normalized = roots.map((root) =>
-    process.platform === 'linux' ? root.root : root.root.toLowerCase(),
-  );
+  const normalized = roots.map((root) => root.root);
   for (let i = 0; i < roots.length; i++)
     for (let j = 0; j < i; j++) {
       const inside = (a: string, b: string): boolean => {
@@ -559,6 +557,14 @@ async function run(
     (!allowWorkspaceCommands || commandSandboxMode !== 'native-srt')
   ) {
     throw new Error('Concurrent workspace leases require native-srt commands');
+  }
+  if (
+    roots.length > 1 &&
+    process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim()
+  ) {
+    throw new Error(
+      'LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE is a single-root override; unset it for multiple workspace roots',
+    );
   }
   const rootQuarantinePaths = new Map(
     roots.map((root) => [

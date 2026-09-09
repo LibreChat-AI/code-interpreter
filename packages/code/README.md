@@ -541,6 +541,8 @@ The primary root keeps its configured workspace ID (default `primary`). Repeat
 `--workspace id=path` to add named roots, up to the protocol's 32-root limit.
 Roots must already exist and must not overlap or alias one another. Commands
 retain the selected root's sandbox boundary, not a shared parent-directory grant.
+The `LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE` single-file override is rejected
+when multiple roots are configured; unset it to use separate root-derived markers.
 
 `LIBRECHAT_CODE_WORKSPACE_LEASE_SLOTS` is the equivalent worker setting. Both
 ceilings must be integers from 1 to 8; the lower ceiling wins. An older Code API
@@ -559,7 +561,10 @@ enable concurrent Docker/NsJail sessions or bypass any approval/network policy.
 
 An uncertain mutation or executor failure leaves an assignment-owned local guard
 and a server-side fence for that root. Healthy roots can continue. The worker
-does not replay the failed command. To recover a quarantined native root:
+does not replay the failed command. A guard-cleanup failure after settlement fences
+the root independently without replacing the committed result. Expiring ownership
+receipts exclude command payloads; explicit reset invalidates old fence requests.
+To recover a quarantined native root:
 
 1. Stop the worker and inspect or restore the affected directory.
 2. Run `librechat-code clear-workspace-quarantine --worker-dir /projects/second --workspace-id second` using the same deployment/identity configuration.
