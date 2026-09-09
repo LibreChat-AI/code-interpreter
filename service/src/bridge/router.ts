@@ -396,6 +396,9 @@ router.post(
         registrationGeneration,
         registeredAt: new Date().toISOString(),
         leaseTtlMs: 60_000,
+      workspaceLeaseSlots: options.store.workspaceLeaseCapacity(
+        registration.capabilities.workspaceLeaseSlots,
+      ),
         supportedWorkspaceToolOperations: [
           'read_file',
           'search_text',
@@ -529,7 +532,11 @@ router.post(
       body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
       !validIncarnationId(body.incarnationId) ||
       !Number.isFinite(requestedWait) ||
-      requestedWait < 0
+      requestedWait < 0 ||
+      (body.workspaceLeaseSlot !== undefined &&
+        (!Number.isSafeInteger(body.workspaceLeaseSlot) ||
+          Number(body.workspaceLeaseSlot) < 0 ||
+          Number(body.workspaceLeaseSlot) >= 8))
     ) {
       res.status(400).json({ error: 'Invalid bridge lease request' });
       return;
@@ -557,6 +564,7 @@ router.post(
               | { identityId: string }
               | undefined
           )?.identityId,
+          body.workspaceLeaseSlot === undefined ? undefined : Number(body.workspaceLeaseSlot),
         );
         if (leaseController.signal.aborted) {
           if (assignment != null) await options.store.returnLease(assignment);
@@ -630,7 +638,11 @@ router.post(
 );
 
 router.post(
-  '/workers/:workerId/assignments/:assignmentId/settle',
+  [
+    '/workers/:workerId/assignments/:assignmentId/settle',
+    '/workers/:workerId/assignments/:assignmentId/quarantine',
+    '/workers/:workerId/assignments/:assignmentId/workspace-cleanup',
+  ],
   workerAuth,
   asyncRoute(async (req, res) => {
     const settlement = req.body as unknown;
@@ -644,7 +656,11 @@ router.post(
       req.once('aborted', abortSettlement);
       res.once('close', abortSettlement);
       try {
-        await options.store.settle(
+        if (req.path.endsWith('/workspace-cleanup')) {
+          await options.store.confirmWorkspaceCleanup(req.params.workerId, req.params.assignmentId,
+            settlement, settlementController.signal,
+            (res.locals.bridgeWorkerAuthorization as {identityId: string} | undefined)?.identityId);
+        } else await options.store.settle(
           req.params.workerId,
           req.params.assignmentId,
           settlement,
@@ -654,6 +670,7 @@ router.post(
               | { identityId: string }
               | undefined
           )?.identityId,
+          req.path.endsWith('/quarantine'),
         );
         if (!settlementController.signal.aborted) {
           res.json({

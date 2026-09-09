@@ -14,6 +14,7 @@ function render(overrides) {
       CODEAPI_BRIDGE_DYNAMIC_WORKERS: '',
       CODEAPI_BRIDGE_WORKER_ID: '',
       CODEAPI_BRIDGE_TOKEN: '',
+      CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS: '',
       ...overrides,
     },
   }));
@@ -26,6 +27,7 @@ for (const overrides of [
     CODEAPI_BRIDGE_TOKEN: token,
     CODEAPI_BRIDGE_DYNAMIC_WORKERS: 'false',
     CODEAPI_BRIDGE_WORKER_ID: 'test-worker',
+    CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS: '4',
   },
 ]) {
   const config = render(overrides);
@@ -34,6 +36,7 @@ for (const overrides of [
     assert.equal(env.CODEAPI_HARDENED_SANDBOX_MODE, 'true');
     assert.equal(env.CODEAPI_BRIDGE_AUTH_MODE, 'paired');
     assert.equal(env.CODEAPI_BRIDGE_TOKEN, token);
+    assert.equal(env.CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS, overrides.CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS ?? '1');
     assert.equal(env.CODEAPI_BRIDGE_DYNAMIC_WORKERS, overrides.CODEAPI_BRIDGE_DYNAMIC_WORKERS ?? 'true');
     assert.equal(env.CODEAPI_BRIDGE_WORKER_ID, overrides.CODEAPI_BRIDGE_WORKER_ID ?? '');
   }

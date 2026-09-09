@@ -397,6 +397,10 @@ export const env = {
   SANDBOX_BACKEND: sandboxBackend,
   /** Permit trusted callers to route each execution to a paired worker ID. */
   BRIDGE_DYNAMIC_WORKERS: process.env.CODEAPI_BRIDGE_DYNAMIC_WORKERS === 'true',
+  /** Opt-in independent native workspace concurrency; serial by default. */
+  BRIDGE_MAX_WORKSPACE_LEASE_SLOTS: Number(
+    process.env.CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS ?? 1,
+  ),
   /** Outbound worker selected by the remote-bridge backend. */
   BRIDGE_WORKER_ID: process.env.CODEAPI_BRIDGE_WORKER_ID ?? '',
   /** Static compatibility auth or short-lived proof-of-possession credentials. */

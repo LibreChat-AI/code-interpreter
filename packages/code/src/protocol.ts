@@ -398,6 +398,8 @@ const WORKSPACE_SEARCH_MATCH_KEYS = new Set([
 ]);
 
 export interface BridgeWorkerCapabilities {
+  /** Opt-in protocol: maximum concurrently leased independent workspace roots. */
+  workspaceLeaseSlots?: number;
   statefulWorkspace: boolean;
   sandboxProfile: string;
   runtimes: string[];
@@ -414,6 +416,8 @@ export interface BridgeWorkerRegistration {
 }
 
 export interface BridgeWorkerRegistrationResponse {
+  /** Absent on legacy servers. Workers must not parallelize without this receipt. */
+  workspaceLeaseSlots?: number;
   protocolVersion: BridgeProtocolVersion;
   workerId: string;
   incarnationId: string;
@@ -464,6 +468,7 @@ export interface BridgeSandboxRequest<TBody = object> {
 }
 
 export interface BridgeAssignment<TBody = object> {
+  workspaceLeaseSlot?: number;
   protocolVersion: BridgeProtocolVersion;
   assignmentId: string;
   workerId: string;
@@ -1125,6 +1130,10 @@ export function isValidBridgeWorkerCapabilities(
   if (typeof value !== 'object' || value === null) return false;
   const capabilities = value as Record<string, unknown>;
   return (
+    (capabilities.workspaceLeaseSlots === undefined ||
+      (Number.isSafeInteger(capabilities.workspaceLeaseSlots) &&
+        Number(capabilities.workspaceLeaseSlots) >= 1 &&
+        Number(capabilities.workspaceLeaseSlots) <= 8)) &&
     typeof capabilities.statefulWorkspace === 'boolean' &&
     typeof capabilities.sandboxProfile === 'string' &&
     capabilities.sandboxProfile.trim().length > 0 &&

@@ -35,10 +35,13 @@ export interface BridgeWorkerOptions {
   capabilities: BridgeWorkerCapabilities;
   workspaceTools?: WorkspaceToolExecutor;
   workspaceMutationQuarantine?: WorkspaceMutationQuarantine;
+  /** Required per-root durable guards when opting into concurrent workspace leases. */
+  workspaceQuarantines?: ReadonlyMap<string, WorkspaceMutationQuarantine>;
   leaseWaitMs?: number;
   leaseTransportGraceMs?: number;
   registrationTransportTimeoutMs?: number;
   leaseAckTransportTimeoutMs?: number;
+  workspaceCleanupTimeoutMs?: number;
   resetTransportTimeoutMs?: number;
   cancellationPollIntervalMs?: number;
   cancellationTransportTimeoutMs?: number;
@@ -59,9 +62,13 @@ export interface BridgeWorkerOptions {
 
 export interface WorkspaceMutationQuarantine {
   assertAvailable(): Promise<void>;
-  arm(reason: string): Promise<void>;
-  clear(): Promise<void>;
-  quarantine(reason: string, cause?: unknown): Promise<void>;
+  arm(reason: string, assignmentId?: string): Promise<void>;
+  clear(assignmentId?: string): Promise<void>;
+  quarantine(
+    reason: string,
+    cause?: unknown,
+    assignmentId?: string,
+  ): Promise<void>;
 }
 
 export interface BridgeWorkerIdentity {
@@ -343,10 +350,32 @@ export class BridgeWorker {
   private activeCapabilities: BridgeWorkerCapabilities;
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
+  private maintenanceOnly = false;
   private mutationGuardArmed = false;
+  private readonly quarantinedWorkspaces = new Set<string>();
+  private readonly activeWorkspaceAssignments = new Map<
+    string,
+    { id: string; done: Promise<void> }
+  >();
+  private readonly armedWorkspaces = new Set<string>();
+  private negotiatedWorkspaceSlots = 1;
+  private concurrentRunning = false;
+  private registrationInFlight?: Promise<BridgeWorkerRegistrationResponse>;
+  private credentialInFlight?: Promise<void>;
   private serverClockOffsetMs = MAX_PROOF_CLOCK_SKEW_MS;
 
   constructor(private readonly options: BridgeWorkerOptions) {
+    const requestedSlots = options.capabilities.workspaceLeaseSlots;
+    if (
+      requestedSlots !== undefined &&
+      (!Number.isSafeInteger(requestedSlots) ||
+        requestedSlots < 1 ||
+        requestedSlots > 8)
+    ) {
+      throw new BridgeProtocolError(
+        'Workspace lease slots must be an integer from 1 to 8',
+      );
+    }
     if (!options.token && !options.identity) {
       throw new BridgeProtocolError(
         'Bridge worker requires a static token or paired identity',
@@ -358,7 +387,9 @@ export class BridgeWorker {
       );
     }
     if (options.runtimeSupervisor == null && !options.sandboxEndpoint?.trim()) {
-      throw new BridgeProtocolError('Bridge worker requires a runtime supervisor');
+      throw new BridgeProtocolError(
+        'Bridge worker requires a runtime supervisor',
+      );
     }
     if (
       (options.workspaceTools == null) !==
@@ -381,11 +412,25 @@ export class BridgeWorker {
           operation === 'edit_file' ||
           operation === 'execute_command',
       ) === true &&
-      options.workspaceMutationQuarantine == null
+      options.workspaceMutationQuarantine == null &&
+      options.workspaceQuarantines == null
     ) {
       throw new BridgeProtocolError(
         'Workspace mutation capabilities require durable quarantine storage',
       );
+    }
+    if ((options.capabilities.workspaceLeaseSlots ?? 1) > 1) {
+      if (
+        options.capabilities.requiresReadyConfirmation !== true ||
+        options.workspaceQuarantines == null ||
+        options.capabilities.workspaceTools?.workspaces.some(
+          (root) => !options.workspaceQuarantines!.has(root.id),
+        ) !== false
+      ) {
+        throw new BridgeProtocolError(
+          'Concurrent workspaces require per-root durable guards and readiness confirmation',
+        );
+      }
     }
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.codeApiUrl = normalizedBaseUrl(options.codeApiUrl);
@@ -410,13 +455,50 @@ export class BridgeWorker {
     return await this.registerWithPolicy(signal, false);
   }
 
+  async registerForMaintenance(
+    signal?: AbortSignal,
+  ): Promise<BridgeWorkerRegistrationResponse> {
+    if (
+      this.lastRegisteredAtMs !== 0 ||
+      this.registrationInFlight != null ||
+      this.concurrentRunning
+    ) {
+      throw new BridgeProtocolError(
+        'Maintenance registration requires a fresh worker',
+      );
+    }
+    this.maintenanceOnly = true;
+    return this.register(signal);
+  }
+
   private async registerWithPolicy(
+    signal: AbortSignal | undefined,
+    allowActiveMutation: boolean,
+  ): Promise<BridgeWorkerRegistrationResponse> {
+    if (this.registrationInFlight) return await this.registrationInFlight;
+    const pending = this.registerOwned(signal, allowActiveMutation);
+    this.registrationInFlight = pending;
+    try {
+      return await pending;
+    } finally {
+      this.registrationInFlight = undefined;
+    }
+  }
+
+  private async registerOwned(
     signal: AbortSignal | undefined,
     allowActiveMutation: boolean,
   ): Promise<BridgeWorkerRegistrationResponse> {
     if (!allowActiveMutation) {
       try {
         await this.options.workspaceMutationQuarantine?.assertAvailable();
+        if (
+          !this.maintenanceOnly &&
+          (this.options.capabilities.workspaceLeaseSlots ?? 1) === 1
+        ) {
+          for (const guard of this.options.workspaceQuarantines?.values() ?? [])
+            await guard.assertAvailable();
+        }
       } catch (error) {
         if (
           error instanceof BridgeProtocolError &&
@@ -457,7 +539,9 @@ export class BridgeWorker {
             protocolVersion: BRIDGE_PROTOCOL_VERSION,
             workerId: this.options.workerId,
             incarnationId: this.incarnationId,
-            capabilities,
+            capabilities: this.maintenanceOnly
+              ? { ...capabilities, requiresReadyConfirmation: true }
+              : capabilities,
           },
           registrationController.signal,
         );
@@ -503,6 +587,38 @@ export class BridgeWorker {
         'Code API registered a different worker incarnation',
       );
     }
+    const slots = registration.workspaceLeaseSlots ?? 1;
+    if (
+      !Number.isSafeInteger(slots) ||
+      slots < 1 ||
+      slots > (this.options.capabilities.workspaceLeaseSlots ?? 1) ||
+      slots > 8 ||
+      (this.concurrentRunning && slots !== this.negotiatedWorkspaceSlots)
+    ) {
+      throw new BridgeProtocolError(
+        'Code API workspace slot negotiation changed or exceeded local policy',
+        undefined,
+        'WORKER_FENCED',
+      );
+    }
+    this.negotiatedWorkspaceSlots = slots;
+    if (
+      !this.maintenanceOnly &&
+      !allowActiveMutation &&
+      slots === 1 &&
+      (this.options.capabilities.workspaceLeaseSlots ?? 1) > 1
+    ) {
+      try {
+        for (const guard of this.options.workspaceQuarantines?.values() ?? [])
+          await guard.assertAvailable();
+      } catch {
+        throw new BridgeProtocolError(
+          'Serial workspace quarantine state could not be verified',
+          undefined,
+          'WORKER_QUARANTINED',
+        );
+      }
+    }
     const registeredAtMs = Date.parse(registration.registeredAt);
     if (Number.isFinite(registeredAtMs)) {
       this.serverClockOffsetMs = registeredAtMs - registrationStartedAtMs;
@@ -510,7 +626,10 @@ export class BridgeWorker {
     this.registrationTtlMs = registration.leaseTtlMs;
     this.activeCapabilities = this.registrationCapabilities;
     await this.options.onRegistered?.(registration);
-    if (this.options.capabilities.requiresReadyConfirmation === true) {
+    if (
+      !this.maintenanceOnly &&
+      this.options.capabilities.requiresReadyConfirmation === true
+    ) {
       await this.confirmReady(registration, signal);
     }
     this.lastRegisteredAtMs = registrationStartedAtMs;
@@ -571,7 +690,55 @@ export class BridgeWorker {
     );
   }
 
-  async lease(signal?: AbortSignal): Promise<BridgeAssignment | undefined> {
+  async resetNativeWorkspace(
+    workspaceId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const guard = this.options.workspaceQuarantines?.get(workspaceId);
+    if (
+      !guard ||
+      this.activeWorkspaceAssignments.size > 0 ||
+      !this.options.capabilities.workspaceTools?.workspaces.some(
+        (root) => root.id === workspaceId,
+      )
+    ) {
+      throw new BridgeProtocolError(
+        'Native workspace reset requires an idle registered root',
+      );
+    }
+    // The operator must have inspected/restored the root and cleared its
+    // machine-local guard before the remote fence can be removed.
+    await guard.assertAvailable();
+    await this.timedRequest(
+      `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/workspaces/reset`,
+      {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        incarnationId: this.incarnationId,
+        runtimeSessionId: `native-workspace:${workspaceId}`,
+        confirmDiscarded: true,
+      },
+      this.options.resetTransportTimeoutMs ??
+        DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+      signal,
+    );
+    this.quarantinedWorkspaces.delete(workspaceId);
+  }
+
+  async lease(
+    signal?: AbortSignal,
+    workspaceLeaseSlot?: number,
+  ): Promise<BridgeAssignment | undefined> {
+    if (
+      workspaceLeaseSlot !== undefined &&
+      (!Number.isSafeInteger(workspaceLeaseSlot) ||
+        workspaceLeaseSlot < 0 ||
+        this.negotiatedWorkspaceSlots <= 1 ||
+        workspaceLeaseSlot >= this.negotiatedWorkspaceSlots)
+    ) {
+      throw new BridgeProtocolError(
+        'Workspace lease slot exceeds negotiated capacity',
+      );
+    }
     const waitMs = Math.min(
       MAX_LEASE_WAIT_MS,
       Math.max(0, this.options.leaseWaitMs ?? DEFAULT_LEASE_WAIT_MS),
@@ -601,6 +768,7 @@ export class BridgeWorker {
           protocolVersion: BRIDGE_PROTOCOL_VERSION,
           waitMs,
           incarnationId: this.incarnationId,
+          ...(workspaceLeaseSlot === undefined ? {} : { workspaceLeaseSlot }),
         },
         leaseController.signal,
       );
@@ -610,7 +778,8 @@ export class BridgeWorker {
     }
     if (
       response.assignment != null &&
-      response.assignment.incarnationId !== this.incarnationId
+      (response.assignment.incarnationId !== this.incarnationId ||
+        response.assignment.workspaceLeaseSlot !== workspaceLeaseSlot)
     ) {
       throw new BridgeProtocolError(
         'Code API leased an assignment for a different worker incarnation',
@@ -698,11 +867,19 @@ export class BridgeWorker {
   }
 
   async run(signal?: AbortSignal): Promise<void> {
+    if (this.maintenanceOnly)
+      throw new BridgeProtocolError(
+        'Maintenance workers cannot execute assignments',
+      );
     let reconnectAttempt = 0;
     while (!signal?.aborted) {
       try {
         await this.refreshCredential(signal);
         await this.register(signal);
+        if (this.negotiatedWorkspaceSlots > 1) {
+          await this.runConcurrent(signal);
+          return;
+        }
         const assignment = await this.lease(signal);
         reconnectAttempt = 0;
         if (!assignment) continue;
@@ -734,13 +911,132 @@ export class BridgeWorker {
     }
   }
 
+  private async runConcurrent(signal?: AbortSignal): Promise<void> {
+    const controller = new AbortController();
+    const abort = (): void => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    let failure: unknown;
+    const fail = (error: unknown): void => {
+      failure ??= error;
+      controller.abort(error);
+    };
+    this.concurrentRunning = true;
+    const heartbeat = this.maintainRegistration(controller.signal).catch(fail);
+    const lane = async (slot?: number): Promise<void> => {
+      let retries = 0;
+      while (!controller.signal.aborted) {
+        let assignment: BridgeAssignment | undefined;
+        try {
+          assignment = await this.lease(controller.signal, slot);
+          retries = 0;
+          if (assignment == null) continue;
+          await this.executeAndSettle(assignment, controller.signal);
+        } catch (error) {
+          if (
+            error instanceof BridgeWorkspaceQuarantinedError &&
+            assignment?.workspaceLeaseSlot !== undefined
+          ) {
+            // The durable local guard is retained. A distinct receipt tells
+            // Code API to release this slot without declaring the root clean.
+            try {
+              await this.reportWorkspaceOwnership(
+                assignment,
+                'quarantine',
+                controller.signal,
+              );
+              this.options.onError?.(error);
+              continue;
+            } catch (quarantineError) {
+              // The durable server fence remains until explicit cleanup/reset.
+              // An unavailable control receipt must not cancel healthy roots.
+              if (
+                quarantineError instanceof BridgeProtocolError &&
+                (quarantineError.status === 401 ||
+                  quarantineError.status === 403 ||
+                  quarantineError.code === 'WORKER_FENCED')
+              ) {
+                fail(quarantineError);
+                return;
+              }
+              this.options.onError?.(quarantineError);
+              // Keep every advertised slot polled. The root remains fenced,
+              // but a committed receipt may already have released this slot.
+              continue;
+            }
+          }
+          if (controller.signal.aborted) return;
+          if (
+            assignment != null ||
+            (error instanceof BridgeProtocolError &&
+              (error.status === 401 ||
+                error.status === 403 ||
+                error.code === 'WORKER_FENCED' ||
+                error.code === 'WORKER_QUARANTINED'))
+          ) {
+            fail(error);
+            return;
+          }
+          this.options.onError?.(error);
+          await abortableDelay(
+            reconnectDelayMs(
+              retries++,
+              this.options.reconnectDelayMs,
+              this.options.reconnectMaxDelayMs,
+              this.options.reconnectRandom,
+            ),
+            controller.signal,
+          );
+        }
+      }
+    };
+    try {
+      // The legacy lane serves run-code requests only when the aggregate lock
+      // excludes workspace slots. It never increases simultaneous executions.
+      await Promise.all([
+        lane(),
+        ...Array.from({ length: this.negotiatedWorkspaceSlots }, (_, i) =>
+          lane(i),
+        ),
+      ]);
+    } finally {
+      controller.abort();
+      await heartbeat;
+      this.concurrentRunning = false;
+      signal?.removeEventListener('abort', abort);
+    }
+    if (failure != null) throw failure;
+  }
+
   async refreshCredential(
     signal?: AbortSignal,
-    validThroughMs =
-      Date.now() +
+    validThroughMs = Date.now() +
       this.serverClockOffsetMs +
       (this.options.credentialRefreshWindowMs ?? CREDENTIAL_REFRESH_WINDOW_MS),
     transportTimeoutMs = Number.POSITIVE_INFINITY,
+  ): Promise<void> {
+    while (this.credentialInFlight) {
+      await this.credentialInFlight;
+      // A longer-lived caller may still need another refresh after this one.
+    }
+    const pending = this.refreshCredentialOwned(
+      signal,
+      validThroughMs,
+      transportTimeoutMs,
+    );
+    this.credentialInFlight = pending;
+    try {
+      await pending;
+    } finally {
+      if (this.credentialInFlight === pending)
+        this.credentialInFlight = undefined;
+    }
+  }
+
+  private async refreshCredentialOwned(
+    signal: AbortSignal | undefined,
+    validThroughMs: number,
+    transportTimeoutMs: number,
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
@@ -833,6 +1129,101 @@ export class BridgeWorker {
     assignment: BridgeAssignment,
     signal?: AbortSignal,
   ): Promise<void> {
+    const root =
+      assignment.executionKind === 'workspace_tool' &&
+      isWorkspaceToolRequest(assignment.request)
+        ? assignment.request.workspaceId
+        : undefined;
+    const waitingAt = Date.now();
+    while (root != null && this.activeWorkspaceAssignments.has(root)) {
+      const active = this.activeWorkspaceAssignments.get(root)!;
+      if (active.id === assignment.assignmentId)
+        throw new BridgeProtocolError(
+          'Code API replayed an active workspace assignment',
+          undefined,
+          'WORKER_FENCED',
+        );
+      // A settlement can commit remotely before the local durable guard clears.
+      // Keep the next lane out of the root until that cleanup has finished.
+      const waitController = new AbortController();
+      const onAbort = (): void => waitController.abort();
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) waitController.abort();
+      let finished: boolean;
+      try {
+        finished = await Promise.race([
+          active.done.then(() => true),
+          abortableDelay(
+            Math.max(
+              0,
+              this.assignmentRemainingMs(assignment) - (Date.now() - waitingAt),
+            ),
+            waitController.signal,
+          ).then(() => false),
+        ]);
+      } finally {
+        waitController.abort();
+        signal?.removeEventListener('abort', onAbort);
+      }
+      if (!finished || signal?.aborted) {
+        await this.rejectUnexecutedAssignment(
+          assignment,
+          'Workspace cleanup wait ended before execution',
+        );
+        return;
+      }
+    }
+    let release!: () => void;
+    if (root != null)
+      this.activeWorkspaceAssignments.set(root, {
+        id: assignment.assignmentId,
+        done: new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      });
+    const adjusted =
+      assignment.remainingMs === undefined
+        ? assignment
+        : {
+            ...assignment,
+            remainingMs: Math.max(
+              0,
+              assignment.remainingMs - (Date.now() - waitingAt),
+            ),
+          };
+    try {
+      await this.executeOwned(adjusted, signal);
+    } catch (error) {
+      if (root != null && error instanceof BridgeWorkspaceQuarantinedError) {
+        // A failed unlink/fsync may have removed the durable marker already.
+        // Fence locally before releasing the handoff to the next root assignment.
+        this.quarantinedWorkspaces.add(root);
+      }
+      throw error;
+    } finally {
+      if (root != null) {
+        this.activeWorkspaceAssignments.delete(root);
+        release();
+      }
+    }
+  }
+
+  private workspaceGuard(
+    assignment: BridgeAssignment,
+  ): WorkspaceMutationQuarantine | undefined {
+    return assignment.executionKind === 'workspace_tool' &&
+      isWorkspaceToolRequest(assignment.request)
+      ? (this.options.workspaceQuarantines?.get(
+          assignment.request.workspaceId,
+        ) ?? this.options.workspaceMutationQuarantine)
+      : this.options.workspaceMutationQuarantine;
+  }
+
+  private async executeOwned(
+    assignment: BridgeAssignment,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const guard = this.workspaceGuard(assignment);
     if (signal?.aborted === true) {
       throw signal.reason instanceof Error
         ? signal.reason
@@ -897,8 +1288,10 @@ export class BridgeWorker {
     }
     const heartbeatController = new AbortController();
     let heartbeatError: unknown;
-    const heartbeat = this.maintainRegistration(
-      heartbeatController.signal,
+    const heartbeat = (
+      this.concurrentRunning
+        ? Promise.resolve()
+        : this.maintainRegistration(heartbeatController.signal)
     ).catch((error) => {
       heartbeatError = error;
       executionController.abort();
@@ -914,7 +1307,9 @@ export class BridgeWorker {
     let settlement: BridgeSettlement;
     let ambiguousSandboxError: unknown;
     let ambiguousWorkspaceMutationError: unknown;
-    let workspaceMutationGuardError: BridgeWorkspaceQuarantinedError | undefined;
+    let workspaceMutationGuardError:
+      | BridgeWorkspaceQuarantinedError
+      | undefined;
     let sandboxRejectedExecution = false;
     let sandboxStarted = false;
     let workspaceMutationArmed = false;
@@ -941,6 +1336,18 @@ export class BridgeWorker {
           throw new BridgeProtocolError('Invalid workspace tool request');
         }
         const workspaceRequest = assignment.request;
+        try {
+          if (this.quarantinedWorkspaces.has(workspaceRequest.workspaceId)) {
+            throw new Error('Workspace requires an explicit quarantine reset');
+          }
+          if (this.options.workspaceQuarantines != null)
+            await guard?.assertAvailable();
+        } catch (error) {
+          throw new BridgeWorkspaceQuarantinedError(
+            'Workspace is quarantined',
+            error,
+          );
+        }
         const advertised = this.activeCapabilities.workspaceTools;
         if (advertised == null) {
           throw new BridgeProtocolError(
@@ -983,7 +1390,8 @@ export class BridgeWorker {
           workspaceRequest.operation === 'preview_edit' ||
           workspaceRequest.operation === 'edit_file'
         ) {
-          const mode = workspaceRequest.edits === undefined ? 'single' : 'batch';
+          const mode =
+            workspaceRequest.edits === undefined ? 'single' : 'batch';
           const modes = advertised.editFileModes;
           if (
             (modes == null && mode !== 'single') ||
@@ -1019,8 +1427,10 @@ export class BridgeWorker {
         if (isMutation) {
           this.mutationGuardArmed = true;
           try {
-            await this.options.workspaceMutationQuarantine!.arm(
+            this.armedWorkspaces.add(workspaceRequest.workspaceId);
+            await guard!.arm(
               `Workspace mutation ${workspaceRequest.operation} is pending settlement`,
+              assignment.assignmentId,
             );
             workspaceMutationArmed = true;
           } catch (error) {
@@ -1040,10 +1450,8 @@ export class BridgeWorker {
           !advertised.listFileFeatures?.includes('after_path') &&
           'nextAfterPath' in payload
         ) {
-          const {
-            nextAfterPath: _nextAfterPath,
-            ...compatiblePayload
-          } = payload;
+          const { nextAfterPath: _nextAfterPath, ...compatiblePayload } =
+            payload;
           payload = compatiblePayload;
         }
         workspaceMutationApplied = isMutation;
@@ -1176,11 +1584,10 @@ export class BridgeWorker {
         error instanceof WorkspaceToolError
           ? { errorCode: error.code }
           : {}),
-        error:
-          (error instanceof Error
-            ? error.message
-            : 'Sandbox execution failed'
-          ).slice(0, MAX_SETTLEMENT_ERROR_LENGTH),
+        error: (error instanceof Error
+          ? error.message
+          : 'Sandbox execution failed'
+        ).slice(0, MAX_SETTLEMENT_ERROR_LENGTH),
       };
     }
 
@@ -1190,12 +1597,14 @@ export class BridgeWorker {
     credentialController.abort();
     await credentialMaintenance;
     try {
-      if (workspaceMutationGuardError != null) throw workspaceMutationGuardError;
+      if (workspaceMutationGuardError != null)
+        throw workspaceMutationGuardError;
       if (ambiguousWorkspaceMutationError != null) {
         throw await this.quarantineWorkspace(
           undefined,
           'Worker stopped after a workspace mutation completed without a fulfilled settlement',
           ambiguousWorkspaceMutationError,
+          assignment,
         );
       }
       if (ambiguousSandboxError != null) {
@@ -1203,6 +1612,7 @@ export class BridgeWorker {
           assignment.runtimeSessionId,
           `Stateful workspace ${assignment.runtimeSessionId} was quarantined after an ambiguous sandbox execution`,
           ambiguousSandboxError,
+          assignment,
         );
       }
       const knownCleanStatefulRejection =
@@ -1242,11 +1652,55 @@ export class BridgeWorker {
       }
       if (workspaceMutationArmed) {
         try {
-          await this.options.workspaceMutationQuarantine!.clear();
+          if (assignment.workspaceLeaseSlot === undefined) {
+            await guard!.clear(assignment.assignmentId);
+          } else {
+            let timer!: ReturnType<typeof setTimeout>;
+            try {
+              await Promise.race([
+                guard!.clear(assignment.assignmentId),
+                new Promise<never>((_resolve, reject) => {
+                  timer = setTimeout(
+                    () =>
+                      reject(new Error('Workspace guard cleanup timed out')),
+                    Math.min(
+                      5000,
+                      Math.max(
+                        1,
+                        this.options.workspaceCleanupTimeoutMs ?? 5000,
+                      ),
+                    ),
+                  );
+                }),
+              ]);
+            } finally {
+              clearTimeout(timer);
+            }
+          }
+          if (
+            assignment.executionKind === 'workspace_tool' &&
+            isWorkspaceToolRequest(assignment.request)
+          ) {
+            this.armedWorkspaces.delete(assignment.request.workspaceId);
+          }
           this.mutationGuardArmed = false;
         } catch (error) {
           throw new BridgeWorkspaceQuarantinedError(
             'Workspace mutation settled, but durable quarantine could not be cleared',
+            error,
+          );
+        }
+      }
+      if (assignment.workspaceLeaseSlot !== undefined) {
+        try {
+          await this.reportWorkspaceOwnership(
+            assignment,
+            'workspace-cleanup',
+            signal,
+          );
+        } catch (error) {
+          throw new BridgeWorkspaceQuarantinedError(
+            'Workspace cleanup acknowledgement could not be confirmed',
             error,
           );
         }
@@ -1260,6 +1714,53 @@ export class BridgeWorker {
         signal?.removeEventListener('abort', abortExecution);
       }
     }
+  }
+
+  private async reportWorkspaceOwnership(
+    assignment: BridgeAssignment,
+    operation: 'quarantine' | 'workspace-cleanup',
+    signal?: AbortSignal,
+  ): Promise<void> {
+    let failure: unknown;
+    for (let attempt = 0; attempt < 3 && !signal?.aborted; attempt++) {
+      try {
+        await this.timedRequest(
+          this.assignmentUrl(assignment, operation),
+          {
+            protocolVersion: BRIDGE_PROTOCOL_VERSION,
+            incarnationId: this.incarnationId,
+            generation: assignment.generation,
+            leaseToken: assignment.leaseToken,
+            status: 'rejected',
+            error:
+              operation === 'quarantine'
+                ? 'Workspace requires inspection before reset.'
+                : 'Local workspace cleanup confirmed.',
+          },
+          this.options.leaseAckTransportTimeoutMs ??
+            DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+          signal,
+        );
+        return;
+      } catch (error) {
+        failure = error;
+        if (
+          error instanceof BridgeProtocolError &&
+          error.status != null &&
+          error.status >= 400 &&
+          error.status < 500 &&
+          error.status !== 408 &&
+          error.status !== 429
+        )
+          throw error;
+        await abortableDelay(100 * (attempt + 1), signal);
+      }
+    }
+    throw (
+      failure ??
+      signal?.reason ??
+      new Error('Workspace ownership reporting aborted')
+    );
   }
 
   private assignmentRemainingMs(assignment: BridgeAssignment): number {
@@ -1307,6 +1808,7 @@ export class BridgeWorker {
         assignment.runtimeSessionId,
         `Stateful workspace ${assignment.runtimeSessionId} could not release its runtime lease`,
         error,
+        assignment,
       );
     }
   }
@@ -1315,13 +1817,15 @@ export class BridgeWorker {
     runtimeSessionId: string | undefined,
     message: string,
     cause?: unknown,
+    assignment?: BridgeAssignment,
   ): Promise<BridgeWorkspaceQuarantinedError> {
     if (runtimeSessionId == null) {
       try {
-        await this.options.workspaceMutationQuarantine?.quarantine(
-          message,
-          cause,
-        );
+        await (
+          assignment == null
+            ? this.options.workspaceMutationQuarantine
+            : this.workspaceGuard(assignment)
+        )?.quarantine(message, cause, assignment?.assignmentId);
         return new BridgeWorkspaceQuarantinedError(message, cause);
       } catch (error) {
         return new BridgeWorkspaceQuarantinedError(
@@ -1355,15 +1859,16 @@ export class BridgeWorker {
         Math.floor(this.registrationTtlMs / 2),
       );
       await this.delay(
-        Math.max(
-          0,
-          this.lastRegisteredAtMs + heartbeatIntervalMs - Date.now(),
-        ),
+        Math.max(0, this.lastRegisteredAtMs + heartbeatIntervalMs - Date.now()),
         signal,
       );
       if (signal.aborted) return;
       try {
-        await this.registerWithPolicy(signal, this.mutationGuardArmed);
+        if (this.concurrentRunning) await this.refreshCredential(signal);
+        await this.registerWithPolicy(
+          signal,
+          this.mutationGuardArmed || this.armedWorkspaces.size > 0,
+        );
       } catch (error) {
         const terminal =
           error instanceof BridgeProtocolError &&
@@ -1403,6 +1908,16 @@ export class BridgeWorker {
             this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
           ),
       );
+      if (assignment.workspaceLeaseSlot !== undefined) {
+        try {
+          await this.reportWorkspaceOwnership(assignment, 'workspace-cleanup');
+        } catch (error) {
+          throw new BridgeWorkspaceQuarantinedError(
+            'Unexecuted workspace cleanup acknowledgement could not be confirmed',
+            error,
+          );
+        }
+      }
     } finally {
       heartbeatController.abort();
       await heartbeat;
@@ -1439,6 +1954,7 @@ export class BridgeWorker {
             ? `Stateful workspace ${assignment.runtimeSessionId} was quarantined before settlement during shutdown`
             : 'Worker stopped after a workspace mutation could not be settled during shutdown',
           signal.reason,
+          assignment,
         );
       }
       throw signal.reason instanceof Error
@@ -1483,6 +1999,7 @@ export class BridgeWorker {
                   ? `Stateful workspace ${assignment.runtimeSessionId} was quarantined after Code API rejected its fulfilled settlement`
                   : 'Worker stopped after Code API rejected a fulfilled workspace mutation settlement',
                 error,
+                assignment,
               );
             }
             throw error;
@@ -1509,6 +2026,7 @@ export class BridgeWorker {
           ? `Stateful workspace ${assignment.runtimeSessionId} was quarantined after ambiguous settlement delivery`
           : 'Worker stopped after ambiguous workspace mutation settlement delivery',
         lastError,
+        assignment,
       );
     }
     if (lastError instanceof Error) throw lastError;

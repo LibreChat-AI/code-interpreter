@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { realpath } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { realpath, stat } from 'node:fs/promises';
+import { basename, resolve, relative, isAbsolute, sep } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
 import { startFileRelay } from './relay.js';
@@ -28,6 +28,10 @@ import {
 } from './runtime.js';
 import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
+import { NativeWorkspaceCommandPool } from './native-pool.js';
+import { workspaceMutationGuard } from './workspace-guards.js';
+import type { NativeProcessSandboxOptions } from './native-process.js';
+import type { LocalWorkspaceConfig } from './workspace.js';
 import {
   GITHUB_ALLOWED_DOMAINS,
   GITHUB_CREDENTIAL_ENV_NAME,
@@ -467,21 +471,114 @@ async function run(
           workspaceRoot: canonicalWorkerDirectory,
         })
       : undefined;
+  const workspaceLeaseSlots = positiveInteger(
+    'LIBRECHAT_CODE_WORKSPACE_LEASE_SLOTS',
+    option(args, '--workspace-lease-slots') ??
+      process.env.LIBRECHAT_CODE_WORKSPACE_LEASE_SLOTS,
+    1,
+  );
+  if (workspaceLeaseSlots > 8)
+    throw new Error('Workspace lease slots cannot exceed 8');
+  const roots: LocalWorkspaceConfig[] = canonicalWorkerDirectory
+    ? [
+        {
+          id: workspaceId,
+          root: canonicalWorkerDirectory,
+          writable: allowWorkspaceWrites,
+          name:
+            option(args, '--workspace-name') ??
+            process.env.LIBRECHAT_CODE_WORKSPACE_NAME?.trim() ??
+            (useDefaultWorkspace
+              ? workspaceId
+              : defaultWorkspaceName(workerDirectory!, workspaceId)),
+        },
+      ]
+    : [];
+  for (let i = 0; i < args.length; i++) {
+    if (
+      args[i] === '--workspace' &&
+      (!args[i + 1] || args[i + 1].startsWith('--'))
+    ) {
+      throw new Error('--workspace requires id=path');
+    }
+    const value =
+      args[i] === '--workspace'
+        ? args[++i]
+        : args[i].startsWith('--workspace=')
+          ? args[i].slice('--workspace='.length)
+          : undefined;
+    if (value === undefined) continue;
+    const separator = value.indexOf('=');
+    if (
+      separator < 1 ||
+      separator === value.length - 1 ||
+      !canonicalWorkerDirectory ||
+      commandSandboxMode !== 'native-srt'
+    ) {
+      throw new Error(
+        'Additional --workspace id=path roots require a primary workspace and native-srt',
+      );
+    }
+    roots.push({
+      id: value.slice(0, separator),
+      root: await realpath(value.slice(separator + 1)),
+      writable: allowWorkspaceWrites,
+    });
+  }
+  // Aliases and nested grants are not independent execution domains.
+  if (roots.length > 32)
+    throw new Error('At most 32 workspace roots may be registered');
+  const rootIdentities = await Promise.all(
+    roots.map((root) => stat(root.root)),
+  );
+  const normalized = roots.map((root) => root.root);
+  for (let i = 0; i < roots.length; i++)
+    for (let j = 0; j < i; j++) {
+      const inside = (a: string, b: string): boolean => {
+        const path = relative(a, b);
+        return (
+          path === '' ||
+          (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+        );
+      };
+      if (
+        (rootIdentities[i].dev === rootIdentities[j].dev &&
+          rootIdentities[i].ino === rootIdentities[j].ino) ||
+        inside(normalized[i], normalized[j]) ||
+        inside(normalized[j], normalized[i])
+      ) {
+        throw new Error(
+          'Workspace roots must not overlap or alias one another',
+        );
+      }
+    }
+  if (
+    workspaceLeaseSlots > 1 &&
+    (!allowWorkspaceCommands || commandSandboxMode !== 'native-srt')
+  ) {
+    throw new Error('Concurrent workspace leases require native-srt commands');
+  }
+  if (
+    roots.length > 1 &&
+    process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim()
+  ) {
+    throw new Error(
+      'LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE is a single-root override; unset it for multiple workspace roots',
+    );
+  }
+  const rootQuarantinePaths = new Map(
+    roots.map((root) => [
+      root.id,
+      workspaceQuarantinePath({
+        codeApiUrl,
+        workerId,
+        workspaceRoot: root.root,
+      }),
+    ]),
+  );
   let workspaceTools: WorkspaceToolExecutor | undefined = workerDirectory
     ? await LocalWorkspaceTools.create({
-        workspaces: [
-          {
-            id: workspaceId,
-            name:
-              option(args, '--workspace-name') ??
-              process.env.LIBRECHAT_CODE_WORKSPACE_NAME?.trim() ??
-              (useDefaultWorkspace
-                ? workspaceId
-                : defaultWorkspaceName(workerDirectory, workspaceId)),
-            root: workerDirectory,
-            writable: allowWorkspaceWrites,
-          },
-        ],
+        workspaces: roots,
       })
     : undefined;
   if (allowWorkspaceCommands && !canonicalWorkerDirectory) {
@@ -657,47 +754,58 @@ async function run(
           endpoint: sandboxEndpoint,
           statefulWorkspace,
         });
+  const nativeOptions: NativeProcessSandboxOptions = {
+    workspaceRoot: canonicalWorkerDirectory!,
+    protectedPaths: [
+      identityPath,
+      ...rootQuarantinePaths.values(),
+      github.privateKeyPath,
+    ].filter((path): path is string => path != null),
+    allowedDomains: commandAllowedDomains,
+    ...(github.provider
+      ? {
+          maskedEnvironment: {
+            variables: [
+              {
+                name: GITHUB_CREDENTIAL_ENV_NAME,
+                extract: '^(.+)$',
+                injectHosts: [github.host],
+              },
+            ],
+            async resolve(signal?: AbortSignal) {
+              return gitHubCredentialEnvironment(
+                await github.provider!.getCredential(signal),
+              );
+            },
+            wrapCommand(command: string, platform: NodeJS.Platform) {
+              return wrapGitHubCredentialCommand(
+                command,
+                github.host,
+                platform,
+              );
+            },
+          },
+        }
+      : {}),
+  };
   const nativeCommandSandbox =
     allowWorkspaceCommands && commandSandboxMode === 'native-srt'
-      ? new NativeProcessWorkspaceCommandSandbox({
-          workspaceRoot: canonicalWorkerDirectory!,
-          protectedPaths: [
-            identityPath,
-            mutationQuarantinePath,
-            github.privateKeyPath,
-          ].filter((path): path is string => path != null),
-          allowedDomains: commandAllowedDomains,
-          ...(github.provider
-            ? {
-                maskedEnvironment: {
-                  variables: [
-                    {
-                      name: GITHUB_CREDENTIAL_ENV_NAME,
-                      extract: '^(.+)$',
-                      injectHosts: [github.host],
-                    },
-                  ],
-                  async resolve(signal?: AbortSignal) {
-                    return gitHubCredentialEnvironment(
-                      await github.provider!.getCredential(signal),
-                    );
-                  },
-                  wrapCommand(command: string, platform: NodeJS.Platform) {
-                    return wrapGitHubCredentialCommand(
-                      command,
-                      github.host,
-                      platform,
-                    );
-                  },
-                },
-              }
-            : {}),
-        })
+      ? roots.length > 1 || workspaceLeaseSlots > 1
+        ? new NativeWorkspaceCommandPool(
+            new Map(
+              roots.map((root) => [
+                root.id,
+                { ...nativeOptions, workspaceRoot: root.root },
+              ]),
+            ),
+            workspaceLeaseSlots,
+          )
+        : new NativeProcessWorkspaceCommandSandbox(nativeOptions)
       : undefined;
   if (allowWorkspaceCommands && workspaceTools) {
     workspaceTools = new SandboxWorkspaceTools({
       workspaceTools,
-      commandWorkspaces: [workspaceId],
+      commandWorkspaces: roots.map((root) => root.id),
       commandSandbox:
         nativeCommandSandbox ??
         new RuntimeWorkspaceCommandSandbox({
@@ -726,6 +834,9 @@ async function run(
       )
       .digest('hex'),
     ...(fileRelayEnabled ? { requiresReadyConfirmation: true } : {}),
+    ...(workspaceLeaseSlots > 1
+      ? { workspaceLeaseSlots, requiresReadyConfirmation: true }
+      : {}),
     ...(workspaceTools ? { workspaceTools: workspaceTools.capabilities } : {}),
   };
   if (!isValidBridgeWorkerCapabilities(capabilities)) {
@@ -752,44 +863,62 @@ async function run(
       runtimeSupervisor,
       capabilities,
       workspaceTools,
-      workspaceMutationQuarantine: mutationQuarantinePath
+      ...(workspaceLeaseSlots > 1 || roots.length > 1
         ? {
-            async assertAvailable() {
-              const record = await loadWorkspaceMutationQuarantine(
-                mutationQuarantinePath,
-              );
-              if (record != null) {
-                throw new BridgeProtocolError(
-                  `Workspace mutations are quarantined since ${record.quarantinedAt}: ${record.reason}. Inspect or restore the workspace, then run librechat-code clear-workspace-quarantine`,
-                  undefined,
-                  'WORKER_QUARANTINED',
-                );
-              }
-            },
-            async arm(reason) {
-              await saveWorkspaceMutationQuarantine(mutationQuarantinePath, {
-                version: 1,
-                workerId,
-                workspaceId,
-                ownerId: incarnationId,
-                quarantinedAt: new Date().toISOString(),
-                reason,
-              });
-            },
-            async clear() {
-              await clearWorkspaceMutationQuarantine(
-                mutationQuarantinePath,
-                incarnationId,
-              );
-            },
-            async quarantine() {
-              await assertWorkspaceMutationQuarantineOwner(
-                mutationQuarantinePath,
-                incarnationId,
-              );
-            },
+            workspaceQuarantines: new Map(
+              roots.map((root) => [
+                root.id,
+                workspaceMutationGuard(
+                  rootQuarantinePaths.get(root.id)!,
+                  workerId,
+                  root.id,
+                  incarnationId,
+                ),
+              ]),
+            ),
           }
-        : undefined,
+        : {}),
+      workspaceMutationQuarantine:
+        mutationQuarantinePath &&
+        workspaceLeaseSlots === 1 &&
+        roots.length === 1
+          ? {
+              async assertAvailable() {
+                const record = await loadWorkspaceMutationQuarantine(
+                  mutationQuarantinePath,
+                );
+                if (record != null) {
+                  throw new BridgeProtocolError(
+                    `Workspace mutations are quarantined since ${record.quarantinedAt}: ${record.reason}. Inspect or restore the workspace, then run librechat-code clear-workspace-quarantine`,
+                    undefined,
+                    'WORKER_QUARANTINED',
+                  );
+                }
+              },
+              async arm(reason) {
+                await saveWorkspaceMutationQuarantine(mutationQuarantinePath, {
+                  version: 1,
+                  workerId,
+                  workspaceId,
+                  ownerId: incarnationId,
+                  quarantinedAt: new Date().toISOString(),
+                  reason,
+                });
+              },
+              async clear() {
+                await clearWorkspaceMutationQuarantine(
+                  mutationQuarantinePath,
+                  incarnationId,
+                );
+              },
+              async quarantine() {
+                await assertWorkspaceMutationQuarantineOwner(
+                  mutationQuarantinePath,
+                  incarnationId,
+                );
+              },
+            }
+          : undefined,
       onIdentityChange:
         pairedIdentity && identityPath
           ? async (identity) => {
@@ -829,6 +958,16 @@ async function run(
       await worker.resetWorkspace(runtimeSessionId, controller.signal);
       process.stdout.write(
         `librechat-code: reset acknowledged for ${runtimeSessionId}\n`,
+      );
+      return;
+    }
+    const resetNativeRoot = option(args, '--reset-workspace-quarantine');
+    if (resetNativeRoot != null) {
+      await worker.refreshCredential(controller.signal);
+      await worker.registerForMaintenance(controller.signal);
+      await worker.resetNativeWorkspace(resetNativeRoot, controller.signal);
+      process.stdout.write(
+        `librechat-code: reset acknowledged for native workspace ${resetNativeRoot}\n`,
       );
       return;
     }
