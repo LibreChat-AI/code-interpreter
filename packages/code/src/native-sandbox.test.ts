@@ -3,11 +3,15 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   access,
+  chmod,
   mkdtemp,
   mkdir,
+  open,
   realpath,
+  rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
@@ -19,6 +23,7 @@ import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 import { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
+import { restoreScratchTraversal } from './native-scratch.js';
 import { WorkspaceToolError } from './workspace.js';
 
 const request = {
@@ -445,6 +450,37 @@ test('removes scratch storage after a command revokes traversal permissions', as
   assert.equal(result.exitCode, 0);
   await sandbox.close();
   await assert.rejects(access(result.stdout));
+});
+
+test('scratch traversal never follows a descendant replaced after inspection', async (t) => {
+  if (process.platform === 'win32') return;
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-scratch-race-'));
+  const outside = await mkdtemp(join(tmpdir(), 'librechat-code-outside-'));
+  const descendant = join(root, 'locked');
+  const retired = join(root, 'retired');
+  const outsideChild = join(outside, 'child');
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await mkdir(descendant);
+  await mkdir(outsideChild);
+  await chmod(outside, 0o711);
+  await chmod(outsideChild, 0o711);
+  const rootHandle = await open(root, 'r');
+  t.after(() => rootHandle.close());
+  let swapped = false;
+
+  await restoreScratchTraversal(rootHandle, {
+    async afterEntryInspected(_directoryFd, name) {
+      if (name !== 'locked' || swapped) return;
+      swapped = true;
+      await rename(descendant, retired);
+      await symlink(outside, descendant, 'dir');
+    },
+  });
+
+  assert.equal(swapped, true);
+  assert.equal((await stat(outside)).mode & 0o777, 0o711);
+  assert.equal((await stat(outsideChild)).mode & 0o777, 0o711);
 });
 
 const proxyEnvironment = {
