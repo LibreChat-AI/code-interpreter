@@ -47,7 +47,7 @@ function dispatch(workspaceId: string, signal = new AbortController().signal) {
   void promise.catch(() => undefined);
   return promise;
 }
-async function settle(assignment: CodeBridgeAssignment) {
+async function settle(assignment: CodeBridgeAssignment, cleanup = true) {
   await store.acknowledgeLease(
     workerId,
     incarnationId,
@@ -63,7 +63,110 @@ async function settle(assignment: CodeBridgeAssignment) {
     status: 'rejected',
     error: 'fixture clean rejection',
   });
+  if (cleanup)
+    await store.confirmWorkspaceCleanup(workerId, assignment.assignmentId, {
+      protocolVersion: 1,
+      incarnationId,
+      generation: assignment.generation,
+      leaseToken: assignment.leaseToken,
+      status: 'rejected',
+      error: 'local cleanup confirmed',
+    });
 }
+test('committed results retain the root fence until cleanup, including receipt expiry', async () => {
+  await register();
+  const pending = dispatch('a');
+  const assignment = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  await store.acknowledgeLease(
+    workerId,
+    incarnationId,
+    assignment.assignmentId,
+    assignment.generation,
+    assignment.leaseToken,
+  );
+  const intent = {
+    protocolVersion: 1 as const,
+    incarnationId,
+    generation: assignment.generation,
+    leaseToken: assignment.leaseToken,
+    status: 'rejected' as const,
+    error: 'fixture',
+  };
+  await store.settle(workerId, assignment.assignmentId, intent);
+  await pending;
+  const fenceKey = (
+    await redis.keys(
+      `codeapi:bridge:v1:worker:${workerId}:workspace:*:quarantined`,
+    )
+  )[0];
+  expect(await redis.get(fenceKey)).toBe(assignment.assignmentId);
+  await redis.del(
+    `codeapi:bridge:v1:assignment:${assignment.assignmentId}:workspace-fence-owner`,
+  );
+  await expect(
+    store.confirmWorkspaceCleanup(workerId, assignment.assignmentId, intent),
+  ).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+  expect(await redis.get(fenceKey)).toBe(assignment.assignmentId);
+  expect(await redis.ttl(fenceKey)).toBe(-1);
+  const healthy = dispatch('b');
+  const next = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    1,
+  ))!;
+  await settle(next);
+  await healthy;
+});
+test('late quarantine after confirmed cleanup cannot fence a newer assignment', async () => {
+  await register();
+  const first = dispatch('a');
+  const assignment = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  await settle(assignment);
+  await first;
+  const second = dispatch('a');
+  const next = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  await store.settle(
+    workerId,
+    assignment.assignmentId,
+    {
+      protocolVersion: 1,
+      incarnationId,
+      generation: assignment.generation,
+      leaseToken: assignment.leaseToken,
+      status: 'rejected',
+      error: 'lost cleanup response',
+    },
+    undefined,
+    undefined,
+    true,
+  );
+  await settle(next);
+  await expect(second).resolves.toMatchObject({ status: 'rejected' });
+});
 test('store routes simultaneous roots through separate acknowledged slots', async () => {
   await register();
   const a = dispatch('a');
@@ -283,8 +386,8 @@ test('post-settlement fences are authenticated, idempotent, and invalidated by r
     undefined,
     0,
   ))!;
-  await settle(assignment);
-  await pending; // Normal dispatch cleanup has removed the full assignment.
+  await settle(assignment, false);
+  await pending; // Result is committed, but local cleanup remains outstanding.
   const receiptKey = `codeapi:bridge:v1:assignment:${assignment.assignmentId}:workspace-fence-owner`;
   expect(await redis.ttl(receiptKey)).toBeGreaterThan(0);
   expect(

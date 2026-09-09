@@ -564,6 +564,12 @@ and a server-side fence for that root. Healthy roots can continue. The worker
 does not replay the failed command. A guard-cleanup failure after settlement fences
 the root independently without replacing the committed result. Expiring ownership
 receipts exclude command payloads; explicit reset invalidates old fence requests.
+The server releases a root only after result finalization **and** explicit local
+cleanup confirmation. Local guard cleanup has a five-second bound; an expired
+receipt never implies a clean root. Control receipt delivery retries three times.
+If delivery remains unavailable, that lease lane stops while healthy lanes keep
+running; inspect/reset the affected root and restart the worker to restore capacity.
+Reset-only registration stays unready and cannot attract new assignments.
 To recover a quarantined native root:
 
 1. Stop the worker and inspect or restore the affected directory.

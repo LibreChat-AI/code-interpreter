@@ -11,6 +11,41 @@ const capabilities: BridgeWorkspaceToolCapabilities = {
   operations: ['read_file'],
   workspaces: [{ id: 'a' }, { id: 'b' }],
 };
+test('maintenance registration never advertises readiness or starts leasing', async () => {
+  const paths: string[] = [];
+  const worker = new BridgeWorker({
+    codeApiUrl: 'http://localhost:1',
+    token: 'fixture',
+    workerId: 'worker',
+    incarnationId: 'incarnation-maintenance',
+    sandboxEndpoint: 'http://localhost:2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'native-srt',
+      runtimes: [],
+    },
+    fetchImpl: async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      paths.push(path);
+      assert.equal(
+        JSON.parse(String(init?.body)).capabilities.requiresReadyConfirmation,
+        true,
+      );
+      return Response.json({
+        protocolVersion: 1,
+        workerId: 'worker',
+        incarnationId: 'incarnation-maintenance',
+        registrationGeneration: 1,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60000,
+      });
+    },
+  });
+  await worker.registerForMaintenance();
+  assert.equal(paths.length, 1);
+  assert.ok(paths[0].endsWith('/register'));
+  await assert.rejects(worker.run(), /maintenance/i);
+});
 for (const receipt of [undefined, 1]) {
   test(`worker keeps serial lease wire format for receipt ${receipt}`, async () => {
     const controller = new AbortController();

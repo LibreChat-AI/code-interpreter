@@ -964,7 +964,7 @@ async function run(
     const resetNativeRoot = option(args, '--reset-workspace-quarantine');
     if (resetNativeRoot != null) {
       await worker.refreshCredential(controller.signal);
-      await worker.register(controller.signal);
+      await worker.registerForMaintenance(controller.signal);
       await worker.resetNativeWorkspace(resetNativeRoot, controller.signal);
       process.stdout.write(
         `librechat-code: reset acknowledged for native workspace ${resetNativeRoot}\n`,

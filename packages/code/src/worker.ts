@@ -41,6 +41,7 @@ export interface BridgeWorkerOptions {
   leaseTransportGraceMs?: number;
   registrationTransportTimeoutMs?: number;
   leaseAckTransportTimeoutMs?: number;
+  workspaceCleanupTimeoutMs?: number;
   resetTransportTimeoutMs?: number;
   cancellationPollIntervalMs?: number;
   cancellationTransportTimeoutMs?: number;
@@ -349,6 +350,7 @@ export class BridgeWorker {
   private activeCapabilities: BridgeWorkerCapabilities;
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
+  private maintenanceOnly = false;
   private mutationGuardArmed = false;
   private readonly quarantinedWorkspaces = new Set<string>();
   private readonly activeWorkspaceAssignments = new Map<
@@ -453,6 +455,22 @@ export class BridgeWorker {
     return await this.registerWithPolicy(signal, false);
   }
 
+  async registerForMaintenance(
+    signal?: AbortSignal,
+  ): Promise<BridgeWorkerRegistrationResponse> {
+    if (
+      this.lastRegisteredAtMs !== 0 ||
+      this.registrationInFlight != null ||
+      this.concurrentRunning
+    ) {
+      throw new BridgeProtocolError(
+        'Maintenance registration requires a fresh worker',
+      );
+    }
+    this.maintenanceOnly = true;
+    return this.register(signal);
+  }
+
   private async registerWithPolicy(
     signal: AbortSignal | undefined,
     allowActiveMutation: boolean,
@@ -514,7 +532,9 @@ export class BridgeWorker {
             protocolVersion: BRIDGE_PROTOCOL_VERSION,
             workerId: this.options.workerId,
             incarnationId: this.incarnationId,
-            capabilities,
+            capabilities: this.maintenanceOnly
+              ? { ...capabilities, requiresReadyConfirmation: true }
+              : capabilities,
           },
           registrationController.signal,
         );
@@ -582,7 +602,10 @@ export class BridgeWorker {
     this.registrationTtlMs = registration.leaseTtlMs;
     this.activeCapabilities = this.registrationCapabilities;
     await this.options.onRegistered?.(registration);
-    if (this.options.capabilities.requiresReadyConfirmation === true) {
+    if (
+      !this.maintenanceOnly &&
+      this.options.capabilities.requiresReadyConfirmation === true
+    ) {
       await this.confirmReady(registration, signal);
     }
     this.lastRegisteredAtMs = registrationStartedAtMs;
@@ -820,6 +843,10 @@ export class BridgeWorker {
   }
 
   async run(signal?: AbortSignal): Promise<void> {
+    if (this.maintenanceOnly)
+      throw new BridgeProtocolError(
+        'Maintenance workers cannot execute assignments',
+      );
     let reconnectAttempt = 0;
     while (!signal?.aborted) {
       try {
@@ -889,24 +916,24 @@ export class BridgeWorker {
             // The durable local guard is retained. A distinct receipt tells
             // Code API to release this slot without declaring the root clean.
             try {
-              await this.timedRequest(
-                this.assignmentUrl(assignment, 'quarantine'),
-                {
-                  protocolVersion: BRIDGE_PROTOCOL_VERSION,
-                  incarnationId: this.incarnationId,
-                  generation: assignment.generation,
-                  leaseToken: assignment.leaseToken,
-                  status: 'rejected',
-                  error:
-                    'Workspace quarantined after an uncertain execution or settlement; inspect it before resetting.',
-                },
-                this.options.leaseAckTransportTimeoutMs ??
-                  DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+              await this.reportWorkspaceOwnership(
+                assignment,
+                'quarantine',
+                controller.signal,
               );
               this.options.onError?.(error);
               continue;
             } catch (quarantineError) {
-              fail(quarantineError);
+              // The durable server fence remains until explicit cleanup/reset.
+              // An unavailable control receipt must not cancel healthy roots.
+              if (
+                quarantineError instanceof BridgeProtocolError &&
+                (quarantineError.status === 401 ||
+                  quarantineError.status === 403 ||
+                  quarantineError.code === 'WORKER_FENCED')
+              )
+                fail(quarantineError);
+              else this.options.onError?.(quarantineError);
               return;
             }
           }
@@ -1597,7 +1624,31 @@ export class BridgeWorker {
       }
       if (workspaceMutationArmed) {
         try {
-          await guard!.clear(assignment.assignmentId);
+          if (assignment.workspaceLeaseSlot === undefined) {
+            await guard!.clear(assignment.assignmentId);
+          } else {
+            let timer!: ReturnType<typeof setTimeout>;
+            try {
+              await Promise.race([
+                guard!.clear(assignment.assignmentId),
+                new Promise<never>((_resolve, reject) => {
+                  timer = setTimeout(
+                    () =>
+                      reject(new Error('Workspace guard cleanup timed out')),
+                    Math.min(
+                      5000,
+                      Math.max(
+                        1,
+                        this.options.workspaceCleanupTimeoutMs ?? 5000,
+                      ),
+                    ),
+                  );
+                }),
+              ]);
+            } finally {
+              clearTimeout(timer);
+            }
+          }
           if (
             assignment.executionKind === 'workspace_tool' &&
             isWorkspaceToolRequest(assignment.request)
@@ -1612,6 +1663,20 @@ export class BridgeWorker {
           );
         }
       }
+      if (assignment.workspaceLeaseSlot !== undefined) {
+        try {
+          await this.reportWorkspaceOwnership(
+            assignment,
+            'workspace-cleanup',
+            signal,
+          );
+        } catch (error) {
+          throw new BridgeWorkspaceQuarantinedError(
+            'Workspace cleanup acknowledgement could not be confirmed',
+            error,
+          );
+        }
+      }
     } finally {
       heartbeatController.abort();
       try {
@@ -1621,6 +1686,53 @@ export class BridgeWorker {
         signal?.removeEventListener('abort', abortExecution);
       }
     }
+  }
+
+  private async reportWorkspaceOwnership(
+    assignment: BridgeAssignment,
+    operation: 'quarantine' | 'workspace-cleanup',
+    signal?: AbortSignal,
+  ): Promise<void> {
+    let failure: unknown;
+    for (let attempt = 0; attempt < 3 && !signal?.aborted; attempt++) {
+      try {
+        await this.timedRequest(
+          this.assignmentUrl(assignment, operation),
+          {
+            protocolVersion: BRIDGE_PROTOCOL_VERSION,
+            incarnationId: this.incarnationId,
+            generation: assignment.generation,
+            leaseToken: assignment.leaseToken,
+            status: 'rejected',
+            error:
+              operation === 'quarantine'
+                ? 'Workspace requires inspection before reset.'
+                : 'Local workspace cleanup confirmed.',
+          },
+          this.options.leaseAckTransportTimeoutMs ??
+            DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
+          signal,
+        );
+        return;
+      } catch (error) {
+        failure = error;
+        if (
+          error instanceof BridgeProtocolError &&
+          error.status != null &&
+          error.status >= 400 &&
+          error.status < 500 &&
+          error.status !== 408 &&
+          error.status !== 429
+        )
+          throw error;
+        await abortableDelay(100 * (attempt + 1), signal);
+      }
+    }
+    throw (
+      failure ??
+      signal?.reason ??
+      new Error('Workspace ownership reporting aborted')
+    );
   }
 
   private assignmentRemainingMs(assignment: BridgeAssignment): number {
@@ -1768,6 +1880,9 @@ export class BridgeWorker {
             this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
           ),
       );
+      if (assignment.workspaceLeaseSlot !== undefined) {
+        await this.reportWorkspaceOwnership(assignment, 'workspace-cleanup');
+      }
     } finally {
       heartbeatController.abort();
       await heartbeat;

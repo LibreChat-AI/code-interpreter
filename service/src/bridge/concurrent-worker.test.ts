@@ -7,8 +7,17 @@ import { WorkspaceToolError } from '../../../packages/code/src/workspace';
 import type { WorkspaceMutationQuarantine } from '../../../packages/code/src/worker';
 import type { BridgeWorkspaceToolCapabilities } from '../../../packages/code/src/protocol';
 
-for (const failure of ['execution', 'cleanup', 'post-unlink']) {
-  const cleanupFailure = failure !== 'execution';
+for (const failure of [
+  'execution',
+  'cleanup',
+  'post-unlink',
+  'hung-cleanup',
+  'lost-response',
+  'delivery-outage',
+]) {
+  const cleanupFailure = ['cleanup', 'post-unlink', 'hung-cleanup'].includes(
+    failure,
+  );
   test(`concurrent worker isolates ${failure} failure`, async () => {
     const redis = new RedisMock() as unknown as Redis;
     const store = new RedisBridgeStore(redis, 60, 1000, 2);
@@ -26,6 +35,10 @@ for (const failure of ['execution', 'cleanup', 'post-unlink']) {
           pending.add(root);
         },
         async clear() {
+          if (failure === 'hung-cleanup' && root === 'a') {
+            pending.delete(root);
+            await new Promise<void>(() => {});
+          }
           if (failure === 'post-unlink') pending.delete(root);
           if (cleanupFailure && root === 'a')
             throw new Error('injected guard cleanup failure');
@@ -46,6 +59,7 @@ for (const failure of ['execution', 'cleanup', 'post-unlink']) {
     });
     const started = new Set<string>();
     const errors: unknown[] = [];
+    let quarantineAttempts = 0;
     let registered!: () => void;
     const ready = new Promise<void>((resolve) => {
       registered = resolve;
@@ -57,6 +71,7 @@ for (const failure of ['execution', 'cleanup', 'post-unlink']) {
       incarnationId,
       sandboxEndpoint: 'http://sandbox.invalid',
       leaseWaitMs: 50,
+      workspaceCleanupTimeoutMs: 20,
       capabilities: {
         statefulWorkspace: false,
         sandboxProfile: 'native-srt',
@@ -154,7 +169,15 @@ for (const failure of ['execution', 'cleanup', 'post-unlink']) {
                 signal,
               ),
             };
+          } else if (path.endsWith('/workspace-cleanup')) {
+            await store.confirmWorkspaceCleanup(workerId, id, body, signal);
+            result = { protocolVersion: 1, accepted: true };
           } else {
+            if (path.endsWith('/quarantine')) {
+              quarantineAttempts++;
+              if (failure === 'delivery-outage')
+                throw new TypeError('injected transport outage');
+            }
             await store.settle(
               workerId,
               id,
@@ -163,6 +186,12 @@ for (const failure of ['execution', 'cleanup', 'post-unlink']) {
               undefined,
               path.endsWith('/quarantine'),
             );
+            if (
+              path.endsWith('/quarantine') &&
+              failure === 'lost-response' &&
+              quarantineAttempts === 1
+            )
+              throw new TypeError('injected lost response after commit');
             result = { protocolVersion: 1, accepted: true };
           }
         }
@@ -188,21 +217,34 @@ for (const failure of ['execution', 'cleanup', 'post-unlink']) {
           }),
         ),
       );
-      if (!cleanupFailure)
+      if (failure === 'delivery-outage')
+        expect(results[0]).toMatchObject({
+          status: 'rejected',
+          reason: { code: 'ASSIGNMENT_EXPIRED' },
+        });
+      else if (!cleanupFailure)
         expect(results[0]).toMatchObject({
           status: 'fulfilled',
           value: { status: 'rejected' },
         });
       else if (results[0].status === 'fulfilled')
-        expect(results[0].value).toMatchObject({ status: 'fulfilled', result: { stdout: 'completed' } });
-      else expect(results[0].reason).toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
+        expect(results[0].value).toMatchObject({
+          status: 'fulfilled',
+          result: { stdout: 'completed' },
+        });
+      else
+        expect(results[0].reason).toMatchObject({
+          code: 'WORKSPACE_QUARANTINED',
+        });
       expect(results[1]).toMatchObject({
         status: 'fulfilled',
         value: { status: 'fulfilled' },
       });
-      for (let i = 0; i < 100 && errors.length === 0; i++)
+      for (let i = 0; i < 300 && errors.length === 0; i++)
         await new Promise((resolve) => setTimeout(resolve, 5));
       expect(errors.length).toBe(1);
+      if (failure === 'lost-response') expect(quarantineAttempts).toBe(2);
+      if (failure === 'delivery-outage') expect(quarantineAttempts).toBe(3);
       await expect(
         store.dispatchWorkspaceTool({
           workerId,
@@ -215,7 +257,12 @@ for (const failure of ['execution', 'cleanup', 'post-unlink']) {
             command: 'must not execute',
           },
         }),
-      ).rejects.toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
+      ).rejects.toMatchObject({
+        code:
+          failure === 'delivery-outage'
+            ? 'ASSIGNMENT_EXPIRED'
+            : 'WORKSPACE_QUARANTINED',
+      });
       await expect(
         store.dispatchWorkspaceTool({
           workerId,
@@ -229,7 +276,9 @@ for (const failure of ['execution', 'cleanup', 'post-unlink']) {
           },
         }),
       ).resolves.toMatchObject({ status: 'fulfilled' });
-      expect([...pending]).toEqual(failure === 'post-unlink' ? [] : ['a']);
+      expect([...pending]).toEqual(
+        ['post-unlink', 'hung-cleanup'].includes(failure) ? [] : ['a'],
+      );
       expect(started.size).toBe(2);
     } catch (error) {
       throw new AggregateError(

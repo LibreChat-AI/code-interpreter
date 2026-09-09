@@ -1523,7 +1523,7 @@ export class RedisBridgeStore {
       "if redis.call('GET', KEYS[#KEYS]) ~= ARGV[7] then return -4 end",
       'redis.call(\'SET\', KEYS[2], ARGV[1], \"EX\", ARGV[2])',
       "if redis.call('GET', KEYS[3]) == ARGV[3] then redis.call('DEL', KEYS[3], KEYS[4]) end",
-      'if ARGV[6] == "1" and ARGV[4] == "rejected" then',
+      'if ARGV[6] == "1" and ARGV[4] == "rejected" and ARGV[8] ~= "1" then',
       "  redis.call('DEL', KEYS[6])",
       'end',
       'return 1',
@@ -1541,6 +1541,7 @@ export class RedisBridgeStore {
           identityId ?? '',
           hasWorkspace ? '1' : '0',
           settlement.incarnationId,
+          assignment.workspaceLeaseSlot === undefined ? '0' : '1',
         ),
         signal,
         'Bridge settlement commit',
@@ -1582,6 +1583,7 @@ export class RedisBridgeStore {
     ) {
       // The dispatcher may already have timed out and finished its cleanup.
       // Release only this settled reservation, retaining a quarantine marker.
+      await this.commitPendingWorkspace(assignment, settlement);
       await this.cleanupWithRetry(workerId, assignmentId, assignment);
     }
   }
@@ -1653,12 +1655,30 @@ export class RedisBridgeStore {
     );
   }
 
+  async confirmWorkspaceCleanup(
+    workerId: string,
+    assignmentId: string,
+    intent: AnyCodeBridgeSettlement,
+    signal?: AbortSignal,
+    identityId?: string,
+  ): Promise<void> {
+    await this.quarantineSettledWorkspace(
+      workerId,
+      assignmentId,
+      intent,
+      signal,
+      identityId,
+      false,
+    );
+  }
+
   private async quarantineSettledWorkspace(
     workerId: string,
     assignmentId: string,
     settlement: AnyCodeBridgeSettlement,
     signal?: AbortSignal,
     identityId?: string,
+    quarantine = true,
   ): Promise<void> {
     // Keep a small, expiring ownership receipt separate from assignment cleanup.
     // A local guard can fail to clear after the result has already committed.
@@ -1699,9 +1719,19 @@ export class RedisBridgeStore {
             "if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end",
             "if (redis.call('GET', KEYS[3]) or '') ~= ARGV[3] then return 0 end",
             "if (redis.call('GET', KEYS[4]) or '0') ~= ARGV[4] then return 0 end",
-            "redis.call('SET', KEYS[5], 'quarantined:' .. ARGV[5])",
+            'if ARGV[8] == "1" then',
+            // A completed cleanup receipt is terminal: a lost response must
+            // not let a late quarantine overwrite a newer root owner.
+            "  if redis.call('HGET', KEYS[1], 'localCleanup') == '1' and redis.call('HGET', KEYS[1], 'resultCommitted') == '1' then return 1 end",
+            "  redis.call('SET', KEYS[5], 'quarantined:' .. ARGV[5])",
             // Never replace a committed result. Before settlement, terminate the waiter.
-            "redis.call('SET', KEYS[6], ARGV[6], 'EX', ARGV[7], 'NX')",
+            "  redis.call('SET', KEYS[6], ARGV[6], 'EX', ARGV[7], 'NX')",
+            'else',
+            "  local fence = redis.call('GET', KEYS[5])",
+            "  if fence and string.sub(fence, 1, 12) == 'quarantined:' then return 0 end",
+            "  redis.call('HSET', KEYS[1], 'localCleanup', '1')",
+            "  if redis.call('HGET', KEYS[1], 'resultCommitted') == '1' and fence == ARGV[5] then redis.call('DEL', KEYS[5]) end",
+            'end',
             "if redis.call('GET', KEYS[7]) == ARGV[5] then redis.call('DEL', KEYS[7]) end",
             "if redis.call('GET', KEYS[8]) == ARGV[5] then redis.call('DEL', KEYS[8]) end",
             'return 1',
@@ -1730,6 +1760,7 @@ export class RedisBridgeStore {
           assignmentId,
           JSON.stringify(settlement),
           assignmentTtlSeconds(Date.parse(receipt.expiresAt)),
+          quarantine ? '1' : '0',
         ),
         signal,
         'Workspace quarantine fence commit',
@@ -2056,6 +2087,35 @@ export class RedisBridgeStore {
     assignment: StoredAssignment,
     settlement: AnyCodeBridgeSettlement,
   ): Promise<void> {
+    if (assignment.workspaceLeaseSlot !== undefined) {
+      const committed = Number(
+        await boundedCommand(
+          this.redis.eval(
+            [
+              "if redis.call('EXISTS', KEYS[2]) == 0 then return 0 end",
+              "redis.call('HSET', KEYS[2], 'resultCommitted', '1')",
+              "if redis.call('HGET', KEYS[2], 'localCleanup') == '1' and redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]) end",
+              'return 1',
+            ].join('\n'),
+            2,
+            workspaceQuarantineKey(
+              assignment.workerId,
+              assignment.workspaceFence!,
+            ),
+            workspaceFenceReceiptKey(assignment.assignmentId),
+            assignment.assignmentId,
+          ),
+          this.redisCommandTimeoutMs,
+          'Bridge native workspace result commit',
+        ),
+      );
+      if (committed !== 1)
+        throw new BridgeStoreError(
+          'WORKSPACE_QUARANTINED',
+          'Native workspace cleanup ownership expired',
+        );
+      return;
+    }
     if (
       assignmentWorkspace(assignment) === undefined ||
       settlement.status !== 'fulfilled'
@@ -2144,6 +2204,7 @@ export class RedisBridgeStore {
       'if claimed and not acknowledged then',
       "  redis.call('DEL', KEYS[3], KEYS[4])",
       'end',
+      'if ARGV[3] == "1" and redis.call(\'GET\', KEYS[5]) == ARGV[1] then return -1 end',
       'if queued == 0 and acknowledged and ARGV[2] == "1" and redis.call(\'GET\', KEYS[5]) == ARGV[1] then',
       '  return -1',
       'end',
@@ -2161,6 +2222,7 @@ export class RedisBridgeStore {
           ...keys,
           assignment.assignmentId,
           assignmentWorkspace(assignment) === undefined ? '0' : '1',
+          assignment.workspaceLeaseSlot === undefined ? '0' : '1',
         ),
         this.redisCommandTimeoutMs,
         'Bridge assignment cleanup',

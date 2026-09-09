@@ -641,6 +641,7 @@ router.post(
   [
     '/workers/:workerId/assignments/:assignmentId/settle',
     '/workers/:workerId/assignments/:assignmentId/quarantine',
+    '/workers/:workerId/assignments/:assignmentId/workspace-cleanup',
   ],
   workerAuth,
   asyncRoute(async (req, res) => {
@@ -655,7 +656,11 @@ router.post(
       req.once('aborted', abortSettlement);
       res.once('close', abortSettlement);
       try {
-        await options.store.settle(
+        if (req.path.endsWith('/workspace-cleanup')) {
+          await options.store.confirmWorkspaceCleanup(req.params.workerId, req.params.assignmentId,
+            settlement, settlementController.signal,
+            (res.locals.bridgeWorkerAuthorization as {identityId: string} | undefined)?.identityId);
+        } else await options.store.settle(
           req.params.workerId,
           req.params.assignmentId,
           settlement,
