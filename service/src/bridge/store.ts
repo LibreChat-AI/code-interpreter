@@ -1785,7 +1785,11 @@ export class RedisBridgeStore {
       'if queued == 0 and acknowledged and ARGV[2] == "1" and redis.call(\'GET\', KEYS[5]) == ARGV[1] then',
       '  return -1',
       'end',
-      "return redis.call('DEL', KEYS[1], KEYS[3], KEYS[4])",
+      // A delayed cleanup can outlive its lock. Never erase the next
+      // assignment's claim or acknowledgement when that happens.
+      "if claimed then redis.call('DEL', KEYS[3]) end",
+      "if acknowledged then redis.call('DEL', KEYS[4]) end",
+      "return redis.call('DEL', KEYS[1])",
     ].join('\n');
     const cleanupResult = Number(
       await boundedCommand(
