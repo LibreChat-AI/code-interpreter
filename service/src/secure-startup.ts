@@ -5,6 +5,7 @@ import {
 } from './config';
 import { INTERNAL_SERVICE_TOKEN_ENV } from './internal-service-auth';
 import { isValidBridgeWorkerId } from '../../packages/code/src/protocol';
+import { isBridgeEnabled } from './bridge/enabled';
 
 export class SecureStartupConfigError extends Error {
   constructor(message: string) {
@@ -56,6 +57,7 @@ export function validateApiHardenedConfig(): void {
 
 /** Validate bridge credentials in every process that exposes bridge routes. */
 export function validateApiBridgePolicy(): void {
+  if (!isBridgeEnabled()) return;
   if (env.BRIDGE_TOKEN !== env.BRIDGE_TOKEN.trim()) {
     throw new SecureStartupConfigError(
       'CODEAPI_BRIDGE_TOKEN must not contain surrounding whitespace',
@@ -87,7 +89,7 @@ export function validateApiBridgePolicy(): void {
   requireStrongSecret('CODEAPI_BRIDGE_TOKEN', env.BRIDGE_TOKEN);
   if (env.BRIDGE_AUTH_MODE !== 'paired') {
     throw new SecureStartupConfigError(
-      'Hardened API deployments require CODEAPI_BRIDGE_AUTH_MODE=paired because bridge routes are always exposed',
+      'Hardened API deployments with bridge routes enabled require CODEAPI_BRIDGE_AUTH_MODE=paired',
     );
   }
 }

@@ -29,6 +29,7 @@ const PRINCIPAL_TYPES = new Set<BridgePrincipalType>([
 export type BridgeAuthMode = 'static' | 'paired';
 
 export interface BridgeRouterOptions {
+  enabled?: boolean;
   store: RedisBridgeStore;
   pairings: RedisBridgePairingStore;
   authMode: BridgeAuthMode;
@@ -130,6 +131,7 @@ function isSettlement(value: unknown): value is CodeBridgeSettlement {
 
 export function createBridgeRouter(options: BridgeRouterOptions): Router {
   const router = Router();
+  if (options.enabled === false) return router;
 
   const configuredWorker = (workerId: string): boolean =>
     options.allowDynamicWorkers === true ||

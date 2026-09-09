@@ -25,6 +25,23 @@ afterEach(async () => {
 });
 
 describe('paired bridge HTTP API', () => {
+  test('disabled bridges expose no HTTP routes', async () => {
+    const app = express();
+    app.use('/v1/bridge', createBridgeRouter({
+      enabled: false,
+      store: new RedisBridgeStore(redis),
+      pairings: new RedisBridgePairingStore(redis),
+      authMode: 'static',
+      adminToken: '',
+    }));
+    server = createServer(app);
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/bridge/workers/test/status`);
+    expect(response.status).toBe(404);
+  });
+
   test('reports authenticated worker readiness without exposing identity or binding data', async () => {
     const store = new RedisBridgeStore(redis);
     const app = express();
