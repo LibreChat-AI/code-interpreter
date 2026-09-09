@@ -1426,7 +1426,6 @@ export class RedisBridgeStore {
       signal,
       'Bridge settlement existing read',
     );
-    if (existingSettlement === serializedSettlement) return;
     if (
       existingSettlement != null &&
       existingSettlement !== serializedSettlement
@@ -1441,6 +1440,12 @@ export class RedisBridgeStore {
       signal,
       'Bridge settlement assignment read',
     );
+    if (
+      existingSettlement === serializedSettlement &&
+      (assignment?.workspaceLeaseSlot === undefined ||
+        settlement.status !== 'rejected')
+    )
+      return;
     if (assignment == null) {
       if (existingSettlement === serializedSettlement) return;
       throw new BridgeStoreError(

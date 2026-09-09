@@ -13,6 +13,7 @@ for (const failure of [
   'post-unlink',
   'hung-cleanup',
   'lost-response',
+  'all-responses-lost',
   'delivery-outage',
 ]) {
   const cleanupFailure = ['cleanup', 'post-unlink', 'hung-cleanup'].includes(
@@ -58,6 +59,7 @@ for (const failure of [
       startBoth = resolve;
     });
     const started = new Set<string>();
+    let failedRootExecutions = 0;
     const errors: unknown[] = [];
     let quarantineAttempts = 0;
     let registered!: () => void;
@@ -88,6 +90,7 @@ for (const failure of [
         capabilities,
         mutationFailuresAreAtomic: true,
         async execute(request) {
+          if (request.workspaceId === 'a') failedRootExecutions++;
           started.add(request.workspaceId);
           if (started.size === 2) startBoth();
           await bothStarted;
@@ -188,8 +191,8 @@ for (const failure of [
             );
             if (
               path.endsWith('/quarantine') &&
-              failure === 'lost-response' &&
-              quarantineAttempts === 1
+              ((failure === 'lost-response' && quarantineAttempts === 1) ||
+                failure === 'all-responses-lost')
             )
               throw new TypeError('injected lost response after commit');
             result = { protocolVersion: 1, accepted: true };
@@ -242,9 +245,13 @@ for (const failure of [
       });
       for (let i = 0; i < 300 && errors.length === 0; i++)
         await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(errors.length).toBe(1);
+      if (failure === 'delivery-outage')
+        expect(errors.length).toBeGreaterThanOrEqual(1);
+      else expect(errors.length).toBe(1);
       if (failure === 'lost-response') expect(quarantineAttempts).toBe(2);
-      if (failure === 'delivery-outage') expect(quarantineAttempts).toBe(3);
+      if (failure === 'delivery-outage')
+        expect(quarantineAttempts).toBeGreaterThanOrEqual(3);
+      if (failure === 'all-responses-lost') expect(quarantineAttempts).toBe(3);
       await expect(
         store.dispatchWorkspaceTool({
           workerId,
@@ -280,6 +287,7 @@ for (const failure of [
         ['post-unlink', 'hung-cleanup'].includes(failure) ? [] : ['a'],
       );
       expect(started.size).toBe(2);
+      expect(failedRootExecutions).toBe(1);
     } catch (error) {
       throw new AggregateError(
         [error, ...errors],

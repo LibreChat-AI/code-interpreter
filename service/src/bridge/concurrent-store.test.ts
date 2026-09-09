@@ -167,6 +167,71 @@ test('late quarantine after confirmed cleanup cannot fence a newer assignment', 
   await settle(next);
   await expect(second).resolves.toMatchObject({ status: 'rejected' });
 });
+test('duplicate rejected settlement retries finalization after the dispatcher leaves', async () => {
+  await register();
+  const controller = new AbortController();
+  const pending = dispatch('a', controller.signal);
+  const assignment = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  await store.acknowledgeLease(
+    workerId,
+    incarnationId,
+    assignment.assignmentId,
+    assignment.generation,
+    assignment.leaseToken,
+  );
+  controller.abort();
+  await pending.catch(() => undefined);
+  const intent = {
+    protocolVersion: 1 as const,
+    incarnationId,
+    generation: assignment.generation,
+    leaseToken: assignment.leaseToken,
+    status: 'rejected' as const,
+    error: 'clean rejection',
+  };
+  const originalEval = redis.eval.bind(redis);
+  let failed = false;
+  redis.eval = ((script: string, ...args: unknown[]) => {
+    if (!failed && script.includes("'resultCommitted', '1'")) {
+      failed = true;
+      return Promise.reject(new Error('injected finalization outage'));
+    }
+    return (originalEval as (...args: unknown[]) => unknown)(script, ...args);
+  }) as typeof redis.eval;
+  try {
+    await expect(
+      store.settle(workerId, assignment.assignmentId, intent),
+    ).rejects.toThrow('injected finalization outage');
+  } finally {
+    redis.eval = originalEval;
+  }
+  expect(failed).toBe(true);
+  await store.settle(workerId, assignment.assignmentId, intent);
+  await store.confirmWorkspaceCleanup(
+    workerId,
+    assignment.assignmentId,
+    intent,
+  );
+  const next = dispatch('a');
+  await settle(
+    (await store.lease(
+      workerId,
+      incarnationId,
+      1000,
+      undefined,
+      undefined,
+      0,
+    ))!,
+  );
+  await expect(next).resolves.toMatchObject({ status: 'rejected' });
+});
 test('store routes simultaneous roots through separate acknowledged slots', async () => {
   await register();
   const a = dispatch('a');

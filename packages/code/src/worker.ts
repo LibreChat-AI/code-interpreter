@@ -931,10 +931,14 @@ export class BridgeWorker {
                 (quarantineError.status === 401 ||
                   quarantineError.status === 403 ||
                   quarantineError.code === 'WORKER_FENCED')
-              )
+              ) {
                 fail(quarantineError);
-              else this.options.onError?.(quarantineError);
-              return;
+                return;
+              }
+              this.options.onError?.(quarantineError);
+              // Keep every advertised slot polled. The root remains fenced,
+              // but a committed receipt may already have released this slot.
+              continue;
             }
           }
           if (controller.signal.aborted) return;

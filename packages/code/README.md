@@ -567,8 +567,9 @@ receipts exclude command payloads; explicit reset invalidates old fence requests
 The server releases a root only after result finalization **and** explicit local
 cleanup confirmation. Local guard cleanup has a five-second bound; an expired
 receipt never implies a clean root. Control receipt delivery retries three times.
-If delivery remains unavailable, that lease lane stops while healthy lanes keep
-running; inspect/reset the affected root and restart the worker to restore capacity.
+If delivery remains unavailable, the root remains fenced while every advertised
+lane keeps polling. Capacity becomes reusable when its owned reservation is
+released or expires; inspect/reset the affected root before using it again.
 Reset-only registration stays unready and cannot attract new assignments.
 To recover a quarantined native root:
 
