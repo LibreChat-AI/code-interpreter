@@ -192,6 +192,38 @@ test('executor cancellation targets the active request and preserves mutation ce
   await sandbox.close();
 });
 
+test('executor ignores a cleanup exemption on non-cancellation failures', async () => {
+  let dispatched!: () => void;
+  const dispatch = new Promise<void>((resolve) => {
+    dispatched = resolve;
+  });
+  const fake = fixture(() => dispatched());
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    { workspaceRoot: '/workspace' },
+    fake.fork,
+  );
+  const execution = sandbox.execute(request);
+  await dispatch;
+  const command = fake.messages.find((message) => message.type === 'execute')!;
+  fake.child.emit('message', {
+    id: command.id,
+    ok: false,
+    code: 'COMMAND_UNAVAILABLE',
+    mutation: true,
+    requiresQuarantine: false,
+  });
+
+  await assert.rejects(
+    execution,
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'COMMAND_UNAVAILABLE' &&
+      error.mutationMayHaveCommitted &&
+      error.requiresQuarantine,
+  );
+  await sandbox.close();
+});
+
 test('executor rejects mismatched results as uncertain and fences subsequent commands', async () => {
   const fake = fixture((child, message) =>
     child.emit('message', {
