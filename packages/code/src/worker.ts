@@ -492,6 +492,13 @@ export class BridgeWorker {
     if (!allowActiveMutation) {
       try {
         await this.options.workspaceMutationQuarantine?.assertAvailable();
+        if (
+          !this.maintenanceOnly &&
+          (this.options.capabilities.workspaceLeaseSlots ?? 1) === 1
+        ) {
+          for (const guard of this.options.workspaceQuarantines?.values() ?? [])
+            await guard.assertAvailable();
+        }
       } catch (error) {
         if (
           error instanceof BridgeProtocolError &&
@@ -595,6 +602,23 @@ export class BridgeWorker {
       );
     }
     this.negotiatedWorkspaceSlots = slots;
+    if (
+      !this.maintenanceOnly &&
+      !allowActiveMutation &&
+      slots === 1 &&
+      (this.options.capabilities.workspaceLeaseSlots ?? 1) > 1
+    ) {
+      try {
+        for (const guard of this.options.workspaceQuarantines?.values() ?? [])
+          await guard.assertAvailable();
+      } catch {
+        throw new BridgeProtocolError(
+          'Serial workspace quarantine state could not be verified',
+          undefined,
+          'WORKER_QUARANTINED',
+        );
+      }
+    }
     const registeredAtMs = Date.parse(registration.registeredAt);
     if (Number.isFinite(registeredAtMs)) {
       this.serverClockOffsetMs = registeredAtMs - registrationStartedAtMs;
@@ -1885,7 +1909,14 @@ export class BridgeWorker {
           ),
       );
       if (assignment.workspaceLeaseSlot !== undefined) {
-        await this.reportWorkspaceOwnership(assignment, 'workspace-cleanup');
+        try {
+          await this.reportWorkspaceOwnership(assignment, 'workspace-cleanup');
+        } catch (error) {
+          throw new BridgeWorkspaceQuarantinedError(
+            'Unexecuted workspace cleanup acknowledgement could not be confirmed',
+            error,
+          );
+        }
       }
     } finally {
       heartbeatController.abort();

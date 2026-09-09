@@ -105,13 +105,32 @@ export class NativeWorkspaceCommandPool {
     signal?: AbortSignal,
   ): Promise<WorkspaceExecuteCommandResult> {
     const entry = await this.allocate(request.workspaceId);
+    let enteredExecutor = false;
     try {
       if (signal?.aborted)
         throw new WorkspaceToolError(
           'Command cancelled before dispatch',
           'EXECUTION_ABORTED',
         );
+      enteredExecutor = true;
       return await entry.sandbox.execute(request, signal);
+    } catch (error) {
+      if (
+        enteredExecutor &&
+        error instanceof WorkspaceToolError &&
+        !error.mutationMayHaveCommitted
+      ) {
+        // Never retry the command here. Retire a failed executor only after
+        // close succeeds, allowing a later assignment to create a fresh child.
+        try {
+          await entry.sandbox.close();
+          if (this.entries.get(request.workspaceId) === entry)
+            this.entries.delete(request.workspaceId);
+        } catch {
+          /* Retain ownership for subsequent cleanup/shutdown. */
+        }
+      }
+      throw error;
     } finally {
       entry.busy = false;
     }

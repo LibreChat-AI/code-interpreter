@@ -11,6 +11,103 @@ const capabilities: BridgeWorkspaceToolCapabilities = {
   operations: ['read_file'],
   workspaces: [{ id: 'a' }, { id: 'b' }],
 };
+for (const requestedSlots of [1, 2]) {
+  test(`mapped quarantine blocks serial readiness with ${requestedSlots} requested slots`, async () => {
+    const paths: string[] = [];
+    const worker = new BridgeWorker({
+      codeApiUrl: 'http://localhost:1',
+      token: 'fixture',
+      workerId: 'worker',
+      incarnationId: 'incarnation-guard',
+      sandboxEndpoint: 'http://localhost:2',
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'native-srt',
+        runtimes: [],
+        workspaceLeaseSlots: requestedSlots,
+        requiresReadyConfirmation: true,
+        workspaceTools: capabilities,
+      },
+      workspaceTools: {
+        capabilities,
+        async execute() {
+          throw new Error('must not execute');
+        },
+      },
+      workspaceQuarantines: new Map([
+        [
+          'a',
+          {
+            async assertAvailable() {
+              throw new Error('retained guard');
+            },
+            async arm() {},
+            async clear() {},
+            async quarantine() {},
+          },
+        ],
+        [
+          'b',
+          {
+            async assertAvailable() {},
+            async arm() {},
+            async clear() {},
+            async quarantine() {},
+          },
+        ],
+      ]),
+      fetchImpl: async (url) => {
+        paths.push(new URL(String(url)).pathname);
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'worker',
+          incarnationId: 'incarnation-guard',
+          registrationGeneration: 1,
+          registeredAt: new Date().toISOString(),
+          leaseTtlMs: 60000,
+          workspaceLeaseSlots: 1,
+        });
+      },
+    });
+    await assert.rejects(worker.register(), { code: 'WORKER_QUARANTINED' });
+    assert.ok(paths.every((path) => path.endsWith('/register')));
+    if (requestedSlots === 1) assert.equal(paths.length, 0);
+  });
+}
+test('clean rejection receipt failure uses lane-local quarantine classification', async () => {
+  const worker = new BridgeWorker({
+    codeApiUrl: 'http://localhost:1',
+    token: 'fixture',
+    workerId: 'worker',
+    sandboxEndpoint: 'http://localhost:2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'fixture',
+      runtimes: [],
+    },
+  });
+  const internals = worker as unknown as {
+    maintainRegistration: () => Promise<void>;
+    settleWithRetry: () => Promise<void>;
+    reportWorkspaceOwnership: () => Promise<void>;
+    rejectUnexecutedAssignment: (
+      assignment: BridgeAssignment,
+      message: string,
+    ) => Promise<void>;
+  };
+  internals.maintainRegistration = async () => {};
+  internals.settleWithRetry = async () => {};
+  internals.reportWorkspaceOwnership = async () => {
+    throw new TypeError('receipt outage');
+  };
+  await assert.rejects(
+    internals.rejectUnexecutedAssignment(
+      { workspaceLeaseSlot: 0 } as BridgeAssignment,
+      'expired',
+    ),
+    { name: 'BridgeWorkspaceQuarantinedError' },
+  );
+});
 test('maintenance registration never advertises readiness or starts leasing', async () => {
   const paths: string[] = [];
   const worker = new BridgeWorker({

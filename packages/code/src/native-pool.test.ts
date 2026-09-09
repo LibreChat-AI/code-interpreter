@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { NativeWorkspaceCommandPool } from './native-pool.js';
+import { WorkspaceToolError } from './workspace.js';
 import type { WorkspaceExecuteCommandRequest } from './protocol.js';
 
 const roots = new Map(
@@ -11,6 +12,47 @@ const request = (workspaceId: string): WorkspaceExecuteCommandRequest => ({
   operation: 'execute_command',
   workspaceId,
   command: 'fixture',
+});
+test('a known-clean executor failure is retired without replaying the command', async () => {
+  let created = 0;
+  let executed = 0;
+  let closed = 0;
+  const pool = new NativeWorkspaceCommandPool(roots, 2, () => {
+    const first = ++created === 1;
+    return {
+      async prepare() {},
+      async close() {
+        closed++;
+      },
+      async execute(req) {
+        executed++;
+        if (first)
+          throw new WorkspaceToolError(
+            'prepare failed',
+            'COMMAND_UNAVAILABLE',
+            false,
+          );
+        return {
+          protocolVersion: 1,
+          operation: 'execute_command',
+          workspaceId: req.workspaceId,
+          stdout: '',
+          stderr: '',
+          exitCode: 0,
+          truncated: false,
+          timedOut: false,
+        };
+      },
+    };
+  });
+  await assert.rejects(pool.execute(request('b')), {
+    code: 'COMMAND_UNAVAILABLE',
+  });
+  assert.equal(executed, 1);
+  assert.equal(closed, 1);
+  await pool.execute(request('b'));
+  assert.equal(created, 2);
+  await pool.close();
 });
 test('native pool reuses roots and evicts only idle processes within its bound', async () => {
   const created: string[] = [];
