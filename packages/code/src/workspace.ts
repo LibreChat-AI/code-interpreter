@@ -176,6 +176,8 @@ export class WorkspaceToolError extends Error {
     message: string,
     public readonly code: WorkspaceToolErrorCode,
     public readonly mutationMayHaveCommitted = false,
+    /** Retain the durable mutation guard when process or write settlement is uncertain. */
+    public readonly requiresQuarantine = mutationMayHaveCommitted,
   ) {
     super(message);
     this.name = 'WorkspaceToolError';

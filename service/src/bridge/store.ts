@@ -23,6 +23,7 @@ import { BridgeWorkspaceSlots } from './slots';
 
 const PREFIX = 'codeapi:bridge:v1';
 const POLL_INTERVAL_MS = 100;
+const CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS = 5_000;
 const DEFAULT_WORKER_TTL_SECONDS = 60;
 const DEFAULT_REDIS_COMMAND_TIMEOUT_MS = 1_000;
 
@@ -1900,6 +1901,55 @@ export class RedisBridgeStore {
       // A failed/aborted poll does not cancel Redis work. Arbitrate with
       // settlement before returning an error, even when the caller is gone.
       pollError = error;
+    }
+    const workspaceRequest =
+      assignment.executionKind === 'workspace_tool' &&
+      isWorkspaceToolRequest(assignment.request)
+        ? assignment.request
+        : undefined;
+    const cancelledMutation =
+      signal.aborted &&
+      workspaceRequest != null &&
+      (workspaceRequest.operation === 'write_file' ||
+        workspaceRequest.operation === 'edit_file' ||
+        workspaceRequest.operation === 'execute_command');
+    if (cancelledMutation) {
+      try {
+        // Keep the acknowledged assignment available long enough for the
+        // worker to terminate its process tree and commit a clean rejection.
+        // Closing it first makes that rejection impossible to acknowledge and
+        // leaves the worker's durable mutation guard armed.
+        await this.cancel(assignment.assignmentId, assignment);
+        // Rejected settlements remain valid after the execution deadline.
+        // Give Stop its own grace so a near-timeout cancellation is not
+        // misclassified as an ambiguous timeout.
+        const cancellationDeadlineAtMs =
+          Date.now() + CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS;
+        let cancellationPollMs = POLL_INTERVAL_MS;
+        while (Date.now() < cancellationDeadlineAtMs) {
+          const raw = await boundedCommand(
+            this.redis.get(settlementKey(assignment.assignmentId)),
+            Math.max(
+              1,
+              Math.min(
+                this.redisCommandTimeoutMs,
+                cancellationDeadlineAtMs - Date.now(),
+              ),
+            ),
+            'Bridge cancelled workspace settlement poll',
+          );
+          if (raw != null) return JSON.parse(raw) as CodeBridgeSettlement;
+          await delay(
+            Math.min(
+              cancellationPollMs,
+              Math.max(0, cancellationDeadlineAtMs - Date.now()),
+            ),
+          );
+          cancellationPollMs = Math.min(cancellationPollMs * 2, 500);
+        }
+      } catch (error) {
+        pollError ??= error;
+      }
     }
     const closeKeys = [
       assignmentKey(assignment.assignmentId),

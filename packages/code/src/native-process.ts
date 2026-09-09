@@ -134,6 +134,7 @@ export class NativeProcessWorkspaceCommandSandbox
         ok?: unknown;
         result?: unknown;
         mutation?: unknown;
+        requiresQuarantine?: unknown;
         code?: unknown;
         errorMessage?: unknown;
         fatal?: unknown;
@@ -156,6 +157,9 @@ export class NativeProcessWorkspaceCommandSandbox
           message.code === 'REGISTRATION_INVALID'
             ? message.code
             : 'COMMAND_UNAVAILABLE';
+        const processTerminationConfirmed =
+          code === 'EXECUTION_ABORTED' &&
+          message.requiresQuarantine === false;
         pending.reject(
           new WorkspaceToolError(
             typeof message.errorMessage === 'string' &&
@@ -164,6 +168,7 @@ export class NativeProcessWorkspaceCommandSandbox
               : 'Native executor request failed',
             code,
             pending.mutation && message.mutation !== false,
+            pending.mutation && !processTerminationConfirmed,
           ),
         );
       }
