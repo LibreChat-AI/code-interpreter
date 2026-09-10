@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { env } from './config';
+import { isBridgeEnabled } from './bridge/enabled';
 import {
   validateApiBridgePolicy,
   validateApiHardenedConfig,
@@ -392,6 +393,23 @@ describe('sandbox backend policy', () => {
 
     env.BRIDGE_AUTH_MODE = 'paired';
     expect(() => validateSandboxBackendPolicy()).not.toThrow();
+  });
+
+  test('hardened HTTP and Lambda APIs start without an unused bridge credential', () => {
+    env.HARDENED_SANDBOX_MODE = true;
+    env.BRIDGE_AUTH_MODE = 'static';
+    env.BRIDGE_DYNAMIC_WORKERS = false;
+    env.BRIDGE_TOKEN = '';
+    env.BRIDGE_WORKER_ID = '';
+    for (const backend of ['http', 'lambda-microvm'] as const) {
+      env.SANDBOX_BACKEND = backend;
+      expect(isBridgeEnabled()).toBe(false);
+      expect(() => validateApiBridgePolicy()).not.toThrow();
+    }
+    env.BRIDGE_AUTH_MODE = 'paired';
+    env.BRIDGE_DYNAMIC_WORKERS = true;
+    expect(isBridgeEnabled()).toBe(true);
+    expect(() => validateApiBridgePolicy()).toThrow('CODEAPI_BRIDGE_TOKEN');
   });
 
   test('API-only hardened bridge validation rejects static worker auth', () => {
