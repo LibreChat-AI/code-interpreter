@@ -1,5 +1,5 @@
 # File Server Dockerfile
-FROM oven/bun:1.3.14 AS base
+FROM oven/bun:1.4.2 AS base
 WORKDIR /app
 
 # Install dependencies
@@ -27,7 +27,7 @@ RUN bun build ./src/worker-server.ts --minify --outdir .build-worker --target bu
 RUN bun build ./src/egress-gateway.ts --minify --outdir .build-egress-gateway --target bun --external '@opentelemetry/*'
 
 # File server production
-FROM oven/bun:1.3.14 AS production
+FROM oven/bun:1.4.2 AS production
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
@@ -35,7 +35,7 @@ COPY --from=builder /app/.build ./.build
 CMD ["bun", "run", ".build/file-server.js"]
 
 # API server (HTTP on port 3112)
-FROM oven/bun:1.3.14 AS api
+FROM oven/bun:1.4.2 AS api
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
@@ -45,7 +45,7 @@ COPY --from=builder /app/src/*.py ./src/
 CMD ["bun", "run", ".build-api/api-server.js"]
 
 # Worker server (job processor, health on port 3113)
-FROM oven/bun:1.3.14 AS worker
+FROM oven/bun:1.4.2 AS worker
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
@@ -54,7 +54,7 @@ COPY --from=builder /app/src/*.py ./src/
 CMD ["bun", "run", ".build-worker/worker-server.js"]
 
 # Egress gateway (sandbox outbound delegation)
-FROM oven/bun:1.3.14 AS egress-gateway
+FROM oven/bun:1.4.2 AS egress-gateway
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules

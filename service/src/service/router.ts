@@ -3,7 +3,7 @@ import busboy from 'busboy';
 import { nanoid } from 'nanoid';
 import { Router } from 'express';
 import type { Response } from 'express';
-import type { Readable } from 'stream';
+import { Readable } from 'stream';
 import type * as t from '../types';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
 import { sessionAuth } from '../middleware/auth';
@@ -42,6 +42,43 @@ const JOB_COMPLETION_WAIT_TIMEOUT_MS = jobCompletionWaitTimeoutMs(
 );
 
 const UPLOAD_TIMEOUT_MS = 30_000;
+
+/**
+ * Streams one busboy file part to the file-server.
+ *
+ * Uses the global `fetch` rather than axios on purpose. axios routes a
+ * stream body through `node:http`'s `ClientRequest`, and on Bun (the
+ * runtime in `Dockerfile.api`) that client can drop the tail of a
+ * chunked request body: every byte is accepted by `write()`, `end()`
+ * is called after the last write, yet the peer receives 32 KiB-800 KiB
+ * less and the file-server stores a short object while reporting
+ * success (reproduced on Bun 1.3.10-1.3.14 with a 20 MiB upload; a
+ * 1 MiB upload is unaffected). Bun's native `fetch` and Node's undici
+ * stream the same body intact. busboy's `limits.fileSize` already caps
+ * the part, so no separate body-length guard is needed here.
+ */
+async function putFileToFileServer(
+  url: string,
+  file: Readable,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+): Promise<t.UploadResult> {
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers,
+    body: Readable.toWeb(file) as unknown as ReadableStream,
+    signal,
+    /* Required by the WHATWG fetch spec for streamed request bodies. */
+    duplex: 'half',
+  } as RequestInit);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(
+      `file-server responded ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`,
+    );
+  }
+  return (await response.json()) as t.UploadResult;
+}
 /* Batch cap sized for skill-priming uploads: a single skill (e.g. pptx)
  * can carry 60+ resource files including .xsd schemas, helper scripts,
  * docs, and Python __init__.py markers. The previous cap of 20 silently
@@ -500,20 +537,16 @@ router.post('/upload', uploadLimiter, async (req: t.AuthenticatedRequest, res: R
         recordSessionOwnership(connection, session_id, sessionKey)
           .then(() => {
             logger.info(`[${INSTANCE_ID}] Upload: Session ID: ${session_id} | User ID: ${userId} | Session key: ${sessionKey}`);
-            return axios.put<t.UploadResult>(
-              `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}`,
-              file,
-              {
-                headers: internalServiceHeaders(putHeaders),
-                maxBodyLength: planFileSize,
-                maxContentLength: planFileSize,
-                signal: abortController.signal,
-              },
-            );
+            return putFileToFileServer(
+          `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}`,
+          file,
+          internalServiceHeaders(putHeaders),
+          abortController.signal,
+        );
           })
-          .then(response => {
+          .then(result => {
             clearTimeout(uploadTimeout);
-            resolve(response.data);
+            resolve(result);
           })
           .catch(error => {
             clearTimeout(uploadTimeout);
@@ -742,18 +775,14 @@ router.post('/upload/batch', uploadLimiter, async (req: t.AuthenticatedRequest, 
           logger.error(`[${INSTANCE_ID}] Batch upload file failed: ${filename} | Session: ${session_id}`, { error: message });
           resolve({ status: 'error', filename, error: message });
         };
-        const forwardFile = (): Promise<void> => axios.put<t.UploadResult>(
+        const forwardFile = (): Promise<void> => putFileToFileServer(
           `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}`,
           file,
-          {
-            headers: internalServiceHeaders(putHeaders),
-            maxBodyLength: planFileSize,
-            maxContentLength: planFileSize,
-            signal: abortController.signal,
-          },
-        ).then(response => {
+          internalServiceHeaders(putHeaders),
+          abortController.signal,
+        ).then(result => {
           clearTimeout(uploadTimeout);
-          resolve({ status: 'success', filename: response.data.filename, fileId: response.data.fileId });
+          resolve({ status: 'success', filename: result.filename, fileId: result.fileId });
         }, resolveUploadFailure);
 
         void ensureSessionRegistered(sessionKey)
