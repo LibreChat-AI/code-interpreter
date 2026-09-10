@@ -1,5 +1,5 @@
 # Tool Call Server Dockerfile
-FROM oven/bun:1.3.14 AS base
+FROM oven/bun:1.4.2 AS base
 WORKDIR /app
 
 # Install dependencies
@@ -13,7 +13,7 @@ COPY service/package.json service/bun.lock /temp/prod/
 RUN cd /temp/prod && bun install --frozen-lockfile --production
 
 # Production stage
-FROM oven/bun:1.3.14 AS production
+FROM oven/bun:1.4.2 AS production
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
