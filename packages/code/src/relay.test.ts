@@ -416,3 +416,68 @@ for (const [status, reason] of [[403, 'scope_mismatch'], [503, 'ledger_conflict'
     }
   });
 }
+
+test('file relay carries version preflights and download preconditions without opening metadata writes', async () => {
+  let requests = 0;
+  const upstream = createServer((req, res) => {
+    requests++;
+    if (req.url?.endsWith('/metadata')) {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ cacheable: true, version: 'opaque-version' }));
+    } else {
+      assert.equal(req.headers['x-codeapi-input-version'], 'opaque-version');
+      res.writeHead(200, { 'X-CodeAPI-Input-Version': 'opaque-version' }).end('bytes');
+    }
+  });
+  const upstreamUrl = await listen(upstream);
+  const relay = await startFileRelay({ host: '127.0.0.1', port: 0, upstreamUrl, token: 'relay-secret', maxBytes: 1024, timeoutMs: 1000 });
+  const headers = { 'X-LibreChat-Code-Relay-Token': 'relay-secret', 'X-CodeAPI-Egress-Grant': 'grant' };
+  try {
+    const metadata = await fetch(`${relay.url}/sessions/s/objects/o/metadata`, { headers });
+    assert.equal(metadata.status, 200);
+    assert.equal((await metadata.json() as { version: string }).version, 'opaque-version');
+    const input = await fetch(`${relay.url}/sessions/s/objects/o`, { headers: { ...headers, 'X-CodeAPI-Input-Version': 'opaque-version' } });
+    assert.equal(input.headers.get('x-codeapi-input-version'), 'opaque-version');
+    assert.equal(await input.text(), 'bytes');
+    const denied = await fetch(`${relay.url}/sessions/s/objects/o/metadata`, { method: 'PUT', headers, body: '' });
+    assert.equal(denied.status, 404);
+    assert.equal(requests, 2);
+  } finally {
+    await relay.close();
+    await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+
+test('file relay forwards bounded manifest POSTs and rejects alternate manifest methods', async () => {
+  let requests = 0;
+  const upstream = createServer(async (req, res) => {
+    requests++;
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/input-manifest');
+    assert.equal(req.headers['x-codeapi-egress-grant'], 'grant');
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), { files: [] });
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ files: [] }));
+  });
+  const upstreamUrl = await listen(upstream);
+  const relay = await startFileRelay({ host: '127.0.0.1', port: 0, upstreamUrl, token: 'relay-secret', maxBytes: 128, timeoutMs: 1000 });
+  const headers = { 'X-LibreChat-Code-Relay-Token': 'relay-secret', 'X-CodeAPI-Egress-Grant': 'grant', 'Content-Type': 'application/json' };
+  try {
+    const response = await fetch(`${relay.url}/input-manifest`, { method: 'POST', headers, body: JSON.stringify({ files: [] }) });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { files: [] });
+    for (const method of ['GET', 'PUT']) {
+      const denied = await fetch(`${relay.url}/input-manifest`, { method, headers });
+      assert.equal(denied.status, 404);
+    }
+    const oversized = await fetch(`${relay.url}/input-manifest`, { method: 'POST', headers, body: 'x'.repeat(129) });
+    assert.equal(oversized.status, 413);
+    assert.equal(requests, 1);
+  } finally {
+    await relay.close();
+    await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()));
+  }
+});

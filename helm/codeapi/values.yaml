@@ -46,6 +46,11 @@ egressGrant:
   ttlSeconds: 900
   ledgerRequired: true
   ledgerTtlGraceSeconds: 300
+  # Enable only after all gateway replicas support compact ledgers.
+  ledgerCompact: false
+  inputManifestMaxFiles: 512
+  inputManifestConcurrency: 8
+  inputManifestTimeoutMs: 10000
 
 # Worker signs sandbox execute requests with this private key; sandbox-runner
 # receives only the public verifier so a runner compromise cannot mint new
@@ -268,6 +273,10 @@ workerSandbox:
     # Defaults to maxConcurrentJobs when unset.
     jobUidCount: null
     workspaceReaperMaxAgeSeconds: 3600
+    httpInputCacheEnabled: false
+    httpInputCacheMaxInflight: 16
+    httpInputCacheMaxObjects: 4096
+    inputCacheMaxBytes: 536870912
 
   # Language runtime package delivery
   packages:
@@ -327,6 +336,8 @@ workerSandbox:
 # FILE SERVER (S3/MinIO integration, stateless)
 # =============================================================================
 fileServer:
+  objectIndexEnabled: false
+  metadataConcurrency: 1
   enabled: true
   replicaCount: 1
 

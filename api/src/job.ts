@@ -42,6 +42,7 @@ import {
   validateFilePath,
   isValidFilePath,
 } from './validation';
+import { fetchCachedHttpInput } from './http-input-cache';
 import { cachedInputResponse, inputCacheKey, openCachedInput } from './session-inputs';
 
 export {
@@ -733,6 +734,7 @@ export class Job {
   private sessionFiles: FileRef[] = [];
   private inheritedRefs: FileRef[] = [];
   private inputFileHashes = new Map<string, InputFileInfo>();
+  private inputManifest = new Map<TFile, unknown>();
   private inputDestinations = new Map<string, TFile>();
   private entryPointName: string | undefined;
   private chmoddedDirs = new Set<string>();
@@ -938,6 +940,7 @@ export class Job {
 
   async prime(): Promise<void> {
     this.inputDestinations.clear();
+    this.inputManifest.clear();
     const requestedDestinations = new Map<string, TFile>();
     for (const file of this.files) {
       validateFilePath(file.name, '/tmp/codeapi-request-validation');
@@ -989,6 +992,8 @@ export class Job {
     if (this.fileEgressBaseUrl() && this.files.some(f => f.id && f.storage_session_id)) {
       await this.autoLoadDirkeep();
     }
+
+    await this.prepareInputManifest();
 
     /* Promise.all rejects as soon as one operation fails, while its siblings
      * keep running. The route's finally then calls cleanup(), which clears the
@@ -1431,6 +1436,38 @@ export class Job {
     throw lastError ?? new Error(`Failed to download input ${file.id}`);
   }
 
+  private async prepareInputManifest(): Promise<void> {
+    if (!config.http_input_cache_enabled || !config.egress_gateway_url) return;
+    const files = this.files.filter(file => file.id && file.storage_session_id);
+    if (!files.length) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), AUTO_LOAD_DIRKEEP_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${this.fileEgressBaseUrl()}/input-manifest`, {
+        method: 'POST', headers: this.fileEgressHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ files: files.map(file => ({
+          sessionHandle: file.storage_session_id, objectHandle: file.id,
+        })) }), signal: controller.signal,
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        return; // Older gateways/relays and transient failures use per-file preflight.
+      }
+      const manifest = await response.json() as { files?: unknown[] };
+      if (!Array.isArray(manifest.files) || manifest.files.length !== files.length) return;
+      manifest.files.forEach((metadata, index) => {
+        if (metadata && typeof metadata === 'object' && !('retry' in metadata)) {
+          this.inputManifest.set(files[index], metadata);
+        }
+      });
+    } catch {
+      // This is an optimization. Individual reads still authorize and report failures.
+    } finally {
+      clearTimeout(timeout);
+      controller.abort();
+    }
+  }
+
   /**
    * Resolves an input object's bytes, preferring the runner-local cache the
    * control plane pushes into on backends whose sandbox cannot reach the file
@@ -1461,6 +1498,24 @@ export class Job {
       throw new Error(
         `Input ${file.id} was not delivered to the sandbox and no file server is reachable`,
       );
+    }
+    if (config.http_input_cache_enabled && config.egress_gateway_url) {
+      const response = await fetchCachedHttpInput({
+        metadata: () => {
+          const metadata = this.inputManifest.get(file);
+          // A version-race retry must obtain a new authorized storage version.
+          this.inputManifest.delete(file);
+          return metadata === undefined
+            ? fetch(`${this.buildDownloadUrl(file)}/metadata`, { headers: this.fileEgressHeaders(), signal })
+            : Promise.resolve(Response.json(metadata));
+        },
+        download: (version, sharedSignal) => fetch(this.buildDownloadUrl(file), {
+          headers: this.fileEgressHeaders({ 'X-CodeAPI-Input-Version': version }), signal: sharedSignal,
+        }),
+        signal, maxBytes: config.input_cache_max_bytes, maxFileBytes: config.max_file_size,
+        maxInflight: config.http_input_cache_max_inflight, maxObjects: config.http_input_cache_max_objects,
+      });
+      if (response) return response;
     }
     return fetch(this.buildDownloadUrl(file), {
       headers: this.fileEgressHeaders(),

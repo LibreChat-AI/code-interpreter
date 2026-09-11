@@ -139,6 +139,9 @@ jobs:
       - name: Install dependencies
         run: bun ci
 
+      - name: Install Redis for ledger integration tests
+        run: sudo apt-get update && sudo apt-get install -y redis-server
+
       - name: Build service
         run: bun run build
 

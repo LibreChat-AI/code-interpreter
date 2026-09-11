@@ -20,6 +20,7 @@ export interface FileRelayHandle {
 }
 
 const OBJECT_PATH = /^\/sessions\/[^/]+\/objects\/[^/]+$/;
+const OBJECT_METADATA_PATH = /^\/sessions\/[^/]+\/objects\/[^/]+\/metadata$/;
 const OBJECT_LIST_PATH = /^\/sessions\/[^/]+\/objects$/;
 const MAX_RELAY_HEADER_BYTES = 512 * 1024;
 const LOCAL_HTTP_HOSTS = new Set([
@@ -160,16 +161,19 @@ export async function startFileRelay(
           response.end('{"status":"ok"}');
           return;
         }
+        const manifestRequest = request.method === 'POST' && requestUrl.pathname === '/input-manifest' && requestUrl.search.length === 0;
         const objectRequest =
           OBJECT_PATH.test(requestUrl.pathname) && requestUrl.search.length === 0;
+        const metadataRequest = request.method === 'GET' &&
+          OBJECT_METADATA_PATH.test(requestUrl.pathname) && requestUrl.search.length === 0;
         const normalizedListRequest =
           request.method === 'GET' &&
           OBJECT_LIST_PATH.test(requestUrl.pathname) &&
           requestUrl.searchParams.size === 1 &&
           requestUrl.searchParams.get('detail') === 'normalized';
         if (
-          (request.method !== 'GET' && request.method !== 'PUT') ||
-          (!objectRequest && !normalizedListRequest)
+          (request.method !== 'GET' && request.method !== 'PUT' && !manifestRequest) ||
+          (!objectRequest && !normalizedListRequest && !metadataRequest && !manifestRequest)
         ) {
           response.writeHead(404).end();
           return;
@@ -191,7 +195,7 @@ export async function startFileRelay(
         }`;
         target.search = requestUrl.search;
         const requestBody =
-          request.method === 'PUT'
+          (request.method === 'PUT' || manifestRequest)
             ? await readRequestBody(request, options.maxBytes)
             : undefined;
         const upstreamResponse = await fetch(target, {
@@ -200,7 +204,9 @@ export async function startFileRelay(
             ...(typeof grant === 'string'
               ? { 'X-CodeAPI-Egress-Grant': grant }
               : {}),
-            ...(request.method === 'PUT'
+            ...(typeof request.headers['x-codeapi-input-version'] === 'string'
+              ? { 'X-CodeAPI-Input-Version': request.headers['x-codeapi-input-version'] } : {}),
+            ...((request.method === 'PUT' || manifestRequest)
               ? {
                   'Content-Length': String(requestBody?.length ?? 0),
                   ...(typeof request.headers['content-type'] === 'string'
@@ -246,6 +252,8 @@ export async function startFileRelay(
           ...(upstreamResponse.headers.has('retry-after')
             ? { 'Retry-After': upstreamResponse.headers.get('retry-after')! }
             : {}),
+          ...(upstreamResponse.headers.has('x-codeapi-input-version')
+            ? { 'X-CodeAPI-Input-Version': upstreamResponse.headers.get('x-codeapi-input-version')! } : {}),
           'Content-Length': String(body.length),
         });
         response.end(body);

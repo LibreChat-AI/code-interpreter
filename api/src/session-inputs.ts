@@ -147,6 +147,8 @@ export interface CachedInputMeta {
    *  ref resolve to the first ref's path — which then overwrote a file the
    *  sandbox had edited. */
   readOnly: boolean;
+  /** HTTP entries require a fresh gateway preflight and cannot satisfy pushed-input probes. */
+  source?: 'http';
 }
 
 export interface CachedInput {
@@ -176,7 +178,9 @@ function parseCachedInputMeta(raw: string): CachedInputMeta | null {
     ) {
       return null;
     }
-    return { readOnly: (parsed as { readOnly: boolean }).readOnly };
+    const source = (parsed as { source?: unknown }).source;
+    if (source !== undefined && source !== 'http') return null;
+    return { readOnly: (parsed as { readOnly: boolean }).readOnly, ...(source === 'http' ? { source } : {}) };
   } catch {
     return null;
   }
@@ -186,8 +190,9 @@ export async function hasCachedInput(
   storageSessionId: string,
   id: string,
   cacheKey?: string,
+  source: 'push' | 'http' = 'push',
 ): Promise<boolean> {
-  const opened = await openCachedInput(storageSessionId, id, cacheKey);
+  const opened = await openCachedInput(storageSessionId, id, cacheKey, source);
   if (!opened) return false;
   await opened.handle.close();
   return true;
@@ -197,6 +202,7 @@ export async function openCachedInput(
   storageSessionId: string,
   id: string,
   cacheKey?: string,
+  source: 'push' | 'http' = 'push',
 ): Promise<CachedInput | null> {
   const key = cacheKey ?? inputCacheKey(storageSessionId, id);
   if (!/^[0-9a-f]{64}$/.test(key)) return null;
@@ -229,7 +235,7 @@ export async function openCachedInput(
       await metaHandle?.close().catch(() => {});
     }
     const meta = raw === null ? null : parseCachedInputMeta(raw);
-    if (!meta) {
+    if (!meta || (meta.source ?? 'push') !== source) {
       logger.warn({ key }, 'Ignoring session input with missing or invalid metadata');
       await handle.close();
       return null;
@@ -325,7 +331,13 @@ async function extractInputArchive(
   };
   compressedGuard.on('error', forwardCompressedError);
   body.once('error', forwardBodyError);
-  body.pipe(compressedGuard).pipe(gunzip);
+  const sourceState = body as NodeJS.ReadableStream & { errored?: Error; destroyed?: boolean };
+  compressedGuard.pipe(gunzip);
+  if (sourceState.errored || sourceState.destroyed) {
+    forwardBodyError(sourceState.errored ?? new Error('Input stream was cancelled before extraction'));
+  } else {
+    body.pipe(compressedGuard);
+  }
 
   let buffered = Buffer.alloc(0);
   let current:
@@ -517,7 +529,10 @@ async function storeCachedInputsOnce(
   body: NodeJS.ReadableStream,
   maxBytes = Number.MAX_SAFE_INTEGER,
   expectedBytes?: number,
+  maxObjects = Number.MAX_SAFE_INTEGER,
 ): Promise<number> {
+  const readable = body as NodeJS.ReadableStream & { errored?: Error; destroyed?: boolean };
+  if (readable.errored || readable.destroyed) throw readable.errored ?? new Error('Input stream was cancelled before cache admission');
   await fsp.mkdir(SESSION_INPUT_CACHE_DIR, { recursive: true, mode: 0o700 });
   const cacheStat = await fsp.lstat(SESSION_INPUT_CACHE_DIR);
   if (!cacheStat.isDirectory() || cacheStat.isSymbolicLink()) {
@@ -571,6 +586,8 @@ async function storeCachedInputsOnce(
       }
     }
 
+    if (keys.length > maxObjects) throw new Error('Input batch exceeds cache object limit');
+    await pruneInputCache(Math.max(0, maxBytes - stagedBytes), maxObjects - keys.length);
     let stored = 0;
     /* Commit sidecars before data. A new key remains a probe miss until both
      * exist; replacing an immutable key can only expose its new validated
@@ -596,6 +613,7 @@ export async function storeCachedInputs(
   body: NodeJS.ReadableStream,
   maxBytes = Number.MAX_SAFE_INTEGER,
   expectedBytes?: number,
+  maxObjects = Number.MAX_SAFE_INTEGER,
 ): Promise<number> {
   /* Concurrent pushes otherwise each budget only its own staging tree and can
    * collectively recreate the same transient disk spike. Queue extraction;
@@ -607,7 +625,7 @@ export async function storeCachedInputs(
   });
   await previous;
   try {
-    return await storeCachedInputsOnce(body, maxBytes, expectedBytes);
+    return await storeCachedInputsOnce(body, maxBytes, expectedBytes, maxObjects);
   } finally {
     release();
   }
@@ -615,7 +633,7 @@ export async function storeCachedInputs(
 
 /** Drops least-recently-used entries until the cache fits `maxBytes`. Eviction
  *  is always safe: a miss simply re-pushes on the next probe. */
-export async function pruneInputCache(maxBytes: number): Promise<void> {
+export async function pruneInputCache(maxBytes: number, maxObjects = Number.MAX_SAFE_INTEGER): Promise<void> {
   const names = await fsp.readdir(SESSION_INPUT_CACHE_DIR).catch(() => [] as string[]);
   const nameSet = new Set(names.filter(name => ENTRY_PATTERN.test(name)));
   const pairs: Array<{ key: string; size: number; atime: number }> = [];
@@ -644,14 +662,16 @@ export async function pruneInputCache(maxBytes: number): Promise<void> {
       await fsp.rm(path.join(SESSION_INPUT_CACHE_DIR, orphan), { force: true }).catch(() => {});
     }
   }
-  if (total <= maxBytes) return;
+  let objects = pairs.length;
+  if (total <= maxBytes && objects <= maxObjects) return;
   pairs.sort((a, b) => a.atime - b.atime);
   for (const pair of pairs) {
-    if (total <= maxBytes) break;
+    if (total <= maxBytes && objects <= maxObjects) break;
     await fsp.rm(path.join(SESSION_INPUT_CACHE_DIR, pair.key), { force: true }).catch(() => {});
     await fsp
       .rm(path.join(SESSION_INPUT_CACHE_DIR, `${pair.key}${META_SUFFIX}`), { force: true })
       .catch(() => {});
     total -= pair.size;
+    objects -= 1;
   }
 }

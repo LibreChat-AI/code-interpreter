@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import RedisMock from 'ioredis-mock';
+import { startTestRedis } from './test/redis';
 import { env } from './config';
 import type { EgressGrantClaims } from './egress-grant';
 import { EgressGrantError } from './egress-grant';
@@ -9,6 +9,9 @@ import {
   ensureEgressLedger,
   releaseEgressUpload,
   reserveEgressUpload,
+  recordEgressRead,
+  recordEgressToolCall,
+  checkEgressGrantActive,
   revokeEgressLedger,
   setEgressLedgerRedisForTest,
 } from './egress-ledger';
@@ -49,26 +52,30 @@ function expectEgressError(fn: () => Promise<unknown>, reason: EgressGrantError[
   );
 }
 
-describe('egress Redis ledger', () => {
-  let redis: InstanceType<typeof RedisMock>;
+describe.each([false, true])('egress Redis ledger compact=%s', compact => {
+  let redis: Awaited<ReturnType<typeof startTestRedis>>;
   let previousRequired: boolean;
+  let previousCompact: boolean;
   let previousMaxFileBytes: number;
   let previousTtlGraceSeconds: number;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     previousRequired = env.EGRESS_LEDGER_REQUIRED;
+    previousCompact = env.EGRESS_LEDGER_COMPACT;
+    env.EGRESS_LEDGER_COMPACT = compact;
     previousMaxFileBytes = env.EGRESS_GATEWAY_MAX_FILE_BYTES;
     previousTtlGraceSeconds = env.EGRESS_LEDGER_TTL_GRACE_SECONDS;
     env.EGRESS_LEDGER_REQUIRED = true;
     env.EGRESS_GATEWAY_MAX_FILE_BYTES = 10;
-    redis = new RedisMock();
+    redis = await startTestRedis();
     setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
   });
 
   afterEach(async () => {
-    await redis.disconnect();
+    await redis.closeTestServer();
     setEgressLedgerRedisForTest(null);
     env.EGRESS_LEDGER_REQUIRED = previousRequired;
+    env.EGRESS_LEDGER_COMPACT = previousCompact;
     env.EGRESS_GATEWAY_MAX_FILE_BYTES = previousMaxFileBytes;
     env.EGRESS_LEDGER_TTL_GRACE_SECONDS = previousTtlGraceSeconds;
   });
@@ -103,7 +110,7 @@ describe('egress Redis ledger', () => {
     );
   });
 
-  test('clears Redis WATCH after rejected mutations so later valid updates can proceed', async () => {
+  test('leaves counters unchanged after a rejected mutation', async () => {
     const claims = grant({ max_output_files: 2, max_requests: 5 });
     await createEgressLedger(claims);
 
@@ -143,7 +150,7 @@ describe('egress Redis ledger', () => {
     await expectEgressError(() => assertEgressGrantActive(claims), 'scope_mismatch');
   });
 
-  test('keeps concurrent WATCH mutations isolated on dedicated Redis connections', async () => {
+  test('accounts concurrent operations without WATCH connections', async () => {
     const claims = grant({
       max_output_files: 16,
       max_requests: 16,
@@ -170,7 +177,7 @@ describe('egress Redis ledger', () => {
       );
 
       const record = await assertEgressGrantActive(claims);
-      expect(duplicateCount).toBe(8);
+      expect(duplicateCount).toBe(0);
       expect(record.request_count).toBe(12);
       expect(record.upload_count).toBe(12);
       expect(record.uploaded_bytes).toBe(12);
@@ -184,4 +191,60 @@ describe('egress Redis ledger', () => {
       redis.duplicate = duplicate as typeof redis.duplicate;
     }
   });
+  test('admits exactly the request budget under a 240-file burst', async () => {
+    const claims = grant({ max_requests: 100, input_files: Array.from({ length: 240 }, (_, i) => ({
+      id: `file_${i}`, session_id: 'inputs', name: `${i}.txt`,
+    })) });
+    await createEgressLedger(claims);
+    const results = await Promise.allSettled(Array.from({ length: 240 }, () => recordEgressRead(claims)));
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(100);
+    expect((await assertEgressGrantActive(claims)).request_count).toBe(100);
+    expect((await assertEgressGrantActive(claims)).read_count).toBe(100);
+  });
+
+  test('rejects wrong execution, expired grants and mutations after revocation', async () => {
+    const claims = grant({ max_requests: 1000 });
+    await createEgressLedger(claims);
+    await expectEgressError(() => recordEgressRead({ ...claims, exec_id: 'wrong' }), 'scope_mismatch');
+    await recordEgressToolCall(claims.grant_id, claims.exec_id);
+    await Promise.all([
+      ...Array.from({ length: 40 }, () => recordEgressRead(claims).catch(() => {})),
+      revokeEgressLedger(claims.grant_id, 'done'),
+    ]);
+    await createEgressLedger(claims);
+    await expectEgressError(() => checkEgressGrantActive(claims), 'scope_mismatch');
+    await expectEgressError(() => recordEgressRead(claims), 'scope_mismatch');
+    const expired = grant({ grant_id: 'expired', exp: nowSeconds() - 1 });
+    await createEgressLedger(expired);
+    await expectEgressError(() => checkEgressGrantActive(expired), 'expired');
+  });
+
+  test('duplicate releases cannot refund another upload or read', async () => {
+    const claims = grant({ max_requests: 10, max_output_files: 2 });
+    await createEgressLedger(claims);
+    await recordEgressRead(claims);
+    await reserveEgressUpload({ grant: claims, fileId: 'a', bytes: 3 });
+    await reserveEgressUpload({ grant: claims, fileId: 'b', bytes: 4 });
+    await Promise.all(Array.from({ length: 10 }, () => releaseEgressUpload({ grant: claims, fileId: 'a', bytes: 3 })));
+    expect(await assertEgressGrantActive(claims)).toMatchObject({
+      request_count: 2, upload_count: 1, uploaded_bytes: 4, output_file_ids: ['b'],
+    });
+  });
+
+  test('format selection affects new grants only and never resets existing state', async () => {
+    const claims = grant();
+    await createEgressLedger(claims);
+    await recordEgressRead(claims);
+    env.EGRESS_LEDGER_COMPACT = !compact;
+    await ensureEgressLedger(claims);
+    await recordEgressRead(claims);
+    expect(await redis.type(`codeapi:egress:grant:${claims.grant_id}`)).toBe(compact ? 'hash' : 'string');
+    expect((await assertEgressGrantActive(claims)).request_count).toBe(2);
+    if (!compact) {
+      const legacy = JSON.parse((await redis.get(`codeapi:egress:grant:${claims.grant_id}`))!);
+      expect(legacy.output_file_ids).toEqual([]);
+      expect(Array.isArray(legacy.input_files)).toBe(true);
+    }
+  });
+
 });

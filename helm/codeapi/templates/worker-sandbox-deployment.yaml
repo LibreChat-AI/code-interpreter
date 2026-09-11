@@ -314,6 +314,14 @@ spec:
               value: {{ (.Values.workerSandbox.sandbox.jobUidCount | default (.Values.workerSandbox.sandbox.maxConcurrentJobs | default (mul (.Values.workerSandbox.launcher.vcpus | default 2) 4))) | quote }}
             - name: SANDBOX_WORKSPACE_REAPER_MAX_AGE_SECONDS
               value: {{ (.Values.workerSandbox.sandbox.workspaceReaperMaxAgeSeconds | default 3600) | quote }}
+            - name: SANDBOX_HTTP_INPUT_CACHE_ENABLED
+              value: {{ .Values.workerSandbox.sandbox.httpInputCacheEnabled | quote }}
+            - name: SANDBOX_HTTP_INPUT_CACHE_MAX_INFLIGHT
+              value: {{ .Values.workerSandbox.sandbox.httpInputCacheMaxInflight | quote }}
+            - name: SANDBOX_HTTP_INPUT_CACHE_MAX_OBJECTS
+              value: {{ .Values.workerSandbox.sandbox.httpInputCacheMaxObjects | quote }}
+            - name: SANDBOX_INPUT_CACHE_MAX_BYTES
+              value: {{ .Values.workerSandbox.sandbox.inputCacheMaxBytes | quote }}
             - name: SANDBOX_EXECUTE_BODY_LIMIT
               value: {{ .Values.workerSandbox.sandbox.executeBodyLimit | quote }}
             - name: SANDBOX_DISABLE_NETWORKING

@@ -1,14 +1,15 @@
 process.env.CODEAPI_EGRESS_GATEWAY_AUTOSTART = 'false';
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test, spyOn } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import crypto from 'crypto';
-import RedisMock from 'ioredis-mock';
+import { startTestRedis } from './test/redis';
 import type { Server } from 'http';
 import type { AddressInfo } from 'net';
 import { env } from './config';
 import {
   assertEgressGrantActive,
   createEgressLedger,
+  revokeEgressLedger,
   setEgressLedgerRedisForTest,
 } from './egress-ledger';
 import {
@@ -435,37 +436,169 @@ describe('egress gateway routes', () => {
     }
   });
 
-  test('reports exhausted ledger conflicts as retryable without forwarding the read', async () => {
-    const redis = new RedisMock();
+  test('batch preflight scopes every entry before reading and preserves order under a concurrency bound', async () => {
+    const files = Array.from({ length: 17 }, (_, i) => ({ id: `file_${i}`, session_id: 'sess_input', name: `file_${i}.csv` }));
+    const grant = claims({ input_files: files });
+    const sid = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+    const body = { files: files.map(file => ({ sessionHandle: sid, objectHandle: objectHandle({ fileId: file.id, name: file.name }) })) };
+    let active = 0, peak = 0, calls = 0;
+    const width = env.INPUT_MANIFEST_CONCURRENCY;
+    env.INPUT_MANIFEST_CONCURRENCY = 3;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls++; active++; peak = Math.max(peak, active);
+      await Bun.sleep(5);
+      active--;
+      const id = String(input).split('/').at(-2)!;
+      return Response.json({ version: crypto.randomUUID(), size: 5, originalFilename: `${id}.csv` });
+    }) as typeof fetch;
+    const redis = await startTestRedis();
+    setEgressLedgerRedisForTest(redis);
     env.EGRESS_LEDGER_REQUIRED = true;
-    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
-    const duplicate = redis.duplicate.bind(redis);
-    const duplication = spyOn(redis, 'duplicate').mockImplementation(() => {
-      const connection = duplicate();
-      const transaction = {
-        set: () => transaction,
-        exec: async () => null,
-      };
-      spyOn(connection, 'multi').mockImplementation(() => transaction as never);
-      return connection;
+    try {
+      await createEgressLedger(grant);
+      const response = await gatewayFetch('/input-manifest', {
+        method: 'POST', headers: { ...grantHeader(grant), 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(200);
+      const result = await response.json() as { files: { cacheKey: string; name: string }[] };
+      expect(result.files.map(file => file.name)).toEqual(files.map(file => file.name));
+      expect(result.files.every(file => /^[0-9a-f]{64}$/.test(file.cacheKey))).toBe(true);
+      expect(calls).toBe(17);
+      expect(peak).toBe(3);
+      expect((await assertEgressGrantActive(grant)).request_count).toBe(1);
+      body.files.push({ sessionHandle: sid, objectHandle: objectHandle({ fileId: 'outside_scope' }) });
+      const denied = await gatewayFetch('/input-manifest', {
+        method: 'POST', headers: { ...grantHeader(grant), 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect(denied.status).toBe(403);
+      expect(calls).toBe(17);
+    } finally {
+      env.INPUT_MANIFEST_CONCURRENCY = width;
+      env.EGRESS_LEDGER_REQUIRED = false;
+      setEgressLedgerRedisForTest(null);
+      await redis.closeTestServer();
+    }
+  });
+
+  test('batch preflight withholds resolved metadata if the grant is revoked during storage access', async () => {
+    const redis = await startTestRedis();
+    setEgressLedgerRedisForTest(redis);
+    env.EGRESS_LEDGER_REQUIRED = true;
+    try {
+      const grant = claims();
+      await createEgressLedger(grant);
+      globalThis.fetch = (async (_input: RequestInfo | URL) => {
+        await revokeEgressLedger(grant.grant_id!, 'test revocation');
+        return Response.json({ version: crypto.randomUUID(), size: 5 });
+      }) as typeof fetch;
+      const response = await gatewayFetch('/input-manifest', {
+        method: 'POST', headers: { ...grantHeader(grant), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: [{ sessionHandle: sessionHandle({ dir: 'read', sessionId: 'sess_input' }), objectHandle: objectHandle({}) }] }),
+      });
+      expect(response.status).toBe(403);
+      expect(await response.text()).not.toContain('cacheKey');
+    } finally {
+      env.EGRESS_LEDGER_REQUIRED = false;
+      setEgressLedgerRedisForTest(null);
+      await redis.closeTestServer();
+    }
+  });
+
+  test('batch deadline aborts in-flight storage requests without starting queued inputs', async () => {
+    const timeout = env.INPUT_MANIFEST_TIMEOUT_MS;
+    const width = env.INPUT_MANIFEST_CONCURRENCY;
+    env.INPUT_MANIFEST_TIMEOUT_MS = 20;
+    env.INPUT_MANIFEST_CONCURRENCY = 1;
+    let started = 0, aborted = 0;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      started++;
+      return new Promise<Response>((_resolve, reject) => {
+        init!.signal!.addEventListener('abort', () => { aborted++; reject(init!.signal!.reason); }, { once: true });
+      });
+    }) as typeof fetch;
+    try {
+      const file = { sessionHandle: sessionHandle({ dir: 'read', sessionId: 'sess_input' }), objectHandle: objectHandle({}) };
+      const response = await gatewayFetch('/input-manifest', {
+        method: 'POST', headers: { ...grantHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: [file, file] }),
+      });
+      expect(response.ok).toBe(false);
+      expect(started).toBe(1);
+      expect(aborted).toBe(1);
+    } finally {
+      env.INPUT_MANIFEST_TIMEOUT_MS = timeout;
+      env.INPUT_MANIFEST_CONCURRENCY = width;
+    }
+  });
+
+  test('batch preflight rejects oversized and malformed manifests before storage access', async () => {
+    for (const files of [Array.from({ length: env.INPUT_MANIFEST_MAX_FILES + 1 }, () => ({})), [null], [{}]]) {
+      const response = await gatewayFetch('/input-manifest', {
+        method: 'POST', headers: { ...grantHeader(), 'Content-Type': 'application/json' }, body: JSON.stringify({ files }),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('preflight authorizes scope and returns version keys scoped to the principal', async () => {
+    const version = crypto.randomUUID();
+    upstreamResponse = Response.json({ version, size: 5, originalFilename: 'inputs/data.csv', readOnly: true });
+    const sid = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+    const object = objectHandle({});
+    const response = await gatewayFetch(`/sessions/${sid}/objects/${object}/metadata`, { headers: grantHeader() });
+    expect(response.status).toBe(200);
+    const metadata = await response.json() as { cacheKey: string; version: string; readOnly: boolean };
+    expect(metadata.cacheKey).toMatch(/^[0-9a-f]{64}$/);
+    expect(metadata.version).toBe(version);
+    expect(metadata.readOnly).toBe(true);
+    expect(upstreamCalls[0].url).toEndWith('/sessions/sess_input/objects/file_123/metadata');
+    const second = await gatewayFetch(`/sessions/${sid}/objects/${object}/metadata`, {
+      headers: grantHeader(claims({ tenant_id: 'another_tenant' })),
     });
+    expect((await second.json() as { cacheKey: string }).cacheKey).not.toBe(metadata.cacheKey);
+    const before = upstreamCalls.length;
+    const denied = await gatewayFetch(`/sessions/${sid}/objects/${objectHandle({ fileId: 'outside_scope' })}/metadata`, {
+      headers: grantHeader(),
+    });
+    expect(denied.status).toBe(403);
+    expect(upstreamCalls).toHaveLength(before);
+  });
+
+  test('preflight denies revoked grants and old metadata stays uncached', async () => {
+    const sid = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+    const object = objectHandle({});
+    upstreamResponse = Response.json({ size: 5 });
+    const legacy = await gatewayFetch(`/sessions/${sid}/objects/${object}/metadata`, { headers: grantHeader() });
+    expect(await legacy.json()).toEqual({ cacheable: false });
+    const redis = await startTestRedis();
+    setEgressLedgerRedisForTest(redis);
+    env.EGRESS_LEDGER_REQUIRED = true;
     try {
       await createEgressLedger(claims());
-      const readSession = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
-      const response = await gatewayFetch(`/sessions/${readSession}/objects?detail=normalized`, {
-        headers: grantHeader(),
-      });
-      expect(response.status).toBe(503);
-      expect(response.headers.get('X-CodeAPI-Error-Code')).toBe('ledger_conflict');
-      expect(response.headers.get('Retry-After')).toBe('1');
-      expect(upstreamCalls).toHaveLength(0);
-      expect((await assertEgressGrantActive(claims())).request_count).toBe(0);
+      await redis.del(`codeapi:egress:grant:${claims().grant_id}`);
+      const before = upstreamCalls.length;
+      const denied = await gatewayFetch(`/sessions/${sid}/objects/${object}/metadata`, { headers: grantHeader() });
+      expect(denied.status).toBe(403);
+      expect(upstreamCalls).toHaveLength(before);
     } finally {
-      duplication.mockRestore();
+      await redis.closeTestServer();
       setEgressLedgerRedisForTest(null);
-      redis.disconnect();
       env.EGRESS_LEDGER_REQUIRED = false;
     }
+  });
+
+  test('forwards the authorized input-version precondition on downloads', async () => {
+    const version = crypto.randomUUID();
+    upstreamResponse = new Response('bytes', { headers: { 'X-CodeAPI-Input-Version': version } });
+    const sid = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+    const response = await gatewayFetch(`/sessions/${sid}/objects/${objectHandle({})}`, {
+      headers: { ...grantHeader(), 'X-CodeAPI-Input-Version': version },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-codeapi-input-version')).toBe(version);
+    expect(new Headers(upstreamCalls[0].init.headers).get('x-codeapi-input-version')).toBe(version);
+    await response.text();
   });
 
   test('lists only scoped objects and injects internal credentials', async () => {
@@ -495,7 +628,7 @@ describe('egress gateway routes', () => {
   });
 
   test('accepts legacy rollout grants and handles while ledger-required mode is enabled', async () => {
-    const redis = new RedisMock();
+    const redis = await startTestRedis();
     env.EGRESS_LEDGER_REQUIRED = true;
     setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
     try {
@@ -526,14 +659,14 @@ describe('egress gateway routes', () => {
       expect(record.max_output_files).toBe(50);
       expect(record.max_requests).toBe(1000);
     } finally {
-      await redis.disconnect();
+      await redis.closeTestServer();
       setEgressLedgerRedisForTest(null);
       env.EGRESS_LEDGER_REQUIRED = false;
     }
   });
 
   test('restores token-only legacy grants and creates ledger state before returning handles', async () => {
-    const redis = new RedisMock();
+    const redis = await startTestRedis();
     env.EGRESS_LEDGER_REQUIRED = true;
     setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
     try {
@@ -569,14 +702,14 @@ describe('egress gateway routes', () => {
       expect(record.grant_id).toBe(legacyGrant.grant_id);
       expect(record.exec_id).toBe('exec_123');
     } finally {
-      await redis.disconnect();
+      await redis.closeTestServer();
       setEgressLedgerRedisForTest(null);
       env.EGRESS_LEDGER_REQUIRED = false;
     }
   });
 
   test('rejects grantless handles for non-legacy grants in ledger-required mode', async () => {
-    const redis = new RedisMock();
+    const redis = await startTestRedis();
     env.EGRESS_LEDGER_REQUIRED = true;
     setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
     try {
@@ -593,7 +726,7 @@ describe('egress gateway routes', () => {
       expect(response.headers.get('X-CodeAPI-Error-Code')).toBe('scope_mismatch');
       expect(upstreamCalls).toHaveLength(0);
     } finally {
-      await redis.disconnect();
+      await redis.closeTestServer();
       setEgressLedgerRedisForTest(null);
       env.EGRESS_LEDGER_REQUIRED = false;
     }
@@ -849,7 +982,7 @@ describe('egress gateway routes', () => {
   });
 
   test('rolls back upload reservations when upstream PUT throws', async () => {
-    const redis = new RedisMock();
+    const redis = await startTestRedis();
     env.EGRESS_LEDGER_REQUIRED = true;
     setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
     const grant = claims({ max_output_files: 1, max_requests: 3 });
@@ -894,14 +1027,14 @@ describe('egress gateway routes', () => {
 
       expect(retried.status).toBe(201);
     } finally {
-      await redis.disconnect();
+      await redis.closeTestServer();
       setEgressLedgerRedisForTest(null);
       env.EGRESS_LEDGER_REQUIRED = false;
     }
   });
 
   test('does not roll back ledger state when upload reservation is rejected', async () => {
-    const redis = new RedisMock();
+    const redis = await startTestRedis();
     env.EGRESS_LEDGER_REQUIRED = true;
     setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -933,14 +1066,14 @@ describe('egress gateway routes', () => {
       expect(await upload('bbbbbbbbbbbbbbbbbbbbb')).toBe(403);
       expect(upstreamCalls).toHaveLength(1);
     } finally {
-      await redis.disconnect();
+      await redis.closeTestServer();
       setEgressLedgerRedisForTest(null);
       env.EGRESS_LEDGER_REQUIRED = false;
     }
   });
 
   test('enforces output budgets per turn when grants reuse an output session', async () => {
-    const redis = new RedisMock();
+    const redis = await startTestRedis();
     env.EGRESS_LEDGER_REQUIRED = true;
     setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -989,7 +1122,7 @@ describe('egress gateway routes', () => {
       expect(await upload(secondTurn, 'ddddddddddddddddddddd')).toBe(201);
       expect(await upload(secondTurn, 'eeeeeeeeeeeeeeeeeeeee')).toBe(403);
     } finally {
-      await redis.disconnect();
+      await redis.closeTestServer();
       setEgressLedgerRedisForTest(null);
       env.EGRESS_LEDGER_REQUIRED = false;
     }
