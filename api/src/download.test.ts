@@ -444,6 +444,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     let requests = 0;
     routes.set('/sessions/previous/objects/denied', {
       status,
+      headers: { 'X-CodeAPI-Error-Code': 'scope_mismatch' },
       onRequest: () => { requests++; },
     });
     const job = makeJob([file]);
@@ -454,7 +455,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     expect(await fsp.readdir(tmpDir)).toEqual([]);
   });
 
-  it.each([404, 408, 429, 503])('still retries transient HTTP %i responses', async status => {
+  it.each([403, 404, 408, 429, 503])('still retries transient HTTP %i responses', async status => {
     const file: TFile = { id: 'transient', storage_session_id: 'previous', name: 'ready.txt' };
     let requests = 0;
     const route: Route = {
@@ -480,6 +481,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     for (const file of files) {
       routes.set(`/sessions/previous/objects/${file.id}`, {
         status: 403,
+        headers: { 'X-CodeAPI-Error-Code': 'scope_mismatch' },
         delayMs: file.id === 'file-0' ? 0 : 30,
         onRequest: () => { requests++; },
       });

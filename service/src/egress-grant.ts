@@ -3,6 +3,7 @@ import type { ExecutionManifestClaims, ExecutionManifestInputFile } from './exec
 import type * as t from './types';
 
 export const EGRESS_GRANT_HEADER = 'X-CodeAPI-Egress-Grant';
+export const EGRESS_ERROR_CODE_HEADER = 'X-CodeAPI-Error-Code';
 export const EGRESS_GRANT_VERSION = 1;
 
 const TOKEN_PREFIX = 'ceg1';
@@ -19,7 +20,8 @@ export type EgressGrantErrorReason =
   | 'malformed'
   | 'expired'
   | 'wrong_type'
-  | 'scope_mismatch';
+  | 'scope_mismatch'
+  | 'ledger_conflict';
 
 export class EgressGrantError extends Error {
   readonly reason: EgressGrantErrorReason;
