@@ -240,6 +240,12 @@ export async function startFileRelay(
                 )!,
               }
             : {}),
+          ...(upstreamResponse.headers.has('x-codeapi-error-code')
+            ? { 'X-CodeAPI-Error-Code': upstreamResponse.headers.get('x-codeapi-error-code')! }
+            : {}),
+          ...(upstreamResponse.headers.has('retry-after')
+            ? { 'Retry-After': upstreamResponse.headers.get('retry-after')! }
+            : {}),
           'Content-Length': String(body.length),
         });
         response.end(body);

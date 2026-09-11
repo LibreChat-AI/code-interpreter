@@ -55,6 +55,7 @@ function makeRuntime(): Runtime {
 function makeJob(files: TFile[] = [], session?: SessionWorkspace): Job {
   return new Job({
     session_id: 'test-session',
+    egress_grant: 'test-grant',
     runtime: makeRuntime(),
     files,
     args: [],
@@ -456,6 +457,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
   });
 
   it.each([403, 404, 408, 429, 503])('still retries transient HTTP %i responses', async status => {
+    config.egress_gateway_url = `http://127.0.0.1:${serverPort}`;
     const file: TFile = { id: 'transient', storage_session_id: 'previous', name: 'ready.txt' };
     let requests = 0;
     const route: Route = {
@@ -470,6 +472,41 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     await expect(job.downloadAndWriteFile(file, 5, 1)).resolves.toBe('ready.txt');
     expect(requests).toBe(2);
     expect(await fsp.readFile(path.join(tmpDir, 'ready.txt'), 'utf8')).toBe('ready');
+  });
+
+  it('does not retry an unclassified direct file-server denial', async () => {
+    config.egress_gateway_url = '';
+    let requests = 0;
+    const file: TFile = { id: 'denied', storage_session_id: 'previous', name: 'denied.txt' };
+    routes.set('/sessions/previous/objects/denied', {
+      status: 403, onRequest: () => { requests++; },
+    });
+    const job = makeJob([file]);
+    asInternals(job).submissionDir = tmpDir;
+    await expect(job.downloadAndWriteFile(file, 5, 1)).rejects.toThrow('HTTP error: 403');
+    expect(requests).toBe(1);
+  });
+
+  it.each(['legacy', 'classified', 'direct'])('handles %s marker denials before priming', async mode => {
+    config.egress_gateway_url = mode === 'direct' ? '' : `http://127.0.0.1:${serverPort}`;
+    let requests = 0;
+    const route: Route = {
+      status: 403, body: '[]',
+      headers: mode === 'classified' ? { 'X-CodeAPI-Error-Code': 'scope_mismatch' } : {},
+      onRequest: () => { if (++requests === 2) route.status = 200; },
+    };
+    routes.set('/sessions/previous/objects', route);
+    const file: TFile = { id: 'ready', storage_session_id: 'previous', name: 'ready.txt' };
+    routes.set('/sessions/previous/objects/ready', { status: 200, body: 'ready' });
+    const job = makeJob([file], sessionWorkspaceAt(tmpDir, 'marker-retry'));
+    if (mode === 'legacy') {
+      await job.prime();
+      expect(requests).toBe(2);
+      expect(await fsp.readFile(path.join(tmpDir, 'ready.txt'), 'utf8')).toBe('ready');
+    } else {
+      await expect(job.prime()).rejects.toThrow('HTTP error loading .dirkeep markers: 403');
+      expect(requests).toBe(1);
+    }
   });
 
   it('accounts for a denied 240-file batch once and stops queued downloads', async () => {

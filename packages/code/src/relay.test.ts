@@ -381,3 +381,38 @@ test('file relay rejects plaintext remote upstreams', async () => {
     /HTTPS unless it is a local development host/,
   );
 });
+
+for (const [status, reason] of [[403, 'scope_mismatch'], [503, 'ledger_conflict']] as const) {
+  test(`file relay preserves ${reason} classification`, async () => {
+    const upstream = createServer((_req, res) => {
+      res.writeHead(status, {
+        'X-CodeAPI-Error-Code': reason,
+        'Retry-After': '1',
+        'X-Internal-Secret': 'must-not-forward',
+      }).end('rejected');
+    });
+    const upstreamUrl = await listen(upstream);
+    const relay = await startFileRelay({
+      host: '127.0.0.1', port: 0, upstreamUrl, token: 'relay-secret',
+      maxBytes: 1024, timeoutMs: 1000,
+    });
+    try {
+      const response = await fetch(`${relay.url}/sessions/storage-1/objects/file-1`, {
+        headers: {
+          'X-LibreChat-Code-Relay-Token': 'relay-secret',
+          'X-CodeAPI-Egress-Grant': 'grant-1',
+        },
+      });
+      assert.equal(response.status, status);
+      assert.equal(response.headers.get('x-codeapi-error-code'), reason);
+      assert.equal(response.headers.get('retry-after'), '1');
+      assert.equal(response.headers.get('x-internal-secret'), null);
+      assert.equal(await response.text(), 'rejected');
+    } finally {
+      await relay.close();
+      await new Promise<void>((resolve, reject) =>
+        upstream.close(error => error ? reject(error) : resolve()),
+      );
+    }
+  });
+}

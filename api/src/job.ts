@@ -1196,6 +1196,11 @@ export class Job {
     }
   }
 
+  private isLegacyGatewayDenial(response: Response): boolean {
+    return !!config.egress_gateway_url && response.status === 403 &&
+      !response.headers.has(EGRESS_ERROR_CODE_HEADER);
+  }
+
   /**
    * Fetches normalized objects for one inherited session and returns the
    * `.dirkeep` markers belonging to exactly that session. Guards against:
@@ -1219,7 +1224,7 @@ export class Job {
             signal: controller.signal,
           },
         );
-        if (res.status === 503 && attempt < AUTO_LOAD_DIRKEEP_RETRIES) {
+        if ((res.status === 503 || this.isLegacyGatewayDenial(res)) && attempt < AUTO_LOAD_DIRKEEP_RETRIES) {
           await res.body?.cancel().catch(() => {});
           const retryAfterSeconds = Number(res.headers.get('retry-after'));
           await sleep(
@@ -1326,11 +1331,10 @@ export class Job {
 
         if (!response.ok) {
           await response.body?.cancel().catch(() => {});
-          const reason = response.headers.get(EGRESS_ERROR_CODE_HEADER);
           /* Older gateways also used 403 for transient ledger contention.
            * Only classify 403 as permanent when the gateway distinguishes it. */
-          if (response.status === 401 || (response.status === 403 &&
-            (reason === 'scope_mismatch' || reason === 'wrong_type'))) {
+          if (response.status === 401 ||
+            (response.status === 403 && !this.isLegacyGatewayDenial(response))) {
             throw new InputAuthorizationError(response.status);
           }
           throw new Error(`HTTP error: ${response.status}`);
