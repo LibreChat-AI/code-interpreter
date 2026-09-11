@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, spyOn } from 'bun:test';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
@@ -437,6 +437,74 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     expect(writtenName).toBe('你好.txt');
     const contents = await fsp.readFile(path.join(tmpDir, '你好.txt'), 'utf8');
     expect(contents).toBe('hi');
+  });
+
+  it.each([401, 403])('does not retry an HTTP %i authorization denial', async status => {
+    const file: TFile = { id: 'denied', storage_session_id: 'previous', name: 'denied.txt' };
+    let requests = 0;
+    routes.set('/sessions/previous/objects/denied', {
+      status,
+      onRequest: () => { requests++; },
+    });
+    const job = makeJob([file]);
+    asInternals(job).submissionDir = tmpDir;
+
+    await expect(job.downloadAndWriteFile(file, 5, 1)).rejects.toThrow(`HTTP error: ${status}`);
+    expect(requests).toBe(1);
+    expect(await fsp.readdir(tmpDir)).toEqual([]);
+  });
+
+  it.each([404, 408, 429, 503])('still retries transient HTTP %i responses', async status => {
+    const file: TFile = { id: 'transient', storage_session_id: 'previous', name: 'ready.txt' };
+    let requests = 0;
+    const route: Route = {
+      status,
+      body: 'ready',
+      onRequest: () => { if (++requests === 2) route.status = 200; },
+    };
+    routes.set('/sessions/previous/objects/transient', route);
+    const job = makeJob([file]);
+    asInternals(job).submissionDir = tmpDir;
+
+    await expect(job.downloadAndWriteFile(file, 5, 1)).resolves.toBe('ready.txt');
+    expect(requests).toBe(2);
+    expect(await fsp.readFile(path.join(tmpDir, 'ready.txt'), 'utf8')).toBe('ready');
+  });
+
+  it('accounts for a denied 240-file batch once and stops queued downloads', async () => {
+    const files: TFile[] = Array.from({ length: 240 }, (_, index) => ({
+      id: `file-${index}`, storage_session_id: 'previous', name: `file-${index}.txt`,
+    }));
+    let requests = 0;
+    routes.set('/sessions/previous/objects', { status: 200, body: '[]' });
+    for (const file of files) {
+      routes.set(`/sessions/previous/objects/${file.id}`, {
+        status: 403,
+        delayMs: file.id === 'file-0' ? 0 : 30,
+        onRequest: () => { requests++; },
+      });
+    }
+    let dirty = false;
+    const job = makeJob(files, sessionWorkspaceAt(tmpDir, 'batch-test', () => { dirty = true; }));
+    const log = (job as unknown as { log: import('pino').Logger }).log;
+    const errorLog = spyOn(log, 'error');
+    const originalConcurrency = config.prime_concurrency;
+    config.prime_concurrency = 8;
+    try {
+      await expect(job.prime()).rejects.toBeInstanceOf(SessionWorkspaceDirtyError);
+      expect(dirty).toBe(true);
+      expect(requests).toBeGreaterThan(0);
+      expect(requests).toBeLessThanOrEqual(8);
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      expect(errorLog).toHaveBeenCalledWith(expect.objectContaining({
+        inputCount: 240, completed: 0, failed: 1, cancelled: 7, notStarted: 232,
+      }), 'Input preparation batch failed');
+      expect(await fsp.readdir(tmpDir)).toEqual([]);
+    } finally {
+      errorLog.mockRestore();
+      config.prime_concurrency = originalConcurrency;
+      await job.cleanup();
+    }
   });
 
   it('fails when the server keeps 404-ing past the retry cap (no phantom write)', async () => {

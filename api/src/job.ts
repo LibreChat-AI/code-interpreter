@@ -60,6 +60,14 @@ export {
 const AUTO_LOAD_DIRKEEP_TIMEOUT_MS = 10000;
 const AUTO_LOAD_DIRKEEP_RETRIES = 2;
 
+/** Replaying the same sealed grant cannot repair an authorization denial. */
+class InputAuthorizationError extends Error {
+  constructor(status: number) {
+    super(`HTTP error: ${status}`);
+    this.name = 'InputAuthorizationError';
+  }
+}
+
 /**
  * Bridges a `fetch` response body to a Node-stream Readable. The types at the
  * module boundary (Node's `stream/web` vs. lib.dom) don't overlap cleanly,
@@ -993,11 +1001,18 @@ export class Job {
       submissionDir: this.submissionDir,
       identity: this.jobIdentity,
     };
+    const startedAt = performance.now();
+    let started = 0;
+    let completed = 0;
+    let cancelled = 0;
     let firstFailure: { error: unknown } | undefined;
     const runFileOperation = async (operation: () => Promise<void>): Promise<void> => {
+      started++;
       try {
         await operation();
+        completed++;
       } catch (error) {
+        if (firstFailure) cancelled++;
         if (!firstFailure) {
           firstFailure = { error };
           controller.abort(error);
@@ -1031,6 +1046,15 @@ export class Job {
       Array.from({ length: workerCount }, () => runPrimeWorker()),
     );
     if (firstFailure) {
+      this.log.error({
+        inputCount: fileOps.length,
+        completed,
+        failed: 1,
+        cancelled,
+        notStarted: fileOps.length - started,
+        durationMs: Math.round(performance.now() - startedAt),
+        err: firstFailure.error,
+      }, 'Input preparation batch failed');
       if (this.session) {
         /* A sibling may already have atomically replaced its destination. The
          * workspace now matches neither the previous checkpoint nor the full
@@ -1302,6 +1326,9 @@ export class Job {
 
         if (!response.ok) {
           await response.body?.cancel().catch(() => {});
+          if (response.status === 401 || response.status === 403) {
+            throw new InputAuthorizationError(response.status);
+          }
           throw new Error(`HTTP error: ${response.status}`);
         }
 
@@ -1366,11 +1393,10 @@ export class Job {
           try { await fsp.unlink(tempPath); } catch { /* may not exist */ }
           throw abortReason(operation.signal);
         }
-        /* ValidationError is deterministic — a bad Content-Disposition
-         * filename will fail identically on every retry. Abort fast
-         * (cleanup + rethrow) instead of burning ~7.5s on exponential
-         * backoff and surfacing the error as a generic download failure. */
-        if (error instanceof ValidationError) {
+        /* Invalid filenames and authorization denials cannot recover by
+         * replaying the same request. Abort the batch before exponential
+         * backoff amplifies the failure across its remaining files. */
+        if (error instanceof ValidationError || error instanceof InputAuthorizationError) {
           try { await fsp.unlink(tempPath); } catch { /* may not exist */ }
           throw error;
         }
@@ -1383,7 +1409,9 @@ export class Job {
       }
     }
 
-    this.log.error({ fileId: file.id, maxRetries, err: lastError }, 'Failed to download file');
+    if (!context?.signal) {
+      this.log.error({ fileId: file.id, maxRetries, err: lastError }, 'Failed to download file');
+    }
     try { await fsp.unlink(tempPath); } catch { /* may not exist */ }
     throw lastError ?? new Error(`Failed to download input ${file.id}`);
   }
