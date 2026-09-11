@@ -42,6 +42,7 @@ import {
   validateFilePath,
   isValidFilePath,
 } from './validation';
+import { fetchCachedHttpInput } from './http-input-cache';
 import { cachedInputResponse, inputCacheKey, openCachedInput } from './session-inputs';
 
 export {
@@ -1461,6 +1462,17 @@ export class Job {
       throw new Error(
         `Input ${file.id} was not delivered to the sandbox and no file server is reachable`,
       );
+    }
+    if (config.http_input_cache_enabled && config.egress_gateway_url) {
+      const response = await fetchCachedHttpInput({
+        metadata: () => fetch(`${this.buildDownloadUrl(file)}/metadata`, { headers: this.fileEgressHeaders(), signal }),
+        download: (version, sharedSignal) => fetch(this.buildDownloadUrl(file), {
+          headers: this.fileEgressHeaders({ 'X-CodeAPI-Input-Version': version }), signal: sharedSignal,
+        }),
+        signal, maxBytes: config.input_cache_max_bytes, maxFileBytes: config.max_file_size,
+        maxInflight: config.http_input_cache_max_inflight, maxObjects: config.http_input_cache_max_objects,
+      });
+      if (response) return response;
     }
     return fetch(this.buildDownloadUrl(file), {
       headers: this.fileEgressHeaders(),

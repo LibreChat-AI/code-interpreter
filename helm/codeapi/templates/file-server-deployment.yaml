@@ -51,6 +51,10 @@ spec:
               containerPort: {{ .Values.fileServer.service.port }}
               protocol: TCP
           env:
+            - name: CODEAPI_FILE_METADATA_CONCURRENCY
+              value: {{ .Values.fileServer.metadataConcurrency | quote }}
+            - name: CODEAPI_FILE_OBJECT_INDEX_ENABLED
+              value: {{ .Values.fileServer.objectIndexEnabled | quote }}
 {{ include "codeapi.otel.env" (dict "root" . "serviceName" "aiml-codeapi-file-server") | nindent 12 }}
             {{- if $useS3 }}
             # AWS S3 configuration (IRSA or static credentials)

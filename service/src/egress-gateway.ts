@@ -26,7 +26,7 @@ import {
   isSyntheticInternalRequestHeader,
 } from './internal-synthetic';
 import {
-  assertEgressGrantActive,
+  checkEgressGrantActive,
   createEgressLedger,
   ensureEgressLedger,
   pingEgressLedger,
@@ -199,7 +199,7 @@ async function getGrant(req: Request, res: Response): Promise<EgressGrantClaims>
   if (grant.legacy_grant) {
     await ensureEgressLedger(grant);
   }
-  await assertEgressGrantActive(grant);
+  await checkEgressGrantActive(grant);
   return grant;
 }
 
@@ -438,7 +438,7 @@ async function restoreInternalSandboxResult(args: {
   if (grant.legacy_grant) {
     await ensureEgressLedger(grant);
   }
-  await assertEgressGrantActive(grant);
+  await checkEgressGrantActive(grant);
   const restored = restoreSandboxExecuteResult(
     args.result as Parameters<typeof restoreSandboxExecuteResult>[0],
     args.egressGrantToken,
@@ -624,6 +624,35 @@ app.get('/sessions/:sessionHandle/objects', async (req, res) => {
   }
 });
 
+/** Cache preflight is a scoped, budgeted read, never a reusable authorization grant. */
+app.get('/sessions/:sessionHandle/objects/:objectHandle/metadata', async (req, res) => {
+  try {
+    if (Object.keys(req.query).length) return res.status(400).json({ error: 'Metadata query parameters are not supported' });
+    const grant = await getGrant(req, res);
+    const sessionId = openSessionParam(req.params.sessionHandle, grant, 'read');
+    const object = openObjectParam(req.params.objectHandle, grant, sessionId);
+    await recordEgressRead(grant);
+    const upstream = await fetch(forwardUrl(env.EGRESS_GATEWAY_FILE_SERVER_URL,
+      `/sessions/${encodeURIComponent(sessionId)}/objects/${encodeURIComponent(object.id)}/metadata`),
+    { headers: injectTraceHeaders(internalServiceHeaders()) });
+    if (!upstream.ok) return pipeFetchResponse(upstream, res);
+    const metadata = await upstream.json() as { version?: unknown; size?: unknown; originalFilename?: unknown; readOnly?: unknown };
+    if (typeof metadata.version !== 'string' || !/^[0-9a-f-]{36}$/.test(metadata.version) ||
+      !Number.isSafeInteger(metadata.size) || (metadata.size as number) < 0) {
+      return res.json({ cacheable: false });
+    }
+    const name = typeof metadata.originalFilename === 'string' ? metadata.originalFilename : undefined;
+    const readOnly = metadata.readOnly === true;
+    const cacheKey = crypto.createHash('sha256').update(JSON.stringify([
+      'authorized-http-input-v1', grant.tenant_id, grant.user_id, sessionId, object.id,
+      metadata.version, metadata.size, name, readOnly,
+    ])).digest('hex');
+    return res.json({ cacheable: true, cacheKey, version: metadata.version, size: metadata.size, name, readOnly });
+  } catch (error) {
+    return sendEgressError(req, res, error);
+  }
+});
+
 app.get('/sessions/:sessionHandle/objects/:objectHandle', async (req, res) => {
   try {
     if (Object.keys(req.query).length > 0) {
@@ -633,12 +662,16 @@ app.get('/sessions/:sessionHandle/objects/:objectHandle', async (req, res) => {
     const sessionId = openSessionParam(req.params.sessionHandle, grant, 'read');
     const object = openObjectParam(req.params.objectHandle, grant, sessionId);
     await recordEgressRead(grant);
+    const expectedVersion = req.header('x-codeapi-input-version');
+    if (expectedVersion && !/^[0-9a-f-]{36}$/.test(expectedVersion)) {
+      return res.status(400).json({ error: 'Invalid input version' });
+    }
     const upstream = await fetch(
       forwardUrl(
         env.EGRESS_GATEWAY_FILE_SERVER_URL,
         `/sessions/${encodeURIComponent(sessionId)}/objects/${encodeURIComponent(object.id)}`,
       ),
-      { headers: injectTraceHeaders(internalServiceHeaders()) },
+      { headers: injectTraceHeaders(internalServiceHeaders(expectedVersion ? { 'X-CodeAPI-Input-Version': expectedVersion } : {})) },
     );
     const headerOverrides = isOpaqueObjectContentDisposition(
       upstream.headers.get('content-disposition'),

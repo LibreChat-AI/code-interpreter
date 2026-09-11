@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, spyOn
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import { createHash, randomUUID } from 'node:crypto';
+import { SESSION_INPUT_CACHE_DIR } from './session-inputs';
 import * as semver from 'semver';
 import { Job, SessionWorkspaceDirtyError, type TFile } from './job';
 import type { Runtime } from './runtime';
@@ -508,6 +510,48 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
       }
     } finally {
       clearTimeout(timer);
+    }
+  });
+
+  it('reuses versioned bytes in fresh workspaces without bypassing a later denial', async () => {
+    const previousCache = config.http_input_cache_enabled;
+    const version = randomUUID();
+    const cacheKey = createHash('sha256').update(version).digest('hex');
+    const otherDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'codeapi-cache-second-'));
+    config.http_input_cache_enabled = true;
+    config.egress_gateway_url = `http://127.0.0.1:${serverPort}`;
+    let reads = 0;
+    let checks = 0;
+    const meta: Route = { status: 200, body: JSON.stringify({ cacheable: true, cacheKey, version, size: 8, readOnly: false }),
+      onRequest: () => { checks++; },
+    };
+    routes.set('/sessions/previous/objects/cached/metadata', meta);
+    routes.set('/sessions/previous/objects/cached', { status: 200, body: 'original',
+      headers: { 'X-CodeAPI-Input-Version': version },
+      onRequest: request => { reads++; expect(request.headers.get('x-codeapi-input-version')).toBe(version); },
+    });
+    const file: TFile = { id: 'cached', storage_session_id: 'previous', name: 'data.txt', input_cache_key: cacheKey };
+    try {
+      const first = makeJob([file]);
+      asInternals(first).submissionDir = tmpDir;
+      await first.downloadAndWriteFile(file);
+      await fsp.writeFile(path.join(tmpDir, 'data.txt'), 'sandbox changed this');
+      const second = makeJob([file]);
+      asInternals(second).submissionDir = otherDir;
+      await second.downloadAndWriteFile(file);
+      expect(await fsp.readFile(path.join(otherDir, 'data.txt'), 'utf8')).toBe('original');
+      expect(reads).toBe(1);
+      expect(checks).toBe(2);
+      meta.status = 403;
+      meta.headers = { 'X-CodeAPI-Error-Code': 'scope_mismatch' };
+      await expect(second.downloadAndWriteFile(file)).rejects.toThrow('HTTP error: 403');
+      expect(checks).toBe(3);
+      expect(reads).toBe(1);
+    } finally {
+      config.http_input_cache_enabled = previousCache;
+      await fsp.rm(otherDir, { recursive: true, force: true });
+      await fsp.rm(path.join(SESSION_INPUT_CACHE_DIR, cacheKey), { force: true });
+      await fsp.rm(path.join(SESSION_INPUT_CACHE_DIR, `${cacheKey}.json`), { force: true });
     }
   });
 

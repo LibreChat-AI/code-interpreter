@@ -20,6 +20,7 @@ export interface FileRelayHandle {
 }
 
 const OBJECT_PATH = /^\/sessions\/[^/]+\/objects\/[^/]+$/;
+const OBJECT_METADATA_PATH = /^\/sessions\/[^/]+\/objects\/[^/]+\/metadata$/;
 const OBJECT_LIST_PATH = /^\/sessions\/[^/]+\/objects$/;
 const MAX_RELAY_HEADER_BYTES = 512 * 1024;
 const LOCAL_HTTP_HOSTS = new Set([
@@ -162,6 +163,8 @@ export async function startFileRelay(
         }
         const objectRequest =
           OBJECT_PATH.test(requestUrl.pathname) && requestUrl.search.length === 0;
+        const metadataRequest = request.method === 'GET' &&
+          OBJECT_METADATA_PATH.test(requestUrl.pathname) && requestUrl.search.length === 0;
         const normalizedListRequest =
           request.method === 'GET' &&
           OBJECT_LIST_PATH.test(requestUrl.pathname) &&
@@ -169,7 +172,7 @@ export async function startFileRelay(
           requestUrl.searchParams.get('detail') === 'normalized';
         if (
           (request.method !== 'GET' && request.method !== 'PUT') ||
-          (!objectRequest && !normalizedListRequest)
+          (!objectRequest && !normalizedListRequest && !metadataRequest)
         ) {
           response.writeHead(404).end();
           return;
@@ -200,6 +203,8 @@ export async function startFileRelay(
             ...(typeof grant === 'string'
               ? { 'X-CodeAPI-Egress-Grant': grant }
               : {}),
+            ...(typeof request.headers['x-codeapi-input-version'] === 'string'
+              ? { 'X-CodeAPI-Input-Version': request.headers['x-codeapi-input-version'] } : {}),
             ...(request.method === 'PUT'
               ? {
                   'Content-Length': String(requestBody?.length ?? 0),
@@ -246,6 +251,8 @@ export async function startFileRelay(
           ...(upstreamResponse.headers.has('retry-after')
             ? { 'Retry-After': upstreamResponse.headers.get('retry-after')! }
             : {}),
+          ...(upstreamResponse.headers.has('x-codeapi-input-version')
+            ? { 'X-CodeAPI-Input-Version': upstreamResponse.headers.get('x-codeapi-input-version')! } : {}),
           'Content-Length': String(body.length),
         });
         response.end(body);

@@ -16,6 +16,12 @@ const httpRequestDuration = new Histogram({
   buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60],
 });
 
+export const httpInputCacheEvents = new Counter({
+  name: 'codeapi_sandbox_http_input_cache_events_total',
+  help: 'Authorized HTTP input cache events; fills and failures may both occur for one input',
+  labelNames: ['event'] as const,
+});
+
 export const sandboxExecutions = new Counter({
   name: 'codeapi_sandbox_executions_total',
   help: 'Total number of sandbox execution attempts by outcome',

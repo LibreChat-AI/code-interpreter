@@ -122,6 +122,9 @@ export const config = {
   /* Ceiling for the pushed input cache (session-inputs.ts). Eviction is
    * always safe — a miss simply re-pushes on the next probe — so this is a
    * disk guard, not a correctness knob. */
+  http_input_cache_enabled: process.env.SANDBOX_HTTP_INPUT_CACHE_ENABLED === 'true',
+  http_input_cache_max_objects: safeInt(process.env.SANDBOX_HTTP_INPUT_CACHE_MAX_OBJECTS, 4096),
+  http_input_cache_max_inflight: safeInt(process.env.SANDBOX_HTTP_INPUT_CACHE_MAX_INFLIGHT, 16),
   input_cache_max_bytes: safeInt(
     process.env.SANDBOX_INPUT_CACHE_MAX_BYTES,
     512 * 1024 * 1024,
