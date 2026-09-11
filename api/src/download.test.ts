@@ -441,6 +441,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
   });
 
   it.each([401, 403])('does not retry an HTTP %i authorization denial', async status => {
+    config.egress_gateway_url = `http://127.0.0.1:${serverPort}`;
     const file: TFile = { id: 'denied', storage_session_id: 'previous', name: 'denied.txt' };
     let requests = 0;
     routes.set('/sessions/previous/objects/denied', {
@@ -510,6 +511,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
   });
 
   it('accounts for a denied 240-file batch once and stops queued downloads', async () => {
+    config.egress_gateway_url = `http://127.0.0.1:${serverPort}`;
     const files: TFile[] = Array.from({ length: 240 }, (_, index) => ({
       id: `file-${index}`, storage_session_id: 'previous', name: `file-${index}.txt`,
     }));
