@@ -48,6 +48,9 @@ egressGrant:
   ledgerTtlGraceSeconds: 300
   # Enable only after all gateway replicas support compact ledgers.
   ledgerCompact: false
+  inputManifestMaxFiles: 512
+  inputManifestConcurrency: 8
+  inputManifestTimeoutMs: 10000
 
 # Worker signs sandbox execute requests with this private key; sandbox-runner
 # receives only the public verifier so a runner compromise cannot mint new

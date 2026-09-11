@@ -40,6 +40,12 @@ spec:
               value: {{ .Values.hardenedSandboxMode | quote }}
             - name: CODEAPI_EGRESS_LEDGER_REQUIRED
               value: {{ .Values.egressGrant.ledgerRequired | quote }}
+            - name: CODEAPI_INPUT_MANIFEST_MAX_FILES
+              value: {{ .Values.egressGrant.inputManifestMaxFiles | quote }}
+            - name: CODEAPI_INPUT_MANIFEST_CONCURRENCY
+              value: {{ .Values.egressGrant.inputManifestConcurrency | quote }}
+            - name: CODEAPI_INPUT_MANIFEST_TIMEOUT_MS
+              value: {{ .Values.egressGrant.inputManifestTimeoutMs | quote }}
             - name: CODEAPI_EGRESS_LEDGER_COMPACT
               value: {{ .Values.egressGrant.ledgerCompact | quote }}
             - name: CODEAPI_EGRESS_LEDGER_TTL_GRACE_SECONDS

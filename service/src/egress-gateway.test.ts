@@ -9,6 +9,7 @@ import { env } from './config';
 import {
   assertEgressGrantActive,
   createEgressLedger,
+  revokeEgressLedger,
   setEgressLedgerRedisForTest,
 } from './egress-ledger';
 import {
@@ -433,6 +434,111 @@ describe('egress gateway routes', () => {
       setEgressLedgerRedisForTest(null);
       env.EGRESS_LEDGER_REQUIRED = false;
     }
+  });
+
+  test('batch preflight scopes every entry before reading and preserves order under a concurrency bound', async () => {
+    const files = Array.from({ length: 17 }, (_, i) => ({ id: `file_${i}`, session_id: 'sess_input', name: `file_${i}.csv` }));
+    const grant = claims({ input_files: files });
+    const sid = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+    const body = { files: files.map(file => ({ sessionHandle: sid, objectHandle: objectHandle({ fileId: file.id, name: file.name }) })) };
+    let active = 0, peak = 0, calls = 0;
+    const width = env.INPUT_MANIFEST_CONCURRENCY;
+    env.INPUT_MANIFEST_CONCURRENCY = 3;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls++; active++; peak = Math.max(peak, active);
+      await Bun.sleep(5);
+      active--;
+      const id = String(input).split('/').at(-2)!;
+      return Response.json({ version: crypto.randomUUID(), size: 5, originalFilename: `${id}.csv` });
+    }) as typeof fetch;
+    const redis = await startTestRedis();
+    setEgressLedgerRedisForTest(redis);
+    env.EGRESS_LEDGER_REQUIRED = true;
+    try {
+      await createEgressLedger(grant);
+      const response = await gatewayFetch('/input-manifest', {
+        method: 'POST', headers: { ...grantHeader(grant), 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(200);
+      const result = await response.json() as { files: { cacheKey: string; name: string }[] };
+      expect(result.files.map(file => file.name)).toEqual(files.map(file => file.name));
+      expect(result.files.every(file => /^[0-9a-f]{64}$/.test(file.cacheKey))).toBe(true);
+      expect(calls).toBe(17);
+      expect(peak).toBe(3);
+      expect((await assertEgressGrantActive(grant)).request_count).toBe(1);
+      body.files.push({ sessionHandle: sid, objectHandle: objectHandle({ fileId: 'outside_scope' }) });
+      const denied = await gatewayFetch('/input-manifest', {
+        method: 'POST', headers: { ...grantHeader(grant), 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect(denied.status).toBe(403);
+      expect(calls).toBe(17);
+    } finally {
+      env.INPUT_MANIFEST_CONCURRENCY = width;
+      env.EGRESS_LEDGER_REQUIRED = false;
+      setEgressLedgerRedisForTest(null);
+      await redis.closeTestServer();
+    }
+  });
+
+  test('batch preflight withholds resolved metadata if the grant is revoked during storage access', async () => {
+    const redis = await startTestRedis();
+    setEgressLedgerRedisForTest(redis);
+    env.EGRESS_LEDGER_REQUIRED = true;
+    try {
+      const grant = claims();
+      await createEgressLedger(grant);
+      globalThis.fetch = (async () => {
+        await revokeEgressLedger(grant.grant_id!, 'test revocation');
+        return Response.json({ version: crypto.randomUUID(), size: 5 });
+      }) as typeof fetch;
+      const response = await gatewayFetch('/input-manifest', {
+        method: 'POST', headers: { ...grantHeader(grant), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: [{ sessionHandle: sessionHandle({ dir: 'read', sessionId: 'sess_input' }), objectHandle: objectHandle({}) }] }),
+      });
+      expect(response.status).toBe(403);
+      expect(await response.text()).not.toContain('cacheKey');
+    } finally {
+      env.EGRESS_LEDGER_REQUIRED = false;
+      setEgressLedgerRedisForTest(null);
+      await redis.closeTestServer();
+    }
+  });
+
+  test('batch deadline aborts in-flight storage requests without starting queued inputs', async () => {
+    const timeout = env.INPUT_MANIFEST_TIMEOUT_MS;
+    const width = env.INPUT_MANIFEST_CONCURRENCY;
+    env.INPUT_MANIFEST_TIMEOUT_MS = 20;
+    env.INPUT_MANIFEST_CONCURRENCY = 1;
+    let started = 0, aborted = 0;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      started++;
+      return new Promise<Response>((_resolve, reject) => {
+        init!.signal!.addEventListener('abort', () => { aborted++; reject(init!.signal!.reason); }, { once: true });
+      });
+    }) as typeof fetch;
+    try {
+      const file = { sessionHandle: sessionHandle({ dir: 'read', sessionId: 'sess_input' }), objectHandle: objectHandle({}) };
+      const response = await gatewayFetch('/input-manifest', {
+        method: 'POST', headers: { ...grantHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: [file, file] }),
+      });
+      expect(response.ok).toBe(false);
+      expect(started).toBe(1);
+      expect(aborted).toBe(1);
+    } finally {
+      env.INPUT_MANIFEST_TIMEOUT_MS = timeout;
+      env.INPUT_MANIFEST_CONCURRENCY = width;
+    }
+  });
+
+  test('batch preflight rejects oversized and malformed manifests before storage access', async () => {
+    for (const files of [Array.from({ length: env.INPUT_MANIFEST_MAX_FILES + 1 }, () => ({})), [null], [{}]]) {
+      const response = await gatewayFetch('/input-manifest', {
+        method: 'POST', headers: { ...grantHeader(), 'Content-Type': 'application/json' }, body: JSON.stringify({ files }),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(upstreamCalls).toHaveLength(0);
   });
 
   test('preflight authorizes scope and returns version keys scoped to the principal', async () => {

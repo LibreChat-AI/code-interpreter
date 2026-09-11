@@ -447,3 +447,37 @@ test('file relay carries version preflights and download preconditions without o
     await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()));
   }
 });
+
+
+test('file relay forwards bounded manifest POSTs and rejects alternate manifest methods', async () => {
+  let requests = 0;
+  const upstream = createServer(async (req, res) => {
+    requests++;
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/input-manifest');
+    assert.equal(req.headers['x-codeapi-egress-grant'], 'grant');
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), { files: [] });
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ files: [] }));
+  });
+  const upstreamUrl = await listen(upstream);
+  const relay = await startFileRelay({ host: '127.0.0.1', port: 0, upstreamUrl, token: 'relay-secret', maxBytes: 128, timeoutMs: 1000 });
+  const headers = { 'X-LibreChat-Code-Relay-Token': 'relay-secret', 'X-CodeAPI-Egress-Grant': 'grant', 'Content-Type': 'application/json' };
+  try {
+    const response = await fetch(`${relay.url}/input-manifest`, { method: 'POST', headers, body: JSON.stringify({ files: [] }) });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { files: [] });
+    for (const method of ['GET', 'PUT']) {
+      const denied = await fetch(`${relay.url}/input-manifest`, { method, headers });
+      assert.equal(denied.status, 404);
+    }
+    const oversized = await fetch(`${relay.url}/input-manifest`, { method: 'POST', headers, body: 'x'.repeat(129) });
+    assert.equal(oversized.status, 413);
+    assert.equal(requests, 1);
+  } finally {
+    await relay.close();
+    await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()));
+  }
+});
