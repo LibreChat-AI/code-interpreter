@@ -1410,7 +1410,14 @@ export class Job {
         }
         lastError = error instanceof Error ? error : new Error(String(error));
         if (attempt < maxRetries) {
-          const delay = retryDelay * Math.pow(2, attempt - 1);
+          const backoff = retryDelay * Math.pow(2, attempt - 1);
+          const retryAfterSeconds = response?.status === 503
+            ? Number(response.headers.get('retry-after')) : NaN;
+          /* Use the same bounded retry hint as marker discovery, without
+           * shortening exponential backoff or bypassing batch cancellation. */
+          const delay = Number.isFinite(retryAfterSeconds)
+            ? Math.max(backoff, Math.min(1000, Math.max(0, retryAfterSeconds * 1000)))
+            : backoff;
           this.log.warn({ fileId: file.id, attempt, maxRetries, delay, err: lastError }, 'Download failed, retrying');
           await sleep(delay, operation.signal);
         }

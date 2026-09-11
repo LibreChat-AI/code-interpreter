@@ -475,6 +475,42 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     expect(await fsp.readFile(path.join(tmpDir, 'ready.txt'), 'utf8')).toBe('ready');
   });
 
+  it.each([false, true])('honors conflict retry hints with cancellation=%s', async cancel => {
+    config.egress_gateway_url = `http://127.0.0.1:${serverPort}`;
+    const controller = new AbortController();
+    const timestamps: number[] = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const route: Route = {
+      status: 503, body: 'ready',
+      headers: { 'X-CodeAPI-Error-Code': 'ledger_conflict', 'Retry-After': '1' },
+      onRequest: () => {
+        timestamps.push(performance.now());
+        if (timestamps.length === 2) route.status = 200;
+        else if (cancel) timer = setTimeout(() => controller.abort(new Error('cancelled retry')), 25);
+      },
+    };
+    routes.set('/sessions/previous/objects/retry-hint', route);
+    const file: TFile = { id: 'retry-hint', storage_session_id: 'previous', name: 'ready.txt' };
+    const job = makeJob([file]);
+    asInternals(job).submissionDir = tmpDir;
+    try {
+      const result = job.downloadAndWriteFile(file, 5, 1, {
+        submissionDir: tmpDir, identity: fallbackSandboxIdentity(), signal: controller.signal,
+      });
+      if (cancel) {
+        await expect(result).rejects.toThrow('cancelled retry');
+        expect(timestamps).toHaveLength(1);
+        expect(await fsp.readdir(tmpDir)).toEqual([]);
+      } else {
+        await expect(result).resolves.toBe('ready.txt');
+        expect(timestamps).toHaveLength(2);
+        expect(timestamps[1] - timestamps[0]).toBeGreaterThanOrEqual(900);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
   it('does not retry an unclassified direct file-server denial', async () => {
     config.egress_gateway_url = '';
     let requests = 0;
