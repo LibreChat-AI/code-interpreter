@@ -487,7 +487,7 @@ describe('egress gateway routes', () => {
     try {
       const grant = claims();
       await createEgressLedger(grant);
-      globalThis.fetch = (async () => {
+      globalThis.fetch = (async (_input: RequestInfo | URL) => {
         await revokeEgressLedger(grant.grant_id!, 'test revocation');
         return Response.json({ version: crypto.randomUUID(), size: 5 });
       }) as typeof fetch;
