@@ -6,6 +6,7 @@ import { Readable } from 'stream';
 import { env } from './config';
 import {
   EGRESS_GRANT_HEADER,
+  EGRESS_ERROR_CODE_HEADER,
   EgressGrantError,
   egressGrantFromExecutionClaims,
   openEgressGrant,
@@ -157,6 +158,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
 function errorStatus(error: EgressGrantError): number {
   if (error.reason === 'missing_secret' || error.reason === 'weak_secret') return 500;
+  if (error.reason === 'ledger_conflict') return 503;
   if (error.reason === 'malformed') return 400;
   if (error.reason === 'expired') return 401;
   return 403;
@@ -165,6 +167,8 @@ function errorStatus(error: EgressGrantError): number {
 function sendEgressError(req: Request, res: Response, error: unknown): Response {
   if (error instanceof EgressGrantError) {
     const statusCode = errorStatus(error);
+    res.setHeader(EGRESS_ERROR_CODE_HEADER, error.reason);
+    if (error.reason === 'ledger_conflict') res.setHeader('Retry-After', '1');
     logger.warn('Rejected egress gateway request', {
       requestId: requestId(res),
       reason: error.reason,

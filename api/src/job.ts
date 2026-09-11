@@ -15,7 +15,7 @@ import { getRuntimes } from './runtime';
 import { execute } from './nsjail';
 import { config } from './config';
 import { internalServiceHeaders } from './internal-service-auth';
-import { EGRESS_GRANT_HEADER } from './egress';
+import { EGRESS_GRANT_HEADER, EGRESS_ERROR_CODE_HEADER } from './egress';
 import { injectTraceHeaders } from './telemetry';
 import {
   applyReadOnlyInputPermissions,
@@ -1326,7 +1326,11 @@ export class Job {
 
         if (!response.ok) {
           await response.body?.cancel().catch(() => {});
-          if (response.status === 401 || response.status === 403) {
+          const reason = response.headers.get(EGRESS_ERROR_CODE_HEADER);
+          /* Older gateways also used 403 for transient ledger contention.
+           * Only classify 403 as permanent when the gateway distinguishes it. */
+          if (response.status === 401 || (response.status === 403 &&
+            (reason === 'scope_mismatch' || reason === 'wrong_type'))) {
             throw new InputAuthorizationError(response.status);
           }
           throw new Error(`HTTP error: ${response.status}`);
