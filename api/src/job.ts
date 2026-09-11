@@ -15,7 +15,7 @@ import { getRuntimes } from './runtime';
 import { execute } from './nsjail';
 import { config } from './config';
 import { internalServiceHeaders } from './internal-service-auth';
-import { EGRESS_GRANT_HEADER } from './egress';
+import { EGRESS_GRANT_HEADER, EGRESS_ERROR_CODE_HEADER } from './egress';
 import { injectTraceHeaders } from './telemetry';
 import {
   applyReadOnlyInputPermissions,
@@ -1196,6 +1196,11 @@ export class Job {
     }
   }
 
+  private isLegacyGatewayDenial(response: Response): boolean {
+    return !!config.egress_gateway_url && response.status === 403 &&
+      !response.headers.has(EGRESS_ERROR_CODE_HEADER);
+  }
+
   /**
    * Fetches normalized objects for one inherited session and returns the
    * `.dirkeep` markers belonging to exactly that session. Guards against:
@@ -1219,7 +1224,7 @@ export class Job {
             signal: controller.signal,
           },
         );
-        if (res.status === 503 && attempt < AUTO_LOAD_DIRKEEP_RETRIES) {
+        if ((res.status === 503 || this.isLegacyGatewayDenial(res)) && attempt < AUTO_LOAD_DIRKEEP_RETRIES) {
           await res.body?.cancel().catch(() => {});
           const retryAfterSeconds = Number(res.headers.get('retry-after'));
           await sleep(
@@ -1326,7 +1331,10 @@ export class Job {
 
         if (!response.ok) {
           await response.body?.cancel().catch(() => {});
-          if (response.status === 401 || response.status === 403) {
+          /* Older gateways also used 403 for transient ledger contention.
+           * Only classify 403 as permanent when the gateway distinguishes it. */
+          if (response.status === 401 ||
+            (response.status === 403 && !this.isLegacyGatewayDenial(response))) {
             throw new InputAuthorizationError(response.status);
           }
           throw new Error(`HTTP error: ${response.status}`);
@@ -1402,7 +1410,14 @@ export class Job {
         }
         lastError = error instanceof Error ? error : new Error(String(error));
         if (attempt < maxRetries) {
-          const delay = retryDelay * Math.pow(2, attempt - 1);
+          const backoff = retryDelay * Math.pow(2, attempt - 1);
+          const retryAfterSeconds = response?.status === 503
+            ? Number(response.headers.get('retry-after')) : NaN;
+          /* Use the same bounded retry hint as marker discovery, without
+           * shortening exponential backoff or bypassing batch cancellation. */
+          const delay = Number.isFinite(retryAfterSeconds)
+            ? Math.max(backoff, Math.min(1000, Math.max(0, retryAfterSeconds * 1000)))
+            : backoff;
           this.log.warn({ fileId: file.id, attempt, maxRetries, delay, err: lastError }, 'Download failed, retrying');
           await sleep(delay, operation.signal);
         }

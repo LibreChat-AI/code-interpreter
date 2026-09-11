@@ -264,7 +264,7 @@ async function mutateRecord(
     });
     releaseMutationConnection(client);
   }
-  throw new EgressGrantError('scope_mismatch', 'Egress grant ledger update conflicted');
+  throw new EgressGrantError('ledger_conflict', 'Egress grant ledger update conflicted');
 }
 
 export async function assertEgressGrantActive(grant: EgressGrantClaims): Promise<EgressLedgerRecord> {

@@ -1,6 +1,6 @@
 process.env.CODEAPI_EGRESS_GATEWAY_AUTOSTART = 'false';
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test, spyOn } from 'bun:test';
 import crypto from 'crypto';
 import RedisMock from 'ioredis-mock';
 import type { Server } from 'http';
@@ -435,6 +435,39 @@ describe('egress gateway routes', () => {
     }
   });
 
+  test('reports exhausted ledger conflicts as retryable without forwarding the read', async () => {
+    const redis = new RedisMock();
+    env.EGRESS_LEDGER_REQUIRED = true;
+    setEgressLedgerRedisForTest(redis as unknown as Parameters<typeof setEgressLedgerRedisForTest>[0]);
+    const duplicate = redis.duplicate.bind(redis);
+    const duplication = spyOn(redis, 'duplicate').mockImplementation(() => {
+      const connection = duplicate();
+      const transaction = {
+        set: () => transaction,
+        exec: async () => null,
+      };
+      spyOn(connection, 'multi').mockImplementation(() => transaction as never);
+      return connection;
+    });
+    try {
+      await createEgressLedger(claims());
+      const readSession = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+      const response = await gatewayFetch(`/sessions/${readSession}/objects?detail=normalized`, {
+        headers: grantHeader(),
+      });
+      expect(response.status).toBe(503);
+      expect(response.headers.get('X-CodeAPI-Error-Code')).toBe('ledger_conflict');
+      expect(response.headers.get('Retry-After')).toBe('1');
+      expect(upstreamCalls).toHaveLength(0);
+      expect((await assertEgressGrantActive(claims())).request_count).toBe(0);
+    } finally {
+      duplication.mockRestore();
+      setEgressLedgerRedisForTest(null);
+      redis.disconnect();
+      env.EGRESS_LEDGER_REQUIRED = false;
+    }
+  });
+
   test('lists only scoped objects and injects internal credentials', async () => {
     upstreamResponse = Response.json([
       { id: 'file_123', name: 'inputs/data.csv', storage_session_id: 'sess_input' },
@@ -557,6 +590,7 @@ describe('egress gateway routes', () => {
       });
 
       expect(response.status).toBe(403);
+      expect(response.headers.get('X-CodeAPI-Error-Code')).toBe('scope_mismatch');
       expect(upstreamCalls).toHaveLength(0);
     } finally {
       await redis.disconnect();

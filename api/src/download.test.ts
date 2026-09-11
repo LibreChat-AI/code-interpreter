@@ -55,6 +55,7 @@ function makeRuntime(): Runtime {
 function makeJob(files: TFile[] = [], session?: SessionWorkspace): Job {
   return new Job({
     session_id: 'test-session',
+    egress_grant: 'test-grant',
     runtime: makeRuntime(),
     files,
     args: [],
@@ -440,10 +441,12 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
   });
 
   it.each([401, 403])('does not retry an HTTP %i authorization denial', async status => {
+    config.egress_gateway_url = `http://127.0.0.1:${serverPort}`;
     const file: TFile = { id: 'denied', storage_session_id: 'previous', name: 'denied.txt' };
     let requests = 0;
     routes.set('/sessions/previous/objects/denied', {
       status,
+      headers: { 'X-CodeAPI-Error-Code': 'scope_mismatch' },
       onRequest: () => { requests++; },
     });
     const job = makeJob([file]);
@@ -454,7 +457,8 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     expect(await fsp.readdir(tmpDir)).toEqual([]);
   });
 
-  it.each([404, 408, 429, 503])('still retries transient HTTP %i responses', async status => {
+  it.each([403, 404, 408, 429, 503])('still retries transient HTTP %i responses', async status => {
+    config.egress_gateway_url = `http://127.0.0.1:${serverPort}`;
     const file: TFile = { id: 'transient', storage_session_id: 'previous', name: 'ready.txt' };
     let requests = 0;
     const route: Route = {
@@ -471,7 +475,79 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     expect(await fsp.readFile(path.join(tmpDir, 'ready.txt'), 'utf8')).toBe('ready');
   });
 
+  it.each([false, true])('honors conflict retry hints with cancellation=%s', async cancel => {
+    config.egress_gateway_url = `http://127.0.0.1:${serverPort}`;
+    const controller = new AbortController();
+    const timestamps: number[] = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const route: Route = {
+      status: 503, body: 'ready',
+      headers: { 'X-CodeAPI-Error-Code': 'ledger_conflict', 'Retry-After': '1' },
+      onRequest: () => {
+        timestamps.push(performance.now());
+        if (timestamps.length === 2) route.status = 200;
+        else if (cancel) timer = setTimeout(() => controller.abort(new Error('cancelled retry')), 25);
+      },
+    };
+    routes.set('/sessions/previous/objects/retry-hint', route);
+    const file: TFile = { id: 'retry-hint', storage_session_id: 'previous', name: 'ready.txt' };
+    const job = makeJob([file]);
+    asInternals(job).submissionDir = tmpDir;
+    try {
+      const result = job.downloadAndWriteFile(file, 5, 1, {
+        submissionDir: tmpDir, identity: fallbackSandboxIdentity(), signal: controller.signal,
+      });
+      if (cancel) {
+        await expect(result).rejects.toThrow('cancelled retry');
+        expect(timestamps).toHaveLength(1);
+        expect(await fsp.readdir(tmpDir)).toEqual([]);
+      } else {
+        await expect(result).resolves.toBe('ready.txt');
+        expect(timestamps).toHaveLength(2);
+        expect(timestamps[1] - timestamps[0]).toBeGreaterThanOrEqual(900);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  it('does not retry an unclassified direct file-server denial', async () => {
+    config.egress_gateway_url = '';
+    let requests = 0;
+    const file: TFile = { id: 'denied', storage_session_id: 'previous', name: 'denied.txt' };
+    routes.set('/sessions/previous/objects/denied', {
+      status: 403, onRequest: () => { requests++; },
+    });
+    const job = makeJob([file]);
+    asInternals(job).submissionDir = tmpDir;
+    await expect(job.downloadAndWriteFile(file, 5, 1)).rejects.toThrow('HTTP error: 403');
+    expect(requests).toBe(1);
+  });
+
+  it.each(['legacy', 'classified', 'direct'])('handles %s marker denials before priming', async mode => {
+    config.egress_gateway_url = mode === 'direct' ? '' : `http://127.0.0.1:${serverPort}`;
+    let requests = 0;
+    const route: Route = {
+      status: 403, body: '[]',
+      headers: mode === 'classified' ? { 'X-CodeAPI-Error-Code': 'scope_mismatch' } : {},
+      onRequest: () => { if (++requests === 2) route.status = 200; },
+    };
+    routes.set('/sessions/previous/objects', route);
+    const file: TFile = { id: 'ready', storage_session_id: 'previous', name: 'ready.txt' };
+    routes.set('/sessions/previous/objects/ready', { status: 200, body: 'ready' });
+    const job = makeJob([file], sessionWorkspaceAt(tmpDir, 'marker-retry'));
+    if (mode === 'legacy') {
+      await job.prime();
+      expect(requests).toBe(2);
+      expect(await fsp.readFile(path.join(tmpDir, 'ready.txt'), 'utf8')).toBe('ready');
+    } else {
+      await expect(job.prime()).rejects.toThrow('HTTP error loading .dirkeep markers: 403');
+      expect(requests).toBe(1);
+    }
+  });
+
   it('accounts for a denied 240-file batch once and stops queued downloads', async () => {
+    config.egress_gateway_url = `http://127.0.0.1:${serverPort}`;
     const files: TFile[] = Array.from({ length: 240 }, (_, index) => ({
       id: `file-${index}`, storage_session_id: 'previous', name: `file-${index}.txt`,
     }));
@@ -480,6 +556,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     for (const file of files) {
       routes.set(`/sessions/previous/objects/${file.id}`, {
         status: 403,
+        headers: { 'X-CodeAPI-Error-Code': 'scope_mismatch' },
         delayMs: file.id === 'file-0' ? 0 : 30,
         onRequest: () => { requests++; },
       });
