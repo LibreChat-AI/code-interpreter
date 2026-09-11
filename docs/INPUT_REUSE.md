@@ -34,6 +34,8 @@ sequenceDiagram
 - The downloader checks the version from the **actual GET**, rather than labeling bytes with metadata from an earlier HEAD. A raced overwrite returns 409 and preparation retries from current metadata. Legacy objects without a version use the uncached path.
 - All writers of input objects must assign a fresh version on every overwrite. The file server does so for both upload routes. Checkpoint storage uses a separate path. Direct bucket writes that preserve an old version marker are outside this protocol.
 - The optional Redis object-key index stores only a locator hint. It is not an authorization or metadata cache. Preflights still read current storage metadata; indexed keys must match the exact session and object identity.
+- Shared download errors belong to the initiating grant. A coalesced caller falls back to its own authorized download rather than inheriting that grant's denial or exhausted budget.
+- Redis reconnects never replay unfulfilled ledger mutations. A lost reply fails closed and may leave a conservatively charged counter/reservation until grant expiry; automatically refunding an ambiguous mutation could over-credit its budget.
 - Full grant policy is no longer returned to the gateway for each authorization check. Atomic Redis scripts serialize accounting with revocation. Duplicate releases cannot repeatedly refund unrelated counters. Newly created compact ledgers keep immutable policy separate from mutable counters.
 
 ## Configuration
@@ -82,7 +84,7 @@ npx tsc --noEmit
 
 ```sh
 cd service
-bun test src/egress-ledger.test.ts src/egress-gateway.test.ts src/file-object-resolver.test.ts src/file-download.test.ts src/file-metadata.test.ts
+bun test src/egress-ledger.test.ts src/egress-ledger-reconnect.test.ts src/egress-gateway.test.ts src/file-object-resolver.test.ts src/file-download.test.ts src/file-metadata.test.ts
 npx tsc --noEmit
 ```
 

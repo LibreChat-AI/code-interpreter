@@ -92,6 +92,26 @@ describe('authorized HTTP input cache', () => {
     expect(f.counts().authorizations).toBe(2);
   });
 
+  test('a shared fill does not propagate its creator grant denial to a valid waiter', async () => {
+    const f = fixture();
+    const started = gate();
+    const finish = gate();
+    const denied = fetchCachedHttpInput({ ...f.args, download: async () => {
+      started.release();
+      await finish.promise;
+      return new Response(null, { status: 403, headers: { 'X-CodeAPI-Error-Code': 'request_budget_exceeded' } });
+    } });
+    await started.promise;
+    const valid = fetchCachedHttpInput(f.args);
+    await Bun.sleep(10);
+    finish.release();
+    expect((await denied)?.status).toBe(403);
+    // Job.fetchInputObject uses the waiter's own normal download on undefined.
+    expect(await valid).toBeUndefined();
+    expect(await (await f.args.download(f.meta.version, new AbortController().signal)).text()).toBe('input');
+    expect(f.counts().authorizations).toBe(2);
+  });
+
   test('last-reader cancellation aborts the upstream fill without publishing', async () => {
     const f = fixture();
     const started = gate();

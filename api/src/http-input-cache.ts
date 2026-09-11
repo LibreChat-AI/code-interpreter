@@ -123,6 +123,7 @@ export async function fetchCachedHttpInput(args: {
   if (cached) httpInputCacheEvents.inc({ event: 'hit' });
   if (!cached) {
     let fill = fills.get(meta.cacheKey);
+    const joinedExistingFill = fill !== undefined;
     if (fill) httpInputCacheEvents.inc({ event: 'coalesced' });
     if (!fill) {
       if (fills.size >= args.maxInflight) {
@@ -155,6 +156,9 @@ export async function fetchCachedHttpInput(args: {
     }
     const result = await waitForFill(fill, args.signal);
     if (result.status) {
+      // The transfer used the creator's grant. Its denial/budget must not reject
+      // another caller whose own preflight succeeded; use that caller's fetch.
+      if (joinedExistingFill) return undefined;
       const headers = new Headers(result.headers);
       headers.delete('content-length');
       return new Response(null, { status: result.status, headers });

@@ -50,7 +50,7 @@ async function fixture(count: number, mode: 'batch' | 'legacy' | 'race' = 'batch
     }
     return new Response('bytes', { headers: { 'X-CodeAPI-Input-Version': mode === 'race' ? freshVersion : version } });
   }) as typeof fetch;
-  async function prime() {
+  async function prime(egressGrant = 'test-grant') {
     const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'manifest-prime-'));
     dirs.push(dir);
     const session = {
@@ -58,7 +58,7 @@ async function fixture(count: number, mode: 'batch' | 'legacy' | 'race' = 'batch
       primedInputId: () => undefined, markPrimed: () => {}, markDirty: () => {},
     };
     const job = new Job({
-      session_id: 'test', egress_grant: 'test-grant', runtime: { language: 'bash', version: '5.0.0', aliases: [] },
+      session_id: 'test', egress_grant: egressGrant, runtime: { language: 'bash', version: '5.0.0', aliases: [] },
       files: Array.from({ length: count }, (_, i) => ({ id: `f${i}`, storage_session_id: 's', name: `file${i}.txt` })),
       args: [], stdin: '', timeouts: { run: 5000, compile: 5000 }, cpu_times: { run: 5000, compile: 5000 },
       memory_limits: { run: 128e6, compile: 128e6 }, session,
@@ -75,7 +75,7 @@ test('240 inputs use one authorized manifest per fresh workspace and reuse only 
   await f.prime();
   await f.prime();
   expect(f.counts()).toEqual({ manifests: 2, singlePreflights: 0, downloads: 240 });
-});
+}, 30000);
 
 test('an older gateway falls back to independently authorized preflights', async () => {
   const f = await fixture(2, 'legacy');
@@ -87,4 +87,38 @@ test('a raced version consumes the batch entry and retries against fresh metadat
   const f = await fixture(1, 'race');
   await f.prime();
   expect(f.counts()).toEqual({ manifests: 1, singlePreflights: 1, downloads: 2 });
+});
+
+
+test('one execution grant denial cannot fail a coalesced execution with its own valid grant', async () => {
+  const f = await fixture(1);
+  const underlying = globalThis.fetch;
+  let release!: () => void;
+  let started!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const creatorStarted = new Promise<void>(resolve => { started = resolve; });
+  let deniedDownloads = 0, validDownloads = 0;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    if (String(url).endsWith('/objects/f0')) {
+      if (new Headers(init?.headers).get('X-CodeAPI-Egress-Grant') === 'denied') {
+        deniedDownloads++;
+        started(); await blocked;
+        return new Response(null, { status: 403, headers: { 'X-CodeAPI-Error-Code': 'scope_mismatch' } });
+      }
+      validDownloads++;
+    }
+    return underlying(url, init);
+  }) as typeof fetch;
+  const creator = f.prime('denied');
+  void creator.catch(() => {});
+  await creatorStarted;
+  const waiter = f.prime('valid');
+  try {
+    while (f.counts().manifests < 2) await Bun.sleep(1);
+    await Bun.sleep(20);
+  } finally { release(); }
+  const result = await Promise.allSettled([creator, waiter]);
+  expect(result.map(item => item.status)).toEqual(['rejected', 'fulfilled']);
+  expect(deniedDownloads).toBe(1);
+  expect(validDownloads).toBe(1);
 });

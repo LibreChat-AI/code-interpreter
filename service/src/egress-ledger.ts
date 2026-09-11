@@ -31,6 +31,14 @@ export interface EgressLedgerRecord {
   output_file_ids: string[];
 }
 
+/** A lost reply is ambiguous: never replay a possibly applied mutation.
+ * maxRetries=0 also rejects the pending promise on disconnect instead of leaving
+ * it unresolved when ioredis discards its unfulfilled-command queue. */
+export const EGRESS_LEDGER_REDIS_RETRY_OPTIONS = {
+  autoResendUnfulfilledCommands: false,
+  maxRetriesPerRequest: 0,
+} as const;
+
 let redis: IORedis | null = null;
 const scriptClients = new WeakSet<IORedis>();
 export function setEgressLedgerRedisForTest(client: IORedis | null): void {
@@ -55,7 +63,7 @@ function redisConnection(): IORedis {
     host: process.env.REDIS_HOST ?? 'redis',
     port: Number(process.env.REDIS_PORT) || 6379,
     password: process.env.REDIS_PASSWORD,
-    maxRetriesPerRequest: 1,
+    ...EGRESS_LEDGER_REDIS_RETRY_OPTIONS,
     retryStrategy,
     enableReadyCheck: true,
     connectTimeout: 10000,
