@@ -41,7 +41,12 @@ import type {
   ChildProcessWithoutNullStreams,
   SpawnOptionsWithoutStdio,
 } from 'node:child_process';
-import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
+import type {
+  SandboxAskCallback,
+  SandboxRuntimeConfig,
+} from '@anthropic-ai/sandbox-runtime';
+import { normalizeNativeSrtCommandPolicy } from './native-policy.js';
+import type { NativeSrtCommandPolicy } from './native-policy.js';
 import type {
   WorkspaceExecuteCommandRequest,
   WorkspaceExecuteCommandResult,
@@ -124,7 +129,10 @@ const HOST_TEMPORARY_ROOT = tmpdir();
 interface NativeSandboxManager {
   isSupportedPlatform(): boolean;
   checkDependenciesAsync(): Promise<{ warnings: string[]; errors: string[] }>;
-  initialize(config: SandboxRuntimeConfig): Promise<void>;
+  initialize(
+    config: SandboxRuntimeConfig,
+    sandboxAskCallback?: SandboxAskCallback,
+  ): Promise<void>;
   wrapWithSandboxArgv(
     command: string,
     binShell?: string,
@@ -153,6 +161,7 @@ type SpawnCommand = (
 
 export interface NativeSrtWorkspaceCommandSandboxOptions {
   workspaceRoot: string;
+  commandPolicy?: NativeSrtCommandPolicy;
   /** Trusted worker files that must never become workspace-readable or writable. */
   protectedPaths?: string[];
   allowedDomains?: string[];
@@ -369,13 +378,18 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         'REGISTRATION_INVALID',
       );
     }
+    const commandPolicy = normalizeNativeSrtCommandPolicy(
+      this.options.commandPolicy,
+    );
+    const unrestrictedNetwork =
+      commandPolicy.network.outbound === 'unrestricted';
     const config: SandboxRuntimeConfig = {
       network: {
         allowedDomains: [...(this.options.allowedDomains ?? [])],
         deniedDomains: [],
-        strictAllowlist: true,
-        allowAllUnixSockets: false,
-        allowLocalBinding: false,
+        strictAllowlist: !unrestrictedNetwork,
+        allowAllUnixSockets: commandPolicy.network.allowAllUnixSockets,
+        allowLocalBinding: commandPolicy.network.allowLocalBinding,
         ...(this.options.maskedEnvironment ? { tlsTerminate: {} } : {}),
       },
       filesystem: {
@@ -439,7 +453,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       enableWeakerNetworkIsolation: false,
       git: { safeDirectories: [root] },
     };
-    await this.manager.initialize(config);
+    await this.manager.initialize(
+      config,
+      unrestrictedNetwork ? async () => true : undefined,
+    );
     this.canonicalRoot = root;
   }
 

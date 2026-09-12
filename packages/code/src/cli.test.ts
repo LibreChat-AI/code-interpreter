@@ -94,6 +94,46 @@ test('CLI rejects an unknown command sandbox before entering the run loop', () =
   );
 });
 
+test('CLI rejects an unknown native SRT command policy preset', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_COMMAND_POLICY_PRESET: 'host-shell',
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /must be restricted or trusted-vm/);
+});
+
+test('CLI refuses a permissive policy when native commands are unavailable', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'https://code.example/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_COMMAND_POLICY_PRESET: 'trusted-vm',
+      },
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /requires native-srt workspace commands/);
+});
+
 test('CLI rejects incomplete GitHub App authentication before worker registration', () => {
   const result = spawnSync(
     process.execPath,

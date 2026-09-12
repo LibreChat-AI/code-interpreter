@@ -56,8 +56,12 @@ worker replacement; the UI and operator documentation must not imply otherwise.
   revocation.
 - Pairing codes and credentials are stored by digest where lookup permits.
 - One configured worker has at most one active fenced assignment.
-- Sandbox isolation and default-deny egress remain mandatory; pairing secures
-  the transport identity but does not make the host a sandbox.
+- Sandbox isolation and default-deny egress remain the mandatory default;
+  pairing secures the transport identity but does not make the host a sandbox.
+  An operator may explicitly delegate network and local-socket restrictions to
+  an approved outer VM boundary through a named, digested worker policy. That
+  delegation must retain workspace filesystem confinement, worker-identity and
+  credential protection, cancellation, and resource limits.
 - A compromised worker can lie about advertised capabilities. Capability
   labels and policy digests are audit signals until enforcement is coupled to
   an attested sandbox or trusted host policy.
@@ -65,7 +69,8 @@ worker replacement; the UI and operator documentation must not imply otherwise.
 ## Consequences
 
 - `@librechat/code` owns the provider-neutral protocol, identity handling, and
-  worker CLI; Code API owns enrollment, scheduling, and execution policy.
+  worker CLI, including machine-local execution-policy presets; Code API owns
+  enrollment, scheduling, and execution policy.
 - LibreChat owns environment persistence, ownership, RBAC, and user experience.
 - The Agents SDK keeps only its adapter until a second concrete consumer proves
   which coding-tool abstractions are genuinely provider neutral.

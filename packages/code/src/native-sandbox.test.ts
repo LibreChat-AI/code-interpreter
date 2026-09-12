@@ -19,7 +19,10 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
-import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
+import type {
+  SandboxAskCallback,
+  SandboxRuntimeConfig,
+} from '@anthropic-ai/sandbox-runtime';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 import { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
@@ -46,6 +49,7 @@ function fakeManager(
   } = {},
 ) {
   let config: SandboxRuntimeConfig | undefined;
+  let askCallback: SandboxAskCallback | undefined;
   let reset = false;
   let credentialSeenDuringWrap: string | undefined;
   let gitLfsRequiredSeenDuringWrap: string | undefined;
@@ -55,8 +59,12 @@ function fakeManager(
     async checkDependenciesAsync() {
       return { warnings: [], errors: options.dependencyErrors ?? [] };
     },
-    async initialize(value: SandboxRuntimeConfig) {
+    async initialize(
+      value: SandboxRuntimeConfig,
+      callback?: SandboxAskCallback,
+    ) {
       config = value;
+      askCallback = callback;
       if (options.initializeError) throw options.initializeError;
     },
     async wrapWithSandboxArgv(command: string) {
@@ -106,6 +114,9 @@ function fakeManager(
     manager,
     get config() {
       return config;
+    },
+    get askCallback() {
+      return askCallback;
     },
     get reset() {
       return reset;
@@ -276,6 +287,8 @@ test('initializes SRT with a default-deny network and scrubbed worker credential
   assert.deepEqual(fake.config?.network.allowedDomains, []);
   assert.equal(fake.config?.network.strictAllowlist, true);
   assert.equal(fake.config?.network.allowAllUnixSockets, false);
+  assert.equal(fake.config?.network.allowLocalBinding, false);
+  assert.equal(fake.askCallback, undefined);
   assert.deepEqual(fake.config?.filesystem.allowRead, [
     canonicalRoot,
     scratchDirectory,
@@ -303,6 +316,39 @@ test('initializes SRT with a default-deny network and scrubbed worker credential
   await sandbox.close();
   assert.equal(fake.reset, true);
   await assert.rejects(access(scratchDirectory!));
+});
+
+test('trusted-vm permits unmatched egress and local development sockets', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    commandPolicy: {
+      version: 1,
+      preset: 'trusted-vm',
+      network: {
+        outbound: 'unrestricted',
+        allowLocalBinding: true,
+        allowAllUnixSockets: true,
+      },
+    },
+    manager: fake.manager,
+  });
+  t.after(() => sandbox.close());
+
+  await sandbox.prepare();
+
+  assert.equal(fake.config?.network.strictAllowlist, false);
+  assert.equal(fake.config?.network.allowLocalBinding, true);
+  assert.equal(fake.config?.network.allowAllUnixSockets, true);
+  assert.equal(
+    await fake.askCallback?.({ host: 'packages.example', port: 443 }),
+    true,
+  );
+  assert.deepEqual(fake.config?.filesystem.allowWrite.slice(0, 1), [
+    await realpath(root),
+  ]);
 });
 
 test('provides an isolated scratch directory to commands and restores the host environment', async (t) => {

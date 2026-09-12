@@ -211,6 +211,37 @@ LIBRECHAT_CODE_COMMAND_SANDBOX=native-srt librechat-code run \
   --worker-dir /path/to/project --allow-workspace-commands
 ```
 
+### Trusted VM command policy
+
+The native SRT backend can be made intentionally permissive when the selected
+machine already supplies an administrator-approved outer security boundary.
+The `trusted-vm` preset keeps SRT filesystem confinement, credential masking,
+private scratch storage, cancellation, time limits, and output limits, while
+allowing unmatched outbound destinations, local port binding, and Unix sockets:
+
+```bash
+librechat-code run \
+  --worker-dir /home/ubuntu/src \
+  --allow-workspace-writes \
+  --allow-workspace-commands \
+  --command-policy-preset trusted-vm
+```
+
+`LIBRECHAT_CODE_COMMAND_POLICY_PRESET=trusted-vm` is the environment equivalent.
+The default is `restricted`, which preserves the default-deny network policy.
+The preset configures `native-srt`; it is not an unsandboxed host-shell
+backend. It is rejected unless native workspace commands are enabled. Its
+normalized effective controls are included in the worker policy digest, and
+the worker advertises `anthropic-srt:trusted-vm` unless an operator supplied a
+custom sandbox profile label.
+
+Treat this preset as delegation to the machine's outer security controls. Any
+outbound destination can receive workspace data, local listeners can accept
+connections reachable under host policy, and Unix socket access may expose
+powerful host services such as a container daemon. Register only the intended
+source root. Worker identity, mutation-quarantine state, and configured GitHub
+App key files must remain outside it.
+
 ## Docker runtime supervisor (optional hardened adapter)
 
 `DockerRuntimeSupervisor` is the first self-contained local OCI adapter. It
