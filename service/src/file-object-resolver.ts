@@ -14,6 +14,19 @@ export interface ObjectResolverDependencies {
   };
 }
 
+/** Caller-supplied identities keep one stable storage key across replacement
+ * filenames. This gives concurrent PUTs one last-writer-wins S3 object without
+ * requiring a distributed lock or leaving extension-keyed siblings behind. */
+export function storageKeyForUpload(
+  session: string,
+  id: string,
+  extension: string,
+  replacing: boolean,
+  current?: string,
+): string {
+  return current ?? `${session}/${id}${replacing ? '' : extension}`;
+}
+
 /** Storage-key index is a hint, never metadata or authorization. A fresh HEAD
  * proves existence and supplies the current version even on index/cache hits. */
 export class FileObjectResolver {

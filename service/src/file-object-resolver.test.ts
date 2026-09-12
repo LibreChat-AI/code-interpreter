@@ -1,8 +1,15 @@
 import { describe, expect, test } from 'bun:test';
-import { FileObjectResolver, mapObjectDetails } from './file-object-resolver';
+import { FileObjectResolver, mapObjectDetails, storageKeyForUpload } from './file-object-resolver';
 import type { BucketItemStat } from 'minio';
 
 describe('storage object resolution', () => {
+  test('replacement uploads converge on one stable object key', () => {
+    expect(storageKeyForUpload('s', 'id', '.csv', true, 's/id.txt')).toBe('s/id.txt');
+    expect(storageKeyForUpload('s', 'id', '.pdf', true, 's/id.txt')).toBe('s/id.txt');
+    expect(storageKeyForUpload('s', 'id', '.csv', true)).toBe('s/id');
+    expect(storageKeyForUpload('s', 'generated', '.csv', false)).toBe('s/generated.csv');
+  });
+
   test('indexes exact identities while reading fresh version metadata on every request', async () => {
     const index = new Map<string, string>();
     let lists = 0;

@@ -1,8 +1,7 @@
 import b from 'busboy';
 import { randomUUID } from 'node:crypto';
-import { mapObjectDetails } from './file-object-resolver';
+import { FileObjectResolver, mapObjectDetails, storageKeyForUpload } from './file-object-resolver';
 import { sendFileDownload } from './file-download';
-import { FileObjectResolver } from './file-object-resolver';
 import path from 'path';
 import IORedis from 'ioredis';
 import express from 'express';
@@ -268,13 +267,18 @@ async function uploadFile(
 ): Promise<t.UploadResult> {
   const fileId = existingFileId ?? nanoid();
   const fileExtension = path.extname(filename);
-  const objectName = `${session_id}/${fileId}${fileExtension}`;
-  // A replacement can change extension and therefore storage key. Resolve the
-  // prior key from storage before the PUT so a failed advisory index update
-  // cannot leave old bytes reachable after this upload succeeds.
+  // Replacements retain one storage key even when their filename extension
+  // changes, so concurrent writers converge on S3's last-writer semantics.
   const previousObjectName = existingFileId
     ? await objectResolver.resolveFresh(session_id, fileId)
     : undefined;
+  const objectName = storageKeyForUpload(
+    session_id,
+    fileId,
+    fileExtension,
+    existingFileId != null,
+    previousObjectName,
+  );
 
   const encodedFilename = Buffer.from(filename).toString('base64');
 
@@ -303,10 +307,6 @@ async function uploadFile(
     await minioClient.putObject(bucketName, objectName, Buffer.alloc(0), 0, metaData);
   } else {
     await minioClient.putObject(bucketName, objectName, peeked.body, undefined, metaData);
-  }
-  if (previousObjectName && previousObjectName !== objectName) {
-    await minioClient.removeObject(bucketName, previousObjectName);
-    await objectResolver.forget(session_id, fileId, previousObjectName);
   }
   await objectResolver.remember(session_id, fileId, objectName);
   logger.info(`[${INSTANCE_ID}] File ID: ${fileId} | Filename: ${filename} | Session key: ${sessionKey}`);
