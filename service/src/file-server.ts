@@ -162,6 +162,16 @@ const objectResolver = new FileObjectResolver({
   } } : {}),
 });
 
+/** Index eviction is best effort: the index is only a hint, so a Redis failure
+ *  must never turn a completed delete or a missing-object 404 into a 500. */
+async function forgetObjectKey(session_id: string, objectId: string, objectName: string): Promise<void> {
+  try {
+    await objectResolver.forget(session_id, objectId, objectName);
+  } catch (error) {
+    logger.warn('Failed to evict file-object index entry', { error, session_id, objectId, objectName });
+  }
+}
+
 const minioRegion = process.env.MINIO_REGION ?? process.env.AWS_REGION ?? 'us-east-1';
 
 async function ensureBucketExists(retries = 10, delay = 1000): Promise<void> {
@@ -490,9 +500,10 @@ app.get('/sessions/:session_id/objects/:objectId/metadata', async (req, res) => 
 
 app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
   const { session_id, objectId } = req.params;
+  let objectName: string | undefined;
 
   try {
-    const objectName = await objectResolver.resolve(session_id, objectId);
+    objectName = await objectResolver.resolve(session_id, objectId);
     if (!objectName) return res.status(404).json({ error: 'File not found' });
     const dataStream = await minioClient.getObject(bucketName, objectName);
     try {
@@ -515,8 +526,11 @@ app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
     }
   } catch (err) {
     logger.error('Error downloading file', { error: err, session_id, objectId });
+    const missing = ['NoSuchKey', 'NotFound', 'NoSuchObject'].includes((err as { code?: string }).code ?? '');
+    // A locator that no longer names bytes must not shadow a replacement object
+    // published for the same identity until the index TTL expires.
+    if (missing && objectName) await forgetObjectKey(session_id, objectId, objectName);
     if (!res.headersSent && !res.destroyed) {
-      const missing = ['NoSuchKey', 'NotFound', 'NoSuchObject'].includes((err as { code?: string }).code ?? '');
       return res.status(missing ? 404 : 500).json({ error: 'Error downloading file' });
     }
   }
@@ -605,15 +619,7 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
   const { session_id, fileId } = req.params;
 
   try {
-    const stream = minioClient.listObjects(bucketName, `${session_id}/${fileId}`, true);
-    let objectName = '';
-
-    for await (const obj of stream) {
-      if (obj.name.startsWith(`${session_id}/${fileId}`) === true) {
-        objectName = obj.name;
-        break;
-      }
-    }
+    const objectName = await objectResolver.resolve(session_id, fileId);
 
     if (!objectName) {
       logger.warn('File not found for deletion', { session_id, fileId, bucketName });
@@ -627,6 +633,7 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
     }
 
     await minioClient.removeObject(bucketName, objectName);
+    await forgetObjectKey(session_id, fileId, objectName);
     logger.info(`[${INSTANCE_ID}] File deleted successfully: ${objectName}`);
     return res.status(200).json({
       message: 'File deleted successfully',

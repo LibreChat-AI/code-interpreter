@@ -32,6 +32,14 @@ export class FileObjectResolver {
     await this.deps.index?.set(this.indexKey(session, id), key, replace);
   }
 
+  /** Evict a cached locator once its object is known to be gone. Scoped to the
+   * requested identity, and conditional on the stored value so a replacement
+   * key published concurrently for the same identity is never dropped. */
+  async forget(session: string, id: string, key: string): Promise<void> {
+    if (!this.matches(key, session, id)) return;
+    await this.deps.index?.forget(this.indexKey(session, id), key);
+  }
+
   async resolve(session: string, id: string): Promise<string | undefined> {
     const cached = await this.deps.index?.get(this.indexKey(session, id));
     if (cached && this.matches(cached, session, id)) return cached;
@@ -51,7 +59,7 @@ export class FileObjectResolver {
       return { key, stat: await this.deps.stat(key) };
     } catch (error) {
       if (!['NoSuchKey', 'NotFound', 'NoSuchObject'].includes((error as { code?: string }).code ?? '')) throw error;
-      await this.deps.index?.forget(this.indexKey(session, id), key);
+      await this.forget(session, id, key);
       // Do not cache absence: a later upload can publish this identity again.
       return undefined;
     }

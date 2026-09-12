@@ -33,6 +33,55 @@ describe('storage object resolution', () => {
     present = true;
     expect(await resolver.resolve('s', 'id')).toBe('s/id.txt');
   });
+
+  test('forgets a deleted locator so a replacement key for the same identity resolves', async () => {
+    const index = new Map<string, string>();
+    const stored = new Set(['s/id.txt']);
+    const resolver = new FileObjectResolver({
+      bucket: 'files',
+      list: async function* (prefix) { for (const name of stored) if (name.startsWith(prefix)) yield { name }; },
+      stat: async () => ({ metaData: {} } as BucketItemStat),
+      index: {
+        get: async k => index.get(k) ?? null,
+        set: async (k, v, replace) => { if (replace || !index.has(k)) index.set(k, v); },
+        forget: async (k, v) => { if (index.get(k) === v) index.delete(k); },
+      },
+    });
+
+    expect(await resolver.resolve('s', 'id')).toBe('s/id.txt');
+    stored.delete('s/id.txt');
+    await resolver.forget('s', 'id', 's/id.txt');
+    expect(index.size).toBe(0);
+
+    stored.add('s/id.csv');
+    expect(await resolver.resolve('s', 'id')).toBe('s/id.csv');
+  });
+
+  test('eviction is scoped to the identity and never drops a newer cached key', async () => {
+    const index = new Map<string, string>();
+    let lists = 0;
+    const resolver = new FileObjectResolver({
+      bucket: 'files',
+      list: async function* () { lists++; yield { name: 's/id.txt' }; },
+      stat: async () => ({ metaData: {} } as BucketItemStat),
+      index: {
+        get: async k => index.get(k) ?? null,
+        set: async (k, v, replace) => { if (replace || !index.has(k)) index.set(k, v); },
+        forget: async (k, v) => { if (index.get(k) === v) index.delete(k); },
+      },
+    });
+
+    expect(await resolver.resolve('s', 'id')).toBe('s/id.txt');
+    // A concurrent upload republished the identity before the delete evicted it.
+    await resolver.remember('s', 'id', 's/id.csv');
+    await resolver.forget('s', 'id', 's/id.txt');
+    // Keys outside the identity can never reach its entry.
+    await resolver.forget('s', 'id', 's2/id.txt');
+    await resolver.forget('s', 'id', 's/other.txt');
+
+    expect(await resolver.resolve('s', 'id')).toBe('s/id.csv');
+    expect(lists).toBe(1);
+  });
 });
 
 test('metadata listing stays bounded and ordered across 240 objects', async () => {
