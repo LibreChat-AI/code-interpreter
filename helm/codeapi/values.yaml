@@ -273,7 +273,7 @@ workerSandbox:
     # Defaults to maxConcurrentJobs when unset.
     jobUidCount: null
     workspaceReaperMaxAgeSeconds: 3600
-    httpInputCacheEnabled: false
+    httpInputCacheEnabled: true
     httpInputCacheMaxInflight: 16
     httpInputCacheMaxObjects: 4096
     inputCacheMaxBytes: 536870912
