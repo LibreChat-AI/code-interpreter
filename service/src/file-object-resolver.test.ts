@@ -34,6 +34,44 @@ describe('storage object resolution', () => {
     expect(await resolver.resolve('s', 'id')).toBe('s/id.txt');
   });
 
+  test('falls back to storage when the advisory index is unavailable', async () => {
+    const failures: string[] = [];
+    const resolver = new FileObjectResolver({
+      bucket: 'files',
+      list: async function* () { yield { name: 's/id.txt' }; },
+      stat: async () => ({ metaData: {} } as BucketItemStat),
+      onIndexError: operation => failures.push(operation),
+      index: {
+        get: async () => { throw new Error('redis unavailable'); },
+        set: async () => { throw new Error('redis unavailable'); },
+        forget: async () => { throw new Error('redis unavailable'); },
+      },
+    });
+
+    expect(await resolver.resolve('s', 'id')).toBe('s/id.txt');
+    expect(await resolver.resolveFresh('s', 'id')).toBe('s/id.txt');
+    expect(failures).toEqual(['get', 'set', 'get', 'set']);
+  });
+
+  test('fresh resolution ignores a stale locator and replaces it from storage', async () => {
+    const index = new Map([['locator', 's/id.txt']]);
+    let lists = 0;
+    const resolver = new FileObjectResolver({
+      bucket: 'files',
+      list: async function* () { lists++; yield { name: 's/id.csv' }; },
+      stat: async () => ({ metaData: {} } as BucketItemStat),
+      index: {
+        get: async () => index.get('locator') ?? null,
+        set: async (_key, value) => index.set('locator', value),
+        forget: async (_key, value) => { if (index.get('locator') === value) index.delete('locator'); },
+      },
+    });
+
+    expect(await resolver.resolveFresh('s', 'id')).toBe('s/id.csv');
+    expect(index.get('locator')).toBe('s/id.csv');
+    expect(lists).toBe(1);
+  });
+
   test('forgets a deleted locator so a replacement key for the same identity resolves', async () => {
     const index = new Map<string, string>();
     const stored = new Set(['s/id.txt']);

@@ -151,6 +151,7 @@ const objectResolver = new FileObjectResolver({
   bucket: bucketName,
   list: prefix => minioClient.listObjects(bucketName, prefix, true),
   stat: key => minioClient.statObject(bucketName, key),
+  onIndexError: (operation, error) => logger.warn('File-object index operation failed', { operation, error }),
   ...(env.FILE_OBJECT_INDEX_ENABLED ? { index: {
     get: (key: string) => redisClient.get(key),
     set: (key: string, value: string, replace: boolean) => replace
@@ -619,7 +620,7 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
   const { session_id, fileId } = req.params;
 
   try {
-    const objectName = await objectResolver.resolve(session_id, fileId);
+    const objectName = await objectResolver.resolveFresh(session_id, fileId);
 
     if (!objectName) {
       logger.warn('File not found for deletion', { session_id, fileId, bucketName });

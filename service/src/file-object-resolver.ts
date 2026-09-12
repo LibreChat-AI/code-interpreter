@@ -6,6 +6,7 @@ export interface ObjectResolverDependencies {
   bucket: string;
   list(prefix: string): AsyncIterable<{ name?: string }>;
   stat(key: string): Promise<BucketItemStat>;
+  onIndexError?(operation: 'get' | 'set' | 'forget', error: unknown): void;
   index?: {
     get(key: string): Promise<string | null>;
     set(key: string, value: string, replace: boolean): Promise<unknown>;
@@ -18,6 +19,10 @@ export interface ObjectResolverDependencies {
 export class FileObjectResolver {
   constructor(private readonly deps: ObjectResolverDependencies) {}
 
+  private reportIndexError(operation: 'get' | 'set' | 'forget', error: unknown): void {
+    this.deps.onIndexError?.(operation, error);
+  }
+
   private indexKey(session: string, id: string): string {
     return `codeapi:file-key:${createHash('sha256').update(JSON.stringify([this.deps.bucket, session, id])).digest('hex')}`;
   }
@@ -29,7 +34,11 @@ export class FileObjectResolver {
 
   async remember(session: string, id: string, key: string, replace = true): Promise<void> {
     if (!this.matches(key, session, id)) throw new Error('Object key does not match storage identity');
-    await this.deps.index?.set(this.indexKey(session, id), key, replace);
+    try {
+      await this.deps.index?.set(this.indexKey(session, id), key, replace);
+    } catch (error) {
+      this.reportIndexError('set', error);
+    }
   }
 
   /** Evict a cached locator once its object is known to be gone. Scoped to the
@@ -37,19 +46,45 @@ export class FileObjectResolver {
    * key published concurrently for the same identity is never dropped. */
   async forget(session: string, id: string, key: string): Promise<void> {
     if (!this.matches(key, session, id)) return;
-    await this.deps.index?.forget(this.indexKey(session, id), key);
+    try {
+      await this.deps.index?.forget(this.indexKey(session, id), key);
+    } catch (error) {
+      this.reportIndexError('forget', error);
+    }
   }
 
-  async resolve(session: string, id: string): Promise<string | undefined> {
-    const cached = await this.deps.index?.get(this.indexKey(session, id));
-    if (cached && this.matches(cached, session, id)) return cached;
+  private async cached(session: string, id: string): Promise<string | undefined> {
+    try {
+      const key = await this.deps.index?.get(this.indexKey(session, id));
+      return key && this.matches(key, session, id) ? key : undefined;
+    } catch (error) {
+      this.reportIndexError('get', error);
+      return undefined;
+    }
+  }
+
+  private async findInStorage(session: string, id: string, replaceIndex: boolean): Promise<string | undefined> {
     for await (const object of this.deps.list(`${session}/${id}`)) {
       if (object.name && this.matches(object.name, session, id)) {
-        await this.remember(session, id, object.name, false);
+        await this.remember(session, id, object.name, replaceIndex);
         return object.name;
       }
     }
     return undefined;
+  }
+
+  async resolve(session: string, id: string): Promise<string | undefined> {
+    return await this.cached(session, id) ?? await this.findInStorage(session, id, false);
+  }
+
+  /** Resolve against storage even when the advisory index contains a match.
+   * Destructive operations use this so an idempotent delete cannot succeed
+   * against a stale key while leaving the current object untouched. */
+  async resolveFresh(session: string, id: string): Promise<string | undefined> {
+    const cached = await this.cached(session, id);
+    const current = await this.findInStorage(session, id, true);
+    if (!current && cached) await this.forget(session, id, cached);
+    return current;
   }
 
   async metadata(session: string, id: string): Promise<{ key: string; stat: BucketItemStat } | undefined> {
