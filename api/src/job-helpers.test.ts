@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  resolveOriginalName,
+  resolveInputDestination,
   isNormalizedObjectForSession,
   markerConflictsWithExplicitFile,
   aggregateBashExtras,
@@ -41,168 +41,19 @@ function makeRuntime(overrides: Partial<Runtime> & { language: string; pkgdir: s
   };
 }
 
-describe('resolveOriginalName', () => {
-  function responseWithHeader(value?: string): Response {
-    const headers = new Headers();
-    if (value !== undefined) headers.set('content-disposition', value);
-    return new Response(null, { headers });
-  }
-
-  it('returns file.name when no Content-Disposition is present', () => {
-    expect(
-      resolveOriginalName(responseWithHeader(), { name: 'script.py', id: 'abc' }),
-    ).toBe('script.py');
+describe('resolveInputDestination', () => {
+  it('uses the caller-requested sandbox path', () => {
+    expect(resolveInputDestination({ name: 'nested/script.py', id: 'abc' }))
+      .toBe('nested/script.py');
   });
 
-  it('extracts quoted filename from Content-Disposition', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader('attachment; filename="server-name.py"'),
-        { name: 'client-name.py', id: 'abc' },
-      ),
-    ).toBe('server-name.py');
+  it('falls back to the object id when no name exists', () => {
+    expect(resolveInputDestination({ name: '', id: 'file-id-123' }))
+      .toBe('file-id-123');
   });
 
-  it('extracts unquoted filename from Content-Disposition', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader('attachment; filename=plain.txt'),
-        { name: 'ignored.txt', id: 'abc' },
-      ),
-    ).toBe('plain.txt');
-  });
-
-  it('falls back to file.id when file.name is empty and no header exists', () => {
-    expect(
-      resolveOriginalName(responseWithHeader(), { name: '', id: 'file-id-123' }),
-    ).toBe('file-id-123');
-  });
-
-  it('falls back to file.name when header is malformed (no filename token)', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader('attachment'),
-        { name: 'fallback.py', id: 'abc' },
-      ),
-    ).toBe('fallback.py');
-  });
-
-  it('stops at the closing quote when the quoted filename is followed by more params', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader('attachment; filename="foo.txt"; size=123'),
-        { name: 'ignored', id: 'abc' },
-      ),
-    ).toBe('foo.txt');
-  });
-
-  it('stops at a semicolon when the unquoted filename is followed by more params', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader('attachment; filename=foo.txt; size=123'),
-        { name: 'ignored', id: 'abc' },
-      ),
-    ).toBe('foo.txt');
-  });
-
-  it('stops at whitespace when the unquoted filename is followed by whitespace-separated params', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader('attachment; filename=foo.txt extra'),
-        { name: 'ignored', id: 'abc' },
-      ),
-    ).toBe('foo.txt');
-  });
-
-  it('returns empty string when both name and id are absent', () => {
-    expect(resolveOriginalName(responseWithHeader(), { name: '' })).toBe('');
-  });
-
-  it('returns empty string when name is empty, id is absent, and header is malformed', () => {
-    expect(
-      resolveOriginalName(responseWithHeader('attachment'), { name: '' }),
-    ).toBe('');
-  });
-
-  it('decodes RFC 5987 filename*= preserving slashes for nested artifact paths', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader("attachment; filename*=UTF-8''test_folder%2Ftest_file.txt"),
-        { name: 'test_file.txt', id: 'abc' },
-      ),
-    ).toBe('test_folder/test_file.txt');
-  });
-
-  it('decodes RFC 5987 filename*= with a UTF-8 charset that includes a language tag', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader("attachment; filename*=UTF-8'en'foo%20bar.txt"),
-        { name: 'ignored', id: 'abc' },
-      ),
-    ).toBe('foo bar.txt');
-  });
-
-  it('decodes RFC 5987 filename*= with non-ASCII characters', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader("attachment; filename*=UTF-8''%E4%BD%A0%E5%A5%BD.txt"),
-        { name: 'ignored', id: 'abc' },
-      ),
-    ).toBe('你好.txt');
-  });
-
-  it('tolerates a filename*= form missing the UTF-8 prefix', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader('attachment; filename*=plain.txt'),
-        { name: 'ignored', id: 'abc' },
-      ),
-    ).toBe('plain.txt');
-  });
-
-  it('falls through to legacy filename= when filename*= is malformed', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader("attachment; filename*=UTF-8''bad%ZZ; filename=\"legacy.txt\""),
-        { name: 'ignored', id: 'abc' },
-      ),
-    ).toBe('legacy.txt');
-  });
-
-  it('prefers filename*= over a legacy filename= present in the same header', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader("attachment; filename=\"legacy.txt\"; filename*=UTF-8''nested%2Ffile.txt"),
-        { name: 'ignored', id: 'abc' },
-      ),
-    ).toBe('nested/file.txt');
-  });
-
-  it('keeps the requested name when an old file server advertises the opaque object basename', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader("attachment; filename*=UTF-8''storage-id.xlsx"),
-        { name: 'Sample_-_Superstore.xlsx', id: 'storage-id' },
-      ),
-    ).toBe('Sample_-_Superstore.xlsx');
-  });
-
-  it('keeps the requested name for a legacy opaque filename header', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader('attachment; filename="storage-id.csv"'),
-        { name: 'original.csv', id: 'storage-id' },
-      ),
-    ).toBe('original.csv');
-  });
-
-  it('keeps an authoritative nested filename even when its basename matches the object id', () => {
-    expect(
-      resolveOriginalName(
-        responseWithHeader("attachment; filename*=UTF-8''exports%2Fstorage-id.csv"),
-        { name: 'original.csv', id: 'storage-id' },
-      ),
-    ).toBe('exports/storage-id.csv');
+  it('returns an empty path when both name and id are absent', () => {
+    expect(resolveInputDestination({ name: '' })).toBe('');
   });
 });
 

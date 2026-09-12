@@ -18,12 +18,8 @@ import {
 
 /**
  * Integration tests for `Job.downloadAndWriteFile` against a real HTTP
- * listener. These exercise the cross-repo round-trip: the file-server
- * (codeapi/service) emits `Content-Disposition: attachment;
- * filename*=UTF-8''<percent-encoded-path>` for nested artifacts, and the
- * sandbox-side parser must recover the path so the file lands at the same
- * nested location on the next prime(). Hitting a real listener (not a
- * mocked Response) catches anything fetch-level that a unit test would miss.
+ * listener. Hitting a real listener verifies that response metadata cannot
+ * redirect a caller-validated sandbox destination.
  */
 
 interface DownloadInternals {
@@ -176,21 +172,16 @@ afterEach(async () => {
   await fsp.rm(tmpDir, { recursive: true, force: true });
 });
 
-describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
-  it('writes a nested-path artifact at the encoded location', async () => {
-    /* Simulates the matplotlib-bug shape: codeapi previously returned a
-     * flat `file.name` and the original path was carried only by the
-     * server's `filename*=` header. The fix is: parser recovers the path,
-     * `mkdir { recursive: true }` creates the parent dir, file ends up
-     * where the user expects to `cat` it on the next turn. */
+describe('downloadAndWriteFile destinations', () => {
+  it('writes a nested-path artifact at the requested location', async () => {
     const file: TFile = {
       id: 'nested-id',
       storage_session_id: 'prev-session',
-      name: 'flat-fallback.txt',
+      name: 'proj/notes.txt',
     };
     routes.set(`/sessions/${encodeURIComponent(file.storage_session_id!)}/objects/${encodeURIComponent(file.id!)}`, {
       status: 200,
-      contentDisposition: "attachment; filename*=UTF-8''proj%2Fnotes.txt",
+      contentDisposition: "attachment; filename*=UTF-8''stored-original.txt",
       body: 'hello from a nested artifact\n',
     });
 
@@ -212,7 +203,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     const file: TFile = {
       id: 'opaque-object-handle',
       storage_session_id: 'opaque-session-handle',
-      name: 'gateway-fallback.txt',
+      name: 'gateway.txt',
     };
     let sawGrantHeader = false;
     let sawRelayToken = false;
@@ -275,14 +266,11 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     expect((await fsp.stat(path.join(tmpDir, 'readonly.txt'))).mode & 0o777).toBe(SANDBOX_READONLY_FILE_MODE);
   });
 
-  it('falls back to the legacy filename= form when filename*= is absent', async () => {
-    /* Backwards-compat: older file-servers (or proxies that strip RFC
-     * 5987 extended-form headers) still send the legacy quoted form. The
-     * parser must still find a name and write the file. */
+  it('downloads when a legacy filename header matches the requested name', async () => {
     const file: TFile = {
       id: 'legacy-id',
       storage_session_id: 'prev-session',
-      name: 'ignored.txt',
+      name: 'legacy.txt',
     };
     routes.set(`/sessions/${encodeURIComponent(file.storage_session_id!)}/objects/${encodeURIComponent(file.id!)}`, {
       status: 200,
@@ -323,7 +311,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     expect(await fsp.stat(path.join(tmpDir, 'opaque-storage-id.xlsx')).catch(() => null)).toBeNull();
   });
 
-  it('resolves concurrent header destinations without provisional-name false conflicts', async () => {
+  it('keeps concurrent inputs at their requested destinations', async () => {
     const renamed: TFile = {
       id: 'renamed-id',
       storage_session_id: 'prev-session',
@@ -338,8 +326,6 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
       status: 200,
       contentDisposition: 'attachment; filename="actual.txt"',
       body: 'renamed bytes',
-      /* Make the other ref resolve `vacated.txt` while this ref's requested
-       * name would still be provisional under the old reservation scheme. */
       delayMs: 75,
     });
     routes.set(`/sessions/${encodeURIComponent(replacement.storage_session_id!)}/objects/${encodeURIComponent(replacement.id!)}`, {
@@ -356,75 +342,62 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
       await job.prime();
       const submissionDir = asInternals(job).submissionDir;
       expect(await fsp.readFile(path.join(submissionDir, 'actual.txt'), 'utf8'))
-        .toBe('renamed bytes');
-      expect(await fsp.readFile(path.join(submissionDir, 'vacated.txt'), 'utf8'))
         .toBe('replacement bytes');
+      expect(await fsp.readFile(path.join(submissionDir, 'vacated.txt'), 'utf8'))
+        .toBe('renamed bytes');
     } finally {
       config.prime_concurrency = originalPrimeConcurrency;
       await job.cleanup();
     }
   });
 
-  it('rejects concurrent refs that resolve to the same destination before either can overwrite', async () => {
-    const slower: TFile = {
-      id: 'same-slower-id',
+  it('keeps distinct requested names when stored objects share an original filename', async () => {
+    const original: TFile = {
+      id: 'original-id',
       storage_session_id: 'prev-session',
-      name: 'slower-fallback.txt',
+      name: 'data.xlsx',
     };
-    const faster: TFile = {
-      id: 'same-faster-id',
+    const aliased: TFile = {
+      id: 'aliased-id',
       storage_session_id: 'prev-session',
-      name: 'faster-fallback.txt',
+      name: 'data-3f9a2c.xlsx',
     };
-    routes.set(`/sessions/${encodeURIComponent(slower.storage_session_id!)}/objects/${encodeURIComponent(slower.id!)}`, {
+    routes.set(`/sessions/${encodeURIComponent(original.storage_session_id!)}/objects/${encodeURIComponent(original.id!)}`, {
       status: 200,
-      contentDisposition: 'attachment; filename="same.txt"',
-      body: 'slower bytes',
+      contentDisposition: 'attachment; filename="data.xlsx"',
+      body: 'original bytes',
       delayMs: 75,
     });
-    routes.set(`/sessions/${encodeURIComponent(faster.storage_session_id!)}/objects/${encodeURIComponent(faster.id!)}`, {
+    routes.set(`/sessions/${encodeURIComponent(aliased.storage_session_id!)}/objects/${encodeURIComponent(aliased.id!)}`, {
       status: 200,
-      contentDisposition: 'attachment; filename="same.txt"',
-      body: 'faster bytes',
+      contentDisposition: 'attachment; filename="data.xlsx"',
+      body: 'aliased bytes',
     });
 
-    let dirty = false;
     const job = makeJob(
-      [slower, faster],
-      sessionWorkspaceAt(tmpDir, 'rt_concurrent_same_destination', () => { dirty = true; }),
+      [original, aliased],
+      sessionWorkspaceAt(tmpDir, 'rt_shared_original_filename'),
     );
     const originalPrimeConcurrency = config.prime_concurrency;
     config.prime_concurrency = 2;
-    let deadlockTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const outcome = await Promise.race([
-        job.prime().then(
-          () => ({ status: 'fulfilled' as const }),
-          error => ({ status: 'rejected' as const, error }),
-        ),
-        new Promise<{ status: 'timeout' }>(resolve => {
-          deadlockTimer = setTimeout(() => resolve({ status: 'timeout' }), 2_000);
-        }),
-      ]);
-      if (deadlockTimer) clearTimeout(deadlockTimer);
-      expect(outcome.status).toBe('rejected');
-      if (outcome.status === 'rejected') {
-        expect(outcome.error).toBeInstanceOf(SessionWorkspaceDirtyError);
-      }
-      expect(dirty).toBe(true);
-      expect(await fsp.readFile(path.join(tmpDir, 'same.txt'), 'utf8')).toBe('faster bytes');
+      await job.prime();
+      const submissionDir = asInternals(job).submissionDir;
+      expect(await fsp.readFile(path.join(submissionDir, 'data.xlsx'), 'utf8'))
+        .toBe('original bytes');
+      expect(await fsp.readFile(path.join(submissionDir, 'data-3f9a2c.xlsx'), 'utf8'))
+        .toBe('aliased bytes');
     } finally {
-      if (deadlockTimer) clearTimeout(deadlockTimer);
       config.prime_concurrency = originalPrimeConcurrency;
       await job.cleanup();
     }
   });
 
-  it('decodes UTF-8 percent-encoded names with non-ASCII characters', async () => {
+  it('keeps a Unicode requested name when the header is percent encoded', async () => {
     const file: TFile = {
       id: 'utf8-id',
       storage_session_id: 'prev-session',
-      name: 'ignored.txt',
+      name: '你好.txt',
     };
     routes.set(`/sessions/${encodeURIComponent(file.storage_session_id!)}/objects/${encodeURIComponent(file.id!)}`, {
       status: 200,
@@ -645,11 +618,7 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     await expect(fsp.access(path.join(tmpDir, 'should-not-exist.txt'))).rejects.toThrow();
   });
 
-  it('rejects a server-supplied filename that escapes the submission dir', async () => {
-    /* Companion guarantee for the path-preserving sanitizer on the
-     * LibreChat side: if a malicious / misconfigured server tries to
-     * smuggle a `..` traversal via Content-Disposition, the codeapi-side
-     * `validateFilePath` aborts before any write happens. */
+  it('ignores a server-supplied filename that escapes the submission dir', async () => {
     const file: TFile = {
       id: 'evil-id',
       storage_session_id: 'prev-session',
@@ -658,16 +627,14 @@ describe('downloadAndWriteFile / RFC 5987 round-trip', () => {
     routes.set(`/sessions/${encodeURIComponent(file.storage_session_id!)}/objects/${encodeURIComponent(file.id!)}`, {
       status: 200,
       contentDisposition: "attachment; filename*=UTF-8''..%2F..%2Fescape.txt",
-      body: 'should never be written',
+      body: 'safe bytes',
     });
 
     const job = makeJob([file]);
     asInternals(job).submissionDir = tmpDir;
 
-    /* downloadAndWriteFile rethrows ValidationError fast (no retries) so
-     * `expect(...).rejects` is the right assertion. */
-    await expect(job.downloadAndWriteFile(file)).rejects.toThrow();
-    /* Defensive: nothing escaped to a parent dir. */
+    await expect(job.downloadAndWriteFile(file)).resolves.toBe('innocent.txt');
+    expect(await fsp.readFile(path.join(tmpDir, 'innocent.txt'), 'utf8')).toBe('safe bytes');
     const parent = path.dirname(tmpDir);
     await expect(fsp.access(path.join(parent, 'escape.txt'))).rejects.toThrow();
   });
