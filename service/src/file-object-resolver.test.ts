@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { canonicalObjectId, FileObjectResolver, mapObjectDetails, storageKeyForUpload } from './file-object-resolver';
+import {
+  canonicalObjectId,
+  canonicalObjectKey,
+  FileObjectResolver,
+  legacyObjectId,
+  mapObjectDetails,
+  storageKeyForUpload,
+} from './file-object-resolver';
 import type { BucketItemStat } from 'minio';
 
 describe('storage object resolution', () => {
@@ -20,6 +27,34 @@ describe('storage object resolution', () => {
 
     expect(await resolver.listFresh('s', 'report.csv')).toEqual([dottedKey]);
     expect(await resolver.listFresh('s', 'report')).toEqual([]);
+  });
+
+  test('legacy extension keys map to exactly one dotted or undotted identity', async () => {
+    const canonicalDotted = canonicalObjectKey('s', 'report.csv');
+    const objects = new Set([
+      's/report.csv',
+      's/report.csv.txt',
+      canonicalDotted,
+    ]);
+    const resolver = new FileObjectResolver({
+      bucket: 'files',
+      list: async function* (prefix) {
+        for (const name of objects) if (name.startsWith(prefix)) yield { name };
+      },
+      stat: async () => ({ metaData: {} } as BucketItemStat),
+    });
+
+    expect(legacyObjectId('s/report.csv', 's')).toBe('report');
+    expect(legacyObjectId('s/report.csv.txt', 's')).toBe('report.csv');
+    expect(legacyObjectId('s/report', 's')).toBe('report');
+    expect(legacyObjectId('other/report.csv', 's')).toBeUndefined();
+    await expect(resolver.remember('s', 'report.csv', 's/report.csv'))
+      .rejects.toThrow('Object key does not match storage identity');
+    expect(await resolver.listFresh('s', 'report')).toEqual(['s/report.csv']);
+    expect(await resolver.listFresh('s', 'report.csv')).toEqual([
+      canonicalDotted,
+      's/report.csv.txt',
+    ]);
   });
 
   test('indexes exact identities while reading fresh version metadata on every request', async () => {

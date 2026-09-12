@@ -1,6 +1,12 @@
 import b from 'busboy';
 import { randomUUID } from 'node:crypto';
-import { canonicalObjectId, FileObjectResolver, mapObjectDetails, storageKeyForUpload } from './file-object-resolver';
+import {
+  canonicalObjectId,
+  FileObjectResolver,
+  legacyObjectId,
+  mapObjectDetails,
+  storageKeyForUpload,
+} from './file-object-resolver';
 import { sendFileDownload } from './file-download';
 import path from 'path';
 import IORedis from 'ioredis';
@@ -573,9 +579,8 @@ function parseObjectName(objectName: string | undefined): { session_id: string; 
   const parts = objectName.split('/');
   if (parts.length < 2) return null;
   const session_id = parts[0];
-  const fileNameWithExt = parts[1];
-  // Remove extension to get file_id
-  const file_id = fileNameWithExt.replace(/\.[^.]+$/, '');
+  const file_id = legacyObjectId(objectName, session_id);
+  if (file_id == null) return null;
   return { session_id, file_id };
 }
 
