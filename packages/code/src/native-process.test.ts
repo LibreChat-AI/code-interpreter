@@ -108,6 +108,36 @@ test('executor bootstrap excludes bridge credentials and Node injection variable
   await sandbox.close();
 });
 
+test('executor forwards the resolved command policy without worker credentials', async () => {
+  const fake = fixture();
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    {
+      workspaceRoot: '/workspace',
+      commandPolicy: {
+        version: 1,
+        preset: 'trusted-vm',
+        network: {
+          outbound: 'unrestricted',
+          allowLocalBinding: true,
+          allowAllUnixSockets: true,
+        },
+      },
+    },
+    fake.fork,
+  );
+  await sandbox.prepare();
+  assert.deepEqual(fake.messages[0].options.commandPolicy, {
+    version: 1,
+    preset: 'trusted-vm',
+    network: {
+      outbound: 'unrestricted',
+      allowLocalBinding: true,
+      allowAllUnixSockets: true,
+    },
+  });
+  await sandbox.close();
+});
+
 test('executor hands credentials over IPC only for the current command', async () => {
   const fake = fixture();
   const sandbox = new NativeProcessWorkspaceCommandSandbox(

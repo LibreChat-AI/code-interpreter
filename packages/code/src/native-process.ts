@@ -182,6 +182,7 @@ export class NativeProcessWorkspaceCommandSandbox
     child.on('disconnect', lost);
     const {
       workspaceRoot,
+      commandPolicy,
       protectedPaths,
       allowedDomains,
       homeDirectory,
@@ -192,6 +193,7 @@ export class NativeProcessWorkspaceCommandSandbox
       {
         options: {
           workspaceRoot,
+          commandPolicy,
           protectedPaths,
           allowedDomains,
           homeDirectory,

@@ -29,6 +29,10 @@ import {
 import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { NativeWorkspaceCommandPool } from './native-pool.js';
+import {
+  resolveNativeSrtCommandPolicy,
+  serializeNativeSrtCommandPolicy,
+} from './native-policy.js';
 import { workspaceMutationGuard } from './workspace-guards.js';
 import type { NativeProcessSandboxOptions } from './native-process.js';
 import type { LocalWorkspaceConfig } from './workspace.js';
@@ -404,6 +408,19 @@ async function run(
       'LIBRECHAT_CODE_COMMAND_SANDBOX must be native-srt or runtime',
     );
   }
+  const commandPolicy = resolveNativeSrtCommandPolicy(
+    option(args, '--command-policy-preset') ??
+      process.env.LIBRECHAT_CODE_COMMAND_POLICY_PRESET?.trim().toLowerCase() ??
+      'restricted',
+  );
+  if (
+    commandPolicy.preset !== 'restricted' &&
+    (!allowWorkspaceCommands || commandSandboxMode !== 'native-srt')
+  ) {
+    throw new Error(
+      'A permissive command policy preset requires native-srt workspace commands',
+    );
+  }
   const github =
     runtimeSessionId == null
       ? githubCredentials()
@@ -756,6 +773,7 @@ async function run(
         });
   const nativeOptions: NativeProcessSandboxOptions = {
     workspaceRoot: canonicalWorkerDirectory!,
+    commandPolicy,
     protectedPaths: [
       identityPath,
       ...rootQuarantinePaths.values(),
@@ -820,7 +838,9 @@ async function run(
     sandboxProfile:
       process.env.LIBRECHAT_CODE_SANDBOX_PROFILE ??
       (allowWorkspaceCommands && commandSandboxMode === 'native-srt'
-        ? 'anthropic-srt'
+        ? commandPolicy.preset === 'restricted'
+          ? 'anthropic-srt'
+          : `anthropic-srt:${commandPolicy.preset}`
         : runtimeMode.startsWith('docker')
           ? 'oci-docker'
           : 'nsjail'),
@@ -829,7 +849,7 @@ async function run(
       .update(policy)
       .update(
         allowWorkspaceCommands && commandSandboxMode === 'native-srt'
-          ? `\0native-srt\0${commandAllowedDomains.join('\0')}\0${github.policyIdentity}`
+          ? `\0native-srt\0${serializeNativeSrtCommandPolicy(commandPolicy)}\0${commandAllowedDomains.join('\0')}\0${github.policyIdentity}`
           : '',
       )
       .digest('hex'),
