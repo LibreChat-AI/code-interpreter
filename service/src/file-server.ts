@@ -269,6 +269,12 @@ async function uploadFile(
   const fileId = existingFileId ?? nanoid();
   const fileExtension = path.extname(filename);
   const objectName = `${session_id}/${fileId}${fileExtension}`;
+  // A replacement can change extension and therefore storage key. Resolve the
+  // prior key from storage before the PUT so a failed advisory index update
+  // cannot leave old bytes reachable after this upload succeeds.
+  const previousObjectName = existingFileId
+    ? await objectResolver.resolveFresh(session_id, fileId)
+    : undefined;
 
   const encodedFilename = Buffer.from(filename).toString('base64');
 
@@ -297,6 +303,10 @@ async function uploadFile(
     await minioClient.putObject(bucketName, objectName, Buffer.alloc(0), 0, metaData);
   } else {
     await minioClient.putObject(bucketName, objectName, peeked.body, undefined, metaData);
+  }
+  if (previousObjectName && previousObjectName !== objectName) {
+    await minioClient.removeObject(bucketName, previousObjectName);
+    await objectResolver.forget(session_id, fileId, previousObjectName);
   }
   await objectResolver.remember(session_id, fileId, objectName);
   logger.info(`[${INSTANCE_ID}] File ID: ${fileId} | Filename: ${filename} | Session key: ${sessionKey}`);
