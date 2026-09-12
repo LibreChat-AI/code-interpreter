@@ -22,9 +22,8 @@ export function storageKeyForUpload(
   id: string,
   extension: string,
   replacing: boolean,
-  current?: string,
 ): string {
-  return current ?? `${session}/${id}${replacing ? '' : extension}`;
+  return `${session}/${id}${replacing ? '' : extension}`;
 }
 
 /** Storage-key index is a hint, never metadata or authorization. A fresh HEAD
@@ -86,18 +85,18 @@ export class FileObjectResolver {
     return undefined;
   }
 
-  async resolve(session: string, id: string): Promise<string | undefined> {
-    return await this.cached(session, id) ?? await this.findInStorage(session, id, false);
+  /** List every exact storage key for an identity without consulting its
+   * locator. Used to collapse legacy siblings and delete the whole identity. */
+  async listFresh(session: string, id: string): Promise<string[]> {
+    const keys: string[] = [];
+    for await (const object of this.deps.list(`${session}/${id}`)) {
+      if (object.name && this.matches(object.name, session, id)) keys.push(object.name);
+    }
+    return keys;
   }
 
-  /** Resolve against storage even when the advisory index contains a match.
-   * Destructive operations use this so an idempotent delete cannot succeed
-   * against a stale key while leaving the current object untouched. */
-  async resolveFresh(session: string, id: string): Promise<string | undefined> {
-    const cached = await this.cached(session, id);
-    const current = await this.findInStorage(session, id, true);
-    if (!current && cached) await this.forget(session, id, cached);
-    return current;
+  async resolve(session: string, id: string): Promise<string | undefined> {
+    return await this.cached(session, id) ?? await this.findInStorage(session, id, false);
   }
 
   async metadata(session: string, id: string): Promise<{ key: string; stat: BucketItemStat } | undefined> {

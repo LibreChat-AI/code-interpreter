@@ -4,9 +4,8 @@ import type { BucketItemStat } from 'minio';
 
 describe('storage object resolution', () => {
   test('replacement uploads converge on one stable object key', () => {
-    expect(storageKeyForUpload('s', 'id', '.csv', true, 's/id.txt')).toBe('s/id.txt');
-    expect(storageKeyForUpload('s', 'id', '.pdf', true, 's/id.txt')).toBe('s/id.txt');
     expect(storageKeyForUpload('s', 'id', '.csv', true)).toBe('s/id');
+    expect(storageKeyForUpload('s', 'id', '.pdf', true)).toBe('s/id');
     expect(storageKeyForUpload('s', 'generated', '.csv', false)).toBe('s/generated.csv');
   });
 
@@ -56,16 +55,21 @@ describe('storage object resolution', () => {
     });
 
     expect(await resolver.resolve('s', 'id')).toBe('s/id.txt');
-    expect(await resolver.resolveFresh('s', 'id')).toBe('s/id.txt');
-    expect(failures).toEqual(['get', 'set', 'get', 'set']);
+    expect(await resolver.listFresh('s', 'id')).toEqual(['s/id.txt']);
+    expect(failures).toEqual(['get', 'set']);
   });
 
-  test('fresh resolution ignores a stale locator and replaces it from storage', async () => {
+  test('fresh listing ignores a stale locator and returns every exact sibling', async () => {
     const index = new Map([['locator', 's/id.txt']]);
     let lists = 0;
     const resolver = new FileObjectResolver({
       bucket: 'files',
-      list: async function* () { lists++; yield { name: 's/id.csv' }; },
+      list: async function* () {
+        lists++;
+        yield { name: 's/identifier.txt' };
+        yield { name: 's/id.csv' };
+        yield { name: 's/id.pdf' };
+      },
       stat: async () => ({ metaData: {} } as BucketItemStat),
       index: {
         get: async () => index.get('locator') ?? null,
@@ -74,8 +78,8 @@ describe('storage object resolution', () => {
       },
     });
 
-    expect(await resolver.resolveFresh('s', 'id')).toBe('s/id.csv');
-    expect(index.get('locator')).toBe('s/id.csv');
+    expect(await resolver.listFresh('s', 'id')).toEqual(['s/id.csv', 's/id.pdf']);
+    expect(index.get('locator')).toBe('s/id.txt');
     expect(lists).toBe(1);
   });
 

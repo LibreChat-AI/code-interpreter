@@ -267,17 +267,13 @@ async function uploadFile(
 ): Promise<t.UploadResult> {
   const fileId = existingFileId ?? nanoid();
   const fileExtension = path.extname(filename);
-  // Replacements retain one storage key even when their filename extension
-  // changes, so concurrent writers converge on S3's last-writer semantics.
-  const previousObjectName = existingFileId
-    ? await objectResolver.resolveFresh(session_id, fileId)
-    : undefined;
+  // Caller-supplied identities use one canonical key, so concurrent writers
+  // converge on S3's last-writer semantics regardless of filename extension.
   const objectName = storageKeyForUpload(
     session_id,
     fileId,
     fileExtension,
     existingFileId != null,
-    previousObjectName,
   );
 
   const encodedFilename = Buffer.from(filename).toString('base64');
@@ -307,6 +303,15 @@ async function uploadFile(
     await minioClient.putObject(bucketName, objectName, Buffer.alloc(0), 0, metaData);
   } else {
     await minioClient.putObject(bucketName, objectName, peeked.body, undefined, metaData);
+  }
+  if (existingFileId != null) {
+    // Retire every extension-keyed sibling left by older replacement behavior.
+    // Concurrent replacement writers share objectName and never delete it.
+    for (const sibling of await objectResolver.listFresh(session_id, fileId)) {
+      if (sibling === objectName) continue;
+      await minioClient.removeObject(bucketName, sibling);
+      await objectResolver.forget(session_id, fileId, sibling);
+    }
   }
   await objectResolver.remember(session_id, fileId, objectName);
   logger.info(`[${INSTANCE_ID}] File ID: ${fileId} | Filename: ${filename} | Session key: ${sessionKey}`);
@@ -630,9 +635,9 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
   const { session_id, fileId } = req.params;
 
   try {
-    const objectName = await objectResolver.resolveFresh(session_id, fileId);
+    const objectNames = await objectResolver.listFresh(session_id, fileId);
 
-    if (!objectName) {
+    if (objectNames.length === 0) {
       logger.warn('File not found for deletion', { session_id, fileId, bucketName });
       return res.status(404).json({
         error: 'File not found',
@@ -643,9 +648,11 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
       });
     }
 
-    await minioClient.removeObject(bucketName, objectName);
-    await forgetObjectKey(session_id, fileId, objectName);
-    logger.info(`[${INSTANCE_ID}] File deleted successfully: ${objectName}`);
+    for (const objectName of objectNames) {
+      await minioClient.removeObject(bucketName, objectName);
+      await forgetObjectKey(session_id, fileId, objectName);
+    }
+    logger.info(`[${INSTANCE_ID}] File identity deleted successfully`, { session_id, fileId, objectNames });
     return res.status(200).json({
       message: 'File deleted successfully',
       session_id,
