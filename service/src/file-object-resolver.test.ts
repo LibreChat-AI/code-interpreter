@@ -83,6 +83,36 @@ describe('storage object resolution', () => {
     expect(lists).toBe(1);
   });
 
+  test('metadata re-resolves storage after a cached locator is missing', async () => {
+    const index = new Map([['locator', 's/id.txt']]);
+    let heads = 0;
+    const resolver = new FileObjectResolver({
+      bucket: 'files',
+      list: async function* () { yield { name: 's/id' }; },
+      stat: async key => {
+        heads++;
+        if (key === 's/id.txt') throw Object.assign(new Error('missing'), { code: 'NoSuchKey' });
+        return {
+          size: 1,
+          etag: 'current',
+          lastModified: new Date(),
+          metaData: { 'codeapi-version': 'current' },
+        } as BucketItemStat;
+      },
+      index: {
+        get: async () => index.get('locator') ?? null,
+        set: async (_key, value) => index.set('locator', value),
+        forget: async (_key, value) => { if (index.get('locator') === value) index.delete('locator'); },
+      },
+    });
+
+    const metadata = await resolver.metadata('s', 'id');
+    expect(metadata?.key).toBe('s/id');
+    expect(metadata?.stat.metaData['codeapi-version']).toBe('current');
+    expect(index.get('locator')).toBe('s/id');
+    expect(heads).toBe(2);
+  });
+
   test('forgets a deleted locator so a replacement key for the same identity resolves', async () => {
     const index = new Map<string, string>();
     const stored = new Set(['s/id.txt']);

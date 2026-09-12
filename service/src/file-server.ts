@@ -521,7 +521,16 @@ app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
   try {
     objectName = await objectResolver.resolve(session_id, objectId);
     if (!objectName) return res.status(404).json({ error: 'File not found' });
-    const dataStream = await minioClient.getObject(bucketName, objectName);
+    let dataStream: Readable;
+    try {
+      dataStream = await minioClient.getObject(bucketName, objectName);
+    } catch (error) {
+      const missing = ['NoSuchKey', 'NotFound', 'NoSuchObject'].includes((error as { code?: string }).code ?? '');
+      if (!missing) throw error;
+      objectName = await objectResolver.recover(session_id, objectId, objectName);
+      if (!objectName) return res.status(404).json({ error: 'File not found' });
+      dataStream = await minioClient.getObject(bucketName, objectName);
+    }
     try {
       const headers = (dataStream as Readable & { headers?: Record<string, string> }).headers ?? {};
       if (!headers['x-amz-meta-codeapi-version'] || !headers['x-amz-meta-original-filename']) {

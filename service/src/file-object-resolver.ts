@@ -99,17 +99,32 @@ export class FileObjectResolver {
     return await this.cached(session, id) ?? await this.findInStorage(session, id, false);
   }
 
+  /** Recover once a cached key is proven missing. Eviction and publication are
+   * advisory; the authoritative storage listing determines the replacement. */
+  async recover(session: string, id: string, missingKey: string): Promise<string | undefined> {
+    await this.forget(session, id, missingKey);
+    const [current] = await this.listFresh(session, id);
+    if (current) await this.remember(session, id, current);
+    return current;
+  }
+
   async metadata(session: string, id: string): Promise<{ key: string; stat: BucketItemStat } | undefined> {
-    const key = await this.resolve(session, id);
+    let key = await this.resolve(session, id);
     if (!key) return undefined;
-    try {
-      return { key, stat: await this.deps.stat(key) };
-    } catch (error) {
-      if (!['NoSuchKey', 'NotFound', 'NoSuchObject'].includes((error as { code?: string }).code ?? '')) throw error;
-      await this.forget(session, id, key);
-      // Do not cache absence: a later upload can publish this identity again.
-      return undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return { key, stat: await this.deps.stat(key) };
+      } catch (error) {
+        if (!['NoSuchKey', 'NotFound', 'NoSuchObject'].includes((error as { code?: string }).code ?? '')) throw error;
+        if (attempt === 1) {
+          await this.forget(session, id, key);
+          return undefined;
+        }
+        key = await this.recover(session, id, key);
+        if (!key) return undefined;
+      }
     }
+    return undefined;
   }
 }
 
