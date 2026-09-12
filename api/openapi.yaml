@@ -67,6 +67,7 @@ components:
       properties:
         name:
           type: string
+          description: Relative path where the file is mounted in the sandbox.
         id:
           type: string
         content:

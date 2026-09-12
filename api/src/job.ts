@@ -173,52 +173,12 @@ export function ensureNodeModulesSymlink(
 }
 
 /**
- * Extracts the on-disk filename from a Content-Disposition response header,
- * falling back to the request-supplied `file.name` (or `file.id` if no name
- * was provided). Pure; exported for unit testing.
- *
- * Matches RFC 5987 / 8187 `filename*=UTF-8''<percent-encoded>` first because
- * the file server emits that form for UTF-8-safe transport of arbitrary
- * names — including paths with `/` separators that the legacy `filename=`
- * form would mangle. Falls back to the legacy quoted (`filename="..."`) or
- * unquoted (`filename=...`) forms, each stopping at the closing quote or
- * the first whitespace/semicolon so trailing params like
- * `attachment; filename="foo.txt"; size=123` correctly yield `foo.txt`.
+ * Resolves the on-disk destination for a by-reference input. The request owns
+ * the sandbox path; object response metadata must not redirect the write.
+ * Pure; exported for unit testing.
  */
-export function resolveOriginalName(response: Response, file: TFile): string {
-  const fallback = file.name || (file.id ?? '');
-  const header = response.headers.get('content-disposition');
-  if (!header) return fallback;
-
-  const preferRequestedName = (candidate: string): string => {
-    /* Older file servers advertised path.basename(objectName) when an
-     * S3-compatible backend omitted original-filename user metadata. That
-     * basename is `<file.id><extension>`, so it is a storage identifier rather
-     * than an authoritative destination. Preserve the caller's requested name
-     * during rolling upgrades instead of exposing the opaque id in /mnt/data. */
-    const opaqueStem = path.basename(candidate, path.extname(candidate));
-    const isFlatObjectBasename = candidate === path.basename(candidate);
-    return file.name && file.id && isFlatObjectBasename && opaqueStem === file.id
-      ? file.name
-      : candidate;
-  };
-
-  const star = header.match(/filename\*=(?:UTF-8'[^']*')?([^;]+)/i);
-  if (star) {
-    const raw = star[1].trim();
-    try {
-      return preferRequestedName(decodeURIComponent(raw));
-    } catch {
-      /* Malformed percent-encoding (e.g. `%ZZ`) — fall through to the legacy
-       * forms. The same header may emit both `filename*=` and a legacy
-       * `filename=` per RFC 5987 §4.3, so a corrupt extended form should
-       * not poison a valid fallback. */
-    }
-  }
-
-  const match = header.match(/filename="([^"]+)"/i)
-    ?? header.match(/filename=([^\s;]+)/i);
-  return match ? preferRequestedName(match[1]) : fallback;
+export function resolveInputDestination(file: TFile): string {
+  return file.name || (file.id ?? '');
 }
 
 /**
@@ -959,12 +919,9 @@ export class Job {
         );
       }
       requestedDestinations.set(file.name, file);
-      /* Inline destinations are final, so keep them reserved while reference
-       * downloads resolve their authoritative Content-Disposition names.
-       * A ref's requested name is only a fallback, not a real destination yet:
-       * reserving every ref here makes concurrent swaps/order-dependent
-       * renames falsely conflict before the owning response has resolved. */
-      if (!file.id) this.inputDestinations.set(file.name, file);
+      /* The request owns every sandbox destination. Reserve it before parallel
+       * priming begins so object metadata cannot redirect a later write. */
+      this.inputDestinations.set(file.name, file);
     }
 
     if (this.session) {
@@ -1083,10 +1040,8 @@ export class Job {
   ): Promise<void> {
     throwIfAborted(context.signal);
     if (this.session && file.id && (await this.reusePrimedInput(file, context))) {
-      /* Reuse has no response header to pass through downloadAndWriteFile, so
-       * its requested name becomes authoritative only after the on-disk copy
-       * has been verified. Reserve it before another concurrent ref can claim
-       * and overwrite that path. */
+      /* Inherited markers are registered after prime's initial reservation
+       * pass, so reserve the verified requested path here as well. */
       this.reserveInputDestination(file, file.name);
       return;
     }
@@ -1345,10 +1300,10 @@ export class Job {
           throw new Error(`HTTP error: ${response.status}`);
         }
 
-        const originalName = resolveOriginalName(response, file);
-        validateFilePath(originalName, operation.submissionDir);
-        this.reserveInputDestination(file, originalName);
-        const finalPath = path.join(operation.submissionDir, originalName);
+        const destination = resolveInputDestination(file);
+        validateFilePath(destination, operation.submissionDir);
+        this.reserveInputDestination(file, destination);
+        const finalPath = path.join(operation.submissionDir, destination);
         const finalParent = path.dirname(finalPath);
         /* Persistent-session workspaces can hold a prior turn's symlink, so build
          * ancestors no-follow; a fresh per-job workspace can use plain mkdir -p. */
@@ -1376,7 +1331,7 @@ export class Job {
           operation.signal,
         );
         const readOnly = response.headers.get('x-read-only')?.toLowerCase() === 'true';
-        this.inputFileHashes.set(originalName, {
+        this.inputFileHashes.set(destination, {
           originalId: file.id,
           originalSessionId: file.storage_session_id!,
           hash,
@@ -1389,15 +1344,8 @@ export class Job {
           await applyReadOnlyInputPermissions(finalPath);
         }
 
-        /* Keep the in-memory TFile in sync with the on-disk name so that
-         * inputByName lookups in handleSessionFiles match walkDir's
-         * path.relative() output. Otherwise a Content-Disposition override
-         * would leave file.name pointing at the client-submitted name while
-         * the file lives under originalName on disk. */
-        if (originalName !== file.name) file.name = originalName;
-
-        this.log.info({ file: originalName, hash: hash.substring(0, 8) }, 'Downloaded file');
-        return originalName;
+        this.log.info({ file: destination, hash: hash.substring(0, 8) }, 'Downloaded file');
+        return destination;
       } catch (error: unknown) {
         if (response?.body && !response.bodyUsed) {
           await response.body.cancel().catch(() => {});
