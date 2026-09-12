@@ -48,7 +48,7 @@ sequenceDiagram
 | `egressGrant.inputManifestTimeoutMs` | `CODEAPI_INPUT_MANIFEST_TIMEOUT_MS` | `10000` |
 | `fileServer.objectIndexEnabled` | `CODEAPI_FILE_OBJECT_INDEX_ENABLED` | `false` |
 | `fileServer.metadataConcurrency` | `CODEAPI_FILE_METADATA_CONCURRENCY` | `1` |
-| `workerSandbox.sandbox.httpInputCacheEnabled` | `SANDBOX_HTTP_INPUT_CACHE_ENABLED` | `false` |
+| `workerSandbox.sandbox.httpInputCacheEnabled` | `SANDBOX_HTTP_INPUT_CACHE_ENABLED` | `true` |
 | `workerSandbox.sandbox.httpInputCacheMaxInflight` | `SANDBOX_HTTP_INPUT_CACHE_MAX_INFLIGHT` | `16` |
 | `workerSandbox.sandbox.httpInputCacheMaxObjects` | `SANDBOX_HTTP_INPUT_CACHE_MAX_OBJECTS` | `4096` |
 | `workerSandbox.sandbox.inputCacheMaxBytes` | `SANDBOX_INPUT_CACHE_MAX_BYTES` | `536870912` |
@@ -61,14 +61,14 @@ Metadata listing concurrency preserves order and is capped at 64. A canary can u
 
 ## Rollout and rollback
 
-1. Deploy the new binaries with feature flags off. Atomic accounting supports existing JSON ledgers, and legacy downloads retain metadata compatibility. The new file server stamps future uploads with versions.
+1. Deploy the new binaries with HTTP input reuse enabled by default. Mixed-version requests remain compatible: older gateways and relays fall back to normal downloads, while older unversioned objects return `cacheable: false`. The new file server stamps future uploads with versions. Set `workerSandbox.sandbox.httpInputCacheEnabled=false` only when a staged rollout requires the immediate rollback path.
 2. Update **all** egress-gateway replicas before enabling compact ledgers. New binaries read both formats regardless of the creation flag. Older binaries cannot read compact hashes. To roll back to an older binary, disable compact creation, drain active grants, and wait their maximum TTL plus grace; never delete active ledgers to force a rollback.
 3. Update all file-server writers before enabling the object-key index. Otherwise an older writer can change a locator without updating the index. Keep file-server replicas consistent during an indexed rollout.
-4. Update the gateway, relay, runner, and launcher before enabling HTTP reuse on a small runner canary. Older gateway/relay metadata routes return 404/405 and fall back safely. Older files return `cacheable: false`. Keep the feature disabled for storage adapters that cannot return user metadata on GET.
+4. Canary the default-on HTTP reuse path after updating the gateway, relay, runner, and launcher. Keep the feature explicitly disabled for storage adapters that cannot return user metadata on GET.
 5. Observe `codeapi_sandbox_http_input_cache_events_total` (bounded event labels, no identities), cold and warm preparation latency, storage/Redis operations, admission fairness, request budgets, and memory/disk pressure before widening the rollout. A successful manifest consumes one read request for the batch, matching the existing list-request accounting unit. Per-file compatibility preflights each consume a read request; each cold miss consumes an additional download request. Do not disable budget enforcement to accommodate a workload.
 6. Disable HTTP reuse to return to normal downloads immediately. Cached files can age out normally; no workspace deletion or migration is needed.
 
-The creation flags default off. No deployment or object retention policy is changed by this code. Command grouping and persistent sessions remain independent options, not prerequisites for content reuse. Nothing deletes user inputs or infers shell dependencies.
+HTTP input reuse defaults on. Compact-ledger creation and the object-key index remain off until their mixed-version rollout requirements are satisfied. No object retention policy is changed by this code. Command grouping and persistent sessions remain independent options, not prerequisites for content reuse. Nothing deletes user inputs or infers shell dependencies.
 
 ## Validation
 
