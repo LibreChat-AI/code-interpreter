@@ -215,9 +215,10 @@ LIBRECHAT_CODE_COMMAND_SANDBOX=native-srt librechat-code run \
 
 The native SRT backend can be made intentionally permissive when the selected
 machine already supplies an administrator-approved outer security boundary.
-The `trusted-vm` preset keeps SRT filesystem confinement, credential masking,
-private scratch storage, cancellation, time limits, and output limits, while
-allowing unmatched outbound destinations, local port binding, and Unix sockets:
+The `trusted-vm` preset keeps SRT's direct filesystem rules, credential
+masking, private scratch storage, cancellation, time limits, and output limits,
+while allowing unmatched outbound destinations, local port binding, and Unix
+sockets:
 
 ```bash
 librechat-code run \
@@ -238,9 +239,12 @@ custom sandbox profile label.
 Treat this preset as delegation to the machine's outer security controls. Any
 outbound destination can receive workspace data, local listeners can accept
 connections reachable under host policy, and Unix socket access may expose
-powerful host services such as a container daemon. Register only the intended
-source root. Worker identity, mutation-quarantine state, and configured GitHub
-App key files must remain outside it.
+powerful host services such as a container daemon. A socket that grants host
+privilege can bypass SRT's filesystem rules and reach worker or GitHub identity
+material; the outer VM boundary must prevent that path or explicitly accept
+that trust. Register only the intended source root. Worker identity,
+mutation-quarantine state, and configured GitHub App key files must remain
+outside it.
 
 ## Docker runtime supervisor (optional hardened adapter)
 

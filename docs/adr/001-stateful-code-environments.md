@@ -60,8 +60,10 @@ worker replacement; the UI and operator documentation must not imply otherwise.
   pairing secures the transport identity but does not make the host a sandbox.
   An operator may explicitly delegate network and local-socket restrictions to
   an approved outer VM boundary through a named, digested worker policy. That
-  delegation must retain workspace filesystem confinement, worker-identity and
-  credential protection, cancellation, and resource limits.
+  delegation retains direct workspace filesystem rules, cancellation, and
+  resource limits. The operator is responsible for preventing permitted host
+  services (for example, a privileged container socket) from bypassing those
+  rules and exposing worker identity or credential material.
 - A compromised worker can lie about advertised capabilities. Capability
   labels and policy digests are audit signals until enforcement is coupled to
   an attested sandbox or trusted host policy.
