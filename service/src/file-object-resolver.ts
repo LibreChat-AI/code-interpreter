@@ -19,6 +19,18 @@ export function canonicalObjectId(key: string): string | undefined {
   }
 }
 
+/** Legacy objects were stored as `<session>/<id><final filename extension>`.
+ * Derive exactly one identity by removing that final extension when present.
+ * In particular, `session/report.csv` belongs to `report`, while a legacy
+ * `report.csv` identity would be stored as e.g. `session/report.csv.txt`.
+ * Dotted identities without a filename extension use canonical storage. */
+export function legacyObjectId(key: string, session: string): string | undefined {
+  if (path.posix.dirname(key) !== session) return undefined;
+  const basename = path.posix.basename(key);
+  const extension = path.posix.extname(basename);
+  return extension === '' ? basename : basename.slice(0, -extension.length);
+}
+
 export interface ObjectResolverDependencies {
   bucket: string;
   list(prefix: string): AsyncIterable<{ name?: string }>;
@@ -58,8 +70,7 @@ export class FileObjectResolver {
 
   private matches(key: string, session: string, id: string): boolean {
     if (key === canonicalObjectKey(session, id)) return true;
-    return path.posix.dirname(key) === session &&
-      (path.posix.basename(key) === id || path.posix.basename(key, path.posix.extname(key)) === id);
+    return legacyObjectId(key, session) === id;
   }
 
   async remember(session: string, id: string, key: string, replace = true): Promise<void> {
