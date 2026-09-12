@@ -2,6 +2,23 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { BucketItemStat } from 'minio';
 
+const CANONICAL_OBJECT_DIRECTORY = '.codeapi-objects';
+
+export function canonicalObjectKey(session: string, id: string): string {
+  return `${session}/${CANONICAL_OBJECT_DIRECTORY}/${Buffer.from(id, 'utf8').toString('base64url')}`;
+}
+
+export function canonicalObjectId(key: string): string | undefined {
+  const parts = key.split('/');
+  if (parts.length !== 3 || parts[1] !== CANONICAL_OBJECT_DIRECTORY || parts[2] === '') return undefined;
+  try {
+    const id = Buffer.from(parts[2], 'base64url').toString('utf8');
+    return canonicalObjectKey(parts[0], id) === key ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface ObjectResolverDependencies {
   bucket: string;
   list(prefix: string): AsyncIterable<{ name?: string }>;
@@ -23,7 +40,7 @@ export function storageKeyForUpload(
   extension: string,
   replacing: boolean,
 ): string {
-  return `${session}/${id}${replacing ? '' : extension}`;
+  return replacing ? canonicalObjectKey(session, id) : `${session}/${id}${extension}`;
 }
 
 /** Storage-key index is a hint, never metadata or authorization. A fresh HEAD
@@ -40,6 +57,7 @@ export class FileObjectResolver {
   }
 
   private matches(key: string, session: string, id: string): boolean {
+    if (key === canonicalObjectKey(session, id)) return true;
     return path.posix.dirname(key) === session &&
       (path.posix.basename(key) === id || path.posix.basename(key, path.posix.extname(key)) === id);
   }
@@ -76,10 +94,12 @@ export class FileObjectResolver {
   }
 
   private async findInStorage(session: string, id: string, replaceIndex: boolean): Promise<string | undefined> {
-    for await (const object of this.deps.list(`${session}/${id}`)) {
-      if (object.name && this.matches(object.name, session, id)) {
-        await this.remember(session, id, object.name, replaceIndex);
-        return object.name;
+    for (const prefix of [canonicalObjectKey(session, id), `${session}/${id}`]) {
+      for await (const object of this.deps.list(prefix)) {
+        if (object.name && this.matches(object.name, session, id)) {
+          await this.remember(session, id, object.name, replaceIndex);
+          return object.name;
+        }
       }
     }
     return undefined;
@@ -88,11 +108,13 @@ export class FileObjectResolver {
   /** List every exact storage key for an identity without consulting its
    * locator. Used to collapse legacy siblings and delete the whole identity. */
   async listFresh(session: string, id: string): Promise<string[]> {
-    const keys: string[] = [];
-    for await (const object of this.deps.list(`${session}/${id}`)) {
-      if (object.name && this.matches(object.name, session, id)) keys.push(object.name);
+    const keys = new Set<string>();
+    for (const prefix of [canonicalObjectKey(session, id), `${session}/${id}`]) {
+      for await (const object of this.deps.list(prefix)) {
+        if (object.name && this.matches(object.name, session, id)) keys.add(object.name);
+      }
     }
-    return keys;
+    return [...keys];
   }
 
   async resolve(session: string, id: string): Promise<string | undefined> {

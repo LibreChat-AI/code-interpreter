@@ -1,6 +1,6 @@
 import b from 'busboy';
 import { randomUUID } from 'node:crypto';
-import { FileObjectResolver, mapObjectDetails, storageKeyForUpload } from './file-object-resolver';
+import { canonicalObjectId, FileObjectResolver, mapObjectDetails, storageKeyForUpload } from './file-object-resolver';
 import { sendFileDownload } from './file-download';
 import path from 'path';
 import IORedis from 'ioredis';
@@ -566,6 +566,10 @@ app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
  */
 function parseObjectName(objectName: string | undefined): { session_id: string; file_id: string } | null {
   if (objectName == null || objectName === '') return null;
+  const canonicalId = canonicalObjectId(objectName);
+  if (canonicalId != null) {
+    return { session_id: objectName.split('/', 1)[0], file_id: canonicalId };
+  }
   const parts = objectName.split('/');
   if (parts.length < 2) return null;
   const session_id = parts[0];

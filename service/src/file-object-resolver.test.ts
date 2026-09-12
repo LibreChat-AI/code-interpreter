@@ -1,12 +1,25 @@
 import { describe, expect, test } from 'bun:test';
-import { FileObjectResolver, mapObjectDetails, storageKeyForUpload } from './file-object-resolver';
+import { canonicalObjectId, FileObjectResolver, mapObjectDetails, storageKeyForUpload } from './file-object-resolver';
 import type { BucketItemStat } from 'minio';
 
 describe('storage object resolution', () => {
   test('replacement uploads converge on one stable object key', () => {
-    expect(storageKeyForUpload('s', 'id', '.csv', true)).toBe('s/id');
-    expect(storageKeyForUpload('s', 'id', '.pdf', true)).toBe('s/id');
+    expect(storageKeyForUpload('s', 'id', '.csv', true)).toBe('s/.codeapi-objects/aWQ');
+    expect(storageKeyForUpload('s', 'id', '.pdf', true)).toBe('s/.codeapi-objects/aWQ');
+    expect(canonicalObjectId(storageKeyForUpload('s', 'report.csv', '', true))).toBe('report.csv');
     expect(storageKeyForUpload('s', 'generated', '.csv', false)).toBe('s/generated.csv');
+  });
+
+  test('canonical dotted identities cannot match another legacy identity', async () => {
+    const dottedKey = storageKeyForUpload('s', 'report.csv', '', true);
+    const resolver = new FileObjectResolver({
+      bucket: 'files',
+      list: async function* () { yield { name: dottedKey }; },
+      stat: async () => ({ metaData: {} } as BucketItemStat),
+    });
+
+    expect(await resolver.listFresh('s', 'report.csv')).toEqual([dottedKey]);
+    expect(await resolver.listFresh('s', 'report')).toEqual([]);
   });
 
   test('indexes exact identities while reading fresh version metadata on every request', async () => {
@@ -80,7 +93,7 @@ describe('storage object resolution', () => {
 
     expect(await resolver.listFresh('s', 'id')).toEqual(['s/id.csv', 's/id.pdf']);
     expect(index.get('locator')).toBe('s/id.txt');
-    expect(lists).toBe(1);
+    expect(lists).toBe(2);
   });
 
   test('metadata re-resolves storage after a cached locator is missing', async () => {
@@ -88,7 +101,7 @@ describe('storage object resolution', () => {
     let heads = 0;
     const resolver = new FileObjectResolver({
       bucket: 'files',
-      list: async function* () { yield { name: 's/id' }; },
+      list: async function* () { yield { name: 's/.codeapi-objects/aWQ' }; },
       stat: async key => {
         heads++;
         if (key === 's/id.txt') throw Object.assign(new Error('missing'), { code: 'NoSuchKey' });
@@ -107,9 +120,9 @@ describe('storage object resolution', () => {
     });
 
     const metadata = await resolver.metadata('s', 'id');
-    expect(metadata?.key).toBe('s/id');
+    expect(metadata?.key).toBe('s/.codeapi-objects/aWQ');
     expect(metadata?.stat.metaData['codeapi-version']).toBe('current');
-    expect(index.get('locator')).toBe('s/id');
+    expect(index.get('locator')).toBe('s/.codeapi-objects/aWQ');
     expect(heads).toBe(2);
   });
 
