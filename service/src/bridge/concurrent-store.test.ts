@@ -384,6 +384,46 @@ test('queued cancellation never leases and does not block another root', async (
   ).toBeUndefined();
 });
 
+test('unassigned slot releases even when dispatch cleanup fails', async () => {
+  await register();
+  const originalIncr = redis.incr.bind(redis);
+  const originalSet = redis.set.bind(redis);
+  const set = originalSet as (...args: unknown[]) => unknown;
+  redis.incr = ((key: string) =>
+    key.endsWith(':generation')
+      ? Promise.reject(new Error('injected generation outage'))
+      : originalIncr(key)) as typeof redis.incr;
+  redis.set = ((key: string, ...args: unknown[]) =>
+    key.endsWith(':cancelled')
+      ? Promise.reject(new Error('injected cancellation outage'))
+      : set(key, ...args)) as typeof redis.set;
+  try {
+    // The reservation succeeds, then dispatch fails before storing an assignment.
+    await expect(dispatch('a')).rejects.toThrow('injected cancellation outage');
+  } finally {
+    redis.incr = originalIncr;
+    redis.set = originalSet;
+  }
+  expect(
+    await redis.hlen(`codeapi:bridge:v1:worker:${workerId}:workspace-slots`),
+  ).toBe(0);
+  expect(
+    await redis.get(`codeapi:bridge:v1:worker:${workerId}:lock`),
+  ).toBeNull();
+  const next = dispatch('a');
+  const assignment = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  expect(assignment.request).toMatchObject({ workspaceId: 'a' });
+  await settle(assignment);
+  await expect(next).resolves.toMatchObject({ status: 'rejected' });
+});
+
 test('late quarantine releases its slot after caller cancellation and retains only its root fence', async () => {
   await register();
   const controller = new AbortController();
