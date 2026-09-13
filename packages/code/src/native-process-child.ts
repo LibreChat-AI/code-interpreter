@@ -25,7 +25,10 @@ const shutdown = () => {
   if (shuttingDown) return;
   shuttingDown = true;
   active?.controller.abort();
-  void (sandbox?.close() ?? Promise.resolve()).finally(() => process.exit(1));
+  void (sandbox?.close() ?? Promise.resolve()).then(
+    () => process.exit(0),
+    () => process.exit(1),
+  );
   setTimeout(() => process.exit(1), 5000);
 };
 process.on('disconnect', shutdown);

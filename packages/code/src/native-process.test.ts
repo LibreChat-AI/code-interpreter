@@ -301,6 +301,47 @@ test('executor close drains an active command before closing IPC', async () => {
   await assert.rejects(sandbox.execute(request), /unavailable/);
 });
 
+test('executor close resolves when the child exits during the close handshake', async () => {
+  const fake = fixture();
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    { workspaceRoot: '/workspace' },
+    fake.fork,
+  );
+  await sandbox.prepare();
+  Object.assign(fake.child, {
+    send(message: Record<string, any>, callback: (error: null) => void) {
+      fake.messages.push(message);
+      callback(null);
+      queueMicrotask(() => {
+        Object.assign(fake.child, { connected: false });
+        fake.child.emit('exit', 1, null);
+        fake.child.emit('disconnect');
+      });
+      return true;
+    },
+  });
+  await sandbox.close();
+  assert.equal(fake.messages.filter((m) => m.type === 'close').length, 1);
+  await assert.rejects(sandbox.execute(request), /unavailable/);
+});
+
+test('executor close skips the handshake once the child is already lost', async () => {
+  const fake = fixture();
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    { workspaceRoot: '/workspace' },
+    fake.fork,
+  );
+  await sandbox.prepare();
+  Object.assign(fake.child, { connected: false });
+  fake.child.emit('exit', 1, null);
+  await sandbox.close();
+  assert.equal(
+    fake.messages.some((m) => m.type === 'close'),
+    false,
+  );
+  await assert.rejects(sandbox.execute(request), /unavailable/);
+});
+
 test('executor startup loss is not reported as an applied mutation', async () => {
   const fake = fixture();
   const sandbox = new NativeProcessWorkspaceCommandSandbox(

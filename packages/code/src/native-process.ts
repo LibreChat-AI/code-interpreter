@@ -340,12 +340,15 @@ export class NativeProcessWorkspaceCommandSandbox
     return this.closing;
   }
 
+  /** Best-effort shutdown handshake. An executor that exits, disconnects, or
+   * stalls while closing is terminated regardless, and once the active
+   * command has drained nothing left in flight can mutate the workspace. */
   private async stop(): Promise<void> {
     await this.active?.catch(() => undefined);
     await this.ready?.catch(() => undefined);
     try {
       if (this.child?.connected && !this.failed)
-        await this.rpc('close', {}, 10_000, false);
+        await this.rpc('close', {}, 10_000, false).catch(() => undefined);
     } finally {
       this.failed = true;
       this.terminate();
