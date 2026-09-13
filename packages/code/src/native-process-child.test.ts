@@ -33,7 +33,7 @@ for (const signal of ['SIGINT', 'SIGHUP', 'SIGTERM'] as const) {
       // installation finished without requiring platform SRT dependencies.
       child.once('message', () => child.kill(signal));
       child.send({ id: 'startup-probe', type: 'probe' });
-      assert.deepEqual(await exited, { code: 1, signal: null });
+      assert.deepEqual(await exited, { code: 0, signal: null });
     },
   );
 }
