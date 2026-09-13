@@ -325,6 +325,35 @@ test('executor close resolves when the child exits during the close handshake', 
   await assert.rejects(sandbox.execute(request), /unavailable/);
 });
 
+test('executor close still reports a cleanup failure the child replies with', async () => {
+  const fake = fixture();
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    { workspaceRoot: '/workspace' },
+    fake.fork,
+  );
+  await sandbox.prepare();
+  Object.assign(fake.child, {
+    send(message: Record<string, any>, callback: (error: null) => void) {
+      fake.messages.push(message);
+      callback(null);
+      queueMicrotask(() =>
+        fake.child.emit('message', {
+          id: message.id,
+          ok: false,
+          code: 'COMMAND_UNAVAILABLE',
+          errorMessage: 'scratch cleanup failed',
+          mutation: false,
+          requiresQuarantine: false,
+        }),
+      );
+      return true;
+    },
+  });
+  await assert.rejects(sandbox.close(), /scratch cleanup failed/);
+  assert.equal(fake.killCalls, 1);
+  await assert.rejects(sandbox.execute(request), /unavailable/);
+});
+
 test('executor close skips the handshake once the child is already lost', async () => {
   const fake = fixture();
   const sandbox = new NativeProcessWorkspaceCommandSandbox(

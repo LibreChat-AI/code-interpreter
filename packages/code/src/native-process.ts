@@ -73,6 +73,15 @@ export function nativeExecutorEnvironment(
   );
 }
 
+/** The executor process was lost, refused a send, or stalled past its
+ * deadline, as opposed to a failure the executor reported explicitly. */
+class NativeExecutorUnavailableError extends WorkspaceToolError {
+  constructor(mutation: boolean) {
+    super('Native executor is unavailable', 'COMMAND_UNAVAILABLE', mutation);
+    this.name = 'NativeExecutorUnavailableError';
+  }
+}
+
 /** One persistent, process-isolated SRT manager per workspace. No automatic
  * restart/replay: losing IPC after execution starts is an ambiguous mutation. */
 export class NativeProcessWorkspaceCommandSandbox
@@ -109,11 +118,7 @@ export class NativeProcessWorkspaceCommandSandbox
   }
 
   private unavailable(mutation: boolean): WorkspaceToolError {
-    return new WorkspaceToolError(
-      'Native executor is unavailable',
-      'COMMAND_UNAVAILABLE',
-      mutation,
-    );
+    return new NativeExecutorUnavailableError(mutation);
   }
 
   private async start(): Promise<void> {
@@ -340,15 +345,17 @@ export class NativeProcessWorkspaceCommandSandbox
     return this.closing;
   }
 
-  /** Best-effort shutdown handshake. An executor that exits, disconnects, or
-   * stalls while closing is terminated regardless, and once the active
-   * command has drained nothing left in flight can mutate the workspace. */
+  /** An executor that exits, disconnects, or stalls while closing is
+   * terminated in `finally` regardless, and the active command has already
+   * drained, so only a failure the executor reports explicitly is surfaced. */
   private async stop(): Promise<void> {
     await this.active?.catch(() => undefined);
     await this.ready?.catch(() => undefined);
     try {
       if (this.child?.connected && !this.failed)
-        await this.rpc('close', {}, 10_000, false).catch(() => undefined);
+        await this.rpc('close', {}, 10_000, false).catch((error: unknown) => {
+          if (!(error instanceof NativeExecutorUnavailableError)) throw error;
+        });
     } finally {
       this.failed = true;
       this.terminate();
