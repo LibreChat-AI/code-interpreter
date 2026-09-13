@@ -20,6 +20,8 @@ export const BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS = 5 * 60_000;
 export const BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES = 256 * 1024;
 export const BRIDGE_WORKSPACE_COMMAND_MAX_OUTPUT_BYTES = 1024 * 1024;
 export const BRIDGE_WORKSPACE_COMMAND_SIGNAL_MAX_LENGTH = 32;
+/** How long Code API drains a clean rejection after Stop cancels a workspace mutation. */
+export const BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS = 5_000;
 
 export type BridgeProtocolVersion = typeof BRIDGE_PROTOCOL_VERSION;
 
