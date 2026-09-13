@@ -1480,6 +1480,208 @@ test('worker clears quarantine after a command cancellation confirms process ter
   assert.deepEqual(lifecycle, ['arm', 'execute', 'settle', 'clear']);
 });
 
+test('worker retries a clean Stop rejection near its deadline through the cancellation grace', async () => {
+  const lifecycle: string[] = [];
+  const settlements: Array<Record<string, unknown>> = [];
+  const remainingMs = 100;
+  const startedAt = Date.now();
+  const baseCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const],
+    workspaces: [{ id: 'primary', operations: ['read_file' as const] }],
+  };
+  const workspaceTools = new SandboxWorkspaceTools({
+    workspaceTools: {
+      capabilities: baseCapabilities,
+      mutationFailuresAreAtomic: true,
+      async execute() { throw new Error('base executor must not run'); },
+    },
+    commandWorkspaces: ['primary'],
+    commandSandbox: {
+      mutationFailuresAreAtomic: true,
+      async execute(_request, signal) {
+        lifecycle.push('execute');
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) return resolve();
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        lifecycle.push('stop');
+        // Process-group termination is confirmed after the original deadline.
+        await new Promise((resolve) => setTimeout(resolve, remainingMs));
+        throw new WorkspaceToolError(
+          'Workspace command execution aborted',
+          'EXECUTION_ABORTED',
+          true,
+          false,
+        );
+      },
+    },
+  });
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceTools.capabilities,
+    },
+    workspaceTools,
+    workspaceMutationQuarantine: mutationQuarantine(
+      () => lifecycle.push('quarantine'),
+      () => lifecycle.push('arm'),
+      () => lifecycle.push('clear'),
+    ),
+    cancellationPollIntervalMs: 5,
+    fetchImpl: async (input, init) => {
+      if (String(input).endsWith('/cancellation')) {
+        return Response.json({
+          protocolVersion: 1,
+          cancelled: Date.now() >= startedAt + remainingMs / 2,
+        });
+      }
+      if (!String(input).endsWith('/settle')) {
+        return Response.json({ protocolVersion: 1, accepted: true });
+      }
+      lifecycle.push('settle');
+      settlements.push({
+        ...(JSON.parse(String(init?.body)) as Record<string, unknown>),
+        attemptedAt: Date.now(),
+      });
+      // Settlement delivery takes a real transport turn and honors its deadline.
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 10);
+        init?.signal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            reject(new DOMException('aborted', 'AbortError'));
+          },
+          { once: true },
+        );
+      });
+      if (settlements.length === 1) {
+        return Response.json(
+          { error: 'Bridge settlement temporarily unavailable' },
+          { status: 503 },
+        );
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-command-stopped-near-deadline',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(startedAt + remainingMs).toISOString(),
+    remainingMs,
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'execute_command',
+      workspaceId: 'primary',
+      command: 'sleep 30; touch delayed.txt',
+    },
+  });
+
+  assert.deepEqual(lifecycle, [
+    'arm',
+    'execute',
+    'stop',
+    'settle',
+    'settle',
+    'clear',
+  ]);
+  assert.ok(Number(settlements[0]?.attemptedAt) > startedAt + remainingMs);
+  assert.equal(settlements[1]?.status, 'rejected');
+  assert.equal(settlements[1]?.errorCode, 'EXECUTION_ABORTED');
+});
+
+test('worker keeps quarantine armed when shutdown interrupts a clean command rejection', async () => {
+  const lifecycle: string[] = [];
+  const controller = new AbortController();
+  const baseCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const],
+    workspaces: [{ id: 'primary', operations: ['read_file' as const] }],
+  };
+  const workspaceTools = new SandboxWorkspaceTools({
+    workspaceTools: {
+      capabilities: baseCapabilities,
+      mutationFailuresAreAtomic: true,
+      async execute() { throw new Error('base executor must not run'); },
+    },
+    commandWorkspaces: ['primary'],
+    commandSandbox: {
+      mutationFailuresAreAtomic: true,
+      async execute() {
+        lifecycle.push('execute');
+        controller.abort(new Error('shutdown'));
+        throw new WorkspaceToolError(
+          'Workspace command execution aborted',
+          'EXECUTION_ABORTED',
+          true,
+          false,
+        );
+      },
+    },
+  });
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+      workspaceTools: workspaceTools.capabilities,
+    },
+    workspaceTools,
+    workspaceMutationQuarantine: mutationQuarantine(
+      () => lifecycle.push('quarantine'),
+      () => lifecycle.push('arm'),
+      () => lifecycle.push('clear'),
+    ),
+    fetchImpl: async () => {
+      lifecycle.push('settle');
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle(
+      {
+        protocolVersion: 1,
+        assignmentId: 'assignment-command-shutdown-cleanly',
+        workerId: 'vm-1',
+        incarnationId,
+        generation: 4,
+        leaseToken: 'lease-token-that-is-long-enough-for-testing',
+        expiresAt: new Date(Date.now() + 5_000).toISOString(),
+        executionKind: 'workspace_tool',
+        request: {
+          protocolVersion: 1,
+          operation: 'execute_command',
+          workspaceId: 'primary',
+          command: 'sleep 30',
+        },
+      },
+      controller.signal,
+    ),
+    /shutdown/,
+  );
+  assert.deepEqual(lifecycle, ['arm', 'execute']);
+});
+
 test('worker retains quarantine when an atomic executor cannot confirm durability', async () => {
   const lifecycle: string[] = [];
   const workspaceCapabilities = {

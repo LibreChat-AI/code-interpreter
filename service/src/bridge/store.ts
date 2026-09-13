@@ -11,6 +11,7 @@ import type {
 } from '../../../packages/code/src/protocol';
 
 import {
+  BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS,
   BRIDGE_PROTOCOL_VERSION,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
@@ -23,7 +24,6 @@ import { BridgeWorkspaceSlots } from './slots';
 
 const PREFIX = 'codeapi:bridge:v1';
 const POLL_INTERVAL_MS = 100;
-const CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS = 5_000;
 const DEFAULT_WORKER_TTL_SECONDS = 60;
 const DEFAULT_REDIS_COMMAND_TIMEOUT_MS = 1_000;
 
@@ -1924,7 +1924,7 @@ export class RedisBridgeStore {
         // Give Stop its own grace so a near-timeout cancellation is not
         // misclassified as an ambiguous timeout.
         const cancellationDeadlineAtMs =
-          Date.now() + CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS;
+          Date.now() + BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS;
         let cancellationPollMs = POLL_INTERVAL_MS;
         while (Date.now() < cancellationDeadlineAtMs) {
           const raw = await boundedCommand(

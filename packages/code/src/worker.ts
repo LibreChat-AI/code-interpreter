@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
 import {
+  BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS,
   BRIDGE_PROTOCOL_VERSION,
   BridgeProtocolError,
   bridgeWorkerPath,
@@ -1619,7 +1620,13 @@ export class BridgeWorker {
         assignment.runtimeSessionId != null &&
         settlement.status === 'rejected' &&
         (!sandboxStarted || sandboxRejectedExecution);
-      if (knownCleanStatefulRejection) {
+      // An armed mutation reaches settlement as rejected only after an atomic
+      // failure that does not require quarantine. Code API accepts that
+      // rejection after expiry and drains it for its own grace after Stop, so a
+      // Stop near the deadline must not cut off retries at the deadline.
+      const knownCleanWorkspaceRejection =
+        workspaceMutationArmed && settlement.status === 'rejected';
+      if (knownCleanStatefulRejection || knownCleanWorkspaceRejection) {
         heartbeatController.abort();
         await heartbeat;
         const recoveryHeartbeatController = new AbortController();
@@ -1627,15 +1634,24 @@ export class BridgeWorker {
           recoveryHeartbeatController.signal,
           true,
         ).catch(() => undefined);
+        const rejectionAckGraceMs = Math.max(
+          0,
+          this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
+        );
         try {
           await this.settleWithRetry(
             assignment,
             settlement,
             localDeadlineAtMs +
-              Math.max(
-                0,
-                this.options.rejectionAckGraceMs ?? REJECTION_ACK_GRACE_MS,
-              ),
+              (knownCleanStatefulRejection
+                ? rejectionAckGraceMs
+                : Math.max(
+                    rejectionAckGraceMs,
+                    BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS,
+                  )),
+            // Stateful rejections outlive shutdown; workspace guards still
+            // fail closed when the worker itself stops.
+            knownCleanStatefulRejection ? undefined : signal,
           );
         } finally {
           recoveryHeartbeatController.abort();
