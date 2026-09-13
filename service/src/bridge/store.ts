@@ -1060,19 +1060,14 @@ export class RedisBridgeStore {
           // already committed result rather than turning cleanup availability
           // into a client-visible failure that could prompt duplicate work.
         }
+      } else if (workspaceSlots != null && assignment == null) {
+        await this.cleanupUnassignedSlot(
+          args.workerId,
+          lockIncarnationId,
+          assignmentId,
+        );
       } else {
         await this.cleanupDispatch(args.workerId, assignmentId, assignment);
-      }
-      if (workspaceSlots != null && assignment == null) {
-        await boundedCommand(
-          workspaceSlots.release(
-            args.workerId,
-            lockIncarnationId,
-            assignmentId,
-          ),
-          this.redisCommandTimeoutMs,
-          'Bridge unassigned slot cleanup',
-        );
       }
     }
   }
@@ -2136,6 +2131,29 @@ export class RedisBridgeStore {
           )
         : this.cleanup(assignment),
     ]);
+  }
+
+  private async cleanupUnassignedSlot(
+    workerId: string,
+    incarnationId: string,
+    assignmentId: string,
+  ): Promise<void> {
+    // No stored assignment owns this reservation, so a cancellation outage
+    // must not leave the slot and its root busy until TTL expiry.
+    const [cleanup, release] = await Promise.allSettled([
+      this.cleanupDispatch(workerId, assignmentId, undefined),
+      boundedCommand(
+        new BridgeWorkspaceSlots(this.redis).release(
+          workerId,
+          incarnationId,
+          assignmentId,
+        ),
+        this.redisCommandTimeoutMs,
+        'Bridge unassigned slot cleanup',
+      ),
+    ]);
+    if (cleanup.status === 'rejected') throw cleanup.reason;
+    if (release.status === 'rejected') throw release.reason;
   }
 
   private async commitPendingWorkspace(
