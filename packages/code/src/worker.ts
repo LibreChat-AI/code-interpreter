@@ -104,6 +104,7 @@ const DEFAULT_REGISTRATION_TRANSPORT_TIMEOUT_MS = 10_000;
 const DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS = 10_000;
 const DEFAULT_CANCELLATION_POLL_INTERVAL_MS = 500;
 const DEFAULT_CANCELLATION_TRANSPORT_TIMEOUT_MS = 2_000;
+const CREDENTIAL_REFRESH_SETTLEMENT_GRACE_MS = 1_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
 const REGISTRATION_RETRY_DELAY_MS = 100;
 const CREDENTIAL_REFRESH_RETRY_DELAY_MS = 100;
@@ -1123,7 +1124,6 @@ export class BridgeWorker {
     assignment: BridgeAssignment,
     stopSignal: AbortSignal,
     serverClockOffsetMs: number,
-    requestSignal?: AbortSignal,
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
@@ -1142,7 +1142,7 @@ export class BridgeWorker {
       if (stopSignal.aborted || Date.now() >= assignmentDeadlineMs) return;
       try {
         await this.refreshCredential(
-          requestSignal,
+          stopSignal,
           Date.now() + serverClockOffsetMs + refreshWindowMs,
         );
       } catch (error) {
@@ -1373,7 +1373,6 @@ export class BridgeWorker {
         assignment,
         credentialController.signal,
         serverClockOffsetMs,
-        signal,
       ).catch((error) => {
         credentialMaintenanceError = error;
         executionController.abort();
@@ -1725,6 +1724,17 @@ export class BridgeWorker {
     clearTimeout(deadlineTimer);
     cancellationController.abort();
     await cancellationWatcher;
+    const credentialInFlight = this.credentialInFlight;
+    if (credentialInFlight != null && !credentialController.signal.aborted) {
+      let drainTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        credentialInFlight.catch(() => undefined),
+        new Promise<void>((resolve) => {
+          drainTimer = setTimeout(resolve, CREDENTIAL_REFRESH_SETTLEMENT_GRACE_MS);
+        }),
+      ]);
+      if (drainTimer != null) clearTimeout(drainTimer);
+    }
     credentialController.abort();
     await credentialMaintenance;
     try {
@@ -2219,12 +2229,14 @@ export class BridgeWorker {
             incarnationId: this.incarnationId,
           },
           pollController.signal,
-          () => {
+          (response) => {
             // Once response headers arrive, drain the bounded body before a
             // successful execution can settle. Otherwise a cancellation=true
             // response racing command completion can be discarded. The
             // transport timer and execution signal still cap the drain.
-            signal.removeEventListener('abort', abortPoll);
+            if (response.ok || response.status === 404) {
+              signal.removeEventListener('abort', abortPoll);
+            }
           },
         );
         if (response.cancelled) {
@@ -2249,7 +2261,7 @@ export class BridgeWorker {
     url: string,
     body: object,
     signal?: AbortSignal,
-    onResponseHeaders?: () => void,
+    onResponseHeaders?: (response: Response) => void,
   ): Promise<T> {
     const requestBody = JSON.stringify(body);
     const response = await this.fetchImpl(url, {
@@ -2261,7 +2273,7 @@ export class BridgeWorker {
       body: requestBody,
       signal,
     });
-    onResponseHeaders?.();
+    onResponseHeaders?.(response);
     let payload: unknown;
     try {
       payload = await response.json();

@@ -9,6 +9,7 @@ import {
   pyQueue,
   pyQueueEvents,
   connection,
+  jobCancellationRegistry,
   getExecutionQueueBinding,
   getExistingExecutionJob,
 } from '../queue';
@@ -403,6 +404,25 @@ async function runReplayIteration(
     state.executionProfileSource ?? env.EXECUTION_PROFILE_SOURCE,
   );
   if (signal?.aborted) throw programmaticCancellationError();
+  let cancellationTarget:
+    | { queueName: string; jobId: string }
+    | undefined;
+  if (cancellation != null) {
+    cancellationTarget = { queueName: queue.name, jobId: nanoid() };
+    const attachment = await attachProgrammaticCancellationTarget({
+      redis: connection,
+      requestId: cancellation.requestId,
+      owner: cancellation.owner,
+      target: cancellationTarget,
+      ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+    });
+    if (attachment === 'forbidden') {
+      throw new Error('Programmatic cancellation request ownership changed');
+    }
+    if (attachment === 'cancelled') {
+      throw programmaticCancellationError();
+    }
+  }
     const job = await queue.add(
         Jobs.execute,
         {
@@ -434,48 +454,14 @@ async function runReplayIteration(
     removeOnComplete: { age: 60, count: 1 },
     removeOnFail: { age: 180, count: 1 },
     attempts: 1,
+    ...(cancellationTarget != null ? { jobId: cancellationTarget.jobId } : {}),
         },
     );
   jobsSubmitted.inc({ language });
 
-  if (cancellation != null) {
-    const target = { queueName: job.queueName, jobId: String(job.id) };
-    let cancellationPublished = false;
-    try {
-      const attachment = await attachProgrammaticCancellationTarget({
-        redis: connection,
-        requestId: cancellation.requestId,
-        owner: cancellation.owner,
-        target,
-        ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
-      });
-      if (attachment === 'forbidden') {
-        throw new Error('Programmatic cancellation request ownership changed');
-      }
-      if (attachment === 'cancelled') {
-        await requestJobCancellation(
-          connection,
-          target,
-          PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
-        );
-        cancellationPublished = true;
-        await removeJobIfWaiting(job).catch(() => false);
-        throw programmaticCancellationError();
-      }
-    } catch (error) {
-      if (!cancellationPublished) {
-        await requestJobCancellation(
-          connection,
-          target,
-          PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
-        ).catch(() => undefined);
-      }
-      throw error;
-    }
-  }
-
   return waitForJobWithCancellation({
     commands: connection,
+    registry: jobCancellationRegistry,
     job,
     events,
     timeoutMs: JOB_COMPLETION_WAIT_TIMEOUT_MS,

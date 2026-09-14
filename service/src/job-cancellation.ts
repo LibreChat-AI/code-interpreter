@@ -50,9 +50,11 @@ export class JobCancellationRegistry {
   private subscriber?: IORedis;
   private readonly controllers = new Map<
     string,
-    { target: JobTarget; controller: AbortController }
+    { target: JobTarget; controllers: Set<AbortController> }
   >();
   private startPromise?: Promise<void>;
+  private reconcileTimer?: ReturnType<typeof setTimeout>;
+  private reconcileRetryMs = 100;
   private closed = false;
 
   constructor(private readonly commands: IORedis) {}
@@ -63,16 +65,17 @@ export class JobCancellationRegistry {
   };
 
   private readonly onSubscriberReady = (): void => {
-    void this.reconcile().catch(() => undefined);
+    this.scheduleReconcile(0);
   };
 
   private readonly onSubscriberMessage = (channel: string, raw: string): void => {
     if (channel !== JOB_CANCELLATION_CHANNEL) return;
     const target = parseTarget(raw);
     if (target == null) return;
-    this.controllers
-      .get(targetKey(target))
-      ?.controller.abort(CLIENT_DISCONNECT_REASON);
+    for (const controller of
+      this.controllers.get(targetKey(target))?.controllers ?? []) {
+      controller.abort(CLIENT_DISCONNECT_REASON);
+    }
   };
 
   private detachSubscriber(subscriber: IORedis): void {
@@ -89,9 +92,34 @@ export class JobCancellationRegistry {
     );
     cancelled.forEach((value, index) => {
       if (value != null) {
-        entries[index]?.controller.abort(CLIENT_DISCONNECT_REASON);
+        for (const controller of entries[index]?.controllers ?? []) {
+          controller.abort(CLIENT_DISCONNECT_REASON);
+        }
       }
     });
+  }
+
+  private scheduleReconcile(delayMs: number): void {
+    if (
+      this.closed ||
+      this.controllers.size === 0 ||
+      this.reconcileTimer != null
+    ) {
+      return;
+    }
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = undefined;
+      void this.reconcile().then(
+        () => {
+          this.reconcileRetryMs = 100;
+        },
+        () => {
+          const retryMs = this.reconcileRetryMs;
+          this.reconcileRetryMs = Math.min(2_000, retryMs * 2);
+          this.scheduleReconcile(retryMs);
+        },
+      );
+    }, delayMs);
   }
 
   private start(): Promise<void> {
@@ -122,26 +150,46 @@ export class JobCancellationRegistry {
   }
 
   async register(target: JobTarget, controller: AbortController): Promise<void> {
-    this.controllers.set(targetKey(target), { target, controller });
+    const key = targetKey(target);
+    const entry = this.controllers.get(key) ?? {
+      target,
+      controllers: new Set<AbortController>(),
+    };
+    entry.controllers.add(controller);
+    this.controllers.set(key, entry);
     try {
       await this.start();
       if (await this.commands.exists(cancellationKey(target))) {
         controller.abort(CLIENT_DISCONNECT_REASON);
       }
     } catch (error) {
-      this.controllers.delete(targetKey(target));
+      entry.controllers.delete(controller);
+      if (entry.controllers.size === 0) this.controllers.delete(key);
       throw error;
     }
   }
 
-  async unregister(target: JobTarget): Promise<void> {
-    this.controllers.delete(targetKey(target));
-    await this.commands.del(cancellationKey(target));
+  async unregister(
+    target: JobTarget,
+    controller?: AbortController,
+  ): Promise<void> {
+    const key = targetKey(target);
+    const entry = this.controllers.get(key);
+    if (controller == null) {
+      this.controllers.delete(key);
+    } else if (entry != null) {
+      entry.controllers.delete(controller);
+      if (entry.controllers.size === 0) this.controllers.delete(key);
+    }
+    // Markers expire by TTL. Deleting one here can erase the only evidence
+    // needed by another replica whose subscriber was reconnecting.
   }
 
   async close(): Promise<void> {
     this.closed = true;
     this.controllers.clear();
+    if (this.reconcileTimer != null) clearTimeout(this.reconcileTimer);
+    this.reconcileTimer = undefined;
     await this.startPromise?.catch(() => undefined);
     const subscriber = this.subscriber;
     this.subscriber = undefined;
@@ -195,21 +243,46 @@ export function programmaticCancellationError(): Error {
   return new DOMException('Programmatic execution request disconnected', 'AbortError');
 }
 
+/** Commit barrier for result-processing stages that may yield after execution. */
+export function throwIfJobAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new DOMException(
+    typeof signal.reason === 'string' ? signal.reason : 'Job aborted',
+    'AbortError',
+  );
+}
+
 export async function waitForJobWithCancellation<T>(args: {
   commands: IORedis;
+  registry: JobCancellationRegistry;
   job: Job<unknown, T>;
   events: QueueEvents;
   timeoutMs: number;
   cancellationTtlSeconds: number;
   signal?: AbortSignal;
 }): Promise<T> {
-  const { commands, job, events, timeoutMs, cancellationTtlSeconds, signal } = args;
+  const {
+    commands,
+    registry,
+    job,
+    events,
+    timeoutMs,
+    cancellationTtlSeconds,
+    signal,
+  } = args;
   const completion = job.waitUntilFinished(events, timeoutMs);
-  if (signal == null) return completion;
-
   const target = { queueName: job.queueName, jobId: String(job.id) };
+  const externalController = new AbortController();
+  try {
+    await registry.register(target, externalController);
+  } catch (error) {
+    void completion.catch(() => undefined);
+    throw error;
+  }
+
   let removeAbortListener = (): void => {};
-  const cancelled = new Promise<never>((_, reject) => {
+  const disconnected = new Promise<never>((_, reject) => {
     let cancelling = false;
     const cancel = (): void => {
       if (cancelling) return;
@@ -223,18 +296,26 @@ export async function waitForJobWithCancellation<T>(args: {
         })
         .then(() => reject(programmaticCancellationError()), reject);
     };
-    removeAbortListener = (): void => signal.removeEventListener('abort', cancel);
-    signal.addEventListener('abort', cancel, { once: true });
-    if (signal.aborted) cancel();
+    if (signal != null) {
+      removeAbortListener = (): void => signal.removeEventListener('abort', cancel);
+      signal.addEventListener('abort', cancel, { once: true });
+      if (signal.aborted) cancel();
+    }
+  });
+  const cancelled = new Promise<never>((_, reject) => {
+    const cancel = (): void => reject(programmaticCancellationError());
+    externalController.signal.addEventListener('abort', cancel, { once: true });
+    if (externalController.signal.aborted) cancel();
   });
 
   // A cancelled request stops awaiting the BullMQ result, so attach a sink to
   // the losing promise before racing it to avoid an unhandled late rejection.
   void completion.catch(() => undefined);
   try {
-    return await Promise.race([completion, cancelled]);
+    return await Promise.race([completion, disconnected, cancelled]);
   } finally {
     removeAbortListener();
+    await registry.unregister(target, externalController).catch(() => undefined);
   }
 }
 

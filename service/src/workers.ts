@@ -19,6 +19,7 @@ import { workerDeadlineFailure } from './worker-error';
 import {
   CLIENT_DISCONNECT_REASON,
   JOB_CANCELLED_MESSAGE,
+  throwIfJobAborted,
 } from './job-cancellation';
 import logger from './logger';
 import {
@@ -181,6 +182,9 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     );
 
     const responseData = await finalizeSandboxResult(responseRaw);
+    // Cancellation can arrive after sandbox exit while artifact restoration
+    // yields. Do not let BullMQ commit a success after Stop was acknowledged.
+    throwIfJobAborted(controller.signal);
 
     if (!isSyntheticJob) {
       logger.info('Sandbox response', summarizeSandboxResponse(responseData));
@@ -289,7 +293,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     }
     if (timer) clearTimeout(timer);
     if (cancellationTarget != null && cancellationRegistered) {
-      await jobCancellationRegistry.unregister(cancellationTarget).catch(error => {
+      await jobCancellationRegistry.unregister(cancellationTarget, controller).catch(error => {
         logger.warn('Failed to clear queued execution cancellation state', {
           queueName: cancellationTarget.queueName,
           jobId: cancellationTarget.jobId,

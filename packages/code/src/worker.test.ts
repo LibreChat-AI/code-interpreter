@@ -755,6 +755,72 @@ test('worker stops an outstanding cancellation request before settling completed
   assert.equal(settlementAttempted, true);
 });
 
+test('worker aborts a retryable cancellation error body before settling completed work', async () => {
+  let cancellationBodyStarted!: () => void;
+  const cancellationStarted = new Promise<void>((resolve) => {
+    cancellationBodyStarted = resolve;
+  });
+  let cancellationBodyAborted = false;
+  let settlementAttempted = false;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/execute')) {
+      await cancellationStarted;
+      return Response.json({ session_id: 'run-1', files: [] });
+    }
+    if (url.endsWith('/cancellation')) {
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            cancellationBodyStarted();
+            init?.signal?.addEventListener(
+              'abort',
+              () => {
+                cancellationBodyAborted = true;
+                controller.error(new DOMException('aborted', 'AbortError'));
+              },
+              { once: true },
+            );
+          },
+        }),
+        { status: 500 },
+      );
+    }
+    settlementAttempted = true;
+    return Response.json({ protocolVersion: 1, accepted: true });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    cancellationPollIntervalMs: 1,
+    cancellationTransportTimeoutMs: 10_000,
+    fetchImpl,
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'complete-during-retryable-cancellation-response',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    remainingMs: 1_000,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(cancellationBodyAborted, true);
+  assert.equal(settlementAttempted, true);
+});
+
 test('worker stops its cancellation delay before settling immediately completed work', async () => {
   let settlementAttempted = false;
   const worker = new BridgeWorker({

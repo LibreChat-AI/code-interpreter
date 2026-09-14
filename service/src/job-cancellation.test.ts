@@ -8,6 +8,7 @@ import {
   jobCancellationInternals,
   removeJobIfWaiting,
   requestJobCancellation,
+  throwIfJobAborted,
   waitForJobWithCancellation,
 } from './job-cancellation';
 
@@ -59,6 +60,7 @@ class FakeRedis {
   readonly existing = new Set<string>();
   readonly deleted: string[] = [];
   readonly transactions: FakeTransaction[] = [];
+  mgetFailures = 0;
 
   duplicate(): FakeSubscriber {
     this.duplicateCalls += 1;
@@ -70,6 +72,10 @@ class FakeRedis {
   }
 
   async mget(...keys: string[]): Promise<Array<string | null>> {
+    if (this.mgetFailures > 0) {
+      this.mgetFailures -= 1;
+      throw new Error('command connection unavailable');
+    }
     return keys.map((key) => (this.existing.has(key) ? '1' : null));
   }
 
@@ -155,6 +161,48 @@ test('one pubsub listener cancels only the matching active job', async () => {
   await registry.close();
 });
 
+test('one pubsub listener wakes every local waiter for the same job', async () => {
+  const fake = new FakeRedis();
+  const registry = new JobCancellationRegistry(redis(fake));
+  const target = { queueName: 'other', jobId: 'job-shared' };
+  const first = new AbortController();
+  const second = new AbortController();
+  await registry.register(target, first);
+  await registry.register(target, second);
+
+  fake.subscriber.emit(
+    'message',
+    jobCancellationInternals.channel,
+    JSON.stringify(target),
+  );
+
+  expect(first.signal.aborted).toBe(true);
+  expect(second.signal.aborted).toBe(true);
+  expect(fake.duplicateCalls).toBe(1);
+  await registry.close();
+});
+
+test('unregistering one local waiter preserves other waiters for the job', async () => {
+  const fake = new FakeRedis();
+  const registry = new JobCancellationRegistry(redis(fake));
+  const target = { queueName: 'other', jobId: 'job-shared-unregister' };
+  const first = new AbortController();
+  const second = new AbortController();
+  await registry.register(target, first);
+  await registry.register(target, second);
+  await registry.unregister(target, first);
+
+  fake.subscriber.emit(
+    'message',
+    jobCancellationInternals.channel,
+    JSON.stringify(target),
+  );
+
+  expect(first.signal.aborted).toBe(false);
+  expect(second.signal.aborted).toBe(true);
+  await registry.close();
+});
+
 test('subscriber reconnect reconciles active jobs against durable markers', async () => {
   const fake = new FakeRedis();
   const registry = new JobCancellationRegistry(redis(fake));
@@ -164,7 +212,24 @@ test('subscriber reconnect reconciles active jobs against durable markers', asyn
   fake.existing.add(jobCancellationInternals.cancellationKey(target));
 
   fake.subscriber.emit('ready');
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(controller.signal.aborted).toBe(true);
+  expect(controller.signal.reason).toBe(CLIENT_DISCONNECT_REASON);
+  await registry.close();
+});
+
+test('subscriber reconnect retries durable-marker reconciliation', async () => {
+  const fake = new FakeRedis();
+  const registry = new JobCancellationRegistry(redis(fake));
+  const target = { queueName: 'other', jobId: 'job-retry-reconcile' };
+  const controller = new AbortController();
+  await registry.register(target, controller);
+  fake.existing.add(jobCancellationInternals.cancellationKey(target));
+  fake.mgetFailures = 1;
+
+  fake.subscriber.emit('ready');
+  await new Promise((resolve) => setTimeout(resolve, 150));
 
   expect(controller.signal.aborted).toBe(true);
   expect(controller.signal.reason).toBe(CLIENT_DISCONNECT_REASON);
@@ -184,6 +249,15 @@ test('cancellation writes a durable marker before publishing', async () => {
   ]);
 });
 
+test('result commit barrier rejects cancellation observed after execution', () => {
+  const controller = new AbortController();
+  expect(() => throwIfJobAborted(controller.signal)).not.toThrow();
+  controller.abort(CLIENT_DISCONNECT_REASON);
+  expect(() => throwIfJobAborted(controller.signal)).toThrow(
+    CLIENT_DISCONNECT_REASON,
+  );
+});
+
 test('disconnect frees a waiting job and rejects promptly', async () => {
   const fake = new FakeRedis();
   const controller = new AbortController();
@@ -199,8 +273,10 @@ test('disconnect frees a waiting job and rejects promptly', async () => {
     },
   } as unknown as Job<unknown, unknown>;
 
+  const registry = new JobCancellationRegistry(redis(fake));
   const waiting = waitForJobWithCancellation({
     commands: redis(fake),
+    registry,
     job,
     events: {} as QueueEvents,
     timeoutMs: 60_000,
@@ -218,6 +294,39 @@ test('disconnect frees a waiting job and rejects promptly', async () => {
     'EX',
     120,
   ]);
+  await registry.close();
+});
+
+test('a separate cancellation request wakes the original job waiter', async () => {
+  const fake = new FakeRedis();
+  const registry = new JobCancellationRegistry(redis(fake));
+  const never = new Promise<never>(() => {});
+  const job = {
+    id: 'job-external-cancel',
+    queueName: 'other',
+    waitUntilFinished: () => never,
+    getState: async () => 'active',
+    remove: async () => undefined,
+  } as unknown as Job<unknown, unknown>;
+
+  const waiting = waitForJobWithCancellation({
+    commands: redis(fake),
+    registry,
+    job,
+    events: {} as QueueEvents,
+    timeoutMs: 60_000,
+    cancellationTtlSeconds: 120,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  fake.subscriber.emit(
+    'message',
+    jobCancellationInternals.channel,
+    JSON.stringify({ queueName: 'other', jobId: 'job-external-cancel' }),
+  );
+
+  await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
+  expect(fake.deleted).toEqual([]);
+  await registry.close();
 });
 
 test('queued removal never removes an active job', async () => {
