@@ -1021,6 +1021,29 @@ describe('walkDir / artifact truncation details', () => {
 
     expect(internals.generatedFiles.map(file => file.name)).toContain('z-generated.txt');
   });
+
+  it('bounds output-cap eligibility probes for wide unsupported-only directories', async () => {
+    const job = makeJob();
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+    internals.generatedFiles = Array.from({ length: config.max_output_files }, (_, i) => ({
+      id: `id-${i}`,
+      name: `file-${i}.txt`,
+      path: path.join(tmpDir, `file-${i}.txt`),
+    }));
+    for (let i = 0; i < 1001; i++) {
+      await fsp.writeFile(path.join(tmpDir, `ignored-${i}.bin`), 'ignored');
+    }
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { max_files: 1 },
+      skipped: ['.'],
+      skipped_count: 1,
+    });
+  });
 });
 
 describe('handleSessionFiles / priority-fill composition', () => {

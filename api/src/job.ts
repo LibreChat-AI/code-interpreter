@@ -61,8 +61,8 @@ export {
 const AUTO_LOAD_DIRKEEP_TIMEOUT_MS = 10000;
 const AUTO_LOAD_DIRKEEP_RETRIES = 2;
 const PTC_HISTORY_FILENAME = '_ptc_history.json';
-const DEPTH_TRUNCATION_PROBE_MAX_ENTRIES = 1000;
-const DEPTH_TRUNCATION_PROBE_MAX_LEVELS = 10;
+const TRUNCATION_PROBE_MAX_ENTRIES = 1000;
+const TRUNCATION_PROBE_MAX_LEVELS = 10;
 
 /** Replaying the same sealed grant cannot repair an authorization denial. */
 class InputAuthorizationError extends Error {
@@ -2184,20 +2184,20 @@ export class Job {
     return this.handleEmptyDirectory(relativePath, fullPath, inputByName);
   }
 
-  /** Finds the first artifact that a depth cap would hide without reading file
-   * contents. Files below this boundary cannot be valid primed inputs, and
+  /** Finds the first artifact that a scan cap would hide without reading file
+   * contents. Files below a depth boundary cannot be valid primed inputs, and
    * symlinks/unsupported files/hidden runtime directories remain intentional
    * exclusions. An empty directory represents a reportable `.dirkeep`. */
-  private async findDepthTruncatedArtifact(
+  private async findTruncatedArtifact(
     dir: string,
     inputByName: Map<string, TFile>,
-    state = { remainingEntries: DEPTH_TRUNCATION_PROBE_MAX_ENTRIES },
+    state = { remainingEntries: TRUNCATION_PROBE_MAX_ENTRIES },
     probeDepth = 0,
     rootPath = path.relative(this.submissionDir, dir) || '.',
   ): Promise<string | undefined> {
-    let entries: fs.Dirent[];
+    let directory: fs.Dir;
     try {
-      entries = await fsp.readdir(dir, { withFileTypes: true });
+      directory = await fsp.opendir(dir);
     } catch (err) {
       const relativeDir = path.relative(this.submissionDir, dir) || '.';
       this.log.debug({ dir, err }, 'walkDir: unable to inspect depth-capped directory');
@@ -2205,38 +2205,36 @@ export class Job {
       return undefined;
     }
 
-    const visibleEntries = entries.filter(entry => entry.name !== PTC_HISTORY_FILENAME);
-    if (visibleEntries.length === 0) {
-      return path.join(path.relative(this.submissionDir, dir), DIRKEEP);
-    }
-
+    let sawVisibleEntry = false;
     let sawVisibleNonHiddenEntry = false;
-    for (const entry of visibleEntries) {
-      state.remainingEntries--;
-      if (state.remainingEntries < 0) return rootPath;
-      const fullPath = path.join(dir, entry.name);
-      const relativePath = path.relative(this.submissionDir, fullPath);
-      const kind = await this.classifyDirent(entry, fullPath, relativePath);
-      if (kind === 'skip') {
-        /* Ordinary walking counts symlinks/special entries as non-empty even
-         * though it does not surface them, so the depth probe must not invent
-         * a parent .dirkeep for that shape. */
-        sawVisibleNonHiddenEntry = true;
-        continue;
-      }
-      if (kind === 'file') {
-        sawVisibleNonHiddenEntry = true;
-        if (entry.name === DIRKEEP || isSupportedOutputFilename(entry.name)) return relativePath;
-        continue;
-      }
-      if (kind === 'dir') {
+    try {
+      for await (const entry of directory) {
+        if (entry.name === PTC_HISTORY_FILENAME) continue;
+        sawVisibleEntry = true;
+        state.remainingEntries--;
+        if (state.remainingEntries < 0) return rootPath;
+        const fullPath = path.join(dir, entry.name);
+        const relativePath = path.relative(this.submissionDir, fullPath);
+        const kind = await this.classifyDirent(entry, fullPath, relativePath);
+        if (kind === 'skip') {
+          /* Ordinary walking counts symlinks/special entries as non-empty even
+           * though it does not surface them, so the probe must not invent a
+           * parent .dirkeep for that shape. */
+          sawVisibleNonHiddenEntry = true;
+          continue;
+        }
+        if (kind === 'file') {
+          sawVisibleNonHiddenEntry = true;
+          if (entry.name === DIRKEEP || isSupportedOutputFilename(entry.name)) return relativePath;
+          continue;
+        }
         if (isHiddenDirectory(entry.name) && !inputsLiveUnder(inputByName, relativePath)) continue;
         sawVisibleNonHiddenEntry = true;
         /* The probe exists only to avoid false warnings for small, obviously
          * unsupported-only subtrees. Once either budget is exhausted, report
          * the capped root conservatively instead of defeating the scan bound. */
-        if (probeDepth >= DEPTH_TRUNCATION_PROBE_MAX_LEVELS) return rootPath;
-        const nested = await this.findDepthTruncatedArtifact(
+        if (probeDepth >= TRUNCATION_PROBE_MAX_LEVELS) return rootPath;
+        const nested = await this.findTruncatedArtifact(
           fullPath,
           inputByName,
           state,
@@ -2245,8 +2243,14 @@ export class Job {
         );
         if (nested) return nested;
       }
+    } catch (err) {
+      const relativeDir = path.relative(this.submissionDir, dir) || '.';
+      this.log.debug({ dir, err }, 'walkDir: failed during bounded directory inspection');
+      this.recordArtifactTruncation('unreadable', relativeDir);
+      return undefined;
     }
-    return sawVisibleNonHiddenEntry
+
+    return sawVisibleEntry && sawVisibleNonHiddenEntry
       ? undefined
       : path.join(path.relative(this.submissionDir, dir), DIRKEEP);
   }
@@ -2264,8 +2268,13 @@ export class Job {
   ): Promise<'collected' | 'empty' | 'skipped'> {
     const relativeDir = path.relative(this.submissionDir, dir) || '.';
     if (depth >= config.max_nesting_depth) {
-      const skippedPath = await this.findDepthTruncatedArtifact(dir, inputByName);
+      const skippedPath = await this.findTruncatedArtifact(dir, inputByName);
       if (skippedPath) this.recordArtifactTruncation('depth', skippedPath);
+      return 'skipped';
+    }
+    if (this.isOutputCapFull()) {
+      const skippedPath = await this.findTruncatedArtifact(dir, inputByName);
+      if (skippedPath) this.recordArtifactTruncation('max_files', skippedPath);
       return 'skipped';
     }
     let entries: fs.Dirent[];
