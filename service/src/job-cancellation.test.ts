@@ -79,17 +79,18 @@ class FakeRedis {
     _script: string,
     _keys: number,
     key: string,
+    _resultKey: string,
     ttl: number,
     channel: string,
     payload: string,
-  ): Promise<number> {
+  ): Promise<unknown> {
     this.cancellationAttempts += 1;
     if (this.cancellationFailures-- > 0) throw new Error('Redis unavailable');
     const transaction = this.multi();
     transaction.set(key, '1', 'EX', ttl);
     transaction.publish(channel, payload);
     await transaction.exec();
-    return 1;
+    return [1];
   }
 
   async mget(...keys: string[]): Promise<Array<string | null>> {

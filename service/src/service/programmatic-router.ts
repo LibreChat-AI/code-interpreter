@@ -19,7 +19,6 @@ import {
   removeJobIfWaiting,
   requestJobCancellation,
   fenceJobCancellation,
-  readCommittedJobResult,
   waitForJobWithCancellation,
 } from '../job-cancellation';
 import {
@@ -444,6 +443,7 @@ async function runReplayIteration(
         ...(state.workspaceId != null ? { workspaceId: state.workspaceId } : {}),
         cancellable: true,
         deadlineAtMs,
+        cancellationTtlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
         runtimeSessionMode: 'stateless',
         runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,
         executionManifestClaims: sandboxSecurity.executionManifestClaims,
@@ -462,16 +462,11 @@ async function runReplayIteration(
     // Redis may have enqueued the job even though its reply was lost.
     // Preserve replay ownership until cancellation is durable or the job's
     // fixed worker deadline prevents a late admission from executing.
-    const cancelled = await fenceJobCancellation({
+    const outcome = await fenceJobCancellation<t.ExecuteResult>({
       commands: connection, target: cancellationTarget,
       ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS, deadlineAtMs,
     });
-    if (!cancelled) {
-      const committed = await readCommittedJobResult<t.ExecuteResult>(
-        connection, cancellationTarget,
-      );
-      if (committed != null) return committed.result;
-    }
+    if (outcome.status === 'completed') return outcome.result;
     throw error;
   }
   jobsSubmitted.inc({ language });

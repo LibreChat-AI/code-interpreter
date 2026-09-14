@@ -8,6 +8,7 @@ import {
   jobCancellationInternals,
   fenceJobCancellation,
   waitForJobWithCancellation,
+  jobCancellationRetentionSeconds,
 } from './job-cancellation';
 
 let redis: Awaited<ReturnType<typeof startTestRedis>>;
@@ -18,6 +19,94 @@ afterEach(async () => {
   await redis.closeTestServer();
 });
 const target = { queueName: 'other', jobId: 'commit-race' };
+
+test('completion retention includes the API producer across timeout configuration drift', async () => {
+  const ttl = jobCancellationRetentionSeconds(30_000, 430);
+  expect(ttl).toBe(430);
+  expect(jobCancellationRetentionSeconds(300_000, 430)).toBe(780);
+  await commitJobResult(redis, target, { stdout: 'done' }, ttl);
+  const key = jobCancellationInternals.cancellationKey(target);
+  expect(await redis.ttl(key)).toBeGreaterThanOrEqual(429);
+  expect(await redis.ttl(`${key}:result`)).toBeGreaterThanOrEqual(429);
+});
+
+test('a late Stop renews completion evidence along with its request tombstone', async () => {
+  await commitJobResult(redis, target, { stdout: 'done' }, 1);
+  expect(await requestJobCancellation(redis, target, 60)).toBe(false);
+  const key = jobCancellationInternals.cancellationKey(target);
+  expect(await redis.ttl(key)).toBeGreaterThanOrEqual(59);
+  expect(await redis.ttl(`${key}:result`)).toBeGreaterThanOrEqual(59);
+});
+
+test('retention renewal does not lose subsecond time to rounded TTL readings', async () => {
+  await commitJobResult(redis, target, { stdout: 'done' }, 60);
+  const key = jobCancellationInternals.cancellationKey(target);
+  await redis.pexpire(key, 59_900);
+  const expiration = async () => Number(await redis.eval(`
+    local now = redis.call('TIME')
+    return tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000) + redis.call('PTTL', KEYS[1])
+  `, 1, key));
+  const before = await expiration();
+  await requestJobCancellation(redis, target, 60);
+  expect(await expiration()).toBeGreaterThan(before);
+});
+
+test('fencing returns the committed result without a vulnerable second Redis read', async () => {
+  const result = { stdout: 'one committed effect' };
+  await commitJobResult(redis, target, result, 60);
+  let calls = 0;
+  const connectionDropsAfterDecision = {
+    eval: async (...args: Parameters<typeof redis.eval>) => {
+      calls += 1;
+      return redis.eval(...args);
+    },
+    get: async () => {
+      throw new Error('connection lost after decision');
+    },
+    mget: async () => {
+      throw new Error('connection lost after decision');
+    },
+  } as unknown as typeof redis;
+  expect(
+    await fenceJobCancellation({
+      commands: connectionDropsAfterDecision,
+      target,
+      ttlSeconds: 60,
+      deadlineAtMs: Date.now() + 1_000,
+    }),
+  ).toEqual({ status: 'completed', result });
+  expect(calls).toBe(1);
+});
+
+test('disconnect returns a known completed result without waiting for a lost queue event', async () => {
+  const result = { stdout: 'done' };
+  await commitJobResult(redis, target, result, 60);
+  const registry = new JobCancellationRegistry(redis);
+  const controller = new AbortController();
+  controller.abort();
+  const job = {
+    id: target.jobId,
+    queueName: target.queueName,
+    waitUntilFinished: () => new Promise(() => {}),
+  } as unknown as Parameters<typeof waitForJobWithCancellation>[0]['job'];
+  try {
+    expect(
+      await waitForJobWithCancellation({
+        commands: redis,
+        registry,
+        job,
+        events: {} as Parameters<
+          typeof waitForJobWithCancellation
+        >[0]['events'],
+        timeoutMs: 1_000,
+        cancellationTtlSeconds: 60,
+        signal: controller.signal,
+      }),
+    ).toEqual(result);
+  } finally {
+    await registry.close();
+  }
+});
 
 test('durable cancellation wins even before its subscriber notification arrives', async () => {
   expect(await requestJobCancellation(redis, target, 60)).toBe(true);
@@ -71,7 +160,7 @@ test('an enqueue failure can recover a result that won cancellation fencing', as
       ttlSeconds: 60,
       deadlineAtMs: Date.now() + 5_000,
     }),
-  ).toBe(false);
+  ).toEqual({ status: 'completed', result });
   expect(await readCommittedJobResult(redis, target)).toEqual({ result });
 });
 
@@ -84,7 +173,7 @@ test('enqueue fencing still recovers completion after the original deadline', as
       ttlSeconds: 60,
       deadlineAtMs: Date.now() - 1_000,
     }),
-  ).toBe(false);
+  ).toEqual({ status: 'completed', result: { stdout: 'done' } });
 });
 
 test('Redis rejects commitment when recovery happens after the producer deadline', async () => {

@@ -42,6 +42,7 @@ import {
   jobResultCommitFailure,
   commitJobResult,
   readCommittedJobResult,
+  jobCancellationRetentionSeconds,
   throwIfJobAborted,
 } from './job-cancellation';
 import logger from './logger';
@@ -366,7 +367,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       try {
         const committed = await commitJobResult(
           connection, cancellationTarget, resultToCommit,
-          Math.ceil(env.JOB_TIMEOUT / 1_000) * 2 + 180, deadlineAtMs,
+          jobCancellationRetentionSeconds(env.JOB_TIMEOUT, job.data.cancellationTtlSeconds), deadlineAtMs,
         );
         if (!committed) {
           lateCommitFailure = new Error(JOB_CANCELLED_MESSAGE);

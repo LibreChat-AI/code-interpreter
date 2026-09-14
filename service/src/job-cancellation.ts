@@ -260,28 +260,86 @@ export class JobCancellationRegistry {
   }
 }
 
+async function cancelJobInRedis(
+  commands: IORedis,
+  target: JobTarget,
+  ttlSeconds: number,
+  includeResult: boolean,
+): Promise<unknown> {
+  // Cancellation and result publication have ONE durable winner. Pub/sub is
+  // only a notification; it must not decide whether Stop was accepted.
+  return commands.eval(
+    `
+    local state = redis.call('GET', KEYS[1])
+    if state == 'completed' then
+      -- The request tombstone is renewed by Stop. Keep its decision and
+      -- result at least as long, even across API/worker config differences.
+      local requestedTtlMs = tonumber(ARGV[1]) * 1000
+      for i = 1, 2 do
+        if redis.call('PTTL', KEYS[i]) < requestedTtlMs then
+          redis.call('PEXPIRE', KEYS[i], requestedTtlMs)
+        end
+      end
+      if ARGV[4] == '1' then return {0, redis.call('GET', KEYS[2])} end
+      return {0}
+    end
+    if state and state ~= '1' then return {-1} end
+    redis.call('SET', KEYS[1], '1', 'EX', ARGV[1])
+    redis.call('PUBLISH', ARGV[2], ARGV[3])
+    return {1}
+  `,
+    2,
+    cancellationKey(target),
+    `${cancellationKey(target)}:result`,
+    Math.max(1, ttlSeconds),
+    JOB_CANCELLATION_CHANNEL,
+    JSON.stringify(target),
+    includeResult ? '1' : '0',
+  );
+}
+
 export async function requestJobCancellation(
   commands: IORedis,
   target: JobTarget,
   ttlSeconds: number,
 ): Promise<boolean> {
-  // Cancellation and result publication have ONE durable winner. Pub/sub is
-  // only a notification; it must not decide whether Stop was accepted.
-  return (
-    (await commands.eval(
-      `
-    local state = redis.call('GET', KEYS[1])
-    if state and state ~= '1' then return 0 end
-    redis.call('SET', KEYS[1], '1', 'EX', ARGV[1])
-    redis.call('PUBLISH', ARGV[2], ARGV[3])
-    return 1
-  `,
-      1,
-      cancellationKey(target),
-      Math.max(1, ttlSeconds),
-      JOB_CANCELLATION_CHANNEL,
-      JSON.stringify(target),
-    )) === 1
+  const decision = await cancelJobInRedis(commands, target, ttlSeconds, false);
+  if (!Array.isArray(decision) || ![0, 1].includes(decision[0])) {
+    throw new Error('Invalid durable cancellation decision');
+  }
+  return decision[0] === 1;
+}
+
+export type JobFenceOutcome<T> =
+  | { status: 'cancelled' | 'expired' }
+  | { status: 'completed'; result: T };
+
+function decodeCommittedResult<T>(value: unknown): { result: T } {
+  if (typeof value !== 'string') {
+    throw new Error(
+      'Committed programmatic result expired; refusing re-execution',
+    );
+  }
+  const decoded: unknown = JSON.parse(value);
+  if (
+    decoded == null ||
+    typeof decoded !== 'object' ||
+    !Object.prototype.hasOwnProperty.call(decoded, 'result')
+  ) {
+    throw new Error(
+      'Invalid committed programmatic result; refusing re-execution',
+    );
+  }
+  return decoded as { result: T };
+}
+
+export function jobCancellationRetentionSeconds(
+  localTimeoutMs: number,
+  producerTtlSeconds = 0,
+): number {
+  return Math.max(
+    Math.ceil(localTimeoutMs / 1_000) * 2 + 180,
+    Number.isFinite(producerTtlSeconds) ? producerTtlSeconds : 0,
   );
 }
 
@@ -331,26 +389,24 @@ export async function readCommittedJobResult<T>(
   commands: IORedis,
   target: JobTarget,
 ): Promise<{ result: T } | undefined> {
-  const state = await commands.get(cancellationKey(target));
+  const [state, value] = await commands.mget(
+    cancellationKey(target),
+    `${cancellationKey(target)}:result`,
+  );
   if (state !== 'completed') return undefined;
-  const value = await commands.get(`${cancellationKey(target)}:result`);
-  if (value == null)
-    throw new Error(
-      'Committed programmatic result expired; refusing re-execution',
-    );
-  return JSON.parse(value);
+  return decodeCommittedResult<T>(value);
 }
 
 /** Do not release replay ownership on an ambiguous Redis failure. Keep one
  * outstanding marker write, retry rejected writes with bounded backoff, and
  * retain ownership until it succeeds or the job's ORIGINAL deadline expires.
  * A delayed queue.add must carry that same timestamp into the worker. */
-export async function fenceJobCancellation(args: {
+export async function fenceJobCancellation<T = unknown>(args: {
   commands: IORedis;
   target: JobTarget;
   ttlSeconds: number;
   deadlineAtMs: number;
-}): Promise<boolean> {
+}): Promise<JobFenceOutcome<T>> {
   let retryMs = 25;
   let firstAttempt = true;
   while (firstAttempt || Date.now() < args.deadlineAtMs) {
@@ -362,10 +418,25 @@ export async function fenceJobCancellation(args: {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        requestJobCancellation(args.commands, args.target, args.ttlSeconds),
-        new Promise<boolean>(resolve => {
+        cancelJobInRedis(
+          args.commands,
+          args.target,
+          args.ttlSeconds,
+          true,
+        ).then((decision): JobFenceOutcome<T> => {
+          if (!Array.isArray(decision))
+            throw new Error('Invalid durable cancellation decision');
+          if (decision[0] === 1) return { status: 'cancelled' };
+          if (decision[0] === 0)
+            return {
+              status: 'completed',
+              result: decodeCommittedResult<T>(decision[1]).result,
+            };
+          throw new Error('Invalid durable cancellation decision');
+        }),
+        new Promise<JobFenceOutcome<T>>(resolve => {
           timer = setTimeout(
-            () => resolve(true),
+            () => resolve({ status: 'expired' }),
             remainingMs > 0 ? remainingMs : 1_000,
           );
         }),
@@ -382,7 +453,7 @@ export async function fenceJobCancellation(args: {
       if (timer != null) clearTimeout(timer);
     }
   }
-  return true;
+  return { status: 'expired' };
 }
 
 const REMOVABLE_JOB_STATES = new Set([
@@ -463,9 +534,9 @@ export async function waitForJobWithCancellation<T>(args: {
   void completion.catch(() => undefined);
   const target = { queueName: job.queueName, jobId: String(job.id) };
   const deadlineAtMs = args.deadlineAtMs ?? Date.now() + timeoutMs;
-  let fencing: Promise<boolean> | undefined;
-  const fence = (): Promise<boolean> =>
-    (fencing ??= fenceJobCancellation({
+  let fencing: Promise<JobFenceOutcome<T>> | undefined;
+  const fence = (): Promise<JobFenceOutcome<T>> =>
+    (fencing ??= fenceJobCancellation<T>({
       commands,
       target,
       ttlSeconds: cancellationTtlSeconds,
@@ -476,23 +547,24 @@ export async function waitForJobWithCancellation<T>(args: {
     await registry.register(target, externalController);
   } catch (error) {
     void completion.catch(() => undefined);
-    if (!(await fence())) {
-      const committed = await readCommittedJobResult<T>(commands, target);
-      if (committed != null) return committed.result;
-    }
+    const outcome = await fence();
+    if (outcome.status === 'completed') return outcome.result;
     await removeJobIfWaiting(job).catch(() => false);
     throw error;
   }
 
   let removeAbortListener = (): void => {};
-  const disconnected = new Promise<never>((_, reject) => {
+  const disconnected = new Promise<T>((resolve, reject) => {
     let cancelling = false;
     const cancel = (): void => {
       if (cancelling) return;
       cancelling = true;
       void fence()
-        .then(async accepted => {
-          if (!accepted) return;
+        .then(async outcome => {
+          if (outcome.status === 'completed') {
+            resolve(outcome.result);
+            return;
+          }
           // Removing a waiting job immediately frees queue capacity. An active
           // job cannot be removed; its worker observes the durable marker or
           // pub/sub event and aborts the sandbox transport instead.
@@ -529,10 +601,8 @@ export async function waitForJobWithCancellation<T>(args: {
   } catch (error) {
     // Includes waitUntilFinished timeouts and registration/transport errors,
     // not only explicit Stop. Replay cleanup is unsafe until this barrier.
-    if (!(await fence())) {
-      const committed = await readCommittedJobResult<T>(commands, target);
-      if (committed != null) return committed.result;
-    }
+    const outcome = await fence();
+    if (outcome.status === 'completed') return outcome.result;
     throw error;
   } finally {
     removeAbortListener();

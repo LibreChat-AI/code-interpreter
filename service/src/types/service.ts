@@ -301,6 +301,8 @@ export type JobData = {
   cancellable?: boolean;
   /** Absolute producer budget; queue-worker configuration may only tighten it. */
   deadlineAtMs?: number;
+  /** Producer request tombstones must never outlive the completion decision. */
+  cancellationTtlSeconds?: number;
   /** Producer deployment identity. Optional only for pre-profile queued jobs. */
   executionProfile?: ExecutionProfile;
   /** Required sandbox transport. Optional only for jobs queued before fencing. */
