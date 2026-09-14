@@ -220,13 +220,19 @@ test('rejects own-root links hidden by parent aliases or filesystem casing', asy
     const root = join(directory, 'Project');
     await mkdir(root);
     await symlink(root, join(root, 'self'));
+    const outside = join(directory, 'outside');
+    await mkdir(outside);
+    await symlink(root, join(outside, 'back'));
+    await symlink(outside, join(root, 'pivot'));
     const alias = join(directory, 'parent-alias');
     await symlink(root, alias);
     const path = join(directory, 'environment.yaml');
-    const selectedRoots = [join(alias, 'self')];
+    const selectedRoots = [join(alias, 'self'), join(alias, 'pivot', 'back')];
     try {
-        if (await realpath(join(directory, 'project')) === root)
+        if (await realpath(join(directory, 'project')) === root) {
             selectedRoots.push(join(directory, 'project', 'self'));
+            selectedRoots.push(join(directory, 'project', 'pivot', 'back'));
+        }
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -236,6 +242,15 @@ test('rejects own-root links hidden by parent aliases or filesystem casing', asy
         await assert.rejects(
             assertEnvironmentDefinitionsOutsideRoots([loaded], [{ id: 'app', root }]),
             /root traversal|mount alias/,
+        );
+    }
+    const definition = join(outside, 'environment.yaml');
+    await writeFile(definition, `name: app\nroot: ${root}\n`);
+    for (const selected of selectedRoots.filter(path => path.endsWith('/back'))) {
+        const loaded = await loadCodeEnvironment(selected.replace(/back$/, 'environment.yaml'));
+        await assert.rejects(
+            assertEnvironmentDefinitionsOutsideRoots([loaded], [{ id: 'app', root }]),
+            /outside|mount alias/,
         );
     }
 });

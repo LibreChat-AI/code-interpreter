@@ -358,8 +358,15 @@ export async function assertEnvironmentDefinitionsOutsideRoots(
     // The entry's parent, not its symlink target, determines who can replace it.
     // Compare ancestor identities so casing and directory aliases cannot make a
     // workspace-controlled entry look external on case-insensitive filesystems.
+    const canonicalParents = new Map<string, Promise<string>>();
     const controlsEntry = async (component: string, rootIdentity: string): Promise<boolean> => {
-        let parent = await realpath(dirname(component));
+        const directory = dirname(component);
+        let canonical = canonicalParents.get(directory);
+        if (!canonical) {
+            canonical = realpath(directory);
+            canonicalParents.set(directory, canonical);
+        }
+        let parent = await canonical;
         while (true) {
             if ((await identity(parent)) === rootIdentity) return true;
             const next = dirname(parent);
@@ -375,13 +382,13 @@ export async function assertEnvironmentDefinitionsOutsideRoots(
                 for (const component of environment.rootPaths ?? []) {
                     const path = relative(root.root, component);
                     const sameRoot = (await identity(component)) === rootIdentity;
+                    const controlled = await controlsEntry(component, rootIdentity);
                     // A trusted external alias may select its own root, but a
                     // link beneath that root is still writable by the workspace.
-                    if (sameRoot && root.id === environment.definition.name &&
-                        !(await controlsEntry(component, rootIdentity)))
+                    if (sameRoot && !controlled && root.id === environment.definition.name)
                         continue;
                     if (
-                        sameRoot ||
+                        controlled || sameRoot ||
                         path === '' ||
                         (!isAbsolute(path) &&
                             path !== '..' &&
@@ -399,6 +406,7 @@ export async function assertEnvironmentDefinitionsOutsideRoots(
             ]) {
                 const path = relative(root.root, controlPath);
                 if (
+                    (await controlsEntry(controlPath, rootIdentity)) ||
                     (await identity(controlPath)) === rootIdentity ||
                     path === '' ||
                     (!isAbsolute(path) &&
