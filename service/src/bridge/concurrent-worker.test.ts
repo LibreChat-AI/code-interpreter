@@ -243,11 +243,25 @@ for (const failure of [
         status: 'fulfilled',
         value: { status: 'fulfilled' },
       });
-      for (let i = 0; i < 300 && errors.length === 0; i++)
+      const diagnosticCount = cleanupFailure ? 1 : 2;
+      const quarantineAttemptCount =
+        failure === 'lost-response'
+          ? 2
+          : failure === 'all-responses-lost' || failure === 'delivery-outage'
+            ? 3
+            : 1;
+      for (
+        let i = 0;
+        i < 300 &&
+        (errors.length < diagnosticCount ||
+          (!cleanupFailure && quarantineAttempts < quarantineAttemptCount));
+        i++
+      ) {
         await new Promise((resolve) => setTimeout(resolve, 5));
+      }
       if (failure === 'delivery-outage')
-        expect(errors.length).toBeGreaterThanOrEqual(1);
-      else expect(errors.length).toBe(1);
+        expect(errors.length).toBeGreaterThanOrEqual(2);
+      else expect(errors.length).toBe(diagnosticCount);
       if (failure === 'lost-response') expect(quarantineAttempts).toBe(2);
       if (failure === 'delivery-outage')
         expect(quarantineAttempts).toBeGreaterThanOrEqual(3);

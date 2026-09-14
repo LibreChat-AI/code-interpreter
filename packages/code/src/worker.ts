@@ -2219,6 +2219,13 @@ export class BridgeWorker {
             incarnationId: this.incarnationId,
           },
           pollController.signal,
+          () => {
+            // Once response headers arrive, drain the bounded body before a
+            // successful execution can settle. Otherwise a cancellation=true
+            // response racing command completion can be discarded. The
+            // transport timer and execution signal still cap the drain.
+            signal.removeEventListener('abort', abortPoll);
+          },
         );
         if (response.cancelled) {
           executionController.abort();
@@ -2242,6 +2249,7 @@ export class BridgeWorker {
     url: string,
     body: object,
     signal?: AbortSignal,
+    onResponseHeaders?: () => void,
   ): Promise<T> {
     const requestBody = JSON.stringify(body);
     const response = await this.fetchImpl(url, {
@@ -2253,6 +2261,7 @@ export class BridgeWorker {
       body: requestBody,
       signal,
     });
+    onResponseHeaders?.();
     let payload: unknown;
     try {
       payload = await response.json();
