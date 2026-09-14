@@ -151,6 +151,24 @@ policy: an allowed destination can receive workspace data. The normalized
 allowlist is included in the worker policy digest. Tool approval hooks remain
 the user-facing allow/deny boundary for each invocation.
 
+When Code API negotiates `bash` programmatic execution for a selected
+workspace, the same native SRT executor also supports replay-mode Programmatic
+Tool Calling on macOS, Linux, and WSL2 workers. Native Windows does not
+advertise this Bash capability. The repository remains the command working directory. Generated
+PTC scripts, replay history, skill files, chat attachments, and returned
+artifacts use an owner-only per-execution directory under the worker's private
+SRT scratch root, exposed to code as `LIBRECHAT_CODE_DATA_DIR`. That directory
+is removed after every iteration and is never placed in the repository.
+
+Reference inputs and artifact outputs travel only through the configured
+`LIBRECHAT_CODE_FILE_RELAY_UPSTREAM`, using Code API's execution-scoped opaque
+egress grant. The worker rejects redirects and bounds each transfer to 10 MiB,
+each execution to 100 files and 100 MiB total, and transfer concurrency to four.
+Its parent process keeps a 64-entry/32-MiB LRU input cache keyed by a stable,
+Code-API-authorized digest; sandboxed commands cannot read that cache. Requests
+against one workspace remain serialized, while negotiated lease slots allow
+different registered roots to execute concurrently.
+
 The native sandbox preserves standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
 and `NO_PROXY` names (including lowercase forms), plus Windows process and profile
 variables on Windows. SRT remains responsible for the final sandbox environment

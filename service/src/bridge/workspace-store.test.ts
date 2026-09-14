@@ -77,6 +77,111 @@ test('dispatches a workspace tool only to a worker advertising its workspace and
   });
 });
 
+test('dispatches programmatic Bash only inside an advertised workspace', async () => {
+  await store.register({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    workerId: 'workspace-worker',
+    incarnationId,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operations: ['execute_command'],
+        programmaticLanguages: ['bash'],
+        workspaces: [{ id: 'primary' }],
+      },
+    },
+  });
+  const body = {
+    language: 'bash',
+    version: '5.2',
+    session_id: 'session-1',
+    files: [{ name: 'main.sh', content: 'echo ready' }],
+  };
+  const completion = store.dispatch({
+    workerId: 'workspace-worker',
+    body,
+    headers: {},
+    workspaceId: 'primary',
+    deadlineAtMs: Date.now() + 5_000,
+    signal: new AbortController().signal,
+  });
+
+  const assignment = await store.lease('workspace-worker', incarnationId, 1_000);
+  expect(assignment).toMatchObject({
+    executionKind: 'workspace_programmatic',
+    workspaceId: 'primary',
+    request: { body },
+  });
+  await store.settle('workspace-worker', assignment?.assignmentId ?? '', {
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    generation: assignment?.generation ?? 0,
+    leaseToken: assignment?.leaseToken ?? '',
+    incarnationId,
+    status: 'fulfilled',
+    result: {
+      session_id: 'session-1',
+      language: 'bash',
+      version: '5.2',
+      files: [],
+      run: {
+        stdout: 'ready\n',
+        stderr: '',
+        code: 0,
+        signal: null,
+        output: 'ready\n',
+        memory: null,
+        message: null,
+        status: null,
+        cpu_time: null,
+        wall_time: 0.01,
+      },
+    },
+  });
+
+  await expect(completion).resolves.toMatchObject({
+    status: 'fulfilled',
+    result: { session_id: 'session-1' },
+  });
+});
+
+test('rejects programmatic execution without the workspace capability', async () => {
+  await store.register({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    workerId: 'workspace-worker',
+    incarnationId,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operations: ['execute_command'],
+        workspaces: [{ id: 'primary' }],
+      },
+    },
+  });
+
+  await expect(
+    store.dispatch({
+      workerId: 'workspace-worker',
+      body: {
+        language: 'bash',
+        version: '5.2',
+        session_id: 'session-2',
+        files: [{ name: 'main.sh', content: 'echo denied' }],
+      },
+      headers: {},
+      workspaceId: 'primary',
+      deadlineAtMs: Date.now() + 1_000,
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+  expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
+});
+
 test('drains an acknowledged workspace mutation cancellation before releasing it', async () => {
   await store.register({
     protocolVersion: BRIDGE_PROTOCOL_VERSION,

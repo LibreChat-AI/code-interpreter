@@ -109,20 +109,24 @@ _PTC_EXECUTION_ID="${executionId}"
 _PTC_SENTINEL_START="${scopedStart}"
 _PTC_SENTINEL_END="${scopedEnd}"
 _PTC_HISTORY_PATH="\${PTC_HISTORY_PATH:-${PTC_HISTORY_SANDBOX_PATH}}"
-_PTC_PENDING_FILE="$(mktemp -t _ptc_pending.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_pending.XXXXXX)"
-_PTC_ERROR_FILE="$(mktemp -t _ptc_error.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_error.XXXXXX)"
-_PTC_CONSUMED_FILE="$(mktemp -t _ptc_consumed.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_consumed.XXXXXX)"
-_PTC_SAW_BARE_TOOL_FILE="$(mktemp -t _ptc_saw_tool.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_saw_tool.XXXXXX)"
-_PTC_PRE_TOOL_JOBS_FILE="$(mktemp -t _ptc_pre_tool_jobs.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_pre_tool_jobs.XXXXXX)"
-_PTC_PRE_TOOL_JOBS_READY_FILE="$(mktemp -t _ptc_pre_tool_jobs_ready.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_pre_tool_jobs_ready.XXXXXX)"
-_PTC_TOOL_JOBS_FILE="$(mktemp -t _ptc_tool_jobs.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_tool_jobs.XXXXXX)"
-_PTC_WAIT_RAN_FILE="$(mktemp -t _ptc_wait_ran.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_wait_ran.XXXXXX)"
-_PTC_SUPPRESS_SUBSHELL_TOOL_FILE="$(mktemp -t _ptc_suppress_subshell_tool.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_suppress_subshell_tool.XXXXXX)"
-_PTC_SUPPRESS_SUBSHELL_TOOL_CLEAR_FILE="$(mktemp -t _ptc_suppress_subshell_tool_clear.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_suppress_subshell_tool_clear.XXXXXX)"
+_PTC_RUNTIME_DIR="\${TMPDIR:-/tmp}"
+_ptc_mktemp() {
+    mktemp "\${_PTC_RUNTIME_DIR%/}/$1.XXXXXX"
+}
+_PTC_PENDING_FILE="$(_ptc_mktemp _ptc_pending)"
+_PTC_ERROR_FILE="$(_ptc_mktemp _ptc_error)"
+_PTC_CONSUMED_FILE="$(_ptc_mktemp _ptc_consumed)"
+_PTC_SAW_BARE_TOOL_FILE="$(_ptc_mktemp _ptc_saw_tool)"
+_PTC_PRE_TOOL_JOBS_FILE="$(_ptc_mktemp _ptc_pre_tool_jobs)"
+_PTC_PRE_TOOL_JOBS_READY_FILE="$(_ptc_mktemp _ptc_pre_tool_jobs_ready)"
+_PTC_TOOL_JOBS_FILE="$(_ptc_mktemp _ptc_tool_jobs)"
+_PTC_WAIT_RAN_FILE="$(_ptc_mktemp _ptc_wait_ran)"
+_PTC_SUPPRESS_SUBSHELL_TOOL_FILE="$(_ptc_mktemp _ptc_suppress_subshell_tool)"
+_PTC_SUPPRESS_SUBSHELL_TOOL_CLEAR_FILE="$(_ptc_mktemp _ptc_suppress_subshell_tool_clear)"
 # Counter must persist across subshells (command substitution) so call_ids
 # stay deterministic across cached/uncached calls. Bash variables set in a
 # subshell don't propagate back, so we use a file.
-_PTC_COUNTER_FILE="$(mktemp -t _ptc_counter.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_counter.XXXXXX)"
+_PTC_COUNTER_FILE="$(_ptc_mktemp _ptc_counter)"
 _PTC_LOCK_DIR="\${_PTC_PENDING_FILE}.lock"
 printf '0' > "$_PTC_COUNTER_FILE"
 : > "$_PTC_CONSUMED_FILE"
@@ -243,7 +247,7 @@ _ptc_prune_finished_tool_jobs() {
         return 0
     fi
     local _ptc_tmp_file
-    _ptc_tmp_file="$(mktemp -t _ptc_tool_jobs_live.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_tool_jobs_live.XXXXXX)"
+    _ptc_tmp_file="$(_ptc_mktemp _ptc_tool_jobs_live)"
     while IFS= read -r _ptc_pid; do
         [ -n "$_ptc_pid" ] || continue
         if kill -0 "$_ptc_pid" 2>/dev/null; then
@@ -512,7 +516,7 @@ _ptc_call_tool() {
 
     # Large input can exceed ARG_MAX via --argjson; write once, reuse path below.
     local _ptc_input_tmp
-    _ptc_input_tmp="$(mktemp -t _ptc_input.XXXXXX 2>/dev/null || mktemp /tmp/_ptc_input.XXXXXX)"
+    _ptc_input_tmp="$(_ptc_mktemp _ptc_input)"
     printf '%s' "$_ptc_input" > "$_ptc_input_tmp"
 
     local _ptc_matches

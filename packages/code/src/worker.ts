@@ -5,6 +5,7 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   BridgeProtocolError,
   bridgeWorkerPath,
+  isBridgeWorkspaceProgrammaticRequest,
   isWorkspaceToolResult,
 } from './protocol.js';
 import { EndpointRuntimeSupervisor } from './runtime.js';
@@ -21,6 +22,7 @@ import type {
   BridgeWorkerCredentialResponse,
   BridgeWorkerRegistrationResponse,
   BridgeWorkspaceToolOperation,
+  BridgeWorkspaceProgrammaticRequest,
 } from './protocol.js';
 import type { RuntimeLease, RuntimeSupervisor } from './runtime.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
@@ -35,6 +37,13 @@ export interface BridgeWorkerOptions {
   runtimeSupervisor?: RuntimeSupervisor;
   capabilities: BridgeWorkerCapabilities;
   workspaceTools?: WorkspaceToolExecutor;
+  workspaceProgrammatic?: {
+    executeProgrammatic(
+      workspaceId: string,
+      request: BridgeWorkspaceProgrammaticRequest,
+      signal?: AbortSignal,
+    ): Promise<object>;
+  };
   workspaceMutationQuarantine?: WorkspaceMutationQuarantine;
   /** Required per-root durable guards when opting into concurrent workspace leases. */
   workspaceQuarantines?: ReadonlyMap<string, WorkspaceMutationQuarantine>;
@@ -164,6 +173,11 @@ function workspaceCapabilitiesMatch(
     (advertised.listFileFeatures?.every(
       (feature, index) => feature === executor.listFileFeatures?.[index],
     ) ?? executor.listFileFeatures == null) &&
+    advertised.programmaticLanguages?.length ===
+      executor.programmaticLanguages?.length &&
+    (advertised.programmaticLanguages?.every(
+      (language, index) => language === executor.programmaticLanguages?.[index],
+    ) ?? executor.programmaticLanguages == null) &&
     advertised.workspaces.length === executor.workspaces.length &&
     advertised.workspaces.every(
       (workspace, index) =>
@@ -223,6 +237,7 @@ function registrationCompatibleCapabilities(
     editFileModes: _editFileModes,
     editFileFeatures: _editFileFeatures,
     listFileFeatures: _listFileFeatures,
+    programmaticLanguages: _programmaticLanguages,
     ...compatibleWorkspaceTools
   } = workspaceTools;
   return {
@@ -302,11 +317,16 @@ function supportedWorkspaceCapabilities(
   const listFileFeatures = desired.listFileFeatures?.filter((feature) =>
     registration.supportedWorkspaceListFileFeatures?.includes(feature),
   );
+  const programmaticLanguages = desired.programmaticLanguages?.filter(
+    (language) =>
+      registration.supportedWorkspaceProgrammaticLanguages?.includes(language),
+  );
   const {
     writeFileModes: _writeFileModes,
     editFileModes: _editFileModes,
     editFileFeatures: _editFileFeatures,
     listFileFeatures: _listFileFeatures,
+    programmaticLanguages: _programmaticLanguages,
     ...compatibleDesired
   } = desired;
   return {
@@ -326,6 +346,10 @@ function supportedWorkspaceCapabilities(
         : {}),
       ...(operations.includes('list_files') && listFileFeatures?.length
         ? { listFileFeatures }
+        : {}),
+      ...(operations.includes('execute_command') &&
+      programmaticLanguages?.length
+        ? { programmaticLanguages }
         : {}),
     },
   };
@@ -404,6 +428,16 @@ export class BridgeWorker {
     ) {
       throw new BridgeProtocolError(
         'Workspace tool capabilities require a matching executor',
+      );
+    }
+    if (
+      (options.workspaceProgrammatic != null) !==
+      (options.capabilities.workspaceTools?.programmaticLanguages?.includes(
+        'bash',
+      ) === true)
+    ) {
+      throw new BridgeProtocolError(
+        'Workspace programmatic capability requires a matching executor',
       );
     }
     if (
@@ -1130,11 +1164,7 @@ export class BridgeWorker {
     assignment: BridgeAssignment,
     signal?: AbortSignal,
   ): Promise<void> {
-    const root =
-      assignment.executionKind === 'workspace_tool' &&
-      isWorkspaceToolRequest(assignment.request)
-        ? assignment.request.workspaceId
-        : undefined;
+    const root = this.assignmentWorkspaceId(assignment);
     const waitingAt = Date.now();
     while (root != null && this.activeWorkspaceAssignments.has(root)) {
       const active = this.activeWorkspaceAssignments.get(root)!;
@@ -1212,12 +1242,29 @@ export class BridgeWorker {
   private workspaceGuard(
     assignment: BridgeAssignment,
   ): WorkspaceMutationQuarantine | undefined {
-    return assignment.executionKind === 'workspace_tool' &&
-      isWorkspaceToolRequest(assignment.request)
-      ? (this.options.workspaceQuarantines?.get(
-          assignment.request.workspaceId,
-        ) ?? this.options.workspaceMutationQuarantine)
+    const workspaceId = this.assignmentWorkspaceId(assignment);
+    return workspaceId != null
+      ? (this.options.workspaceQuarantines?.get(workspaceId) ??
+          this.options.workspaceMutationQuarantine)
       : this.options.workspaceMutationQuarantine;
+  }
+
+  private assignmentWorkspaceId(
+    assignment: BridgeAssignment,
+  ): string | undefined {
+    if (
+      assignment.executionKind === 'workspace_tool' &&
+      isWorkspaceToolRequest(assignment.request)
+    ) {
+      return assignment.request.workspaceId;
+    }
+    if (
+      assignment.executionKind === 'workspace_programmatic' &&
+      typeof assignment.workspaceId === 'string'
+    ) {
+      return assignment.workspaceId;
+    }
+    return undefined;
   }
 
   private async executeOwned(
@@ -1472,6 +1519,76 @@ export class BridgeWorker {
             'Bridge assignment expired during workspace execution',
           );
         }
+      } else if (assignment.executionKind === 'workspace_programmatic') {
+        const workspaceId = assignment.workspaceId;
+        if (
+          workspaceId == null ||
+          this.options.workspaceProgrammatic == null ||
+          !isBridgeWorkspaceProgrammaticRequest(assignment.request)
+        ) {
+          throw new BridgeProtocolError(
+            'Worker does not provide valid selected-workspace programmatic execution',
+          );
+        }
+        try {
+          if (this.quarantinedWorkspaces.has(workspaceId)) {
+            throw new Error('Workspace requires an explicit quarantine reset');
+          }
+          if (this.options.workspaceQuarantines != null)
+            await guard?.assertAvailable();
+        } catch (error) {
+          throw new BridgeWorkspaceQuarantinedError(
+            'Workspace is quarantined',
+            error,
+          );
+        }
+        const advertised = this.activeCapabilities.workspaceTools;
+        const workspace = advertised?.workspaces.find(
+          (candidate) => candidate.id === workspaceId,
+        );
+        if (
+          workspace == null ||
+          !advertised?.operations.includes('execute_command') ||
+          (workspace.operations != null &&
+            !workspace.operations.includes('execute_command')) ||
+          !advertised.programmaticLanguages?.includes('bash')
+        ) {
+          throw new BridgeProtocolError(
+            'Selected-workspace programmatic execution is not advertised',
+          );
+        }
+        this.mutationGuardArmed = true;
+        try {
+          this.armedWorkspaces.add(workspaceId);
+          await guard!.arm(
+            'Workspace programmatic execution is pending settlement',
+            assignment.assignmentId,
+          );
+          workspaceMutationArmed = true;
+        } catch (error) {
+          this.mutationGuardArmed = false;
+          throw new BridgeWorkspaceQuarantinedError(
+            'Workspace mutation quarantine could not be armed before execution',
+            error,
+          );
+        }
+        payload = await this.options.workspaceProgrammatic.executeProgrammatic(
+          workspaceId,
+          assignment.request,
+          executionController.signal,
+        );
+        workspaceMutationApplied = true;
+        if (executionController.signal.aborted) {
+          throw (
+            executionController.signal.reason ??
+            new DOMException('aborted', 'AbortError')
+          );
+        }
+        if (Date.now() >= localDeadlineAtMs) {
+          throw new BridgeProtocolError(
+            'Bridge assignment expired during programmatic execution',
+          );
+        }
       } else {
         runtimeLease = await this.runtimeSupervisor.acquire(
           assignment,
@@ -1581,7 +1698,8 @@ export class BridgeWorker {
         leaseToken: assignment.leaseToken,
         incarnationId: this.incarnationId,
         status: 'rejected',
-        ...(assignment.executionKind === 'workspace_tool' &&
+        ...((assignment.executionKind === 'workspace_tool' ||
+          assignment.executionKind === 'workspace_programmatic') &&
         error instanceof WorkspaceToolError
           ? { errorCode: error.code }
           : {}),
@@ -1693,12 +1811,8 @@ export class BridgeWorker {
               clearTimeout(timer);
             }
           }
-          if (
-            assignment.executionKind === 'workspace_tool' &&
-            isWorkspaceToolRequest(assignment.request)
-          ) {
-            this.armedWorkspaces.delete(assignment.request.workspaceId);
-          }
+          const workspaceId = this.assignmentWorkspaceId(assignment);
+          if (workspaceId != null) this.armedWorkspaces.delete(workspaceId);
           this.mutationGuardArmed = false;
         } catch (error) {
           throw new BridgeWorkspaceQuarantinedError(
@@ -1957,11 +2071,12 @@ export class BridgeWorker {
     const fulfilledWorkspaceMutation =
       workspaceMutationApplied &&
       settlement.status === 'fulfilled' &&
-      assignment.executionKind === 'workspace_tool' &&
-      isWorkspaceToolRequest(assignment.request) &&
-      (assignment.request.operation === 'write_file' ||
-        assignment.request.operation === 'edit_file' ||
-        assignment.request.operation === 'execute_command');
+      (assignment.executionKind === 'workspace_programmatic' ||
+        (assignment.executionKind === 'workspace_tool' &&
+          isWorkspaceToolRequest(assignment.request) &&
+          (assignment.request.operation === 'write_file' ||
+            assignment.request.operation === 'edit_file' ||
+            assignment.request.operation === 'execute_command')));
     if (signal?.aborted === true) {
       if (assignment.runtimeSessionId != null || fulfilledWorkspaceMutation) {
         throw await this.quarantineWorkspace(

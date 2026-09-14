@@ -265,6 +265,8 @@ export type JobData = {
   canonicalUserId?: string;
   /** Trusted dynamic outbound worker selection. */
   bridgeWorkerId?: string;
+  /** Trusted selected workspace for native replay-mode PTC. */
+  workspaceId?: string;
   /** Producer deployment identity. Optional only for pre-profile queued jobs. */
   executionProfile?: ExecutionProfile;
   /** Required sandbox transport. Optional only for jobs queued before fencing. */

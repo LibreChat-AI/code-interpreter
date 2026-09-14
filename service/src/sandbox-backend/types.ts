@@ -39,6 +39,8 @@ export interface SandboxExecuteContext {
   canonicalUserId?: string;
   /** Trusted API-selected outbound worker. Presence requires a tenant-bound credential. */
   bridgeWorkerId?: string;
+  /** Trusted selected workspace for native replay-mode PTC. */
+  workspaceId?: string;
   /** Stable identifier for this queued iteration, used to derive an idempotent
    * stateless launch token. PTC replay reuses one executionId across every
    * iteration, so the executionId alone cannot separate them; the request body

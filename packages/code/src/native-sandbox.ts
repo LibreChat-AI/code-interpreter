@@ -479,9 +479,71 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     }
   }
 
+  /**
+   * Allocate an owner-only execution directory that is already inside this
+   * sandbox's allowlist. The caller must remove the returned directory after
+   * the execution settles. It is intentionally unavailable on native Windows
+   * until the restricted-account TEMP directory can be opened and verified by
+   * the trusted parent process.
+   */
+  async createExecutionDirectory(): Promise<string> {
+    await this.initialize();
+    if (!this.scratchDirectory || this.platform === 'win32') {
+      throw new WorkspaceToolError(
+        'Native programmatic execution storage is unavailable',
+        'COMMAND_UNAVAILABLE',
+      );
+    }
+    return await mkdtemp(join(this.scratchDirectory, 'execution-'));
+  }
+
+  /** Run a generated program from a verified private execution directory. */
+  async executeProgrammatic(
+    request: WorkspaceExecuteCommandRequest,
+    dataDirectory: string,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceExecuteCommandResult> {
+    if (this.execution || this.closing) {
+      throw new WorkspaceToolError(
+        'Native sandbox already has an active command or is closing',
+        'COMMAND_UNAVAILABLE',
+      );
+    }
+    await this.initialize();
+    const scratchDirectory = this.scratchDirectory;
+    let canonicalDataDirectory: string;
+    try {
+      canonicalDataDirectory = await realpath(dataDirectory);
+      if (
+        !scratchDirectory ||
+        !isWithin(scratchDirectory, canonicalDataDirectory) ||
+        !(await stat(canonicalDataDirectory)).isDirectory()
+      ) {
+        throw new Error('invalid execution directory');
+      }
+    } catch {
+      throw new WorkspaceToolError(
+        'Programmatic execution directory is unavailable',
+        'INVALID_PATH',
+      );
+    }
+    const execution = this.executeExclusive(request, signal, {
+      LIBRECHAT_CODE_DATA_DIR: canonicalDataDirectory,
+      PTC_HISTORY_PATH: join(canonicalDataDirectory, '_ptc_history.json'),
+      TMPDIR: canonicalDataDirectory,
+    });
+    this.execution = execution;
+    try {
+      return await execution;
+    } finally {
+      this.execution = undefined;
+    }
+  }
+
   private async executeExclusive(
     request: WorkspaceExecuteCommandRequest,
     signal?: AbortSignal,
+    trustedEnvironment?: NodeJS.ProcessEnv,
   ): Promise<WorkspaceExecuteCommandResult> {
     if (
       !isWorkspaceToolRequest(request) ||
@@ -561,7 +623,14 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           'EXECUTION_ABORTED',
         );
       }
-      return await this.runWrapped(request, wrapped, cwd, commandId, signal);
+      return await this.runWrapped(
+        request,
+        wrapped,
+        cwd,
+        commandId,
+        signal,
+        trustedEnvironment,
+      );
     } finally {
       // A successful wrap owns command state even when no child is spawned.
       try {
@@ -604,6 +673,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     cwd: string,
     commandId: string,
     signal?: AbortSignal,
+    trustedEnvironment?: NodeJS.ProcessEnv,
   ): Promise<WorkspaceExecuteCommandResult> {
     const outputLimit =
       request.maxOutputBytes ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES;
@@ -618,6 +688,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             env: {
               ...wrapped.env,
               ...this.scratchEnvironment(),
+              ...trustedEnvironment,
               ...TRUSTED_GIT_CONFIG_ENTRIES,
               GIT_CONFIG_COUNT:
                 wrapped.env.GIT_CONFIG_COUNT ?? TRUSTED_GIT_CONFIG_COUNT,

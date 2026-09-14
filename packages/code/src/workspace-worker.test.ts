@@ -950,6 +950,88 @@ test('worker executes a workspace tool assignment locally without acquiring a sa
   });
 });
 
+test('worker executes programmatic Bash in the selected workspace and preserves its fence', async () => {
+  const programmaticRequests: object[] = [];
+  const quarantineEvents: string[] = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['execute_command' as const],
+    programmaticLanguages: ['bash' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      mutationFailuresAreAtomic: true,
+      async execute() {
+        throw new Error('workspace tool executor must not run');
+      },
+    },
+    workspaceProgrammatic: {
+      async executeProgrammatic(workspaceId, request) {
+        programmaticRequests.push({ workspaceId, request });
+        return {
+          session_id: 'session-1',
+          language: 'bash',
+          version: '5.2',
+          files: [],
+          run: { stdout: 'ready\n', stderr: '', code: 0, signal: null },
+        };
+      },
+    },
+    workspaceQuarantines: new Map([
+      [
+        'primary',
+        mutationQuarantine(
+          (reason) => quarantineEvents.push(`quarantine:${reason}`),
+          (reason) => quarantineEvents.push(`arm:${reason}`),
+          () => quarantineEvents.push('clear'),
+        ),
+      ],
+    ]),
+    fetchImpl: async () => Response.json({ protocolVersion: 1, accepted: true }),
+  });
+  const request = {
+    body: {
+      language: 'bash' as const,
+      version: '5.2',
+      session_id: 'session-1',
+      files: [{ name: 'main.sh', content: 'echo ready' }],
+    },
+    headers: {},
+  };
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-programmatic-1',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_programmatic',
+    workspaceId: 'primary',
+    request,
+  });
+
+  assert.deepEqual(programmaticRequests, [{ workspaceId: 'primary', request }]);
+  assert.deepEqual(quarantineEvents, [
+    'arm:Workspace programmatic execution is pending settlement',
+    'clear',
+  ]);
+});
+
 test('worker stops after Code API rejects a fulfilled workspace mutation', async () => {
   let quarantinedReason: string | undefined;
   let armed = 0;

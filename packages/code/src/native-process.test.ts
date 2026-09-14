@@ -49,7 +49,9 @@ function fixture(
         child.emit('message', {
           id: message.id,
           ok: true,
-          ...(message.type === 'execute' ? { result } : {}),
+          ...(message.type === 'execute' || message.type === 'programmatic'
+            ? { result }
+            : {}),
         });
       });
       return true;
@@ -168,6 +170,47 @@ test('executor hands credentials over IPC only for the current command', async (
     TOKEN: 'per-command-secret',
   });
   assert.equal(fake.messages[1].wrappedCommand, 'wrapped printf ok');
+  await sandbox.close();
+});
+
+test('programmatic executor resolves and scopes credentials to its command', async () => {
+  const fake = fixture();
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    {
+      workspaceRoot: '/workspace',
+      programmaticFileUpstream: 'http://127.0.0.1:3190',
+      maskedEnvironment: {
+        variables: [{ name: 'TOKEN', injectHosts: ['github.com'] }],
+        async resolve() {
+          return { TOKEN: 'per-programmatic-secret' };
+        },
+        wrapCommand(command) {
+          return `wrapped ${command}`;
+        },
+      },
+    },
+    fake.fork,
+  );
+  const programmaticRequest = {
+    headers: {},
+    body: {
+      language: 'bash' as const,
+      version: '5.2.0',
+      session_id: 'session',
+      files: [{ name: 'main.sh', content: 'git status' }],
+    },
+  };
+  await sandbox.executeProgrammatic('primary', programmaticRequest);
+  assert.equal(
+    JSON.stringify(fake.options).includes('per-programmatic-secret'),
+    false,
+  );
+  const message = fake.messages.find((candidate) => candidate.type === 'programmatic')!;
+  assert.deepEqual(message.credentials, { TOKEN: 'per-programmatic-secret' });
+  assert.equal(
+    message.wrappedCommand,
+    'wrapped exec /bin/bash "$LIBRECHAT_CODE_DATA_DIR/main.sh"',
+  );
   await sandbox.close();
 });
 

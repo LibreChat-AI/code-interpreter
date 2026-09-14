@@ -1,11 +1,13 @@
 import { fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { WorkspaceToolError } from './workspace.js';
+import { NATIVE_PROGRAMMATIC_COMMAND } from './native-programmatic.js';
 import { isWorkspaceToolRequest, isWorkspaceToolResult } from './protocol.js';
 import type { ChildProcess, ForkOptions } from 'node:child_process';
 import type { NativeSrtWorkspaceCommandSandboxOptions } from './native-sandbox.js';
 import type { WorkspaceCommandSandbox } from './workspace.js';
 import type {
+  BridgeWorkspaceProgrammaticRequest,
   WorkspaceExecuteCommandRequest,
   WorkspaceExecuteCommandResult,
 } from './protocol.js';
@@ -13,7 +15,10 @@ import type {
 export type NativeProcessSandboxOptions = Omit<
   NativeSrtWorkspaceCommandSandboxOptions,
   'manager' | 'spawnCommand' | 'platform'
->;
+> & {
+  /** Hardened Code API egress gateway used for execution-scoped files. */
+  programmaticFileUpstream?: string;
+};
 
 /** Only OS discovery and conventional proxy settings cross into the executor.
  * In particular, never inherit NODE_OPTIONS, bridge identity, or app secrets. */
@@ -90,7 +95,7 @@ export class NativeProcessWorkspaceCommandSandbox
   readonly mutationFailuresAreAtomic = true as const;
   private child?: ChildProcess;
   private ready?: Promise<void>;
-  private active?: Promise<WorkspaceExecuteCommandResult>;
+  private active?: Promise<unknown>;
   private closing?: Promise<void>;
   private failed = false;
   private terminationTimer?: ReturnType<typeof setTimeout>;
@@ -192,6 +197,7 @@ export class NativeProcessWorkspaceCommandSandbox
       allowedDomains,
       homeDirectory,
       shellPath,
+      programmaticFileUpstream,
     } = this.options;
     await this.rpc(
       'prepare',
@@ -203,6 +209,7 @@ export class NativeProcessWorkspaceCommandSandbox
           allowedDomains,
           homeDirectory,
           shellPath,
+          programmaticFileUpstream,
           variables: this.options.maskedEnvironment?.variables,
         },
       },
@@ -234,6 +241,88 @@ export class NativeProcessWorkspaceCommandSandbox
     } finally {
       this.active = undefined;
     }
+  }
+
+  async executeProgrammatic(
+    workspaceId: string,
+    request: BridgeWorkspaceProgrammaticRequest,
+    signal?: AbortSignal,
+  ): Promise<object> {
+    if (this.active || this.closing || this.failed)
+      throw this.unavailable(false);
+    if (!this.options.programmaticFileUpstream) {
+      throw new WorkspaceToolError(
+        'Native programmatic file transport is unavailable',
+        'COMMAND_UNAVAILABLE',
+      );
+    }
+    const active = this.executeProgrammaticOnce(request, workspaceId, signal);
+    this.active = active;
+    try {
+      return await active;
+    } finally {
+      this.active = undefined;
+    }
+  }
+
+  private async executeProgrammaticOnce(
+    request: BridgeWorkspaceProgrammaticRequest,
+    workspaceId: string,
+    signal?: AbortSignal,
+  ): Promise<object> {
+    if (signal?.aborted)
+      throw new WorkspaceToolError('Programmatic execution aborted', 'EXECUTION_ABORTED');
+    let credentials: Record<string, string> | undefined;
+    let wrappedCommand: string | undefined;
+    try {
+      await this.prepare();
+      if (signal?.aborted) throw new Error('aborted');
+      credentials = await this.options.maskedEnvironment?.resolve(signal);
+      if (signal?.aborted) throw new Error('aborted');
+      wrappedCommand = this.options.maskedEnvironment?.wrapCommand?.(
+        NATIVE_PROGRAMMATIC_COMMAND,
+        process.platform,
+      );
+      if (signal?.aborted) throw new Error('aborted');
+    } catch (error) {
+      if (signal?.aborted) {
+        throw new WorkspaceToolError(
+          'Programmatic execution aborted',
+          'EXECUTION_ABORTED',
+        );
+      }
+      throw error instanceof WorkspaceToolError
+        ? new WorkspaceToolError(error.message, error.code, false)
+        : new WorkspaceToolError(
+            'Native programmatic executor setup failed before dispatch',
+            'COMMAND_UNAVAILABLE',
+          );
+    }
+    const result = await this.rpc(
+      'programmatic',
+      {
+        programmaticRequest: request,
+        workspaceId,
+        credentials,
+        wrappedCommand,
+      },
+      (request.body.run_timeout ?? 30_000) + 2 * 30_000 + 5_000,
+      true,
+      signal,
+    );
+    if (signal?.aborted) {
+      throw new WorkspaceToolError(
+        'Programmatic execution aborted',
+        'EXECUTION_ABORTED',
+        true,
+      );
+    }
+    if (typeof result !== 'object' || result === null) {
+      this.failed = true;
+      this.terminate();
+      throw this.unavailable(true);
+    }
+    return result;
   }
 
   private async executeOnce(

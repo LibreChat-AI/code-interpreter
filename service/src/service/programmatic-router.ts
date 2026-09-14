@@ -50,8 +50,10 @@ import {
 import {
   BridgeWorkerSelectionError,
   CODEAPI_BRIDGE_WORKER_HEADER,
+  CODEAPI_BRIDGE_WORKSPACE_HEADER,
   resolveBridgeWorkerSelection,
 } from '../bridge/selection';
+import { isValidBridgeWorkerId } from '../../../packages/code/src/protocol';
 import logger from '../logger';
 import {
   type ExecutionState,
@@ -333,6 +335,7 @@ async function runReplayIteration(
     executionProfile: state.executionProfile ?? env.EXECUTION_PROFILE,
     sandboxBackend: replayBackend,
     ...(state.bridgeWorkerId != null ? { bridgeWorkerId: state.bridgeWorkerId } : {}),
+    ...(state.workspaceId != null ? { workspaceId: state.workspaceId } : {}),
     runtimeSessionMode: 'stateless',
     runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,
     executionManifestClaims: sandboxSecurity.executionManifestClaims,
@@ -365,9 +368,10 @@ async function handleReplayInitial(
     apiKeyId: string;
     userId: string;
     bridgeWorkerId?: string;
+    workspaceId?: string;
   },
 ): Promise<void> {
-  const { apiKeyId, userId, bridgeWorkerId } = params;
+  const { apiKeyId, userId, bridgeWorkerId, workspaceId } = params;
   const {
     code,
     tools,
@@ -401,13 +405,22 @@ async function handleReplayInitial(
     return;
   }
   const language: 'python' | 'bash' = requestedLanguage === 'bash' ? 'bash' : 'python';
+  if (workspaceId != null && language !== 'bash') {
+    res.status(400).json({
+      error: 'Selected-workspace programmatic execution supports bash only',
+    });
+    return;
+  }
 
   if (!code) {
     res.status(400).json({ error: 'Missing required field: code' });
     return;
   }
-  if (!tools || !Array.isArray(tools) || tools.length === 0) {
-    res.status(400).json({ error: 'Missing required field: tools (must be a non-empty array)' });
+  if (!Array.isArray(tools) || (tools.length === 0 && workspaceId == null)) {
+    res.status(400).json({
+      error:
+        'Missing required field: tools (must be non-empty unless a selected workspace executes bash)',
+    });
     return;
   }
   if (tools.length > MAX_TOOLS_PER_REQUEST) {
@@ -487,6 +500,7 @@ async function handleReplayInitial(
     timeout,
     language,
     bridgeWorkerId,
+    workspaceId,
     executionProfile: env.EXECUTION_PROFILE,
     executionProfileSource: env.EXECUTION_PROFILE_SOURCE,
     sandboxBackend: resolveReplayStateSandboxBackend({
@@ -961,6 +975,7 @@ router.post('/exec/programmatic', executionLimiter, async (req: t.AuthenticatedR
   const rawBody = req.body as Record<string, unknown>;
   const requestedLanguage: unknown = rawBody.language ?? rawBody.lang;
   let bridgeWorkerId: string | undefined;
+  let workspaceId: string | undefined;
   if (continuation_token == null || continuation_token === '') {
     try {
       const bridgeSelection = resolveBridgeWorkerSelection({
@@ -970,9 +985,25 @@ router.post('/exec/programmatic', executionLimiter, async (req: t.AuthenticatedR
         requestedWorkerId: req.header(CODEAPI_BRIDGE_WORKER_HEADER),
         trustedWorkerId: principal.codeWorkerId,
       });
-      bridgeWorkerId = bridgeSelection?.explicit === true
-        ? bridgeSelection.workerId
-        : undefined;
+      bridgeWorkerId =
+        bridgeSelection?.explicit === true ||
+        (bridgeSelection != null && !env.BRIDGE_DYNAMIC_WORKERS)
+          ? bridgeSelection.workerId
+          : undefined;
+      const requestedWorkspaceId = req
+        .header(CODEAPI_BRIDGE_WORKSPACE_HEADER)
+        ?.trim();
+      if (requestedWorkspaceId != null && requestedWorkspaceId !== '') {
+        if (bridgeWorkerId == null) {
+          return res.status(400).json({
+            error: 'Workspace selection requires an authenticated bridge worker',
+          });
+        }
+        if (!isValidBridgeWorkerId(requestedWorkspaceId)) {
+          return res.status(400).json({ error: 'Invalid code workspace ID' });
+        }
+        workspaceId = requestedWorkspaceId;
+      }
     } catch (error) {
       if (error instanceof BridgeWorkerSelectionError) {
         return res.status(error.status).json({ error: error.message });
@@ -1036,7 +1067,17 @@ router.post('/exec/programmatic', executionLimiter, async (req: t.AuthenticatedR
       });
     }
     if (env.PTC_MODE === 'replay') {
-      return await handleReplayInitial(req, res, { apiKeyId, userId, bridgeWorkerId });
+      return await handleReplayInitial(req, res, {
+        apiKeyId,
+        userId,
+        bridgeWorkerId,
+        workspaceId,
+      });
+    }
+    if (workspaceId != null) {
+      return res.status(400).json({
+        error: 'Selected-workspace programmatic execution requires replay mode',
+      });
     }
     return await handleBlocking(req, res, { apiKeyId, userId, bridgeWorkerId });
   } catch (err) {

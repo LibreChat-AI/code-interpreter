@@ -414,6 +414,7 @@ router.post(
         supportedWorkspaceEditFileModes: ['single', 'batch'],
         supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
         supportedWorkspaceListFileFeatures: ['after_path'],
+        supportedWorkspaceProgrammaticLanguages: ['bash'],
       });
     } catch (error) {
       if (error instanceof BridgeStoreError) {

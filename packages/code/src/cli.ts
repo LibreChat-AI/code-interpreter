@@ -408,6 +408,11 @@ async function run(
       'LIBRECHAT_CODE_COMMAND_SANDBOX must be native-srt or runtime',
     );
   }
+  const nativeProgrammaticEnabled =
+    allowWorkspaceCommands &&
+    commandSandboxMode === 'native-srt' &&
+    process.platform !== 'win32' &&
+    (fileRelayUpstream?.length ?? 0) > 0;
   const commandPolicy = resolveNativeSrtCommandPolicy(
     option(args, '--command-policy-preset') ??
       process.env.LIBRECHAT_CODE_COMMAND_POLICY_PRESET?.trim().toLowerCase() ??
@@ -780,6 +785,9 @@ async function run(
       github.privateKeyPath,
     ].filter((path): path is string => path != null),
     allowedDomains: commandAllowedDomains,
+    ...(nativeProgrammaticEnabled
+      ? { programmaticFileUpstream: fileRelayUpstream }
+      : {}),
     ...(github.provider
       ? {
           maskedEnvironment: {
@@ -819,6 +827,9 @@ async function run(
     workspaceTools = new SandboxWorkspaceTools({
       workspaceTools,
       commandWorkspaces: roots.map((root) => root.id),
+      ...(nativeProgrammaticEnabled
+        ? { programmaticLanguages: ['bash'] }
+        : {}),
       commandSandbox:
         nativeCommandSandbox ??
         new RuntimeWorkspaceCommandSandbox({
@@ -878,6 +889,9 @@ async function run(
       runtimeSupervisor,
       capabilities,
       workspaceTools,
+      ...(nativeProgrammaticEnabled && nativeCommandSandbox
+        ? { workspaceProgrammatic: nativeCommandSandbox }
+        : {}),
       ...(workspaceLeaseSlots > 1 || roots.length > 1
         ? {
             workspaceQuarantines: new Map(

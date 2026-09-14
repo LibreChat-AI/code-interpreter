@@ -1,11 +1,16 @@
 import { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
+import { NativeWorkspaceProgrammaticExecutor } from './native-programmatic.js';
 import { WorkspaceToolError } from './workspace.js';
 import type { NativeSrtWorkspaceCommandSandboxOptions } from './native-sandbox.js';
-import type { WorkspaceExecuteCommandRequest } from './protocol.js';
+import type {
+  BridgeWorkspaceProgrammaticRequest,
+  WorkspaceExecuteCommandRequest,
+} from './protocol.js';
 
 // This entrypoint is private to a forked trusted executor. No HTTP listener,
 // argv credentials, bridge token, or persisted pairing material is required.
 let sandbox: NativeSrtWorkspaceCommandSandbox | undefined;
+let programmaticExecutor: NativeWorkspaceProgrammaticExecutor | undefined;
 let active: { id: string; controller: AbortController } | undefined;
 let busy = false;
 let credentials: Record<string, string> = {};
@@ -44,11 +49,14 @@ process.on('message', async (raw: unknown) => {
       NativeSrtWorkspaceCommandSandboxOptions,
       'maskedEnvironment'
     > & {
+      programmaticFileUpstream?: string;
       variables?: NonNullable<
         NativeSrtWorkspaceCommandSandboxOptions['maskedEnvironment']
       >['variables'];
     };
     request: WorkspaceExecuteCommandRequest;
+    programmaticRequest?: BridgeWorkspaceProgrammaticRequest;
+    workspaceId?: string;
     credentials?: Record<string, string>;
     wrappedCommand?: string;
   };
@@ -62,7 +70,8 @@ process.on('message', async (raw: unknown) => {
   try {
     let result: unknown;
     if (message.type === 'prepare' && !sandbox) {
-      const { variables, ...options } = message.options;
+      const { variables, programmaticFileUpstream, ...options } =
+        message.options;
       sandbox = new NativeSrtWorkspaceCommandSandbox({
         ...options,
         ...(variables
@@ -80,11 +89,32 @@ process.on('message', async (raw: unknown) => {
           : {}),
       });
       await sandbox.prepare();
+      programmaticExecutor = programmaticFileUpstream
+        ? new NativeWorkspaceProgrammaticExecutor({
+            sandbox,
+            upstreamUrl: programmaticFileUpstream,
+          })
+        : undefined;
     } else if (message.type === 'execute' && sandbox) {
       active = { id: message.id, controller: new AbortController() };
       credentials = message.credentials ?? {};
       wrappedCommand = message.wrappedCommand;
       result = await sandbox.execute(message.request, active.controller.signal);
+    } else if (
+      message.type === 'programmatic' &&
+      sandbox &&
+      programmaticExecutor &&
+      message.programmaticRequest &&
+      typeof message.workspaceId === 'string'
+    ) {
+      active = { id: message.id, controller: new AbortController() };
+      credentials = message.credentials ?? {};
+      wrappedCommand = message.wrappedCommand;
+      result = await programmaticExecutor.execute(
+        message.programmaticRequest,
+        message.workspaceId,
+        active.controller.signal,
+      );
     } else if (message.type === 'close' && sandbox) {
       await sandbox.close();
     } else throw new Error('Invalid executor state');

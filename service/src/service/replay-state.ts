@@ -116,6 +116,8 @@ export interface ExecutionState {
   apiKeyId?: string;
   /** Authenticated worker selection retained across every replay iteration. */
   bridgeWorkerId?: string;
+  /** Selected workspace retained and bound across every replay iteration. */
+  workspaceId?: string;
   /** Original queue/backend target retained across replay continuations. */
   sandboxBackend?: SandboxBackendName;
   /** Original producer profile retained so continuations use the same queue. */

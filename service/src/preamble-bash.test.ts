@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { describe, expect, test } from 'bun:test';
@@ -98,6 +98,45 @@ function pendingNames(stdout: string): string[] {
   const parsed = extractPendingFromStdout(stdout, executionId);
   return (parsed.pending ?? []).map(call => call.tool_name).sort();
 }
+
+describe('generateBashReplayPreamble - private runtime directory', () => {
+  test('creates every replay tempfile beneath TMPDIR', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ptc-bash-private-tmp-'));
+    const dataDir = join(dir, 'data');
+    const runtimeDir = join(dir, 'runtime');
+    const file = join(dir, 'main.sh');
+    const historyPath = join(dataDir, 'history.json');
+    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(runtimeDir, { recursive: true });
+    writeFileSync(historyPath, '{}');
+    writeFileSync(
+      file,
+      assemble(`
+printf '%s\\n' "$_PTC_PENDING_FILE" "$_PTC_ERROR_FILE" "$_PTC_COUNTER_FILE"
+`),
+      { mode: 0o755 },
+    );
+
+    try {
+      const stdout = execFileSync('bash', [file], {
+        env: {
+          ...process.env,
+          PTC_HISTORY_PATH: historyPath,
+          TMPDIR: runtimeDir,
+        },
+        encoding: 'utf8',
+      });
+      const paths = stdout.trim().split('\n');
+      expect(paths).toHaveLength(3);
+      expect(paths.every(value => value.startsWith(`${runtimeDir}/`))).toBe(true);
+      expect(generateBashReplayPreamble({ executionId, tools })).not.toContain(
+        'mktemp -t',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('generateBashReplayPreamble - command substitution pending emission', () => {
   test('emits ClickHouse-style object input with SQL quotes from double-quoted JSON', () => {

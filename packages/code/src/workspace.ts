@@ -112,6 +112,8 @@ export interface SandboxWorkspaceToolsOptions {
   commandSandbox: WorkspaceCommandSandbox;
   /** Workspace IDs whose sandbox is configured and may run commands. */
   commandWorkspaces: string[];
+  /** Optional execution-scoped languages supplied by the same command sandbox. */
+  programmaticLanguages?: BridgeWorkspaceToolCapabilities['programmaticLanguages'];
 }
 
 const MAX_SEARCH_CANDIDATE_BYTES = 1024 * 1024;
@@ -1656,6 +1658,9 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
         : {}),
       ...(base.listFileFeatures != null
         ? { listFileFeatures: base.listFileFeatures }
+        : {}),
+      ...(options.programmaticLanguages?.length
+        ? { programmaticLanguages: [...options.programmaticLanguages] }
         : {}),
       workspaces: base.workspaces.map((workspace) => ({
         ...workspace,

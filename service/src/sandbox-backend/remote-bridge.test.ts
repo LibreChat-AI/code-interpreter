@@ -62,6 +62,34 @@ describe('RemoteBridgeSandboxBackend', () => {
     });
   });
 
+  test('preserves an authenticated selected workspace on remote dispatch', async () => {
+    let dispatched: Parameters<RedisBridgeStore['dispatch']>[0] | undefined;
+    const store = {
+      dispatch: async (
+        args: Parameters<RedisBridgeStore['dispatch']>[0],
+      ): ReturnType<RedisBridgeStore['dispatch']> => {
+        dispatched = args;
+        return {
+          protocolVersion: 1 as const,
+          generation: 1,
+          leaseToken: 'a'.repeat(32),
+          incarnationId: 'incarnation-00000001',
+          status: 'fulfilled' as const,
+          result: { session_id: 'session-1', language: 'bash', version: '5.2', files: [] },
+        };
+      },
+    } satisfies Pick<RedisBridgeStore, 'dispatch'>;
+    const backend = new RemoteBridgeSandboxBackend(store, 'default-vm');
+
+    await backend.execute(request(), { ...context(), workspaceId: 'project-a' });
+
+    expect(dispatched).toMatchObject({
+      workerId: 'user-vm',
+      workspaceId: 'project-a',
+      requireTenantBinding: true,
+    });
+  });
+
   test('maps tenant authorization rejection to a bridge backend error', async () => {
     const store = {
       dispatch: async (): ReturnType<RedisBridgeStore['dispatch']> => {

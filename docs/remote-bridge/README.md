@@ -149,6 +149,17 @@ implementation and an allowlist of workspace IDs, preserves per-workspace
 operation restrictions, validates bounded results, and treats an unknown
 command failure as an uncertain mutation.
 
+Selected attached workspaces on macOS, Linux, and WSL2 can also advertise Bash
+Programmatic Tool Calling. Native Windows workers do not advertise Bash PTC.
+Code API then runs each replay iteration through the same workspace-scoped
+native SRT executor. Source code operates in the selected local root, while
+replay metadata, injected skills and attachments, and generated artifacts are
+staged in an execution-private data directory and removed after settlement.
+Only authorized file references and returned artifacts cross the relay; the
+repository is never uploaded to Code API. This capability is advertised only
+when native SRT commands and a file-relay upstream are both configured, so
+older or partially configured workers continue to fail closed.
+
 Native SRT is the MVP and default command backend on a user's chosen laptop or
 VM. It uses Seatbelt on macOS, bubblewrap/seccomp on Linux, and the SRT
 restricted-account helper on Windows. It confines writes to the registered

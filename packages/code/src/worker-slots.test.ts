@@ -312,3 +312,51 @@ test('a local cleanup handoff preserves the new assignment owner and remaining b
   assert.equal(executed, true);
   assert.equal(internals.activeWorkspaceAssignments.size, 0);
 });
+
+test('programmatic work on an independent workspace bypasses another root cleanup', async () => {
+  const worker = new BridgeWorker({
+    codeApiUrl: 'http://localhost:1',
+    token: 'fixture',
+    workerId: 'worker',
+    sandboxEndpoint: 'http://localhost:2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'fixture',
+      runtimes: [],
+    },
+  });
+  const internals = worker as unknown as {
+    activeWorkspaceAssignments: Map<
+      string,
+      { id: string; done: Promise<void> }
+    >;
+    executeOwned: (assignment: BridgeAssignment) => Promise<void>;
+  };
+  internals.activeWorkspaceAssignments.set('a', {
+    id: 'previous',
+    done: new Promise(() => {}),
+  });
+  let executed = false;
+  internals.executeOwned = async () => {
+    executed = true;
+    assert.equal(internals.activeWorkspaceAssignments.get('b')?.id, 'next');
+  };
+  await worker.executeAndSettle({
+    assignmentId: 'next',
+    executionKind: 'workspace_programmatic',
+    workspaceId: 'b',
+    remainingMs: 1_000,
+    request: {
+      headers: {},
+      body: {
+        language: 'bash',
+        version: '5.2',
+        session_id: 'session',
+        files: [{ name: 'main.sh', content: 'echo ready' }],
+      },
+    },
+  } as BridgeAssignment);
+  assert.equal(executed, true);
+  assert.equal(internals.activeWorkspaceAssignments.has('b'), false);
+  assert.equal(internals.activeWorkspaceAssignments.get('a')?.id, 'previous');
+});

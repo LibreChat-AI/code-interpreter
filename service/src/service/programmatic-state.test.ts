@@ -83,6 +83,7 @@ describe('buildReplayExecutionState', () => {
     const state = build({
       authContext,
       bridgeWorkerId: 'code-user_123',
+      workspaceId: 'project-a',
       sandboxBackend: 'remote-bridge',
       executionProfile: 'stateful',
       executionProfileSource: 'explicit',
@@ -102,6 +103,7 @@ describe('buildReplayExecutionState', () => {
       authContextHash: 'hash_123',
       apiKeyId: 'key_legacy',
       bridgeWorkerId: 'code-user_123',
+      workspaceId: 'project-a',
       sandboxBackend: 'remote-bridge',
       executionProfile: 'stateful',
       executionProfileSource: 'explicit',

@@ -20,6 +20,9 @@ export const BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS = 5 * 60_000;
 export const BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES = 256 * 1024;
 export const BRIDGE_WORKSPACE_COMMAND_MAX_OUTPUT_BYTES = 1024 * 1024;
 export const BRIDGE_WORKSPACE_COMMAND_SIGNAL_MAX_LENGTH = 32;
+export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES = 100;
+export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES = 10 * 1024 * 1024;
+export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 /** How long Code API drains a clean rejection after Stop cancels a workspace mutation. */
 export const BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS = 5_000;
 
@@ -38,6 +41,7 @@ export type WorkspaceWriteFileMode = 'replace' | 'create';
 export type WorkspaceEditFileMode = 'single' | 'batch';
 export type WorkspaceEditFileFeature = 'expected_base_sha256';
 export type WorkspaceListFileFeature = 'after_path';
+export type WorkspaceProgrammaticLanguage = 'bash';
 
 export interface BridgeWorkspaceDescriptor {
   id: string;
@@ -58,6 +62,8 @@ export interface BridgeWorkspaceToolCapabilities {
   editFileFeatures?: WorkspaceEditFileFeature[];
   /** Omitted by workers that cannot continue a bounded file listing. */
   listFileFeatures?: WorkspaceListFileFeature[];
+  /** Languages that can execute PTC replay inside a selected workspace. */
+  programmaticLanguages?: WorkspaceProgrammaticLanguage[];
 }
 
 export interface WorkspaceReadFileRequest {
@@ -437,6 +443,8 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceEditFileFeatures?: WorkspaceEditFileFeature[];
   /** Listing features this Code API can safely route to a capability-aware worker. */
   supportedWorkspaceListFileFeatures?: WorkspaceListFileFeature[];
+  /** PTC languages this Code API can safely route into a selected workspace. */
+  supportedWorkspaceProgrammaticLanguages?: WorkspaceProgrammaticLanguage[];
 }
 
 /** Administrator-visible liveness for a configured worker. Credentials,
@@ -469,6 +477,28 @@ export interface BridgeSandboxRequest<TBody = object> {
   headers: Record<string, string>;
 }
 
+export type BridgeProgrammaticPayloadFile =
+  | { name: string; content: string }
+  | {
+      name: string;
+      id: string;
+      storage_session_id: string;
+      input_cache_key?: string;
+    };
+
+export interface BridgeWorkspaceProgrammaticBody {
+  language: 'bash';
+  version: string;
+  run_timeout?: number;
+  files: BridgeProgrammaticPayloadFile[];
+  session_id: string;
+  output_session_id?: string;
+  egress_grant?: string;
+}
+
+export type BridgeWorkspaceProgrammaticRequest =
+  BridgeSandboxRequest<BridgeWorkspaceProgrammaticBody>;
+
 export interface BridgeAssignment<TBody = object> {
   workspaceLeaseSlot?: number;
   protocolVersion: BridgeProtocolVersion;
@@ -481,7 +511,9 @@ export interface BridgeAssignment<TBody = object> {
   /** Server-calculated execution budget at lease time; avoids VM clock skew. */
   remainingMs?: number;
   runtimeSessionId?: string;
-  executionKind?: 'sandbox' | 'workspace_tool';
+  executionKind?: 'sandbox' | 'workspace_tool' | 'workspace_programmatic';
+  /** Selected workspace for workspace-scoped programmatic execution. */
+  workspaceId?: string;
   request: BridgeSandboxRequest<TBody> | WorkspaceToolRequest;
 }
 
@@ -587,6 +619,102 @@ export function bridgeWorkerPath(workerId: string): string {
 
 export function isValidBridgeWorkerId(workerId: string): boolean {
   return BRIDGE_WORKER_ID_PATTERN.test(workerId);
+}
+
+export function isBridgeWorkspaceProgrammaticRequest(
+  value: unknown,
+): value is BridgeWorkspaceProgrammaticRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  const request = value as Record<string, unknown>;
+  if (
+    typeof request.headers !== 'object' ||
+    request.headers === null ||
+    !Object.values(request.headers).every((entry) => typeof entry === 'string') ||
+    typeof request.body !== 'object' ||
+    request.body === null
+  ) {
+    return false;
+  }
+  const body = request.body as Record<string, unknown>;
+  if (
+    body.language !== 'bash' ||
+    typeof body.version !== 'string' ||
+    body.version.length === 0 ||
+    body.version.length > BRIDGE_RUNTIME_MAX_LENGTH ||
+    typeof body.session_id !== 'string' ||
+    body.session_id.length === 0 ||
+    body.session_id.length > 32_768 ||
+    /[\0\r\n]/.test(body.session_id) ||
+    (body.output_session_id !== undefined &&
+      (typeof body.output_session_id !== 'string' ||
+        body.output_session_id.length === 0 ||
+        body.output_session_id.length > 32_768 ||
+        /[\0\r\n]/.test(body.output_session_id))) ||
+    (body.egress_grant !== undefined &&
+      (typeof body.egress_grant !== 'string' ||
+        body.egress_grant.length === 0 ||
+        body.egress_grant.length > 256 * 1024)) ||
+    (body.run_timeout !== undefined &&
+      (!Number.isSafeInteger(body.run_timeout) ||
+        Number(body.run_timeout) < 1 ||
+        Number(body.run_timeout) > BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS)) ||
+    !Array.isArray(body.files) ||
+    body.files.length < 1 ||
+    body.files.length > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES
+  ) {
+    return false;
+  }
+  let inlineBytes = 0;
+  const names = new Set<string>();
+  for (const rawFile of body.files) {
+    if (typeof rawFile !== 'object' || rawFile === null) return false;
+    const file = rawFile as Record<string, unknown>;
+    if (
+      !isSafePortableRelativePath(file.name) ||
+      file.name === '.' ||
+      normalizePortableRelativePath(file.name) !== file.name ||
+      names.has(file.name)
+    ) {
+      return false;
+    }
+    names.add(file.name);
+    if (typeof file.content === 'string') {
+      inlineBytes += Buffer.byteLength(file.content);
+      if (
+        Object.keys(file).some((key) => key !== 'name' && key !== 'content') ||
+        Buffer.byteLength(file.content) > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES
+      ) {
+        return false;
+      }
+      continue;
+    }
+    if (
+      typeof file.id !== 'string' ||
+      file.id.length === 0 ||
+      file.id.length > 32_768 ||
+      /[\0\r\n]/.test(file.id) ||
+      typeof file.storage_session_id !== 'string' ||
+      file.storage_session_id.length === 0 ||
+      file.storage_session_id.length > 32_768 ||
+      /[\0\r\n]/.test(file.storage_session_id) ||
+      Object.keys(file).some(
+        (key) =>
+          key !== 'name' &&
+          key !== 'id' &&
+          key !== 'storage_session_id' &&
+          key !== 'input_cache_key',
+      ) ||
+      (file.input_cache_key !== undefined &&
+        (typeof file.input_cache_key !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(file.input_cache_key)))
+    ) {
+      return false;
+    }
+  }
+  return (
+    names.has('main.sh') &&
+    inlineBytes <= BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES
+  );
 }
 
 export function isSafePortableRelativePath(value: unknown): value is string {
@@ -1089,6 +1217,16 @@ export function isValidBridgeWorkspaceToolCapabilities(
       capabilities.listFileFeatures.length !== 1 ||
       !capabilities.operations.includes('list_files') ||
       capabilities.listFileFeatures[0] !== 'after_path')
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.programmaticLanguages !== undefined &&
+    (!Array.isArray(capabilities.programmaticLanguages) ||
+      capabilities.programmaticLanguages.length !== 1 ||
+      !capabilities.operations.includes('execute_command') ||
+      capabilities.programmaticLanguages[0] !== 'bash')
   ) {
     return false;
   }

@@ -1,4 +1,5 @@
 export const CODEAPI_BRIDGE_WORKER_HEADER = 'X-LibreChat-Code-Worker-ID';
+export const CODEAPI_BRIDGE_WORKSPACE_HEADER = 'X-LibreChat-Code-Workspace-ID';
 export const BRIDGE_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export class BridgeWorkerSelectionError extends Error {

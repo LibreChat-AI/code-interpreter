@@ -149,6 +149,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
         tenantId: job.data.tenantId,
         canonicalUserId: job.data.canonicalUserId,
         bridgeWorkerId: job.data.bridgeWorkerId,
+        workspaceId: job.data.workspaceId,
         runtimeSessionId: runtimeSession.runtimeSessionId,
         runtimeSessionMode: runtimeSession.runtimeSessionMode,
         /* Stateful backends run this as a commit barrier after user code but

@@ -60,6 +60,7 @@ export class RemoteBridgeSandboxBackend implements SandboxBackend {
           (this.dynamicWorkers || ctx.bridgeWorkerId !== this.workerId),
         body: req.body,
         headers: req.headers,
+        ...(ctx.workspaceId != null ? { workspaceId: ctx.workspaceId } : {}),
         runtimeSessionId: ctx.runtimeSessionId,
         deadlineAtMs: ctx.deadlineAtMs ?? Date.now() + env.JOB_TIMEOUT,
         signal: ctx.signal,

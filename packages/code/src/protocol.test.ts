@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   bridgeWorkerPath,
   comparePortableRelativePaths,
+  isBridgeWorkspaceProgrammaticRequest,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
   isWorkspaceToolRequest,
@@ -591,4 +592,92 @@ test('workspace capabilities allow per-workspace operation restrictions', () => 
     }),
     false,
   );
+});
+
+test('workspace programmatic capability is closed to Bash command roots', () => {
+  const workspaceTools = {
+    protocolVersion: 1,
+    operations: ['execute_command'],
+    programmaticLanguages: ['bash'],
+    workspaces: [{ id: 'project-a' }],
+  };
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools,
+    }),
+    true,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools: { ...workspaceTools, operations: ['read_file'] },
+    }),
+    false,
+  );
+  assert.equal(
+    isValidBridgeWorkerCapabilities({
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools: { ...workspaceTools, programmaticLanguages: ['python'] },
+    }),
+    false,
+  );
+});
+
+test('workspace programmatic requests accept only stable input cache identities', () => {
+  const request = {
+    headers: {},
+    body: {
+      language: 'bash',
+      version: '5.2',
+      session_id: 'session-1',
+      files: [
+        { name: 'main.sh', content: 'echo ready' },
+        {
+          name: 'skills/example.txt',
+          id: 'file-1',
+          storage_session_id: 'storage-1',
+          input_cache_key: 'a'.repeat(64),
+        },
+      ],
+    },
+  };
+  assert.equal(isBridgeWorkspaceProgrammaticRequest(request), true);
+  assert.equal(
+    isBridgeWorkspaceProgrammaticRequest({
+      ...request,
+      body: {
+        ...request.body,
+        files: [request.body.files[0], { ...request.body.files[1], input_cache_key: '../cache' }],
+      },
+    }),
+    false,
+  );
+});
+
+test('workspace programmatic requests reject non-canonical file paths', () => {
+  for (const name of ['./main.sh', 'scripts//main.sh', 'scripts/./main.sh', '.']) {
+    assert.equal(
+      isBridgeWorkspaceProgrammaticRequest({
+        headers: {},
+        body: {
+          language: 'bash',
+          version: '5.2',
+          session_id: 'session-1',
+          files: [
+            { name: 'main.sh', content: 'echo ready' },
+            { name, content: 'data' },
+          ],
+        },
+      }),
+      false,
+      name,
+    );
+  }
 });
