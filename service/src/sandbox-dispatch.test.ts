@@ -74,6 +74,7 @@ describe('sandbox execute request dispatch', () => {
     const request = buildSandboxExecuteRequest({
       payload: payload(),
       executionManifestClaims: claims(),
+      maxOutputFileBytes: 1_000,
       executionManifestSecret: SECRET,
       executionManifestTtlSeconds: 300,
       nowSeconds: 1_000,
@@ -81,6 +82,7 @@ describe('sandbox execute request dispatch', () => {
 
     expect(request.headers[EXECUTION_MANIFEST_HEADER]).toBeUndefined();
         expect(request.body.max_output_files).toBe(10);
+    expect(request.body.max_output_file_bytes).toBe(1_000);
     expect(request.body.execution_manifest).toEqual(expect.any(String));
         expect(
             verifyExecutionManifest(request.body.execution_manifest!, SECRET, {

@@ -527,12 +527,102 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     return await mkdtemp(join(this.scratchDirectory, 'execution-'));
   }
 
+  /**
+   * Clone the current workspace into private scratch for a side-effect-
+   * equivalent replay probe. Platform clone flags are intentionally strict:
+   * silently falling back to a byte copy would make every tool-bearing run
+   * consume time and disk proportional to the repository size.
+   */
+  async createProgrammaticProbeWorkspace(
+    executionDirectory: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    await this.initialize();
+    const scratchDirectory = this.scratchDirectory;
+    const root = this.canonicalRoot;
+    let parent: string;
+    try {
+      parent = await realpath(executionDirectory);
+      if (
+        !scratchDirectory ||
+        !root ||
+        !isWithin(scratchDirectory, parent) ||
+        !(await stat(parent)).isDirectory()
+      ) {
+        throw new Error('invalid execution directory');
+      }
+    } catch {
+      throw new WorkspaceToolError(
+        'Programmatic execution directory is unavailable',
+        'INVALID_PATH',
+      );
+    }
+    if (signal?.aborted) {
+      throw new WorkspaceToolError(
+        'Programmatic execution aborted',
+        'EXECUTION_ABORTED',
+      );
+    }
+    const destination = join(parent, 'workspace');
+    try {
+      if (this.platform === 'win32') {
+        throw new Error('copy-on-write cloning is unavailable on Windows');
+      }
+      const args =
+        this.platform === 'darwin'
+          ? ['-cR', root, destination]
+          : ['--archive', '--reflink=always', root, destination];
+      await new Promise<void>((resolveCopy, rejectCopy) => {
+        const child = this.spawnCommand('/bin/cp', args, {
+          env: {
+            PATH: this.environment.PATH,
+            LANG: this.environment.LANG,
+            LC_ALL: this.environment.LC_ALL,
+          },
+          signal,
+        });
+        let stderr = Buffer.alloc(0);
+        child.stderr.on('data', (chunk: Buffer) => {
+          if (stderr.byteLength < 4_096) {
+            stderr = Buffer.concat([stderr, chunk]).subarray(0, 4_096);
+          }
+        });
+        child.once('error', rejectCopy);
+        child.once('close', code => {
+          if (code === 0) resolveCopy();
+          else {
+            rejectCopy(
+              new Error(
+                `copy-on-write clone failed (${code ?? 'signal'}): ${boundedUtf8(stderr, 4_096)}`,
+              ),
+            );
+          }
+        });
+      });
+      return await realpath(destination);
+    } catch {
+      await rm(destination, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+      if (signal?.aborted) {
+        throw new WorkspaceToolError(
+          'Programmatic execution aborted',
+          'EXECUTION_ABORTED',
+        );
+      }
+      throw new WorkspaceToolError(
+        'Selected-workspace PTC requires copy-on-write filesystem cloning',
+        'COMMAND_UNAVAILABLE',
+      );
+    }
+  }
+
   /** Run a generated program from a verified private execution directory. */
   async executeProgrammatic(
     request: WorkspaceExecuteCommandRequest,
     dataDirectory: string,
     signal?: AbortSignal,
-        options?: { probe?: boolean },
+        options?: { probe?: boolean; workspaceRoot?: string },
   ): Promise<WorkspaceExecuteCommandResult> {
     if (this.execution || this.closing) {
       throw new WorkspaceToolError(
@@ -543,12 +633,19 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     await this.initialize();
     const scratchDirectory = this.scratchDirectory;
     let canonicalDataDirectory: string;
+    let canonicalWorkspaceRoot: string | undefined;
     try {
       canonicalDataDirectory = await realpath(dataDirectory);
+      canonicalWorkspaceRoot = options?.workspaceRoot
+        ? await realpath(options.workspaceRoot)
+        : undefined;
       if (
         !scratchDirectory ||
         !isWithin(scratchDirectory, canonicalDataDirectory) ||
-        !(await stat(canonicalDataDirectory)).isDirectory()
+        !(await stat(canonicalDataDirectory)).isDirectory() ||
+        (canonicalWorkspaceRoot != null &&
+          (!isWithin(scratchDirectory, canonicalWorkspaceRoot) ||
+            !(await stat(canonicalWorkspaceRoot)).isDirectory()))
       ) {
         throw new Error('invalid execution directory');
       }
@@ -578,10 +675,15 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                 ? {
                       filesystem: {
                           allowRead: [
-                              this.canonicalRoot!,
+                              canonicalWorkspaceRoot ?? this.canonicalRoot!,
                               canonicalDataDirectory,
                           ],
-                          allowWrite: [canonicalDataDirectory],
+                          allowWrite: [
+                              ...(canonicalWorkspaceRoot != null
+                                  ? [canonicalWorkspaceRoot]
+                                  : []),
+                              canonicalDataDirectory,
+                          ],
                           denyRead: this.denyReadPaths,
                           denyWrite: [
                               this.canonicalRoot!,
@@ -598,6 +700,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                   }
                 : undefined,
             canonicalDataDirectory,
+            canonicalWorkspaceRoot,
         );
     this.execution = execution;
     try {
@@ -613,6 +716,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     trustedEnvironment?: NodeJS.ProcessEnv,
         customConfig?: Partial<SandboxRuntimeConfig>,
         sandboxScratchDirectory?: string,
+        workspaceRoot?: string,
   ): Promise<WorkspaceExecuteCommandResult> {
     if (
       !isWorkspaceToolRequest(request) ||
@@ -630,7 +734,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       );
     }
     await this.initialize();
-    const root = this.canonicalRoot!;
+    const root = workspaceRoot ?? this.canonicalRoot!;
     let cwd: string;
     try {
       cwd = await realpath(resolve(root, request.cwd ?? '.'));

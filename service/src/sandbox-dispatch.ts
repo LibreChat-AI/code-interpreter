@@ -13,6 +13,7 @@ interface BuildSandboxExecuteRequestArgs {
   executionManifestSecret: string;
   executionManifestTtlSeconds: number;
   nowSeconds?: number;
+  maxOutputFileBytes?: number;
 }
 
 interface SandboxExecuteRequest {
@@ -35,6 +36,9 @@ export function buildSandboxExecuteRequest(
 
   if (args.egressGrantToken) {
     body.egress_grant = args.egressGrantToken;
+  }
+  if (args.maxOutputFileBytes != null) {
+    body.max_output_file_bytes = args.maxOutputFileBytes;
   }
 
   if (args.executionManifestClaims) {

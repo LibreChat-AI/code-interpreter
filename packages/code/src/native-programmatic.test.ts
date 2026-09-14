@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -128,6 +128,11 @@ test('keeps replay probes read-only and commits the script exactly once', async 
             async createExecutionDirectory() {
                 return await mkdtemp(join(scratch, 'execution-'));
             },
+            async createProgrammaticProbeWorkspace(executionDirectory) {
+                const workspace = join(executionDirectory, 'workspace');
+                await mkdir(workspace);
+                return workspace;
+            },
             async executeProgrammatic(
                 _request,
                 dataDirectory,
@@ -135,6 +140,9 @@ test('keeps replay probes read-only and commits the script exactly once', async 
                 options,
             ) {
                 phases.push(options?.probe === true);
+                if (options?.probe === true) {
+                    assert.match(options.workspaceRoot ?? '', /\/workspace$/);
+                }
                 return {
                     protocolVersion: 1,
                     operation: 'execute_command' as const,
@@ -181,6 +189,11 @@ test('returns pending calls from the private control file even when stdout trunc
         sandbox: {
             async createExecutionDirectory() {
                 return await mkdtemp(join(scratch, 'execution-'));
+            },
+            async createProgrammaticProbeWorkspace(executionDirectory) {
+                const workspace = join(executionDirectory, 'workspace');
+                await mkdir(workspace);
+                return workspace;
             },
             async executeProgrammatic(
                 _request,
@@ -274,6 +287,59 @@ test('rejects traversal before creating execution state', async () => {
     /Invalid selected-workspace programmatic request/,
   );
   assert.equal(allocated, false);
+});
+
+test('rejects artifacts above the negotiated byte ceiling before upload', async () => {
+  const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-output-limit-'));
+  let uploads = 0;
+  const executor = new NativeWorkspaceProgrammaticExecutor({
+    upstreamUrl: 'http://127.0.0.1:1',
+    fetchImpl: async () => {
+      uploads += 1;
+      return new Response();
+    },
+    sandbox: {
+      async createExecutionDirectory() {
+        return await mkdtemp(join(scratch, 'execution-'));
+      },
+      async executeProgrammatic(request, dataDirectory) {
+        await writeFile(join(dataDirectory, 'artifact.txt'), 'too large');
+        return {
+          protocolVersion: 1,
+          operation: 'execute_command' as const,
+          workspaceId: request.workspaceId,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          truncated: false,
+          timedOut: false,
+        };
+      },
+    },
+  });
+  try {
+    await assert.rejects(
+      executor.execute(
+        {
+          headers: {},
+          body: {
+            language: 'bash',
+            version: '5.2.0',
+            session_id: 'execution-session',
+            output_session_id: 'output-session',
+            egress_grant: 'grant',
+            max_output_file_bytes: 4,
+            files: [{ name: 'main.sh', content: 'printf done' }],
+          },
+        },
+        'primary',
+      ),
+      /exceeds the file limit/,
+    );
+    assert.equal(uploads, 0);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 });
 
 test('stops admitting downloads and drains in-flight transfers before cleanup', async () => {

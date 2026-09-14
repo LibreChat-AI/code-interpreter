@@ -22,6 +22,7 @@ export const BRIDGE_WORKSPACE_COMMAND_MAX_OUTPUT_BYTES = 1024 * 1024;
 export const BRIDGE_WORKSPACE_COMMAND_SIGNAL_MAX_LENGTH = 32;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES = 100;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES = 10 * 1024 * 1024;
+export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_HISTORY_BYTES = 40_000_000;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 /** How long Code API drains a clean rejection after Stop cancels a workspace mutation. */
 export const BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS = 5_000;
@@ -485,6 +486,8 @@ export interface BridgeWorkspaceProgrammaticBody {
   run_timeout?: number;
     /** Manifest-bound upload ceiling negotiated by Code API. */
     max_output_files?: number;
+    /** Effective per-file upload ceiling negotiated by Code API. */
+    max_output_file_bytes?: number;
   files: BridgeProgrammaticPayloadFile[];
   session_id: string;
   output_session_id?: string;
@@ -650,6 +653,11 @@ export function isBridgeWorkspaceProgrammaticRequest(
                 Number(body.max_output_files) < 0 ||
                 Number(body.max_output_files) >
                     BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES)) ||
+        (body.max_output_file_bytes !== undefined &&
+            (!Number.isSafeInteger(body.max_output_file_bytes) ||
+                Number(body.max_output_file_bytes) < 1 ||
+                Number(body.max_output_file_bytes) >
+                    BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES)) ||
     typeof body.session_id !== 'string' ||
     body.session_id.length === 0 ||
     body.session_id.length > 32_768 ||
@@ -695,7 +703,9 @@ export function isBridgeWorkspaceProgrammaticRequest(
                     key => key !== 'name' && key !== 'content',
                 ) ||
                 Buffer.byteLength(file.content) >
-                    BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES
+                    (file.name === '_ptc_history.json'
+                        ? BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_HISTORY_BYTES
+                        : BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES)
       ) {
         return false;
       }

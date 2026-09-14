@@ -639,6 +639,7 @@ test('workspace programmatic requests accept only stable input cache identities'
       execution_id: 'execution_1',
       replay_tool_count: 2,
       max_output_files: 50,
+      max_output_file_bytes: 10_000_000,
       session_id: 'session-1',
       files: [
         { name: 'main.sh', content: 'echo ready' },
@@ -668,12 +669,41 @@ test('workspace programmatic requests accept only stable input cache identities'
     { ...request.body, replay_tool_count: 257 },
     { ...request.body, max_output_files: -1 },
     { ...request.body, max_output_files: 101 },
+    { ...request.body, max_output_file_bytes: 0 },
+    { ...request.body, max_output_file_bytes: 10 * 1024 * 1024 + 1 },
   ]) {
     assert.equal(
       isBridgeWorkspaceProgrammaticRequest({ ...request, body }),
       false,
     );
   }
+});
+
+test('workspace programmatic history can use the bounded replay aggregate budget', () => {
+  const history = 'h'.repeat(10 * 1024 * 1024 + 1);
+  const body = {
+    language: 'bash',
+    version: '5.2',
+    session_id: 'session-1',
+    files: [
+      { name: 'main.sh', content: 'echo ready' },
+      { name: '_ptc_history.json', content: history },
+    ],
+  };
+  assert.equal(isBridgeWorkspaceProgrammaticRequest({ headers: {}, body }), true);
+  assert.equal(
+    isBridgeWorkspaceProgrammaticRequest({
+      headers: {},
+      body: {
+        ...body,
+        files: [
+          { name: 'main.sh', content: history },
+          { name: '_ptc_history.json', content: '{}' },
+        ],
+      },
+    }),
+    false,
+  );
 });
 
 test('workspace programmatic requests reject non-canonical file paths', () => {

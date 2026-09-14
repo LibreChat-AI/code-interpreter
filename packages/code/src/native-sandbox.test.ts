@@ -7,6 +7,7 @@ import {
   mkdtemp,
   mkdir,
   open,
+  readFile,
   realpath,
   rename,
   rm,
@@ -178,6 +179,24 @@ test('programmatic probe denies workspace writes and all network per execution',
         ),
     );
     await sandbox.close();
+});
+
+test('programmatic probes use a copy-on-write workspace without mutating the project', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'state.txt'), 'original');
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fake.manager,
+  });
+  t.after(() => sandbox.close());
+  const executionDirectory = await sandbox.createExecutionDirectory();
+  const snapshot =
+    await sandbox.createProgrammaticProbeWorkspace(executionDirectory);
+  await writeFile(join(snapshot, 'state.txt'), 'probe-only');
+  assert.equal(await readFile(join(root, 'state.txt'), 'utf8'), 'original');
+  assert.equal(await readFile(join(snapshot, 'state.txt'), 'utf8'), 'probe-only');
 });
 
 test('exclusive lifecycle rejects a second workspace sharing an SRT manager', async t => {

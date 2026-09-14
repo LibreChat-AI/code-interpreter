@@ -198,6 +198,8 @@ export interface PayloadBody {
     replay_tool_count?: number;
     /** Manifest-bound upload ceiling exposed to remote workers. */
     max_output_files?: number;
+    /** Effective per-file ceiling after manifest and gateway policy intersect. */
+    max_output_file_bytes?: number;
   run_memory_limit?: number;
   run_timeout?: number;
   run_cpu_time?: number;

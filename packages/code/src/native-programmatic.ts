@@ -198,7 +198,10 @@ export interface NativeWorkspaceProgrammaticOptions {
   sandbox: Pick<
     NativeSrtWorkspaceCommandSandbox,
     'createExecutionDirectory' | 'executeProgrammatic'
-  >;
+  > &
+    Partial<
+      Pick<NativeSrtWorkspaceCommandSandbox, 'createProgrammaticProbeWorkspace'>
+    >;
   upstreamUrl: string;
   fetchImpl?: typeof fetch;
 }
@@ -396,6 +399,7 @@ export class NativeWorkspaceProgrammaticExecutor {
             const run = async (
                 directory: string,
                 probe: boolean,
+                workspaceRoot?: string,
             ): Promise<WorkspaceExecuteCommandResult> => {
                 await cp(inputDirectory, directory, {
                     recursive: true,
@@ -420,7 +424,7 @@ export class NativeWorkspaceProgrammaticExecutor {
         },
                     directory,
         signal,
-                    { probe },
+                    { probe, workspaceRoot },
                 );
             };
 
@@ -458,7 +462,24 @@ export class NativeWorkspaceProgrammaticExecutor {
 
             if ((request.body.replay_tool_count ?? 0) > 0) {
                 const probeDirectory = join(executionDirectory, 'probe');
-                const probeResult = await run(probeDirectory, true);
+                const createProbeWorkspace =
+                    this.options.sandbox.createProgrammaticProbeWorkspace;
+                if (createProbeWorkspace == null) {
+                    throw new WorkspaceToolError(
+                        'Selected-workspace PTC probe isolation is unavailable',
+                        'COMMAND_UNAVAILABLE',
+                    );
+                }
+                const probeWorkspace = await createProbeWorkspace.call(
+                    this.options.sandbox,
+                    executionDirectory,
+                    signal,
+                );
+                const probeResult = await run(
+                    probeDirectory,
+                    true,
+                    probeWorkspace,
+                );
                 const pending = await readPending(probeDirectory);
                 if (pending) {
                     return this.result(
@@ -546,10 +567,12 @@ export class NativeWorkspaceProgrammaticExecutor {
         try {
           const metadata = await handle.stat();
           if (!metadata.isFile()) continue;
-                    if (
-                        metadata.size >
-                        BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES
-                    ) {
+                    const maxOutputFileBytes = Math.min(
+                        request.body.max_output_file_bytes ??
+                            BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES,
+                        BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES,
+                    );
+                    if (metadata.size > maxOutputFileBytes) {
             throw new WorkspaceToolError(
               'Programmatic output exceeds the file limit',
               'WRITE_LIMIT_EXCEEDED',

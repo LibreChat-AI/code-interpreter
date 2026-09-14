@@ -65,6 +65,7 @@ export type SandboxRawResponse = t.ExecuteResponse & {
   session_id: string;
   files?: t.FileRefs;
   run?: t.ExecuteResponse['run'];
+  pending_tool_calls_payload?: string;
 };
 
 export interface SandboxBackend {
