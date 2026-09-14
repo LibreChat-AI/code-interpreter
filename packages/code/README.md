@@ -143,8 +143,11 @@ policy. This matches the personal-machine SRT trust model; use the Docker/NsJail
 backend or a dedicated VM boundary when hard teardown of adversarial process
 trees is required.
 
-Linux hosts need Bash at `/bin/bash`, `bubblewrap`, `socat`, and `ripgrep`; macOS uses system
-facilities. Follow SRT's one-time restricted-account setup when using Windows.
+Linux hosts need `bubblewrap`, `socat`, and `ripgrep`; macOS uses system
+facilities. Bash Programmatic Tool Calling additionally requires Bash 5.2 or
+newer and `jq` on `PATH` on macOS, Linux, and WSL2. The worker resolves that
+shell explicitly instead of assuming `/bin/bash`, which remains Bash 3.2 on
+many macOS hosts. Follow SRT's one-time restricted-account setup when using Windows.
 An operator may allow explicit egress destinations with the comma-separated
 `LIBRECHAT_CODE_COMMAND_ALLOWED_DOMAINS` setting. Treat that as a security
 policy: an allowed destination can receive workspace data. The normalized

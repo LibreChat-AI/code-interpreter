@@ -54,6 +54,7 @@ function fakeManager(
   let credentialSeenDuringWrap: string | undefined;
   let gitLfsRequiredSeenDuringWrap: string | undefined;
   let scratchSelectorSeenDuringWrap: string | undefined;
+    let customConfigSeenDuringWrap: Partial<SandboxRuntimeConfig> | undefined;
   const manager = {
     isSupportedPlatform: () => true,
     async checkDependenciesAsync() {
@@ -67,19 +68,28 @@ function fakeManager(
       askCallback = callback;
       if (options.initializeError) throw options.initializeError;
     },
-    async wrapWithSandboxArgv(command: string) {
+        async wrapWithSandboxArgv(
+            command: string,
+            _binShell?: string,
+            customConfig?: Partial<SandboxRuntimeConfig>,
+        ) {
       await options.beforeWrap?.();
-      credentialSeenDuringWrap = process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
+            customConfigSeenDuringWrap = customConfig;
+            credentialSeenDuringWrap =
+                process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
       gitLfsRequiredSeenDuringWrap = process.env.GIT_CONFIG_VALUE_3;
       scratchSelectorSeenDuringWrap = process.env.CLAUDE_CODE_TMPDIR;
       const ambientGitEnvironment = Object.fromEntries(
         Object.entries(process.env).filter(
-          ([name, value]) => name.startsWith('GIT_CONFIG_') && value != null,
+                    ([name, value]) =>
+                        name.startsWith('GIT_CONFIG_') && value != null,
         ),
       );
       let gitEnvironment = ambientGitEnvironment;
       if (options.appendGitSafeDirectory) {
-        const index = Number(ambientGitEnvironment.GIT_CONFIG_COUNT ?? '0');
+                const index = Number(
+                    ambientGitEnvironment.GIT_CONFIG_COUNT ?? '0',
+                );
         gitEnvironment = {
           ...(options.inheritedGitEnvironment ?? {}),
           GIT_CONFIG_COUNT: String(index + 1),
@@ -130,10 +140,47 @@ function fakeManager(
     get scratchSelectorSeenDuringWrap() {
       return scratchSelectorSeenDuringWrap;
     },
+        get customConfigSeenDuringWrap() {
+            return customConfigSeenDuringWrap;
+        },
   };
 }
 
-test('exclusive lifecycle rejects a second workspace sharing an SRT manager', async (t) => {
+test('programmatic probe denies workspace writes and all network per execution', async t => {
+    const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const fake = fakeManager();
+    const sandbox = new NativeSrtWorkspaceCommandSandbox({
+        workspaceRoot: root,
+        manager: fake.manager,
+    });
+    const dataDirectory = await sandbox.createExecutionDirectory();
+    await sandbox.executeProgrammatic(request, dataDirectory, undefined, {
+        probe: true,
+    });
+    assert.deepEqual(fake.customConfigSeenDuringWrap?.network, {
+        allowedDomains: [],
+        deniedDomains: [],
+        strictAllowlist: true,
+        allowAllUnixSockets: false,
+        allowLocalBinding: false,
+    });
+    assert.deepEqual(fake.customConfigSeenDuringWrap?.filesystem?.allowWrite, [
+        await realpath(dataDirectory),
+    ]);
+    assert.equal(
+        fake.scratchSelectorSeenDuringWrap,
+        await realpath(dataDirectory),
+    );
+    assert.ok(
+        fake.customConfigSeenDuringWrap?.filesystem?.denyWrite?.includes(
+            await realpath(root),
+        ),
+    );
+    await sandbox.close();
+});
+
+test('exclusive lifecycle rejects a second workspace sharing an SRT manager', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fake = fakeManager();
@@ -164,15 +211,15 @@ test('exclusive lifecycle rejects a second workspace sharing an SRT manager', as
   assert.equal((await second.execute(request)).stdout, 'hello');
 });
 
-test('exclusive lifecycle rejects overlapping commands and waits before resetting', async (t) => {
+test('exclusive lifecycle rejects overlapping commands and waits before resetting', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   let entered!: () => void;
-  const wrapping = new Promise<void>((resolve) => {
+    const wrapping = new Promise<void>(resolve => {
     entered = resolve;
   });
   let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
+    const gate = new Promise<void>(resolve => {
     release = resolve;
   });
   const fake = fakeManager({
@@ -191,7 +238,7 @@ test('exclusive lifecycle rejects overlapping commands and waits before resettin
   await assert.rejects(sandbox.execute(request), /active command/);
   const closing = sandbox.close();
   const secondClose = sandbox.close();
-  await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(fake.reset, false);
   await assert.rejects(sandbox.prepare(), /closing/);
   release();
@@ -200,7 +247,7 @@ test('exclusive lifecycle rejects overlapping commands and waits before resettin
   assert.equal(fake.reset, true);
 });
 
-test('exclusive lifecycle retains ownership after a failed reset until cleanup succeeds', async (t) => {
+test('exclusive lifecycle retains ownership after a failed reset until cleanup succeeds', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fake = fakeManager();
@@ -226,16 +273,16 @@ test('exclusive lifecycle retains ownership after a failed reset until cleanup s
   await second.close();
 });
 
-test('exclusive lifecycle waits for initialization before resetting the manager', async (t) => {
+test('exclusive lifecycle waits for initialization before resetting the manager', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fake = fakeManager();
   let entered!: () => void;
-  const initializing = new Promise<void>((resolve) => {
+    const initializing = new Promise<void>(resolve => {
     entered = resolve;
   });
   let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
+    const gate = new Promise<void>(resolve => {
     release = resolve;
   });
   fake.manager.initialize = async () => {
@@ -249,7 +296,7 @@ test('exclusive lifecycle waits for initialization before resetting the manager'
   const preparing = sandbox.prepare();
   await initializing;
   const closing = sandbox.close();
-  await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(fake.reset, false);
   release();
   await preparing;
@@ -257,7 +304,7 @@ test('exclusive lifecycle waits for initialization before resetting the manager'
   assert.equal(fake.reset, true);
 });
 
-test('initializes SRT with a default-deny network and scrubbed worker credentials', async (t) => {
+test('initializes SRT with a default-deny network and scrubbed worker credentials', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   const identity = join(tmpdir(), 'librechat-code-identity.json');
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -301,7 +348,7 @@ test('initializes SRT with a default-deny network and scrubbed worker credential
   assert.ok(fake.config?.filesystem.denyRead.includes(canonicalHome));
   assert.ok(fake.config?.filesystem.denyWrite.includes(canonicalIdentity));
   assert.ok(
-    fake.config?.filesystem.denyWrite.some((path) =>
+        fake.config?.filesystem.denyWrite.some(path =>
       path.endsWith('/tmp/claude'),
     ),
   );
@@ -318,7 +365,7 @@ test('initializes SRT with a default-deny network and scrubbed worker credential
   await assert.rejects(access(scratchDirectory!));
 });
 
-test('trusted-vm permits unmatched egress and local development sockets', async (t) => {
+test('trusted-vm permits unmatched egress and local development sockets', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fake = fakeManager();
@@ -351,7 +398,7 @@ test('trusted-vm permits unmatched egress and local development sockets', async 
   ]);
 });
 
-test('provides an isolated scratch directory to commands and restores the host environment', async (t) => {
+test('provides an isolated scratch directory to commands and restores the host environment', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const originalTmpdir = process.env.TMPDIR;
@@ -380,7 +427,7 @@ test('provides an isolated scratch directory to commands and restores the host e
   await assert.rejects(access(result.stdout));
 });
 
-test('removes scratch storage when SRT initialization fails', async (t) => {
+test('removes scratch storage when SRT initialization fails', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fake = fakeManager({ initializeError: new Error('init failed') });
@@ -396,7 +443,7 @@ test('removes scratch storage when SRT initialization fails', async (t) => {
   assert.equal(fake.reset, true);
 });
 
-test('rejects workspaces nested inside SRT shared scratch storage', async (t) => {
+test('rejects workspaces nested inside SRT shared scratch storage', async t => {
   if (process.platform === 'win32') return;
   const sharedRoot = '/tmp/claude';
   await mkdir(sharedRoot, { recursive: true });
@@ -431,17 +478,17 @@ test('rejects a workspace that contains worker scratch storage', async () => {
   await sandbox.close();
 });
 
-test('keeps concurrent sandbox scratch directories independent', async (t) => {
+test('keeps concurrent sandbox scratch directories independent', async t => {
   const firstRoot = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   const secondRoot = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(firstRoot, { recursive: true, force: true }));
   t.after(() => rm(secondRoot, { recursive: true, force: true }));
   let releaseWrap!: () => void;
   let wrapStarted!: () => void;
-  const wrapStartedPromise = new Promise<void>((resolve) => {
+    const wrapStartedPromise = new Promise<void>(resolve => {
     wrapStarted = resolve;
   });
-  const holdWrap = new Promise<void>((resolve) => {
+    const holdWrap = new Promise<void>(resolve => {
     releaseWrap = resolve;
   });
   const firstFake = fakeManager({
@@ -478,7 +525,7 @@ test('keeps concurrent sandbox scratch directories independent', async (t) => {
   await secondSandbox.close();
 });
 
-test('removes scratch storage after a command revokes traversal permissions', async (t) => {
+test('removes scratch storage after a command revokes traversal permissions', async t => {
   if (process.platform === 'win32') return;
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -498,7 +545,7 @@ test('removes scratch storage after a command revokes traversal permissions', as
   await assert.rejects(access(result.stdout));
 });
 
-test('scratch traversal never follows a descendant replaced after inspection', async (t) => {
+test('scratch traversal never follows a descendant replaced after inspection', async t => {
   if (process.platform === 'win32') return;
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-scratch-race-'));
   const outside = await mkdtemp(join(tmpdir(), 'librechat-code-outside-'));
@@ -529,7 +576,7 @@ test('scratch traversal never follows a descendant replaced after inspection', a
   assert.equal((await stat(outsideChild)).mode & 0o777, 0o711);
 });
 
-test('scratch traversal removes command-created Darwin ACLs', async (t) => {
+test('scratch traversal removes command-created Darwin ACLs', async t => {
   if (process.platform !== 'darwin') return;
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -548,7 +595,7 @@ test('scratch traversal removes command-created Darwin ACLs', async (t) => {
   await assert.rejects(access(result.stdout));
 });
 
-test('scratch traversal bounds descriptors and work across a deep tree', async (t) => {
+test('scratch traversal bounds descriptors and work across a deep tree', async t => {
   if (process.platform === 'win32') return;
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-scratch-depth-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -565,12 +612,17 @@ test('scratch traversal bounds descriptors and work across a deep tree', async (
 
   await restoreScratchTraversal(rootHandle);
 
-  assert.equal((await stat(directories[directories.length - 1])).mode & 0o777, 0o700);
+    assert.equal(
+        (await stat(directories[directories.length - 1])).mode & 0o777,
+        0o700,
+    );
 });
 
-test('scratch traversal rejects trees beyond its recovery depth limit', async (t) => {
+test('scratch traversal rejects trees beyond its recovery depth limit', async t => {
   if (process.platform === 'win32') return;
-  const root = await mkdtemp(join(tmpdir(), 'librechat-code-scratch-depth-limit-'));
+    const root = await mkdtemp(
+        join(tmpdir(), 'librechat-code-scratch-depth-limit-'),
+    );
   t.after(() => rm(root, { recursive: true, force: true }));
   let directory = root;
   for (let depth = 0; depth < 129; depth += 1) {
@@ -586,7 +638,7 @@ test('scratch traversal rejects trees beyond its recovery depth limit', async (t
   );
 });
 
-test('does not replace scratch state while cleanup remains pending', async (t) => {
+test('does not replace scratch state while cleanup remains pending', async t => {
   if (process.platform === 'win32') return;
   const workspace = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   const retained = await mkdtemp(join(tmpdir(), 'librechat-code-retained-'));
@@ -642,7 +694,7 @@ const windowsEnvironment = {
 };
 
 for (const platform of ['darwin', 'linux', 'win32'] as const) {
-  test(`preserves required ${platform} environment names without allowing credentials`, async (t) => {
+    test(`preserves required ${platform} environment names without allowing credentials`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
     t.after(() => rm(root, { recursive: true, force: true }));
     const fake = fakeManager();
@@ -658,23 +710,43 @@ for (const platform of ['darwin', 'linux', 'win32'] as const) {
       LD_PRELOAD: '/host/private.so',
     };
     const sandbox = new NativeSrtWorkspaceCommandSandbox({
-      workspaceRoot: root, platform, allowedDomains: ['github.com'],
+            workspaceRoot: root,
+            platform,
+            allowedDomains: ['github.com'],
       environment: {
-        ...proxyEnvironment, ...windowsEnvironment, ...credentials,
+                ...proxyEnvironment,
+                ...windowsEnvironment,
+                ...credentials,
         HtTp_PrOxY: 'http://mixed-case.invalid:8080',
-        PATH: '/usr/bin', LC_ALL: 'C.UTF-8',
+                PATH: '/usr/bin',
+                LC_ALL: 'C.UTF-8',
       },
       manager: fake.manager,
     });
     t.after(() => sandbox.close());
     await sandbox.prepare();
-    const denied = new Set(fake.config?.credentials?.envVars
-      ?.filter(({ mode }) => mode === 'deny').map(({ name }) => name));
-    for (const name of [...Object.keys(proxyEnvironment), 'PATH', 'LC_ALL']) {
-      assert.equal(denied.has(name), false, `${name} must remain available`);
+        const denied = new Set(
+            fake.config?.credentials?.envVars
+                ?.filter(({ mode }) => mode === 'deny')
+                .map(({ name }) => name),
+        );
+        for (const name of [
+            ...Object.keys(proxyEnvironment),
+            'PATH',
+            'LC_ALL',
+        ]) {
+            assert.equal(
+                denied.has(name),
+                false,
+                `${name} must remain available`,
+            );
     }
     for (const name of Object.keys(windowsEnvironment)) {
-      assert.equal(denied.has(name), platform !== 'win32', `${name} must be platform-specific`);
+            assert.equal(
+                denied.has(name),
+                platform !== 'win32',
+                `${name} must be platform-specific`,
+            );
     }
     assert.equal(denied.has('HtTp_PrOxY'), platform !== 'win32');
     for (const name of Object.keys(credentials)) {
@@ -685,12 +757,14 @@ for (const platform of ['darwin', 'linux', 'win32'] as const) {
   });
 }
 
-test('uses SRT proxy values without restoring inherited proxies or credentials', async (t) => {
+test('uses SRT proxy values without restoring inherited proxies or credentials', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const wrappedEnvironment = {
-    HTTP_PROXY: 'http://localhost:3128', HTTPS_PROXY: 'http://localhost:3128',
-    ALL_PROXY: 'http://localhost:3128', NO_PROXY: 'localhost',
+        HTTP_PROXY: 'http://localhost:3128',
+        HTTPS_PROXY: 'http://localhost:3128',
+        ALL_PROXY: 'http://localhost:3128',
+        NO_PROXY: 'localhost',
   };
   const fake = fakeManager({ wrappedEnvironment });
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
@@ -700,14 +774,19 @@ test('uses SRT proxy values without restoring inherited proxies or credentials',
   });
   t.after(() => sandbox.close());
   const result = await sandbox.execute({
-    ...request, maxOutputBytes: 256,
-    command: 'printf "%s|%s|%s|%s|%s" "$HTTP_PROXY" "$HTTPS_PROXY" "$ALL_PROXY" "$NO_PROXY" "${GITHUB_TOKEN-unset}"',
+        ...request,
+        maxOutputBytes: 256,
+        command:
+            'printf "%s|%s|%s|%s|%s" "$HTTP_PROXY" "$HTTPS_PROXY" "$ALL_PROXY" "$NO_PROXY" "${GITHUB_TOKEN-unset}"',
   });
   assert.equal(result.exitCode, 0);
-  assert.equal(result.stdout, `${Object.values(wrappedEnvironment).join('|')}|unset`);
+    assert.equal(
+        result.stdout,
+        `${Object.values(wrappedEnvironment).join('|')}|unset`,
+    );
 });
 
-test('masks a host credential for only its injection host and restores the parent environment', async (t) => {
+test('masks a host credential for only its injection host and restores the parent environment', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fake = fakeManager();
@@ -731,7 +810,8 @@ test('masks a host credential for only its injection host and restores the paren
       ],
       async resolve() {
         return {
-          LIBRECHAT_CODE_TEST_CREDENTIAL: 'Authorization: Bearer real-secret',
+                    LIBRECHAT_CODE_TEST_CREDENTIAL:
+                        'Authorization: Bearer real-secret',
         };
       },
     },
@@ -759,7 +839,7 @@ test('masks a host credential for only its injection host and restores the paren
   });
 });
 
-test('serializes credential handoff across concurrent sandbox instances', async (t) => {
+test('serializes credential handoff across concurrent sandbox instances', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const original = process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
@@ -770,11 +850,11 @@ test('serializes credential handoff across concurrent sandbox instances', async 
     else process.env.LIBRECHAT_CODE_TEST_CREDENTIAL = original;
   });
   let firstEntered!: () => void;
-  const firstEnteredPromise = new Promise<void>((resolve) => {
+    const firstEnteredPromise = new Promise<void>(resolve => {
     firstEntered = resolve;
   });
   let releaseFirst!: () => void;
-  const firstGate = new Promise<void>((resolve) => {
+    const firstGate = new Promise<void>(resolve => {
     releaseFirst = resolve;
   });
   let secondEntered = false;
@@ -817,7 +897,7 @@ test('serializes credential handoff across concurrent sandbox instances', async 
   const secondExecution = sandbox(second.manager, 'second-secret').execute(
     request,
   );
-  await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(secondEntered, false);
   releaseFirst();
   await firstExecution;
@@ -828,7 +908,7 @@ test('serializes credential handoff across concurrent sandbox instances', async 
   assert.equal(process.env.LIBRECHAT_CODE_TEST_CREDENTIAL, undefined);
 });
 
-test('isolates Git from host-level global and system configuration', async (t) => {
+test('isolates Git from host-level global and system configuration', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
@@ -844,7 +924,7 @@ test('isolates Git from host-level global and system configuration', async (t) =
   assert.equal(result.stdout, '/dev/null|1');
 });
 
-test('restores trusted Git LFS filters without reading host Git configuration', async (t) => {
+test('restores trusted Git LFS filters without reading host Git configuration', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fake = fakeManager({
@@ -884,7 +964,7 @@ test('restores trusted Git LFS filters without reading host Git configuration', 
   assert.ok(!denied?.includes('GIT_CONFIG_VALUE_0'));
 });
 
-test('filters environment names case-insensitively only on Windows', async (t) => {
+test('filters environment names case-insensitively only on Windows', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fake = fakeManager();
@@ -923,7 +1003,7 @@ test('filters environment names case-insensitively only on Windows', async (t) =
   assert.ok(!denied?.includes('git_config_count'));
 });
 
-test('fails closed when the configured POSIX shell is unavailable', async (t) => {
+test('fails closed when the configured POSIX shell is unavailable', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
@@ -942,7 +1022,7 @@ test('fails closed when the configured POSIX shell is unavailable', async (t) =>
   );
 });
 
-test('fails closed when SRT dependencies are unavailable', async (t) => {
+test('fails closed when SRT dependencies are unavailable', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fake = fakeManager({ dependencyErrors: ['bubblewrap missing'] });
@@ -960,7 +1040,7 @@ test('fails closed when SRT dependencies are unavailable', async (t) => {
   );
 });
 
-test('refuses workspace roots that expose worker home or control files', async (t) => {
+test('refuses workspace roots that expose worker home or control files', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   const controlDirectory = join(root, '.control');
   await mkdir(controlDirectory);
@@ -985,7 +1065,7 @@ test('refuses workspace roots that expose worker home or control files', async (
   );
 });
 
-test('executes in the canonical workspace and bounds aggregate output', async (t) => {
+test('executes in the canonical workspace and bounds aggregate output', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   await mkdir(join(root, 'src'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -1015,7 +1095,7 @@ test('executes in the canonical workspace and bounds aggregate output', async (t
   );
 });
 
-test('rejects an escaping or unavailable command working directory', async (t) => {
+test('rejects an escaping or unavailable command working directory', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
@@ -1026,11 +1106,12 @@ test('rejects an escaping or unavailable command working directory', async (t) =
   await assert.rejects(
     sandbox.execute({ ...request, cwd: '..' }),
     (error: unknown) =>
-      error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
+            error instanceof WorkspaceToolError &&
+            error.code === 'INVALID_REQUEST',
   );
 });
 
-test('terminates detached command descendants before returning', async (t) => {
+test('terminates detached command descendants before returning', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
@@ -1043,15 +1124,15 @@ test('terminates detached command descendants before returning', async (t) => {
     command: '(sleep 0.2; printf late > late.txt) >/dev/null 2>&1 &',
   });
   assert.equal(result.exitCode, 0);
-  await new Promise((resolve) => setTimeout(resolve, 350));
+    await new Promise(resolve => setTimeout(resolve, 350));
   await assert.rejects(access(join(root, 'late.txt')));
 });
 
-test('reports cancellation after command start as a potentially committed mutation', async (t) => {
+test('reports cancellation after command start as a potentially committed mutation', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   let commandStarted!: () => void;
-  const commandStartedPromise = new Promise<void>((resolve) => {
+    const commandStartedPromise = new Promise<void>(resolve => {
     commandStarted = resolve;
   });
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
@@ -1081,7 +1162,7 @@ test('reports cancellation after command start as a potentially committed mutati
   );
 });
 
-test('closes stdin immediately when the command protocol provides no input', async (t) => {
+test('closes stdin immediately when the command protocol provides no input', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
@@ -1098,7 +1179,7 @@ test('closes stdin immediately when the command protocol provides no input', asy
   assert.equal(result.timedOut, false);
 });
 
-test('maps platform-native exit statuses into the bridge protocol range', async (t) => {
+test('maps platform-native exit statuses into the bridge protocol range', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const spawnCommand = () => {
@@ -1123,7 +1204,7 @@ test('maps platform-native exit statuses into the bridge protocol range', async 
   assert.equal(result.exitCode, 1);
 });
 
-test('cleans allocated command state exactly once on every execution exit', async (t) => {
+test('cleans allocated command state exactly once on every execution exit', async t => {
   for (const outcome of [
     'abort-before-spawn',
     'spawn-throw',
@@ -1134,8 +1215,12 @@ test('cleans allocated command state exactly once on every execution exit', asyn
     'wrap-throw',
   ] as const) {
     for (const cleanupThrows of [false, true]) {
-      await t.test(`${outcome}, cleanup throws: ${cleanupThrows}`, async (t) => {
-        const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+            await t.test(
+                `${outcome}, cleanup throws: ${cleanupThrows}`,
+                async t => {
+                    const root = await mkdtemp(
+                        join(tmpdir(), 'librechat-code-native-'),
+                    );
         t.after(() => rm(root, { recursive: true, force: true }));
         const controller = new AbortController();
         let cleanupCalls = 0;
@@ -1143,9 +1228,11 @@ test('cleans allocated command state exactly once on every execution exit', asyn
         let allocated = false;
         const fake = fakeManager({
           async beforeWrap() {
-            if (outcome === 'wrap-throw') throw new Error('wrap failed');
+                            if (outcome === 'wrap-throw')
+                                throw new Error('wrap failed');
             allocated = true;
-            if (outcome === 'abort-before-spawn') controller.abort();
+                            if (outcome === 'abort-before-spawn')
+                                controller.abort();
           },
         });
         fake.manager.cleanupAfterCommand = () => {
@@ -1160,13 +1247,17 @@ test('cleans allocated command state exactly once on every execution exit', asyn
           spawnCommand() {
             spawnCalls += 1;
             assert.equal(allocated, true);
-            if (outcome === 'spawn-throw') throw new Error('spawn failed');
-            const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+                            if (outcome === 'spawn-throw')
+                                throw new Error('spawn failed');
+                            const child =
+                                new EventEmitter() as ChildProcessWithoutNullStreams;
             let closeQueued = false;
             const close = () => {
               if (!closeQueued) {
                 closeQueued = true;
-                queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+                                    queueMicrotask(() =>
+                                        child.emit('close', null, 'SIGKILL'),
+                                    );
               }
               return true;
             };
@@ -1180,7 +1271,10 @@ test('cleans allocated command state exactly once on every execution exit', asyn
             queueMicrotask(() => {
               assert.equal(cleanupCalls, 0);
               if (outcome === 'error') {
-                child.emit('error', new Error('spawn failed'));
+                                    child.emit(
+                                        'error',
+                                        new Error('spawn failed'),
+                                    );
               } else if (outcome === 'abort-after-spawn') {
                 controller.abort();
               } else if (outcome === 'close') {
@@ -1196,28 +1290,43 @@ test('cleans allocated command state exactly once on every execution exit', asyn
         );
         if (outcome === 'close' || outcome === 'timeout') {
           const result = await execution;
-          assert.equal(result.exitCode, outcome === 'close' ? 0 : null);
+                        assert.equal(
+                            result.exitCode,
+                            outcome === 'close' ? 0 : null,
+                        );
           assert.equal(result.timedOut, outcome === 'timeout');
         } else {
-          await assert.rejects(execution, (error: unknown) =>
+                        await assert.rejects(
+                            execution,
+                            (error: unknown) =>
             error instanceof WorkspaceToolError &&
-            error.code === (outcome.startsWith('abort')
+                                error.code ===
+                                    (outcome.startsWith('abort')
               ? 'EXECUTION_ABORTED'
               : 'COMMAND_UNAVAILABLE') &&
-            error.mutationMayHaveCommitted === (outcome === 'abort-after-spawn') &&
+                                error.mutationMayHaveCommitted ===
+                                    (outcome === 'abort-after-spawn') &&
             error.requiresQuarantine ===
-              (outcome === 'abort-after-spawn' && process.platform === 'win32'),
+                                    (outcome === 'abort-after-spawn' &&
+                                        process.platform === 'win32'),
           );
         }
         assert.equal(
           spawnCalls,
-          outcome === 'abort-before-spawn' || outcome === 'wrap-throw' ? 0 : 1,
+                        outcome === 'abort-before-spawn' ||
+                            outcome === 'wrap-throw'
+                            ? 0
+                            : 1,
+                    );
+                    assert.equal(
+                        cleanupCalls,
+                        outcome === 'wrap-throw' ? 0 : 1,
         );
-        assert.equal(cleanupCalls, outcome === 'wrap-throw' ? 0 : 1);
         assert.equal(allocated, false);
         await sandbox.close();
         assert.equal(fake.reset, true);
-      });
+                },
+            );
     }
   }
 });

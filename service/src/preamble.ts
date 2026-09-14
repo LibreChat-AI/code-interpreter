@@ -2,7 +2,10 @@ import fs from 'fs';
 import path from 'path';
 import type * as t from './types';
 import { planLimits } from './config';
-import { generateBashReplayPreamble, generateBashReplayPostamble } from './preamble-bash';
+import {
+    generateBashReplayPreamble,
+    generateBashReplayPostamble,
+} from './preamble-bash';
 import {
   PTC_HISTORY_FILENAME,
   PTC_HISTORY_SANDBOX_PATH,
@@ -11,10 +14,16 @@ import {
   buildScopedSentinel,
   isReservedPtcFilename,
 } from './ptc-constants';
-import { hashToolInput, pendingInputHashesFromRawPayload } from './tool-input-signature';
+import {
+    hashToolInput,
+    pendingInputHashesFromRawPayload,
+} from './tool-input-signature';
 
 // Load async matplotlib template for programmatic tool calling
-const templateCodeAsync = fs.readFileSync(path.join(__dirname, 'matplotlib-async.py'), 'utf8');
+const templateCodeAsync = fs.readFileSync(
+    path.join(__dirname, 'matplotlib-async.py'),
+    'utf8',
+);
 
 // =============================================================================
 // Programmatic Tool Calling Types & Preamble Generation
@@ -88,11 +97,41 @@ function normalizePythonFunctionName(name: string): string {
 
   // Python keywords to avoid
   const pythonKeywords = new Set([
-    'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
-    'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
-    'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is',
-    'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return',
-    'try', 'while', 'with', 'yield'
+        'False',
+        'None',
+        'True',
+        'and',
+        'as',
+        'assert',
+        'async',
+        'await',
+        'break',
+        'class',
+        'continue',
+        'def',
+        'del',
+        'elif',
+        'else',
+        'except',
+        'finally',
+        'for',
+        'from',
+        'global',
+        'if',
+        'import',
+        'in',
+        'is',
+        'lambda',
+        'nonlocal',
+        'not',
+        'or',
+        'pass',
+        'raise',
+        'return',
+        'try',
+        'while',
+        'with',
+        'yield',
   ]);
 
   if (pythonKeywords.has(normalized)) {
@@ -137,11 +176,14 @@ function jsonSchemaToPythonType(schema: JsonSchemaProperty): string {
  * Sort property names so required parameters come before optional ones.
  * Uses a Set for O(1) lookups instead of repeated array includes() calls.
  */
-function getSortedPropertyNames(propertyNames: string[], required: string[]): string[] {
+function getSortedPropertyNames(
+    propertyNames: string[],
+    required: string[],
+): string[] {
   const requiredSet = new Set(required);
   return [
     ...propertyNames.filter(name => requiredSet.has(name)),
-    ...propertyNames.filter(name => !requiredSet.has(name))
+        ...propertyNames.filter(name => !requiredSet.has(name)),
   ];
 }
 
@@ -155,7 +197,10 @@ function schemaToParams(schema?: JsonSchema): string {
 
   const required = schema.required ?? [];
   const requiredSet = new Set(required);
-  const sortedNames = getSortedPropertyNames(Object.keys(schema.properties), required);
+    const sortedNames = getSortedPropertyNames(
+        Object.keys(schema.properties),
+        required,
+    );
 
   const params: string[] = [];
 
@@ -192,7 +237,11 @@ function inferReturnType(description?: string): string {
 
   const desc = description.toLowerCase();
 
-  if (desc.includes('returns list') || desc.includes('returns array') || desc.includes('list of')) {
+    if (
+        desc.includes('returns list') ||
+        desc.includes('returns array') ||
+        desc.includes('list of')
+    ) {
     return 'List[Dict[str, Any]]';
   }
   if (desc.includes('returns dict') || desc.includes('returns object')) {
@@ -225,7 +274,10 @@ function generateDocstring(tool: LCTool): string {
     doc += '\n\n    Parameters:';
     const required = tool.parameters.required ?? [];
     const requiredSet = new Set(required);
-    const sortedNames = getSortedPropertyNames(Object.keys(tool.parameters.properties), required);
+        const sortedNames = getSortedPropertyNames(
+            Object.keys(tool.parameters.properties),
+            required,
+        );
 
     for (const name of sortedNames) {
       const propSchema = tool.parameters.properties[name];
@@ -253,7 +305,8 @@ function generateToolStub(tool: LCTool): string {
   const pythonFunctionName = normalizePythonFunctionName(tool.name);
 
   // If name was changed, add a comment
-  const nameComment = pythonFunctionName !== tool.name
+    const nameComment =
+        pythonFunctionName !== tool.name
     ? `    # Original tool name: ${tool.name}\n`
     : '';
 
@@ -451,7 +504,8 @@ async def _execute_tool_internal_async(tool_name: str, tool_input: Dict[str, Any
  */
 export function generateReplayPreamble(config: ReplayPreambleConfig): string {
   const { executionId, tools } = config;
-  const { start: scopedStart, end: scopedEnd } = buildScopedSentinel(executionId);
+    const { start: scopedStart, end: scopedEnd } =
+        buildScopedSentinel(executionId);
 
   let preamble = `
 # ============================================================================
@@ -564,6 +618,63 @@ export interface ExtractPendingResult {
   }> | null;
 }
 
+export function extractPendingFromControlPayload(
+    rawPayload: string,
+): ExtractPendingResult['pending'] {
+    let parsed: { pending?: unknown } | null = null;
+    try {
+        parsed = JSON.parse(rawPayload) as { pending?: unknown };
+    } catch {
+        return null;
+    }
+
+    const pendingField = parsed?.pending;
+    if (!Array.isArray(pendingField)) return null;
+
+    const rawInputHashes = pendingInputHashesFromRawPayload(rawPayload);
+    type PendingWithIndex = {
+        c: { call_id: string; tool_name: string; input: unknown };
+        index: number;
+    };
+    const isPendingWithIndex = (entry: {
+        c: unknown;
+        index: number;
+    }): entry is PendingWithIndex => {
+        const { c } = entry;
+        return (
+            c != null &&
+            typeof c === 'object' &&
+            typeof (c as { call_id?: unknown }).call_id === 'string' &&
+            typeof (c as { tool_name?: unknown }).tool_name === 'string'
+        );
+    };
+    return pendingField
+        .map((c, index) => ({ c, index }))
+        .filter(isPendingWithIndex)
+        .map(({ c, index }) => {
+            const callSite = (c as { call_site?: unknown }).call_site;
+            const rawInputHash = rawInputHashes[index];
+            const hasObjectInput =
+                c.input != null && typeof c.input === 'object';
+            const input = (hasObjectInput ? c.input : {}) as Record<
+                string,
+                unknown
+            >;
+            return {
+                call_id: c.call_id,
+                tool_name: c.tool_name,
+                input,
+                input_hash:
+                    hasObjectInput && typeof rawInputHash === 'string'
+                        ? rawInputHash
+                        : hashToolInput(input),
+                ...(typeof callSite === 'string'
+                    ? { call_site: callSite }
+                    : {}),
+            };
+        });
+}
+
 /**
  * Locate the last line whose trimmed content exactly equals `marker`.
  * Using full-line anchoring prevents user-provided tool payloads that happen
@@ -581,7 +692,8 @@ function findSentinelLine(
   for (let i = lines.length - 1; i >= searchFromLine; i--) {
     if (lines[i].trim() === marker) {
       const startOffset = lineStartOffsets[i];
-      const endOffset = i + 1 < lineStartOffsets.length
+            const endOffset =
+                i + 1 < lineStartOffsets.length
         ? lineStartOffsets[i + 1] - 1
         : startOffset + lines[i].length;
       return { line: i, startOffset, endOffset };
@@ -619,48 +731,8 @@ export function extractPendingFromStdout(
 
   const payloadLines = lines.slice(startLine.line + 1, endLine.line);
   const rawPayload = payloadLines.join('\n').trim();
-  let parsed: { pending?: unknown } | null = null;
-  try {
-    parsed = JSON.parse(rawPayload) as { pending?: unknown };
-  } catch {
-    return { stdout, pending: null };
-  }
-
-  const pendingField = parsed?.pending;
-  if (!Array.isArray(pendingField)) return { stdout, pending: null };
-
-  const rawInputHashes = pendingInputHashesFromRawPayload(rawPayload);
-  type PendingWithIndex = {
-    c: { call_id: string; tool_name: string; input: unknown };
-    index: number;
-  };
-  const isPendingWithIndex = (entry: { c: unknown; index: number }): entry is PendingWithIndex => {
-    const { c } = entry;
-    return (
-      c != null &&
-      typeof c === 'object' &&
-      typeof (c as { call_id?: unknown }).call_id === 'string' &&
-      typeof (c as { tool_name?: unknown }).tool_name === 'string'
-    );
-  };
-  const pending = pendingField
-    .map((c, index) => ({ c, index }))
-    .filter(isPendingWithIndex)
-    .map(({ c, index }) => {
-      const callSite = (c as { call_site?: unknown }).call_site;
-      const rawInputHash = rawInputHashes[index];
-      const hasObjectInput = c.input != null && typeof c.input === 'object';
-      const input = (hasObjectInput ? c.input : {}) as Record<string, unknown>;
-      return {
-        call_id: c.call_id,
-        tool_name: c.tool_name,
-        input,
-        input_hash: hasObjectInput && typeof rawInputHash === 'string'
-          ? rawInputHash
-          : hashToolInput(input),
-        ...(typeof callSite === 'string' ? { call_site: callSite } : {}),
-      };
-    });
+    const pending = extractPendingFromControlPayload(rawPayload);
+    if (pending == null) return { stdout, pending: null };
 
   /** Strip only the sentinel block and leave every other byte of user
    * stdout untouched. Both the Python and bash preambles defensively
@@ -674,7 +746,10 @@ export function extractPendingFromStdout(
    * emission, and anything else that depends on byte-accurate stdout. */
   const rawHead = stdout.slice(0, startLine.startOffset);
   const head = rawHead.endsWith('\n') ? rawHead.slice(0, -1) : rawHead;
-  const tailStart = endLine.endOffset < stdout.length ? endLine.endOffset + 1 : stdout.length;
+    const tailStart =
+        endLine.endOffset < stdout.length
+            ? endLine.endOffset + 1
+            : stdout.length;
   const tail = stdout.slice(tailStart);
   const cleaned = head + tail;
 
@@ -688,11 +763,14 @@ export function extractPendingFromStdout(
 function wrapUserCodeInAsync(userCode: string): string {
   const lines = userCode.split('\n');
 
-  let wrapped = '# ============================================================================\n';
+    let wrapped =
+        '# ============================================================================\n';
   wrapped += '# USER CODE BEGINS BELOW\n';
-  wrapped += '# ============================================================================\n\n';
+    wrapped +=
+        '# ============================================================================\n\n';
   wrapped += 'async def __user_main__():\n';
-  wrapped += '    """Auto-generated wrapper for user code to support top-level await"""\n';
+    wrapped +=
+        '    """Auto-generated wrapper for user code to support top-level await"""\n';
 
   // Indent all user code
   for (const line of lines) {
@@ -743,10 +821,21 @@ const PROGRAMMATIC_RUN_TIMEOUT = 300000; // 5 minutes wall time
  * Create a payload for programmatic tool calling execution
  * Combines the tool preamble with user code
  */
-export function createProgrammaticPayload(options: CreateProgrammaticPayloadOptions): t.PayloadBody {
+export function createProgrammaticPayload(
+    options: CreateProgrammaticPayloadOptions,
+): t.PayloadBody {
   const {
-    req, session_id, execution_id, callbackUrl, callbackToken, tools, timeout,
-    mode = 'blocking', history, codeOverride, filesOverride,
+        req,
+        session_id,
+        execution_id,
+        callbackUrl,
+        callbackToken,
+        tools,
+        timeout,
+        mode = 'blocking',
+        history,
+        codeOverride,
+        filesOverride,
     language = 'python',
   } = options;
   const body = req.body as t.ProgrammaticRequestBody;
@@ -762,7 +851,14 @@ export function createProgrammaticPayload(options: CreateProgrammaticPayloadOpti
       throw new Error('bash PTC is only supported in replay mode');
     }
     return buildBashPayload({
-      req, execution_id, session_id, tools, userCode, files, history, timeout,
+            req,
+            execution_id,
+            session_id,
+            tools,
+            userCode,
+            files,
+            history,
+            timeout,
     });
   }
 
@@ -771,7 +867,9 @@ export function createProgrammaticPayload(options: CreateProgrammaticPayloadOpti
     preamble = generateReplayPreamble({ executionId: execution_id, tools });
   } else {
     if (!callbackUrl || !callbackToken) {
-      throw new Error('blocking PTC mode requires callbackUrl and callbackToken');
+            throw new Error(
+                'blocking PTC mode requires callbackUrl and callbackToken',
+            );
     }
     preamble = generatePreamble({
       callbackUrl,
@@ -781,15 +879,21 @@ export function createProgrammaticPayload(options: CreateProgrammaticPayloadOpti
     });
   }
 
-  const isPyPlot = userCode.includes('import matplotlib') || userCode.includes('import seaborn');
+    const isPyPlot =
+        userCode.includes('import matplotlib') ||
+        userCode.includes('import seaborn');
 
   let finalCode: string;
 
   if (isPyPlot) {
-    const indentedUserCode = userCode.trim().split('\n').map(line => `    ${line}`).join('\n');
+        const indentedUserCode = userCode
+            .trim()
+            .split('\n')
+            .map(line => `    ${line}`)
+            .join('\n');
     const wrappedUserCode = templateCodeAsync.replace(
       /# BEGIN USER CODE\n[\s\S]*?# END USER CODE/,
-      `# BEGIN USER CODE\n${indentedUserCode}\n    # END USER CODE`
+            `# BEGIN USER CODE\n${indentedUserCode}\n    # END USER CODE`,
     );
     finalCode = preamble + '\n' + wrappedUserCode;
   } else {
@@ -797,7 +901,9 @@ export function createProgrammaticPayload(options: CreateProgrammaticPayloadOpti
     finalCode = preamble + wrappedUserCode;
   }
 
-  const run_memory_limit = planLimits[req.planId ?? '']?.run_memory_limit ?? planLimits.default.run_memory_limit;
+    const run_memory_limit =
+        planLimits[req.planId ?? '']?.run_memory_limit ??
+        planLimits.default.run_memory_limit;
   const run_timeout = timeout ?? PROGRAMMATIC_RUN_TIMEOUT;
 
   const payload: t.PayloadBody = {
@@ -809,8 +915,8 @@ export function createProgrammaticPayload(options: CreateProgrammaticPayloadOpti
     files: [
       {
         name: 'main.py',
-        content: finalCode
-      }
+                content: finalCode,
+            },
     ],
     session_id,
   };
@@ -851,13 +957,27 @@ function buildBashPayload(args: {
   history?: Record<string, unknown>;
   timeout?: number;
 }): t.PayloadBody {
-  const { req, execution_id, session_id, tools, userCode, files, history, timeout } = args;
+    const {
+        req,
+        execution_id,
+        session_id,
+        tools,
+        userCode,
+        files,
+        history,
+        timeout,
+    } = args;
 
-  const preamble = generateBashReplayPreamble({ executionId: execution_id, tools });
+    const preamble = generateBashReplayPreamble({
+        executionId: execution_id,
+        tools,
+    });
   const postamble = generateBashReplayPostamble();
   const finalCode = preamble + userCode + '\n' + postamble;
 
-  const run_memory_limit = planLimits[req.planId ?? '']?.run_memory_limit ?? planLimits.default.run_memory_limit;
+    const run_memory_limit =
+        planLimits[req.planId ?? '']?.run_memory_limit ??
+        planLimits.default.run_memory_limit;
   const run_timeout = timeout ?? PROGRAMMATIC_RUN_TIMEOUT;
 
   const payload: t.PayloadBody = {
@@ -865,6 +985,8 @@ function buildBashPayload(args: {
     run_timeout,
     language: 'bash',
     version: '5.2.0',
+        execution_id,
+        replay_tool_count: tools.length,
     files: [
       {
         name: 'main.sh',

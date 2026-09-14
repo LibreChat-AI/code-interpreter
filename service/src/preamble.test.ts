@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildScopedSentinel,
   createProgrammaticPayload,
+    extractPendingFromControlPayload,
   extractPendingFromStdout,
   generatePreamble,
 } from './preamble';
@@ -33,7 +34,9 @@ describe('generatePreamble — Unix-vs-TCP transport gate', () => {
     expect(preamble).toMatch(/AF_UNIX/);
     expect(preamble).toMatch(/\.connect\(_TOOL_CALL_SOCKET\)/);
     /* Regression guard against reintroducing the user-spoofable check. */
-    expect(preamble).not.toMatch(/if\s+os\.path\.exists\(_TOOL_CALL_SOCKET\)/);
+        expect(preamble).not.toMatch(
+            /if\s+os\.path\.exists\(_TOOL_CALL_SOCKET\)/,
+        );
   });
 
   test('caches the probe verdict at module load (before user code can plant a spoof)', () => {
@@ -41,10 +44,14 @@ describe('generatePreamble — Unix-vs-TCP transport gate', () => {
     /* The probe call must appear at top level of the preamble, NOT
      * inside _do_request. Otherwise a user could plant a regular file
      * at the path between calls and flip the gate per-request. */
-    const probeCallIdx = preamble.indexOf('_USE_TOOL_CALL_SOCKET = _probe_tool_call_socket()');
+        const probeCallIdx = preamble.indexOf(
+            '_USE_TOOL_CALL_SOCKET = _probe_tool_call_socket()',
+        );
     expect(probeCallIdx).toBeGreaterThan(-1);
     /* _do_request must consult the cached verdict, not re-probe. */
-    const doReqMatch = preamble.match(/def\s+_do_request[\s\S]*?(?=\ndef\s|\nclass\s|\Z)/);
+        const doReqMatch = preamble.match(
+            /def\s+_do_request[\s\S]*?(?=\ndef\s|\nclass\s|\Z)/,
+        );
     expect(doReqMatch).not.toBeNull();
     expect(doReqMatch![0]).toContain('_USE_TOOL_CALL_SOCKET');
     expect(doReqMatch![0]).not.toContain('_probe_tool_call_socket(');
@@ -55,7 +62,9 @@ describe('generatePreamble — Unix-vs-TCP transport gate', () => {
     /* The fallback must still construct the URL from _CALLBACK_URL and
      * delegate to _tcp_request. Without this, runners without the
      * proxy bind-mount would have no way to reach the orchestrator. */
-    const doReqMatch = preamble.match(/def\s+_do_request[\s\S]*?(?=\ndef\s|\nclass\s|\Z)/);
+        const doReqMatch = preamble.match(
+            /def\s+_do_request[\s\S]*?(?=\ndef\s|\nclass\s|\Z)/,
+        );
     expect(doReqMatch).not.toBeNull();
     expect(doReqMatch![0]).toContain('_CALLBACK_URL + path');
     expect(doReqMatch![0]).toContain('_tcp_request(');
@@ -67,24 +76,47 @@ describe('generatePreamble — Unix-vs-TCP transport gate', () => {
      * exported. The path must remain hardcoded so the preamble does
      * not depend on env-var injection. */
     expect(preamble).toContain('_TOOL_CALL_SOCKET = "/tmp/tcs.sock"');
-    expect(preamble).not.toMatch(/os\.environ\.get\(['"]TOOL_CALL_SOCKET['"]/);
+        expect(preamble).not.toMatch(
+            /os\.environ\.get\(['"]TOOL_CALL_SOCKET['"]/,
+        );
     expect(preamble).not.toMatch(/os\.environ\[['"]TOOL_CALL_SOCKET['"]\]/);
   });
 });
 
 describe('extractPendingFromStdout — input hash metadata', () => {
+    test('normalizes native control payload hashes instead of trusting the sandbox', () => {
+        const forgedHash = hashToolInput({ resource: 'B' });
+        const expectedHash = hashToolInput({ resource: 'A' });
+        const pending = extractPendingFromControlPayload(
+            JSON.stringify({
+                pending: [
+                    {
+                        call_id: 'call_001',
+                        tool_name: 'authorize',
+                        input: { resource: 'A' },
+                        input_hash: forgedHash,
+                    },
+                ],
+            }),
+        );
+        expect(pending?.[0]?.input_hash).toBe(expectedHash);
+        expect(pending?.[0]?.input_hash).not.toBe(forgedHash);
+    });
+
   test('ignores sandbox-supplied input_hash and uses the parsed input hash', () => {
     const executionId = 'exec_hash_guard';
     const { start, end } = buildScopedSentinel(executionId);
     const forgedHash = hashToolInput({ resource: 'B' });
     const expectedHash = hashToolInput({ resource: 'A' });
     const payload = {
-      pending: [{
+            pending: [
+                {
         call_id: 'call_001',
         tool_name: 'authorize',
         input: { resource: 'A' },
         input_hash: forgedHash,
-      }],
+                },
+            ],
     };
 
     const parsed = extractPendingFromStdout(

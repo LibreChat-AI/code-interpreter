@@ -1,5 +1,9 @@
 import type * as t from './types';
-import { executionManifestBodySha256, signExecutionManifestWithKey, type ExecutionManifestClaims } from './execution-manifest';
+import {
+    executionManifestBodySha256,
+    signExecutionManifestWithKey,
+    type ExecutionManifestClaims,
+} from './execution-manifest';
 
 interface BuildSandboxExecuteRequestArgs {
   payload: t.PayloadBody;
@@ -21,15 +25,20 @@ interface SandboxExecuteRequest {
  * ride in the JSON body instead of HTTP headers. Otherwise skill-heavy jobs can
  * fail with 431 before sandbox-runner reaches capability validation.
  */
-export function buildSandboxExecuteRequest(args: BuildSandboxExecuteRequestArgs): SandboxExecuteRequest {
+export function buildSandboxExecuteRequest(
+    args: BuildSandboxExecuteRequestArgs,
+): SandboxExecuteRequest {
   const body: t.PayloadBody = { ...args.payload };
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+    };
 
   if (args.egressGrantToken) {
     body.egress_grant = args.egressGrantToken;
   }
 
   if (args.executionManifestClaims) {
+        body.max_output_files = args.executionManifestClaims.max_output_files;
     const nowSeconds = args.nowSeconds ?? Math.floor(Date.now() / 1000);
     body.execution_manifest = signExecutionManifestWithKey(
       {

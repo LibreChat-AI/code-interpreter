@@ -1,8 +1,16 @@
-import { fork } from 'node:child_process';
+import { execFile, fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
+import { access } from 'node:fs/promises';
+import { delimiter, join } from 'node:path';
+import { promisify } from 'node:util';
 import { WorkspaceToolError } from './workspace.js';
 import { NATIVE_PROGRAMMATIC_COMMAND } from './native-programmatic.js';
-import { isWorkspaceToolRequest, isWorkspaceToolResult } from './protocol.js';
+import {
+    BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES,
+    isWorkspaceToolRequest,
+    isWorkspaceToolResult,
+} from './protocol.js';
 import type { ChildProcess, ForkOptions } from 'node:child_process';
 import type { NativeSrtWorkspaceCommandSandboxOptions } from './native-sandbox.js';
 import type { WorkspaceCommandSandbox } from './workspace.js';
@@ -19,6 +27,65 @@ export type NativeProcessSandboxOptions = Omit<
   /** Hardened Code API egress gateway used for execution-scoped files. */
   programmaticFileUpstream?: string;
 };
+
+const execFileAsync = promisify(execFile);
+
+async function executableOnPath(
+    name: string,
+    environment: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
+    for (const directory of (environment.PATH ?? '').split(delimiter)) {
+        if (!directory) continue;
+        const candidate = join(directory, name);
+        try {
+            await access(candidate, fsConstants.X_OK);
+            return candidate;
+        } catch {
+            // Continue through the bounded PATH entries.
+        }
+    }
+}
+
+async function resolveProgrammaticShell(
+    options: NativeProcessSandboxOptions,
+): Promise<string> {
+    const environment = options.environment ?? process.env;
+    const shellPath =
+        options.shellPath ?? (await executableOnPath('bash', environment));
+    const jqPath = await executableOnPath('jq', environment);
+    if (!shellPath || !jqPath) {
+        throw new WorkspaceToolError(
+            'Native programmatic execution requires Bash 5.2 or newer and jq on PATH',
+            'COMMAND_UNAVAILABLE',
+        );
+    }
+    try {
+        const [{ stdout: bashVersion }] = await Promise.all([
+            execFileAsync(shellPath, ['--version'], {
+                env: nativeExecutorEnvironment(environment),
+                timeout: 5_000,
+            }),
+            execFileAsync(jqPath, ['--version'], {
+                env: nativeExecutorEnvironment(environment),
+                timeout: 5_000,
+            }),
+        ]);
+        const match = /version\s+(\d+)\.(\d+)/i.exec(bashVersion);
+        if (
+            !match ||
+            Number(match[1]) < 5 ||
+            (Number(match[1]) === 5 && Number(match[2]) < 2)
+        ) {
+            throw new Error('unsupported Bash version');
+        }
+    } catch {
+        throw new WorkspaceToolError(
+            'Native programmatic execution requires Bash 5.2 or newer and jq on PATH',
+            'COMMAND_UNAVAILABLE',
+        );
+    }
+    return shellPath;
+}
 
 /** Only OS discovery and conventional proxy settings cross into the executor.
  * In particular, never inherit NODE_OPTIONS, bridge identity, or app secrets. */
@@ -82,16 +149,18 @@ export function nativeExecutorEnvironment(
  * deadline, as opposed to a failure the executor reported explicitly. */
 class NativeExecutorUnavailableError extends WorkspaceToolError {
   constructor(mutation: boolean) {
-    super('Native executor is unavailable', 'COMMAND_UNAVAILABLE', mutation);
+        super(
+            'Native executor is unavailable',
+            'COMMAND_UNAVAILABLE',
+            mutation,
+        );
     this.name = 'NativeExecutorUnavailableError';
   }
 }
 
 /** One persistent, process-isolated SRT manager per workspace. No automatic
  * restart/replay: losing IPC after execution starts is an ambiguous mutation. */
-export class NativeProcessWorkspaceCommandSandbox
-  implements WorkspaceCommandSandbox
-{
+export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSandbox {
   readonly mutationFailuresAreAtomic = true as const;
   private child?: ChildProcess;
   private ready?: Promise<void>;
@@ -127,12 +196,17 @@ export class NativeProcessWorkspaceCommandSandbox
   }
 
   private async start(): Promise<void> {
+        const programmaticShellPath = this.options.programmaticFileUpstream
+            ? await resolveProgrammaticShell(this.options)
+            : this.options.shellPath;
     const child = this.forkExecutor(
       new URL('./native-process-child.js', import.meta.url),
       [],
       {
         execArgv: [],
-        env: nativeExecutorEnvironment(this.options.environment ?? process.env),
+                env: nativeExecutorEnvironment(
+                    this.options.environment ?? process.env,
+                ),
         stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
         serialization: 'json',
       },
@@ -208,14 +282,14 @@ export class NativeProcessWorkspaceCommandSandbox
           protectedPaths,
           allowedDomains,
           homeDirectory,
-          shellPath,
+                    shellPath: programmaticShellPath ?? shellPath,
           programmaticFileUpstream,
           variables: this.options.maskedEnvironment?.variables,
         },
       },
       30_000,
       false,
-    ).catch((error) => {
+        ).catch(error => {
       this.failed = true;
       this.terminate();
       throw error;
@@ -230,7 +304,10 @@ export class NativeProcessWorkspaceCommandSandbox
       !isWorkspaceToolRequest(request) ||
       request.operation !== 'execute_command'
     ) {
-      throw new WorkspaceToolError('Invalid native command', 'INVALID_REQUEST');
+            throw new WorkspaceToolError(
+                'Invalid native command',
+                'INVALID_REQUEST',
+            );
     }
     if (this.active || this.closing || this.failed)
       throw this.unavailable(false);
@@ -256,7 +333,11 @@ export class NativeProcessWorkspaceCommandSandbox
         'COMMAND_UNAVAILABLE',
       );
     }
-    const active = this.executeProgrammaticOnce(request, workspaceId, signal);
+        const active = this.executeProgrammaticOnce(
+            request,
+            workspaceId,
+            signal,
+        );
     this.active = active;
     try {
       return await active;
@@ -271,7 +352,10 @@ export class NativeProcessWorkspaceCommandSandbox
     signal?: AbortSignal,
   ): Promise<object> {
     if (signal?.aborted)
-      throw new WorkspaceToolError('Programmatic execution aborted', 'EXECUTION_ABORTED');
+            throw new WorkspaceToolError(
+                'Programmatic execution aborted',
+                'EXECUTION_ABORTED',
+            );
     let credentials: Record<string, string> | undefined;
     let wrappedCommand: string | undefined;
     try {
@@ -306,7 +390,17 @@ export class NativeProcessWorkspaceCommandSandbox
         credentials,
         wrappedCommand,
       },
-      (request.body.run_timeout ?? 30_000) + 2 * 30_000 + 5_000,
+            (request.body.run_timeout ?? 30_000) *
+                ((request.body.replay_tool_count ?? 0) > 0 ? 2 : 1) +
+                (Math.ceil(
+                    request.body.files.filter(file => 'id' in file).length / 4,
+                ) +
+                    Math.ceil(
+                        (request.body.max_output_files ??
+                            BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES) / 4,
+                    )) *
+                    30_000 +
+                5_000,
       true,
       signal,
     );
@@ -330,7 +424,10 @@ export class NativeProcessWorkspaceCommandSandbox
     signal?: AbortSignal,
   ): Promise<WorkspaceExecuteCommandResult> {
     if (signal?.aborted)
-      throw new WorkspaceToolError('Command aborted', 'EXECUTION_ABORTED');
+            throw new WorkspaceToolError(
+                'Command aborted',
+                'EXECUTION_ABORTED',
+            );
     let credentials: Record<string, string> | undefined;
     let wrappedCommand: string | undefined;
     try {
@@ -347,7 +444,10 @@ export class NativeProcessWorkspaceCommandSandbox
       // No execute RPC has been sent: setup, token refresh and wrapping cannot
       // have mutated the workspace. Do not quarantine it for setup failures.
       if (signal?.aborted)
-        throw new WorkspaceToolError('Command aborted', 'EXECUTION_ABORTED');
+                throw new WorkspaceToolError(
+                    'Command aborted',
+                    'EXECUTION_ABORTED',
+                );
       throw error instanceof WorkspaceToolError
         ? new WorkspaceToolError(error.message, error.code, false)
         : new WorkspaceToolError(
@@ -413,7 +513,7 @@ export class NativeProcessWorkspaceCommandSandbox
           reject(this.unavailable(mutation));
         };
         try {
-          child.send({ type, id, ...payload }, (error) => {
+                    child.send({ type, id, ...payload }, error => {
             if (error) sendFailed();
           });
         } catch {
@@ -442,9 +542,12 @@ export class NativeProcessWorkspaceCommandSandbox
     await this.ready?.catch(() => undefined);
     try {
       if (this.child?.connected && !this.failed)
-        await this.rpc('close', {}, 10_000, false).catch((error: unknown) => {
-          if (!(error instanceof NativeExecutorUnavailableError)) throw error;
-        });
+                await this.rpc('close', {}, 10_000, false).catch(
+                    (error: unknown) => {
+                        if (!(error instanceof NativeExecutorUnavailableError))
+                            throw error;
+                    },
+                );
     } finally {
       this.failed = true;
       this.terminate();

@@ -3,7 +3,10 @@ import type { Request } from 'express';
 import type { ExecutionManifestClaims } from '../execution-manifest';
 import type { ExecutionIdentity } from '../execution-identity';
 import type { CodeApiPrincipal } from '../auth/principal';
-import type { ExecutionProfile, SandboxBackendName } from '../execution-profile';
+import type {
+    ExecutionProfile,
+    SandboxBackendName,
+} from '../execution-profile';
 import { Jobs } from '@/enum/service';
 
 /**
@@ -149,7 +152,11 @@ export interface RequestBody {
   runtime_session_hint?: string;
 }
 
-export type CreatePayload = { req: AuthenticatedRequest, session_id: string; isPyPlot?: boolean };
+export type CreatePayload = {
+    req: AuthenticatedRequest;
+    session_id: string;
+    isPyPlot?: boolean;
+};
 export interface FileObject {
   name: string;
   id: string;
@@ -160,10 +167,12 @@ export interface FileObject {
   size?: number;
   lastModified?: string;
   etag?: string;
-  metadata?: {
+    metadata?:
+        | {
     'content-type': string;
     'original-filename': string;
-  } | undefined;
+          }
+        | undefined;
   versionId?: string | null;
   contentType?: string;
 }
@@ -184,6 +193,11 @@ export type PayloadFileRef = {
 export interface PayloadBody {
   language: string;
   version: string;
+    /** Stable identity shared by all replay iterations of one execution. */
+    execution_id?: string;
+    replay_tool_count?: number;
+    /** Manifest-bound upload ceiling exposed to remote workers. */
+    max_output_files?: number;
   run_memory_limit?: number;
   run_timeout?: number;
   run_cpu_time?: number;
@@ -238,6 +252,8 @@ export type ExecuteResult = {
   message?: string | null;
   status?: string | null;
   wall_time?: number | null;
+    /** Trusted worker control channel; avoids losing replay calls to stdout truncation. */
+    pending_tool_calls_payload?: string;
 };
 
 export interface LanguageConfig {

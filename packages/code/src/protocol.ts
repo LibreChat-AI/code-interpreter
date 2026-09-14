@@ -159,8 +159,7 @@ interface WorkspaceEditFileRequestBase {
   expectedBaseSha256?: string;
 }
 
-export interface WorkspaceSingleEditFileRequest
-  extends WorkspaceEditFileRequestBase {
+export interface WorkspaceSingleEditFileRequest extends WorkspaceEditFileRequestBase {
   /** Legacy single-edit form. */
   oldText: string;
   /** Legacy single-edit form. */
@@ -168,8 +167,7 @@ export interface WorkspaceSingleEditFileRequest
   edits?: never;
 }
 
-export interface WorkspaceBatchEditFileRequest
-  extends WorkspaceEditFileRequestBase {
+export interface WorkspaceBatchEditFileRequest extends WorkspaceEditFileRequestBase {
   /** Ordered exact replacements applied atomically as one file mutation. */
   edits: WorkspaceTextEdit[];
   oldText?: never;
@@ -177,8 +175,7 @@ export interface WorkspaceBatchEditFileRequest
 }
 
 export type WorkspaceEditFileRequest =
-  | WorkspaceSingleEditFileRequest
-  | WorkspaceBatchEditFileRequest;
+    WorkspaceSingleEditFileRequest | WorkspaceBatchEditFileRequest;
 
 export interface WorkspaceTextEdit {
   oldText: string;
@@ -201,23 +198,20 @@ interface WorkspacePreviewEditRequestBase {
   path: string;
 }
 
-export interface WorkspaceSinglePreviewEditRequest
-  extends WorkspacePreviewEditRequestBase {
+export interface WorkspaceSinglePreviewEditRequest extends WorkspacePreviewEditRequestBase {
   oldText: string;
   newText: string;
   edits?: never;
 }
 
-export interface WorkspaceBatchPreviewEditRequest
-  extends WorkspacePreviewEditRequestBase {
+export interface WorkspaceBatchPreviewEditRequest extends WorkspacePreviewEditRequestBase {
   edits: WorkspaceTextEdit[];
   oldText?: never;
   newText?: never;
 }
 
 export type WorkspacePreviewEditRequest =
-  | WorkspaceSinglePreviewEditRequest
-  | WorkspaceBatchPreviewEditRequest;
+    WorkspaceSinglePreviewEditRequest | WorkspaceBatchPreviewEditRequest;
 
 export interface WorkspacePreviewEditResult {
   protocolVersion: BridgeProtocolVersion;
@@ -398,12 +392,7 @@ const WORKSPACE_COMMAND_RESULT_KEYS = new Set([
   'truncated',
   'timedOut',
 ]);
-const WORKSPACE_SEARCH_MATCH_KEYS = new Set([
-  'path',
-  'line',
-  'column',
-  'text',
-]);
+const WORKSPACE_SEARCH_MATCH_KEYS = new Set(['path', 'line', 'column', 'text']);
 
 export interface BridgeWorkerCapabilities {
   /** Opt-in protocol: maximum concurrently leased independent workspace roots. */
@@ -489,7 +478,13 @@ export type BridgeProgrammaticPayloadFile =
 export interface BridgeWorkspaceProgrammaticBody {
   language: 'bash';
   version: string;
+    /** Stable identity shared by every replay iteration of one execution. */
+    execution_id?: string;
+    /** Declared replay tools; zero allows the worker to skip the probe pass. */
+    replay_tool_count?: number;
   run_timeout?: number;
+    /** Manifest-bound upload ceiling negotiated by Code API. */
+    max_output_files?: number;
   files: BridgeProgrammaticPayloadFile[];
   session_id: string;
   output_session_id?: string;
@@ -629,7 +624,9 @@ export function isBridgeWorkspaceProgrammaticRequest(
   if (
     typeof request.headers !== 'object' ||
     request.headers === null ||
-    !Object.values(request.headers).every((entry) => typeof entry === 'string') ||
+        !Object.values(request.headers).every(
+            entry => typeof entry === 'string',
+        ) ||
     typeof request.body !== 'object' ||
     request.body === null
   ) {
@@ -641,6 +638,18 @@ export function isBridgeWorkspaceProgrammaticRequest(
     typeof body.version !== 'string' ||
     body.version.length === 0 ||
     body.version.length > BRIDGE_RUNTIME_MAX_LENGTH ||
+        (body.execution_id !== undefined &&
+            (typeof body.execution_id !== 'string' ||
+                !/^[A-Za-z0-9_-]{1,128}$/.test(body.execution_id))) ||
+        (body.replay_tool_count !== undefined &&
+            (!Number.isSafeInteger(body.replay_tool_count) ||
+                Number(body.replay_tool_count) < 0 ||
+                Number(body.replay_tool_count) > 256)) ||
+        (body.max_output_files !== undefined &&
+            (!Number.isSafeInteger(body.max_output_files) ||
+                Number(body.max_output_files) < 0 ||
+                Number(body.max_output_files) >
+                    BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES)) ||
     typeof body.session_id !== 'string' ||
     body.session_id.length === 0 ||
     body.session_id.length > 32_768 ||
@@ -657,7 +666,8 @@ export function isBridgeWorkspaceProgrammaticRequest(
     (body.run_timeout !== undefined &&
       (!Number.isSafeInteger(body.run_timeout) ||
         Number(body.run_timeout) < 1 ||
-        Number(body.run_timeout) > BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS)) ||
+                Number(body.run_timeout) >
+                    BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS)) ||
     !Array.isArray(body.files) ||
     body.files.length < 1 ||
     body.files.length > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES
@@ -681,8 +691,11 @@ export function isBridgeWorkspaceProgrammaticRequest(
     if (typeof file.content === 'string') {
       inlineBytes += Buffer.byteLength(file.content);
       if (
-        Object.keys(file).some((key) => key !== 'name' && key !== 'content') ||
-        Buffer.byteLength(file.content) > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES
+                Object.keys(file).some(
+                    key => key !== 'name' && key !== 'content',
+                ) ||
+                Buffer.byteLength(file.content) >
+                    BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES
       ) {
         return false;
       }
@@ -698,7 +711,7 @@ export function isBridgeWorkspaceProgrammaticRequest(
       file.storage_session_id.length > 32_768 ||
       /[\0\r\n]/.test(file.storage_session_id) ||
       Object.keys(file).some(
-        (key) =>
+                key =>
           key !== 'name' &&
           key !== 'id' &&
           key !== 'storage_session_id' &&
@@ -730,20 +743,23 @@ export function isSafePortableRelativePath(value: unknown): value is string {
   ) {
     return false;
   }
-  return value.split('/').every((segment) => segment !== '..');
+    return value.split('/').every(segment => segment !== '..');
 }
 
 function normalizePortableRelativePath(value: string): string {
   return (
     value
       .split('/')
-      .filter((segment) => segment.length > 0 && segment !== '.')
+            .filter(segment => segment.length > 0 && segment !== '.')
       .join('/') || '.'
   );
 }
 
 /** Compare path segments in ripgrep's sorted, depth-first traversal order. */
-export function comparePortableRelativePaths(left: string, right: string): number {
+export function comparePortableRelativePaths(
+    left: string,
+    right: string,
+): number {
   const encoder = new TextEncoder();
   const leftSegments = left.split('/');
   const rightSegments = right.split('/');
@@ -773,9 +789,14 @@ function isWithinRequestedPath(candidate: string, requested?: string): boolean {
   );
 }
 
-function isValidWorkspaceEditRequest(request: Record<string, unknown>): boolean {
+function isValidWorkspaceEditRequest(
+    request: Record<string, unknown>,
+): boolean {
   const hasBatch = request.edits !== undefined;
-  if (hasBatch && (request.oldText !== undefined || request.newText !== undefined)) {
+    if (
+        hasBatch &&
+        (request.oldText !== undefined || request.newText !== undefined)
+    ) {
     return false;
   }
   const edits = hasBatch
@@ -793,7 +814,10 @@ function isValidWorkspaceEditRequest(request: Record<string, unknown>): boolean 
     if (
       typeof edit !== 'object' ||
       edit === null ||
-      !hasOnlyKeys(edit as Record<string, unknown>, WORKSPACE_TEXT_EDIT_KEYS)
+            !hasOnlyKeys(
+                edit as Record<string, unknown>,
+                WORKSPACE_TEXT_EDIT_KEYS,
+            )
     ) {
       return false;
     }
@@ -801,9 +825,11 @@ function isValidWorkspaceEditRequest(request: Record<string, unknown>): boolean 
     if (
       typeof candidate.oldText !== 'string' ||
       candidate.oldText.length === 0 ||
-      Buffer.from(candidate.oldText).toString('utf8') !== candidate.oldText ||
+            Buffer.from(candidate.oldText).toString('utf8') !==
+                candidate.oldText ||
       typeof candidate.newText !== 'string' ||
-      Buffer.from(candidate.newText).toString('utf8') !== candidate.newText
+            Buffer.from(candidate.newText).toString('utf8') !==
+                candidate.newText
     ) {
       return false;
     }
@@ -826,7 +852,7 @@ function hasOnlyKeys(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
 ): boolean {
-  return Object.keys(value).every((key) => allowed.has(key));
+    return Object.keys(value).every(key => allowed.has(key));
 }
 
 export function isWorkspaceToolRequest(
@@ -851,7 +877,8 @@ export function isWorkspaceToolRequest(
       (request.maxLines === undefined ||
         (Number.isSafeInteger(request.maxLines) &&
           Number(request.maxLines) >= 1 &&
-          Number(request.maxLines) <= BRIDGE_WORKSPACE_READ_MAX_LINES))
+                    Number(request.maxLines) <=
+                        BRIDGE_WORKSPACE_READ_MAX_LINES))
     );
   }
   if (request.operation === 'search_text') {
@@ -871,7 +898,8 @@ export function isWorkspaceToolRequest(
       (request.maxResults === undefined ||
         (Number.isSafeInteger(request.maxResults) &&
           Number(request.maxResults) >= 1 &&
-          Number(request.maxResults) <= BRIDGE_WORKSPACE_SEARCH_MAX_RESULTS))
+                    Number(request.maxResults) <=
+                        BRIDGE_WORKSPACE_SEARCH_MAX_RESULTS))
     );
   }
   if (request.operation === 'list_files') {
@@ -881,12 +909,14 @@ export function isWorkspaceToolRequest(
         isSafePortableRelativePath(request.path)) &&
       (request.afterPath === undefined ||
         (isSafePortableRelativePath(request.afterPath) &&
-          normalizePortableRelativePath(request.afterPath) === request.afterPath &&
+                    normalizePortableRelativePath(request.afterPath) ===
+                        request.afterPath &&
           isWithinRequestedPath(request.afterPath, request.path))) &&
       (request.maxResults === undefined ||
         (Number.isSafeInteger(request.maxResults) &&
           Number(request.maxResults) >= 1 &&
-          Number(request.maxResults) <= BRIDGE_WORKSPACE_LIST_MAX_RESULTS))
+                    Number(request.maxResults) <=
+                        BRIDGE_WORKSPACE_LIST_MAX_RESULTS))
     );
   }
   if (request.operation === 'write_file') {
@@ -927,7 +957,8 @@ export function isWorkspaceToolRequest(
       !request.command.includes('\0') &&
       new TextEncoder().encode(request.command).byteLength <=
         BRIDGE_WORKSPACE_COMMAND_MAX_BYTES &&
-      (request.cwd === undefined || isSafePortableRelativePath(request.cwd)) &&
+            (request.cwd === undefined ||
+                isSafePortableRelativePath(request.cwd)) &&
       (request.timeoutMs === undefined ||
         (Number.isSafeInteger(request.timeoutMs) &&
           Number(request.timeoutMs) >= 1 &&
@@ -966,13 +997,19 @@ export function isWorkspaceToolResult(
   if (request.operation === 'read_file') {
     const startLine = request.startLine ?? 1;
     const maxLines = request.maxLines ?? 200;
-    const content = typeof result.content === 'string' ? result.content : null;
+        const content =
+            typeof result.content === 'string' ? result.content : null;
     const reportedLineCount =
-      Number.isSafeInteger(result.endLine) && Number(result.endLine) >= startLine - 1
+            Number.isSafeInteger(result.endLine) &&
+            Number(result.endLine) >= startLine - 1
         ? Number(result.endLine) - startLine + 1
         : -1;
     const actualLineCount =
-      content === null ? -1 : content.length === 0 ? reportedLineCount : content.split('\n').length;
+            content === null
+                ? -1
+                : content.length === 0
+                  ? reportedLineCount
+                  : content.split('\n').length;
     return (
       hasOnlyKeys(result, WORKSPACE_READ_RESULT_KEYS) &&
       result.path === request.path &&
@@ -1027,7 +1064,10 @@ export function isWorkspaceToolResult(
         (enforcesPaginationContract &&
           (normalizedPath !== path ||
             (previousPath !== undefined &&
-              comparePortableRelativePaths(normalizedPath, previousPath) <= 0)))
+                            comparePortableRelativePaths(
+                                normalizedPath,
+                                previousPath,
+                            ) <= 0)))
       ) {
         return false;
       }
@@ -1037,7 +1077,8 @@ export function isWorkspaceToolResult(
     if (!enforcesPaginationContract) {
       return result.nextAfterPath === undefined;
     }
-    if (result.truncated !== true) return result.nextAfterPath === undefined;
+        if (result.truncated !== true)
+            return result.nextAfterPath === undefined;
     return (
       result.paths.length > 0 &&
       result.nextAfterPath === result.paths[result.paths.length - 1]
@@ -1070,7 +1111,8 @@ export function isWorkspaceToolResult(
 
   if (request.operation === 'preview_edit') {
     const replacements = request.edits?.length ?? 1;
-    const content = typeof result.content === 'string' ? result.content : null;
+        const content =
+            typeof result.content === 'string' ? result.content : null;
     return (
       hasOnlyKeys(result, WORKSPACE_PREVIEW_EDIT_RESULT_KEYS) &&
       result.path === request.path &&
@@ -1092,7 +1134,8 @@ export function isWorkspaceToolResult(
     const stdout = typeof result.stdout === 'string' ? result.stdout : null;
     const stderr = typeof result.stderr === 'string' ? result.stderr : null;
     const outputLimit =
-      request.maxOutputBytes ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES;
+            request.maxOutputBytes ??
+            BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES;
     return (
       hasOnlyKeys(result, WORKSPACE_COMMAND_RESULT_KEYS) &&
       stdout !== null &&
@@ -1108,7 +1151,8 @@ export function isWorkspaceToolResult(
           Number(result.exitCode) <= 255)) &&
       (result.signal === undefined ||
         (typeof result.signal === 'string' &&
-          result.signal.length <= BRIDGE_WORKSPACE_COMMAND_SIGNAL_MAX_LENGTH &&
+                    result.signal.length <=
+                        BRIDGE_WORKSPACE_COMMAND_SIGNAL_MAX_LENGTH &&
           /^SIG[A-Z0-9]+$/.test(result.signal))) &&
       typeof result.truncated === 'boolean' &&
       typeof result.timedOut === 'boolean' &&
@@ -1123,7 +1167,7 @@ export function isWorkspaceToolResult(
   return (
     hasOnlyKeys(result, WORKSPACE_SEARCH_RESULT_KEYS) &&
     result.matches.length <= maxResults &&
-    result.matches.every((match) => {
+        result.matches.every(match => {
       if (typeof match !== 'object' || match === null) return false;
       const candidate = match as Record<string, unknown>;
       return (
@@ -1135,7 +1179,8 @@ export function isWorkspaceToolResult(
         Number.isSafeInteger(candidate.column) &&
         Number(candidate.column) >= 1 &&
         typeof candidate.text === 'string' &&
-        candidate.text.length <= BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH &&
+                candidate.text.length <=
+                    BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH &&
         candidate.text.includes(request.query)
       );
     })
@@ -1153,7 +1198,7 @@ export function isValidBridgeWorkspaceToolCapabilities(
     capabilities.operations.length < 1 ||
     capabilities.operations.length > 7 ||
     !capabilities.operations.every(
-      (operation) =>
+            operation =>
         operation === 'read_file' ||
         operation === 'search_text' ||
         operation === 'list_files' ||
@@ -1162,7 +1207,8 @@ export function isValidBridgeWorkspaceToolCapabilities(
         operation === 'edit_file' ||
         operation === 'execute_command',
     ) ||
-    new Set(capabilities.operations).size !== capabilities.operations.length ||
+        new Set(capabilities.operations).size !==
+            capabilities.operations.length ||
     !Array.isArray(capabilities.workspaces) ||
     capabilities.workspaces.length < 1 ||
     capabilities.workspaces.length > BRIDGE_WORKSPACE_MAX_COUNT
@@ -1177,7 +1223,7 @@ export function isValidBridgeWorkspaceToolCapabilities(
       capabilities.writeFileModes.length > 2 ||
       !capabilities.operations.includes('write_file') ||
       !capabilities.writeFileModes.every(
-        (mode) => mode === 'replace' || mode === 'create',
+                mode => mode === 'replace' || mode === 'create',
       ) ||
       new Set(capabilities.writeFileModes).size !==
         capabilities.writeFileModes.length)
@@ -1193,7 +1239,7 @@ export function isValidBridgeWorkspaceToolCapabilities(
       (!capabilities.operations.includes('edit_file') &&
         !capabilities.operations.includes('preview_edit')) ||
       !capabilities.editFileModes.every(
-        (mode) => mode === 'single' || mode === 'batch',
+                mode => mode === 'single' || mode === 'batch',
       ) ||
       new Set(capabilities.editFileModes).size !==
         capabilities.editFileModes.length)
@@ -1232,12 +1278,12 @@ export function isValidBridgeWorkspaceToolCapabilities(
   }
 
   const workspaceIds = new Set<string>();
-  return capabilities.workspaces.every((workspace) => {
+    return capabilities.workspaces.every(workspace => {
     if (typeof workspace !== 'object' || workspace === null) return false;
     const descriptor = workspace as Record<string, unknown>;
     if (
       Object.keys(descriptor).some(
-        (key) => key !== 'id' && key !== 'name' && key !== 'operations',
+                key => key !== 'id' && key !== 'name' && key !== 'operations',
       ) ||
       typeof descriptor.id !== 'string' ||
       !isValidBridgeWorkerId(descriptor.id) ||
@@ -1245,17 +1291,21 @@ export function isValidBridgeWorkspaceToolCapabilities(
       (descriptor.name !== undefined &&
         (typeof descriptor.name !== 'string' ||
           descriptor.name.trim().length === 0 ||
-          descriptor.name.length > BRIDGE_WORKSPACE_NAME_MAX_LENGTH)) ||
+                    descriptor.name.length >
+                        BRIDGE_WORKSPACE_NAME_MAX_LENGTH)) ||
       (descriptor.operations !== undefined &&
         (!Array.isArray(descriptor.operations) ||
           descriptor.operations.length < 1 ||
           descriptor.operations.length >
             (capabilities.operations as unknown[]).length ||
           descriptor.operations.some(
-            (operation) =>
-              !(capabilities.operations as unknown[]).includes(operation),
+                        operation =>
+                            !(capabilities.operations as unknown[]).includes(
+                                operation,
+                            ),
           ) ||
-          new Set(descriptor.operations).size !== descriptor.operations.length))
+                    new Set(descriptor.operations).size !==
+                        descriptor.operations.length))
     ) {
       return false;
     }
@@ -1277,11 +1327,12 @@ export function isValidBridgeWorkerCapabilities(
     typeof capabilities.statefulWorkspace === 'boolean' &&
     typeof capabilities.sandboxProfile === 'string' &&
     capabilities.sandboxProfile.trim().length > 0 &&
-    capabilities.sandboxProfile.length <= BRIDGE_SANDBOX_PROFILE_MAX_LENGTH &&
+        capabilities.sandboxProfile.length <=
+            BRIDGE_SANDBOX_PROFILE_MAX_LENGTH &&
     Array.isArray(capabilities.runtimes) &&
     capabilities.runtimes.length <= BRIDGE_RUNTIME_MAX_COUNT &&
     capabilities.runtimes.every(
-      (runtime) =>
+            runtime =>
         typeof runtime === 'string' &&
         runtime.length > 0 &&
         runtime.length <= BRIDGE_RUNTIME_MAX_LENGTH,

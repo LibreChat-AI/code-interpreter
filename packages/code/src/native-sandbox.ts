@@ -11,14 +11,7 @@ import {
   sep,
 } from 'node:path';
 import { constants as fsConstants } from 'node:fs';
-import {
-  access,
-  mkdtemp,
-  open,
-  realpath,
-  rm,
-  stat,
-} from 'node:fs/promises';
+import { access, mkdtemp, open, realpath, rm, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
@@ -141,7 +134,10 @@ interface NativeSandboxManager {
     cwd?: string,
     options?: { commandId?: string; commandText?: string },
   ): Promise<{ argv: string[]; env: NodeJS.ProcessEnv }>;
-  annotateStderrWithSandboxFailures(commandId: string, stderr: string): string;
+    annotateStderrWithSandboxFailures(
+        commandId: string,
+        stderr: string,
+    ): string;
   cleanupAfterCommand(): void;
   reset(): Promise<void>;
 }
@@ -224,13 +220,16 @@ function deniedEnvironmentNames(
   platform: NodeJS.Platform,
 ): string[] {
   return Object.keys(environment)
-    .filter((name) => {
+        .filter(name => {
       const normalized = platform === 'win32' ? name.toUpperCase() : name;
       return (
         normalized.startsWith('LIBRECHAT_CODE_') ||
         (!SAFE_CHILD_ENV_NAMES.has(normalized) &&
           !PROXY_CHILD_ENV_NAMES.has(normalized) &&
-          !(platform === 'win32' && WINDOWS_CHILD_ENV_NAMES.has(normalized)) &&
+                    !(
+                        platform === 'win32' &&
+                        WINDOWS_CHILD_ENV_NAMES.has(normalized)
+                    ) &&
           !normalized.startsWith('LC_'))
       );
     })
@@ -252,6 +251,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private readonly platform: NodeJS.Platform;
   private initialized?: Promise<void>;
   private canonicalRoot?: string;
+    private denyReadPaths: string[] = [];
+    private denyWritePaths: string[] = [];
   private scratchDirectory?: string;
   private scratchHandle?: FileHandle;
   private execution?: Promise<WorkspaceExecuteCommandResult>;
@@ -288,7 +289,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       );
     }
     managerOwners.set(this.manager, this);
-    this.initialized = this.initializeOnce().catch(async (error) => {
+        this.initialized = this.initializeOnce().catch(async error => {
       await this.manager.reset().catch(() => {
         this.resetFailed = true;
       });
@@ -314,7 +315,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         'COMMAND_UNAVAILABLE',
       );
     }
-    const home = await canonicalPath(this.options.homeDirectory ?? homedir());
+        const home = await canonicalPath(
+            this.options.homeDirectory ?? homedir(),
+        );
     if (isWithin(root, home)) {
       throw new WorkspaceToolError(
         'Native sandbox workspace cannot contain the worker home directory',
@@ -324,7 +327,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     const protectedPaths = await Promise.all(
       (this.options.protectedPaths ?? []).map(canonicalPath),
     );
-    if (protectedPaths.some((path) => isWithin(root, path))) {
+        if (protectedPaths.some(path => isWithin(root, path))) {
       throw new WorkspaceToolError(
         'Native sandbox workspace cannot contain worker control files',
         'REGISTRATION_INVALID',
@@ -338,13 +341,16 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     const inheritedWritablePaths = [
       ...sharedScratchPaths,
       ...(await Promise.all(
-        [join(home, '.npm', '_logs'), join(home, '.claude', 'debug')].map(
-          canonicalPath,
-        ),
+                [
+                    join(home, '.npm', '_logs'),
+                    join(home, '.claude', 'debug'),
+                ].map(canonicalPath),
       )),
     ];
-    const deniedInheritedWritablePaths = [...new Set(inheritedWritablePaths)];
-    if (deniedInheritedWritablePaths.some((path) => isWithin(path, root))) {
+        const deniedInheritedWritablePaths = [
+            ...new Set(inheritedWritablePaths),
+        ];
+        if (deniedInheritedWritablePaths.some(path => isWithin(path, root))) {
       throw new WorkspaceToolError(
         'Native sandbox workspace cannot be inside an inherited writable path',
         'REGISTRATION_INVALID',
@@ -359,7 +365,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     }
     if (this.platform !== 'win32') {
       try {
-        await access(this.options.shellPath ?? '/bin/bash', fsConstants.X_OK);
+                await access(
+                    this.options.shellPath ?? '/bin/bash',
+                    fsConstants.X_OK,
+                );
       } catch {
         throw new WorkspaceToolError(
           `Native sandbox shell is unavailable: ${this.options.shellPath ?? '/bin/bash'}`,
@@ -395,23 +404,27 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       filesystem: {
         denyRead: [
           home,
-          ...sharedScratchPaths.filter((path) =>
+                    ...sharedScratchPaths.filter(path =>
             deniedInheritedWritablePaths.includes(path),
           ),
         ],
         allowRead: [
           root,
-          ...(canonicalScratchDirectory ? [canonicalScratchDirectory] : []),
+                    ...(canonicalScratchDirectory
+                        ? [canonicalScratchDirectory]
+                        : []),
         ],
         allowWrite: [
           root,
-          ...(canonicalScratchDirectory ? [canonicalScratchDirectory] : []),
+                    ...(canonicalScratchDirectory
+                        ? [canonicalScratchDirectory]
+                        : []),
         ],
         denyWrite: [...protectedPaths, ...deniedInheritedWritablePaths],
         allowGitConfig: false,
       },
       credentials: {
-        files: protectedPaths.map((path) => ({
+                files: protectedPaths.map(path => ({
           path,
           mode: 'deny' as const,
         })),
@@ -424,15 +437,18 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             },
             this.platform,
           )
-            .filter((name) => {
+                        .filter(name => {
               const normalized = normalizedEnvironmentName(
                 name,
                 this.platform,
               );
               return (
-                !Object.hasOwn(TRUSTED_GIT_ENVIRONMENT, normalized) &&
+                                !Object.hasOwn(
+                                    TRUSTED_GIT_ENVIRONMENT,
+                                    normalized,
+                                ) &&
                 !this.options.maskedEnvironment?.variables.some(
-                  (variable) =>
+                                    variable =>
                     normalizedEnvironmentName(
                       variable.name,
                       this.platform,
@@ -440,12 +456,16 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                 )
               );
             })
-            .map((name) => ({ name, mode: 'deny' as const })),
-          ...(this.options.maskedEnvironment?.variables.map((variable) => ({
+                        .map(name => ({ name, mode: 'deny' as const })),
+                    ...(this.options.maskedEnvironment?.variables.map(
+                        variable => ({
             ...variable,
             mode: 'mask' as const,
-            ...(variable.extract ? { onExtractNoMatch: 'error' as const } : {}),
-          })) ?? []),
+                            ...(variable.extract
+                                ? { onExtractNoMatch: 'error' as const }
+                                : {}),
+                        }),
+                    ) ?? []),
         ],
       },
       allowAppleEvents: false,
@@ -458,6 +478,16 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       unrestrictedNetwork ? async () => true : undefined,
     );
     this.canonicalRoot = root;
+        this.denyReadPaths = [
+            home,
+            ...sharedScratchPaths.filter(path =>
+                deniedInheritedWritablePaths.includes(path),
+            ),
+        ];
+        this.denyWritePaths = [
+            ...protectedPaths,
+            ...deniedInheritedWritablePaths,
+        ];
   }
 
   async execute(
@@ -502,6 +532,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     request: WorkspaceExecuteCommandRequest,
     dataDirectory: string,
     signal?: AbortSignal,
+        options?: { probe?: boolean },
   ): Promise<WorkspaceExecuteCommandResult> {
     if (this.execution || this.closing) {
       throw new WorkspaceToolError(
@@ -527,11 +558,47 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         'INVALID_PATH',
       );
     }
-    const execution = this.executeExclusive(request, signal, {
+        const execution = this.executeExclusive(
+            request,
+            signal,
+            {
       LIBRECHAT_CODE_DATA_DIR: canonicalDataDirectory,
-      PTC_HISTORY_PATH: join(canonicalDataDirectory, '_ptc_history.json'),
+                LIBRECHAT_CODE_CONTROL_PATH: join(
+                    canonicalDataDirectory,
+                    '_ptc_pending_result.json',
+                ),
+                LIBRECHAT_CODE_BASH_PATH: this.options.shellPath ?? '/bin/bash',
+                PTC_HISTORY_PATH: join(
+                    canonicalDataDirectory,
+                    '_ptc_history.json',
+                ),
       TMPDIR: canonicalDataDirectory,
-    });
+            },
+            options?.probe
+                ? {
+                      filesystem: {
+                          allowRead: [
+                              this.canonicalRoot!,
+                              canonicalDataDirectory,
+                          ],
+                          allowWrite: [canonicalDataDirectory],
+                          denyRead: this.denyReadPaths,
+                          denyWrite: [
+                              this.canonicalRoot!,
+                              ...this.denyWritePaths,
+                          ],
+                      },
+                      network: {
+                          allowedDomains: [],
+                          deniedDomains: [],
+                          strictAllowlist: true,
+                          allowAllUnixSockets: false,
+                          allowLocalBinding: false,
+                      },
+                  }
+                : undefined,
+            canonicalDataDirectory,
+        );
     this.execution = execution;
     try {
       return await execution;
@@ -544,6 +611,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     request: WorkspaceExecuteCommandRequest,
     signal?: AbortSignal,
     trustedEnvironment?: NodeJS.ProcessEnv,
+        customConfig?: Partial<SandboxRuntimeConfig>,
+        sandboxScratchDirectory?: string,
   ): Promise<WorkspaceExecuteCommandResult> {
     if (
       !isWorkspaceToolRequest(request) ||
@@ -590,7 +659,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         {
           ...TRUSTED_GIT_ENVIRONMENT,
           ...(credentialEnvironment ?? {}),
-          ...this.scratchSelectorEnvironment(),
+          ...this.scratchSelectorEnvironment(sandboxScratchDirectory),
         },
         () =>
           this.manager.wrapWithSandboxArgv(
@@ -598,7 +667,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             this.platform === 'win32'
               ? undefined
               : (this.options.shellPath ?? '/bin/bash'),
-            undefined,
+                        customConfig,
             signal,
             cwd,
             { commandId, commandText: request.command },
@@ -647,7 +716,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   ): Promise<T> {
     const previousMutation = hostEnvironmentMutationQueue;
     let releaseMutation!: () => void;
-    hostEnvironmentMutationQueue = new Promise<void>((resolve) => {
+        hostEnvironmentMutationQueue = new Promise<void>(resolve => {
       releaseMutation = resolve;
     });
     await previousMutation;
@@ -676,14 +745,18 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     trustedEnvironment?: NodeJS.ProcessEnv,
   ): Promise<WorkspaceExecuteCommandResult> {
     const outputLimit =
-      request.maxOutputBytes ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES;
+            request.maxOutputBytes ??
+            BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES;
     const timeoutMs =
       request.timeoutMs ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS;
     return await new Promise<WorkspaceExecuteCommandResult>(
       (resolvePromise, reject) => {
         let child: ChildProcessWithoutNullStreams;
         try {
-          child = this.spawnCommand(wrapped.argv[0], wrapped.argv.slice(1), {
+                    child = this.spawnCommand(
+                        wrapped.argv[0],
+                        wrapped.argv.slice(1),
+                        {
             cwd,
             env: {
               ...wrapped.env,
@@ -691,15 +764,19 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
               ...trustedEnvironment,
               ...TRUSTED_GIT_CONFIG_ENTRIES,
               GIT_CONFIG_COUNT:
-                wrapped.env.GIT_CONFIG_COUNT ?? TRUSTED_GIT_CONFIG_COUNT,
+                                    wrapped.env.GIT_CONFIG_COUNT ??
+                                    TRUSTED_GIT_CONFIG_COUNT,
               GIT_CONFIG_GLOBAL:
-                this.platform === 'win32' ? 'NUL' : '/dev/null',
+                                    this.platform === 'win32'
+                                        ? 'NUL'
+                                        : '/dev/null',
               GIT_CONFIG_NOSYSTEM: '1',
             },
             detached: this.platform !== 'win32',
             shell: false,
             windowsHide: true,
-          });
+                        },
+                    );
           child.stdin.end();
         } catch {
           reject(
@@ -725,10 +802,15 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           const accepted = chunk.subarray(0, remaining);
           target.push(accepted);
           outputBytes += accepted.byteLength;
-          if (accepted.byteLength !== chunk.byteLength) truncated = true;
+                    if (accepted.byteLength !== chunk.byteLength)
+                        truncated = true;
         };
-        child.stdout.on('data', (chunk: Buffer) => append(stdout, chunk));
-        child.stderr.on('data', (chunk: Buffer) => append(stderr, chunk));
+                child.stdout.on('data', (chunk: Buffer) =>
+                    append(stdout, chunk),
+                );
+                child.stderr.on('data', (chunk: Buffer) =>
+                    append(stderr, chunk),
+                );
         const abort = (): void => {
           if (settled) return;
           this.killCommandTree(child);
@@ -777,7 +859,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             );
             return;
           }
-          const stdoutValue = boundedUtf8(Buffer.concat(stdout), outputLimit);
+                    const stdoutValue = boundedUtf8(
+                        Buffer.concat(stdout),
+                        outputLimit,
+                    );
           const stderrBudget = Math.max(
             0,
             outputLimit - Buffer.byteLength(stdoutValue),
@@ -785,7 +870,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           const rawStderr = Buffer.concat(stderr).toString('utf8');
           let annotatedStderr = rawStderr;
           try {
-            annotatedStderr = this.manager.annotateStderrWithSandboxFailures(
+                        annotatedStderr =
+                            this.manager.annotateStderrWithSandboxFailures(
               commandId,
               rawStderr,
             );
@@ -801,12 +887,15 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             operation: 'execute_command',
             workspaceId: request.workspaceId,
             exitCode:
-              timedOut || childSignal ? null : this.protocolExitCode(code),
+                            timedOut || childSignal
+                                ? null
+                                : this.protocolExitCode(code),
             ...(childSignal ? { signal: childSignal } : {}),
             stdout: stdoutValue,
             stderr: stderrValue,
             truncated:
-              truncated || Buffer.byteLength(annotatedStderr) > stderrBudget,
+                            truncated ||
+                            Buffer.byteLength(annotatedStderr) > stderrBudget,
             timedOut,
           });
         });
@@ -846,7 +935,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       );
     }
     const canonicalTemporaryRoot = await canonicalPath(HOST_TEMPORARY_ROOT);
-    const sharedScratchRoot = sharedScratchPaths.find((path) =>
+        const sharedScratchRoot = sharedScratchPaths.find(path =>
       isWithin(path, canonicalTemporaryRoot),
     );
     const scratchDirectory = await mkdtemp(
@@ -869,7 +958,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           true,
         );
         if (((await scratchHandle.stat()).mode & 0o777) !== 0o700) {
-          throw new Error('Native sandbox scratch directory is not private');
+                    throw new Error(
+                        'Native sandbox scratch directory is not private',
+                    );
         }
         this.scratchHandle = scratchHandle;
       } catch (error) {
@@ -900,11 +991,13 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       : { TMPDIR: scratchDirectory };
   }
 
-  private scratchSelectorEnvironment(): NodeJS.ProcessEnv {
-    const scratchDirectory = this.scratchDirectory;
+  private scratchSelectorEnvironment(
+        selectedDirectory = this.scratchDirectory,
+  ): NodeJS.ProcessEnv {
+    const scratchDirectory = selectedDirectory;
     if (!scratchDirectory) return {};
     return Object.fromEntries(
-      SRT_SCRATCH_SELECTOR_NAMES.map((name) => [name, scratchDirectory]),
+            SRT_SCRATCH_SELECTOR_NAMES.map(name => [name, scratchDirectory]),
     );
   }
 

@@ -636,6 +636,9 @@ test('workspace programmatic requests accept only stable input cache identities'
     body: {
       language: 'bash',
       version: '5.2',
+      execution_id: 'execution_1',
+      replay_tool_count: 2,
+      max_output_files: 50,
       session_id: 'session-1',
       files: [
         { name: 'main.sh', content: 'echo ready' },
@@ -659,6 +662,18 @@ test('workspace programmatic requests accept only stable input cache identities'
     }),
     false,
   );
+  for (const body of [
+    { ...request.body, execution_id: '../execution' },
+    { ...request.body, replay_tool_count: -1 },
+    { ...request.body, replay_tool_count: 257 },
+    { ...request.body, max_output_files: -1 },
+    { ...request.body, max_output_files: 101 },
+  ]) {
+    assert.equal(
+      isBridgeWorkspaceProgrammaticRequest({ ...request, body }),
+      false,
+    );
+  }
 });
 
 test('workspace programmatic requests reject non-canonical file paths', () => {

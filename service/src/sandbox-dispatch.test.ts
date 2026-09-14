@@ -12,8 +12,10 @@ import {
 } from './execution-manifest';
 
 const SECRET = 'test-secret';
-const PRIVATE_KEY = 'MC4CAQAwBQYDK2VwBCIEIBoxzSJjQ5jTVyuohHtlD+uDGqv/tZ6hQS2CmxuOg2Wn';
-const PUBLIC_KEY = 'MCowBQYDK2VwAyEAeY3PRoTS3adfU6E3gQUB5hSZdrdMSw6OrKkH4UhYh0U=';
+const PRIVATE_KEY =
+    'MC4CAQAwBQYDK2VwBCIEIBoxzSJjQ5jTVyuohHtlD+uDGqv/tZ6hQS2CmxuOg2Wn';
+const PUBLIC_KEY =
+    'MCowBQYDK2VwAyEAeY3PRoTS3adfU6E3gQUB5hSZdrdMSw6OrKkH4UhYh0U=';
 
 function payload(overrides: Partial<t.PayloadBody> = {}): t.PayloadBody {
   return {
@@ -25,14 +27,22 @@ function payload(overrides: Partial<t.PayloadBody> = {}): t.PayloadBody {
   };
 }
 
-function claims(overrides: Partial<ExecutionManifestClaims> = {}): ExecutionManifestClaims {
+function claims(
+    overrides: Partial<ExecutionManifestClaims> = {},
+): ExecutionManifestClaims {
   return {
     v: EXECUTION_MANIFEST_VERSION,
     exec_id: 'exec_123',
     tenant_id: 'tenant_abc',
     user_id: 'user_123',
     session_key: 'tenant:tenant_abc:user:user_123',
-    input_files: [{ id: 'file_123', session_id: 'sess_input', name: 'inputs/data.csv' }],
+        input_files: [
+            {
+                id: 'file_123',
+                session_id: 'sess_input',
+                name: 'inputs/data.csv',
+            },
+        ],
     read_sessions: ['sess_input'],
     output_session_id: 'sess_output',
     max_upload_bytes: 1024,
@@ -70,12 +80,19 @@ describe('sandbox execute request dispatch', () => {
     });
 
     expect(request.headers[EXECUTION_MANIFEST_HEADER]).toBeUndefined();
+        expect(request.body.max_output_files).toBe(10);
     expect(request.body.execution_manifest).toEqual(expect.any(String));
-    expect(verifyExecutionManifest(request.body.execution_manifest!, SECRET, { nowSeconds: 1_100 })).toEqual(claims({
+        expect(
+            verifyExecutionManifest(request.body.execution_manifest!, SECRET, {
+                nowSeconds: 1_100,
+            }),
+        ).toEqual(
+            claims({
       execute_body_sha256: executionManifestBodySha256(request.body),
       iat: 1_000,
       exp: 1_300,
-    }));
+            }),
+        );
   });
 
   test('signs execution manifests with a private key when configured', () => {
@@ -88,11 +105,19 @@ describe('sandbox execute request dispatch', () => {
       nowSeconds: 1_000,
     });
 
-    expect(verifyExecutionManifestWithPublicKey(request.body.execution_manifest!, PUBLIC_KEY, { nowSeconds: 1_100 })).toEqual(claims({
+        expect(
+            verifyExecutionManifestWithPublicKey(
+                request.body.execution_manifest!,
+                PUBLIC_KEY,
+                { nowSeconds: 1_100 },
+            ),
+        ).toEqual(
+            claims({
       execute_body_sha256: executionManifestBodySha256(request.body),
       iat: 1_000,
       exp: 1_300,
-    }));
+            }),
+        );
   });
 
   test('binds body-carried egress grants into signed execution manifests', () => {
@@ -106,10 +131,16 @@ describe('sandbox execute request dispatch', () => {
     });
 
     expect(request.body.egress_grant).toBe('ceg1.sealed-grant');
-    expect(verifyExecutionManifest(request.body.execution_manifest!, SECRET, { nowSeconds: 1_100 })).toEqual(claims({
+        expect(
+            verifyExecutionManifest(request.body.execution_manifest!, SECRET, {
+                nowSeconds: 1_100,
+            }),
+        ).toEqual(
+            claims({
       execute_body_sha256: executionManifestBodySha256(request.body),
       iat: 1_000,
       exp: 1_300,
-    }));
+            }),
+        );
   });
 });

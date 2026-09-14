@@ -1,12 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import {
-  mkdir,
-  open,
-  readdir,
-  rm,
-  writeFile,
-} from 'node:fs/promises';
+import { cp, mkdir, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 
 import {
@@ -32,13 +26,15 @@ import type { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
 const EGRESS_GRANT_HEADER = 'X-CodeAPI-Egress-Grant';
 const EXECUTION_MAIN_FILE = 'main.sh';
 const EXECUTION_HISTORY_FILE = '_ptc_history.json';
+const EXECUTION_CONTROL_FILE = '_ptc_pending_result.json';
 export const NATIVE_PROGRAMMATIC_COMMAND =
-  'exec /bin/bash "$LIBRECHAT_CODE_DATA_DIR/main.sh"';
+    'exec "$LIBRECHAT_CODE_BASH_PATH" "$LIBRECHAT_CODE_DATA_DIR/main.sh"';
 const TRANSFER_TIMEOUT_MS = 30_000;
 const TRANSFER_CONCURRENCY = 4;
 const MAX_WALK_ENTRIES = 2_000;
 const INPUT_CACHE_MAX_ENTRIES = 64;
 const INPUT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const CONTROL_PAYLOAD_MAX_BYTES = 512 * 1024;
 
 type ProgrammaticFileResult = {
   id: string;
@@ -52,6 +48,7 @@ type ProgrammaticResult = {
   version: string;
   session_id: string;
   files: ProgrammaticFileResult[];
+    pending_tool_calls_payload?: string;
   run: {
     stdout: string;
     stderr: string;
@@ -81,12 +78,18 @@ function outputFileId(): string {
 
 function localPath(root: string, name: string): string {
   if (!isSafePortableRelativePath(name)) {
-    throw new WorkspaceToolError('Invalid programmatic file path', 'INVALID_PATH');
+        throw new WorkspaceToolError(
+            'Invalid programmatic file path',
+            'INVALID_PATH',
+        );
   }
   const path = join(root, ...name.split('/'));
   const child = relative(root, path);
   if (child === '' || child === '..' || child.startsWith(`..${sep}`)) {
-    throw new WorkspaceToolError('Invalid programmatic file path', 'INVALID_PATH');
+        throw new WorkspaceToolError(
+            'Invalid programmatic file path',
+            'INVALID_PATH',
+        );
   }
   return path;
 }
@@ -99,7 +102,8 @@ async function readBoundedResponse(
   if (
     declaredLength != null &&
     (!/^\d+$/.test(declaredLength) ||
-      Number(declaredLength) > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES)
+            Number(declaredLength) >
+                BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES)
   ) {
     await response.body?.cancel();
     throw new WorkspaceToolError(
@@ -141,7 +145,9 @@ async function mapConcurrent<T, R>(
   let failed = false;
   let failure: unknown;
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+        Array.from(
+            { length: Math.min(concurrency, values.length) },
+            async () => {
       for (;;) {
         if (failed) return;
         const index = next++;
@@ -156,7 +162,8 @@ async function mapConcurrent<T, R>(
           return;
         }
       }
-    }),
+            },
+        ),
   );
   if (failed) throw failure;
   return results;
@@ -218,9 +225,12 @@ export class NativeWorkspaceProgrammaticExecutor {
   }
 
   private cacheKey(
+        executionId: string | undefined,
     file: Extract<BridgeProgrammaticPayloadFile, { id: string }>,
   ): string | undefined {
-    return file.input_cache_key;
+        return executionId && file.input_cache_key
+            ? `${executionId}:${file.input_cache_key}`
+            : undefined;
   }
 
   private cachedInput(key: string): Buffer | undefined {
@@ -247,7 +257,8 @@ export class NativeWorkspaceProgrammaticExecutor {
         }
       }
       if (!oldestKey) break;
-      this.inputCacheBytes -= this.inputCache.get(oldestKey)!.bytes.byteLength;
+            this.inputCacheBytes -=
+                this.inputCache.get(oldestKey)!.bytes.byteLength;
       this.inputCache.delete(oldestKey);
     }
     this.inputCache.set(key, { bytes, lastUsed: Date.now() });
@@ -257,9 +268,10 @@ export class NativeWorkspaceProgrammaticExecutor {
   private async downloadInput(
     file: Extract<BridgeProgrammaticPayloadFile, { id: string }>,
     grant: string,
+        executionId: string | undefined,
     signal?: AbortSignal,
   ): Promise<Buffer> {
-    const key = this.cacheKey(file);
+        const key = this.cacheKey(executionId, file);
     const cached = key ? this.cachedInput(key) : undefined;
     if (cached) return cached;
     const controller = new AbortController();
@@ -285,7 +297,10 @@ export class NativeWorkspaceProgrammaticExecutor {
           'COMMAND_UNAVAILABLE',
         );
       }
-      const bytes = await readBoundedResponse(response, controller.signal);
+            const bytes = await readBoundedResponse(
+                response,
+                controller.signal,
+            );
       if (key) this.cacheInput(key, bytes);
       return bytes;
     } finally {
@@ -306,11 +321,16 @@ export class NativeWorkspaceProgrammaticExecutor {
       );
     }
     if (signal?.aborted) {
-      throw new WorkspaceToolError('Programmatic execution aborted', 'EXECUTION_ABORTED');
+            throw new WorkspaceToolError(
+                'Programmatic execution aborted',
+                'EXECUTION_ABORTED',
+            );
     }
     const grant = request.body.egress_grant;
     const refFiles = request.body.files.filter(
-      (file): file is Extract<BridgeProgrammaticPayloadFile, { id: string }> =>
+            (
+                file,
+            ): file is Extract<BridgeProgrammaticPayloadFile, { id: string }> =>
         'id' in file,
     );
     if (refFiles.length > 0 && !grant) {
@@ -319,12 +339,16 @@ export class NativeWorkspaceProgrammaticExecutor {
         'INVALID_REQUEST',
       );
     }
-    const dataDirectory = await this.options.sandbox.createExecutionDirectory();
+        const executionDirectory =
+            await this.options.sandbox.createExecutionDirectory();
+        const inputDirectory = join(executionDirectory, 'inputs');
+        let dataDirectory = join(executionDirectory, 'final');
     const baselines = new Map<string, InputBaseline>();
     let totalInputBytes = 0;
     const startedAt = performance.now();
     let commandDispatched = false;
     try {
+            await mkdir(inputDirectory, { mode: 0o700 });
       await mapConcurrent(
         request.body.files,
         TRANSFER_CONCURRENCY,
@@ -332,16 +356,27 @@ export class NativeWorkspaceProgrammaticExecutor {
           const bytes =
             'content' in file
               ? Buffer.from(file.content)
-              : await this.downloadInput(file, grant!, signal);
+                            : await this.downloadInput(
+                                  file,
+                                  grant!,
+                                  request.body.execution_id,
+                                  signal,
+                              );
           totalInputBytes += bytes.byteLength;
-          if (totalInputBytes > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES) {
+                    if (
+                        totalInputBytes >
+                        BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES
+                    ) {
             throw new WorkspaceToolError(
               'Programmatic inputs exceed the total byte limit',
               'READ_LIMIT_EXCEEDED',
             );
           }
-          const path = localPath(dataDirectory, file.name);
-          await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+                    const path = localPath(inputDirectory, file.name);
+                    await mkdir(dirname(path), {
+                        recursive: true,
+                        mode: 0o700,
+                    });
           await writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
           baselines.set(file.name, {
             sha256: sha256(bytes),
@@ -349,7 +384,8 @@ export class NativeWorkspaceProgrammaticExecutor {
               ? {
                   source: {
                     id: file.id,
-                    storage_session_id: file.storage_session_id,
+                                      storage_session_id:
+                                          file.storage_session_id,
                   },
                 }
               : {}),
@@ -357,28 +393,141 @@ export class NativeWorkspaceProgrammaticExecutor {
         },
       );
 
+            const run = async (
+                directory: string,
+                probe: boolean,
+            ): Promise<WorkspaceExecuteCommandResult> => {
+                await cp(inputDirectory, directory, {
+                    recursive: true,
+                    force: false,
+                    errorOnExist: true,
+                    mode: constants.COPYFILE_FICLONE,
+                });
       commandDispatched = true;
-      const commandResult = await this.options.sandbox.executeProgrammatic(
+                return await this.options.sandbox.executeProgrammatic(
         {
           protocolVersion: BRIDGE_PROTOCOL_VERSION,
           operation: 'execute_command',
           workspaceId,
           command: NATIVE_PROGRAMMATIC_COMMAND,
           timeoutMs: Math.min(
-            request.body.run_timeout ?? BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
+                            request.body.run_timeout ??
+                                BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
             BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
           ),
-          maxOutputBytes: BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES,
+                        maxOutputBytes:
+                            BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES,
         },
-        dataDirectory,
+                    directory,
         signal,
+                    { probe },
+                );
+            };
+
+            const readPending = async (
+                directory: string,
+            ): Promise<string | undefined> => {
+                try {
+                    const path = join(directory, EXECUTION_CONTROL_FILE);
+                    const handle = await open(
+                        path,
+                        constants.O_RDONLY | constants.O_NOFOLLOW,
+                    );
+                    try {
+                        const metadata = await handle.stat();
+                        if (
+                            !metadata.isFile() ||
+                            metadata.size === 0 ||
+                            metadata.size > CONTROL_PAYLOAD_MAX_BYTES
+                        ) {
+                            throw new WorkspaceToolError(
+                                'Native programmatic control frame is invalid',
+                                'COMMAND_UNAVAILABLE',
+                            );
+                        }
+                        return await handle.readFile('utf8');
+                    } finally {
+                        await handle.close();
+                    }
+                } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+                        return;
+                    throw error;
+                }
+            };
+
+            if ((request.body.replay_tool_count ?? 0) > 0) {
+                const probeDirectory = join(executionDirectory, 'probe');
+                const probeResult = await run(probeDirectory, true);
+                const pending = await readPending(probeDirectory);
+                if (pending) {
+                    return this.result(
+                        request,
+                        {
+                            ...probeResult,
+                            /** Probe output is speculative and the script will
+                             * run once under its real policy after tool
+                             * resolution. Never duplicate it or expose
+                             * expected read-only policy denials to callers. */
+                            stdout: '',
+                            stderr: '',
+                        },
+                        [],
+                        performance.now() - startedAt,
+                        pending,
+                    );
+                }
+                if (probeResult.truncated) {
+                    throw new WorkspaceToolError(
+                        'Native programmatic probe output exceeded its limit',
+                        'WRITE_LIMIT_EXCEEDED',
+                    );
+                }
+                if (
+                    probeResult.timedOut ||
+                    probeResult.signal
+                ) {
+                    return this.result(
+                        request,
+                        probeResult,
+                        [],
+                        performance.now() - startedAt,
+                    );
+                }
+                /** A read-only probe commonly exits non-zero after it reaches
+                 * an intentional workspace write denial. With no pending call,
+                 * run the script once under its real policy so ordinary writes
+                 * and their resulting exit status are evaluated exactly once. */
+            }
+
+            commandDispatched = true;
+            const commandResult = await run(dataDirectory, false);
+            if (await readPending(dataDirectory)) {
+                throw new WorkspaceToolError(
+                    'Native programmatic commit pass requested an unexpected replay tool',
+                    'COMMAND_UNAVAILABLE',
+                    true,
+                    true,
+                );
+            }
+            if (commandResult.truncated) {
+                throw new WorkspaceToolError(
+                    'Native programmatic output exceeded its limit',
+                    'WRITE_LIMIT_EXCEEDED',
+                    true,
+                    true,
       );
+            }
 
       const outputSessionId = request.body.output_session_id;
       const outputNames = (await listRegularFiles(dataDirectory)).filter(
-        (name) =>
+                name =>
           name !== EXECUTION_MAIN_FILE &&
           name !== EXECUTION_HISTORY_FILE &&
+                    name !== EXECUTION_CONTROL_FILE &&
+                    !name
+                        .split('/')
+                        .some(segment => segment.startsWith('_ptc_')) &&
           !name.startsWith('skills/'),
       );
       const changed: Array<{
@@ -390,11 +539,17 @@ export class NativeWorkspaceProgrammaticExecutor {
       for (const name of outputNames) {
         const path = localPath(dataDirectory, name);
         let bytes: Buffer;
-        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+                const handle = await open(
+                    path,
+                    constants.O_RDONLY | constants.O_NOFOLLOW,
+                );
         try {
           const metadata = await handle.stat();
           if (!metadata.isFile()) continue;
-          if (metadata.size > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES) {
+                    if (
+                        metadata.size >
+                        BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES
+                    ) {
             throw new WorkspaceToolError(
               'Programmatic output exceeds the file limit',
               'WRITE_LIMIT_EXCEEDED',
@@ -405,7 +560,10 @@ export class NativeWorkspaceProgrammaticExecutor {
           await handle.close();
         }
         totalOutputBytes += bytes.byteLength;
-        if (totalOutputBytes > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES) {
+                if (
+                    totalOutputBytes >
+                    BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES
+                ) {
           throw new WorkspaceToolError(
             'Programmatic outputs exceed the total byte limit',
             'WRITE_LIMIT_EXCEEDED',
@@ -415,7 +573,12 @@ export class NativeWorkspaceProgrammaticExecutor {
         if (baseline?.sha256 === sha256(bytes)) continue;
         changed.push({ name, bytes, source: baseline?.source });
       }
-      if (changed.length > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES) {
+            const maxOutputFiles = Math.min(
+                request.body.max_output_files ??
+                    BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES,
+                BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES,
+            );
+            if (changed.length > maxOutputFiles) {
         throw new WorkspaceToolError(
           'Programmatic output contains too many files',
           'WRITE_LIMIT_EXCEEDED',
@@ -430,12 +593,19 @@ export class NativeWorkspaceProgrammaticExecutor {
       const files = await mapConcurrent(
         changed,
         TRANSFER_CONCURRENCY,
-        async ({ name, bytes, source }): Promise<ProgrammaticFileResult> => {
+                async ({
+                    name,
+                    bytes,
+                    source,
+                }): Promise<ProgrammaticFileResult> => {
           const id = outputFileId();
           const controller = new AbortController();
           const abort = (): void => controller.abort(signal?.reason);
           signal?.addEventListener('abort', abort, { once: true });
-          const timer = setTimeout(() => controller.abort(), TRANSFER_TIMEOUT_MS);
+                    const timer = setTimeout(
+                        () => controller.abort(),
+                        TRANSFER_TIMEOUT_MS,
+                    );
           try {
             const response = await this.fetchImpl(
               new URL(
@@ -448,7 +618,8 @@ export class NativeWorkspaceProgrammaticExecutor {
                   [EGRESS_GRANT_HEADER]: grant!,
                   'Content-Type': 'application/octet-stream',
                   'Content-Length': String(bytes.byteLength),
-                  'X-Original-Filename': encodeURIComponent(name),
+                                    'X-Original-Filename':
+                                        encodeURIComponent(name),
                 },
                 body: new Uint8Array(bytes),
                 redirect: 'error',
@@ -474,14 +645,27 @@ export class NativeWorkspaceProgrammaticExecutor {
           }
         },
       );
-      return this.result(request, commandResult, files, performance.now() - startedAt);
+            return this.result(
+                request,
+                commandResult,
+                files,
+                performance.now() - startedAt,
+            );
     } catch (error) {
       if (!commandDispatched) throw error;
       if (error instanceof WorkspaceToolError) {
-        if (error.mutationMayHaveCommitted || error.requiresQuarantine) {
+                if (
+                    error.mutationMayHaveCommitted ||
+                    error.requiresQuarantine
+                ) {
           throw error;
         }
-        throw new WorkspaceToolError(error.message, error.code, true, true);
+                throw new WorkspaceToolError(
+                    error.message,
+                    error.code,
+                    true,
+                    true,
+                );
       }
       throw new WorkspaceToolError(
         'Native programmatic execution failed after dispatch',
@@ -491,7 +675,7 @@ export class NativeWorkspaceProgrammaticExecutor {
       );
     } finally {
       try {
-        await rm(dataDirectory, { recursive: true, force: true });
+                await rm(executionDirectory, { recursive: true, force: true });
       } catch {
         throw new WorkspaceToolError(
           'Native programmatic execution cleanup failed',
@@ -508,6 +692,7 @@ export class NativeWorkspaceProgrammaticExecutor {
     command: WorkspaceExecuteCommandResult,
     files: ProgrammaticFileResult[],
     elapsedMs: number,
+        pendingToolCallsPayload?: string,
   ): ProgrammaticResult {
     return {
       language: 'bash',
@@ -515,8 +700,12 @@ export class NativeWorkspaceProgrammaticExecutor {
       // Code API masks the execution session separately from the writable
       // output bucket. Sandbox results must identify the output bucket so the
       // gateway can restore it to the caller-owned session after upload.
-      session_id: request.body.output_session_id ?? request.body.session_id,
+            session_id:
+                request.body.output_session_id ?? request.body.session_id,
       files,
+            ...(pendingToolCallsPayload
+                ? { pending_tool_calls_payload: pendingToolCallsPayload }
+                : {}),
       run: {
         stdout: command.stdout,
         stderr: command.stderr,

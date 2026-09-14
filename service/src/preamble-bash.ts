@@ -1,8 +1,5 @@
 import type { LCTool } from './preamble';
-import {
-  buildScopedSentinel,
-  PTC_HISTORY_SANDBOX_PATH,
-} from './ptc-constants';
+import { buildScopedSentinel, PTC_HISTORY_SANDBOX_PATH } from './ptc-constants';
 
 export interface BashReplayPreambleConfig {
   executionId: string;
@@ -42,12 +39,55 @@ export class BashToolNameCollisionError extends Error {
 }
 
 const BASH_RESERVED = new Set([
-  'if', 'then', 'else', 'elif', 'fi', 'case', 'esac', 'for', 'select',
-  'while', 'until', 'do', 'done', 'in', 'function', 'time', 'coproc',
-  'return', 'exit', 'break', 'continue', 'shift', 'export', 'readonly',
-  'local', 'declare', 'typeset', 'unset', 'alias', 'unalias', 'source',
-  'echo', 'printf', 'read', 'cd', 'pwd', 'kill', 'trap', 'wait', 'eval',
-  'exec', 'jobs', 'bg', 'fg', 'set', 'let', 'test', 'true', 'false',
+    'if',
+    'then',
+    'else',
+    'elif',
+    'fi',
+    'case',
+    'esac',
+    'for',
+    'select',
+    'while',
+    'until',
+    'do',
+    'done',
+    'in',
+    'function',
+    'time',
+    'coproc',
+    'return',
+    'exit',
+    'break',
+    'continue',
+    'shift',
+    'export',
+    'readonly',
+    'local',
+    'declare',
+    'typeset',
+    'unset',
+    'alias',
+    'unalias',
+    'source',
+    'echo',
+    'printf',
+    'read',
+    'cd',
+    'pwd',
+    'kill',
+    'trap',
+    'wait',
+    'eval',
+    'exec',
+    'jobs',
+    'bg',
+    'fg',
+    'set',
+    'let',
+    'test',
+    'true',
+    'false',
 ]);
 
 function normalizeBashFunctionName(name: string): string {
@@ -60,10 +100,7 @@ function normalizeBashFunctionName(name: string): string {
    * the end-of-preamble `readonly -f` lockdown runs. Compared case-
    * insensitively because the `_PTC_` prefix is used for variables and
    * `_ptc_` for functions, and both live in the same identifier space. */
-  if (
-    BASH_RESERVED.has(normalized) ||
-    /^_ptc_/i.test(normalized)
-  ) {
+    if (BASH_RESERVED.has(normalized) || /^_ptc_/i.test(normalized)) {
     normalized = normalized + '_tool';
   }
   if (normalized === '') normalized = 'tool';
@@ -95,9 +132,12 @@ function escapeForBashEre(s: string): string {
  * Users capture results via command substitution; input is passed as a single
  * JSON object string argument (validated by jq).
  */
-export function generateBashReplayPreamble(config: BashReplayPreambleConfig): string {
+export function generateBashReplayPreamble(
+    config: BashReplayPreambleConfig,
+): string {
   const { executionId, tools } = config;
-  const { start: scopedStart, end: scopedEnd } = buildScopedSentinel(executionId);
+    const { start: scopedStart, end: scopedEnd } =
+        buildScopedSentinel(executionId);
 
   let preamble = `#!/bin/bash
 # ============================================================================
@@ -109,6 +149,7 @@ _PTC_EXECUTION_ID="${executionId}"
 _PTC_SENTINEL_START="${scopedStart}"
 _PTC_SENTINEL_END="${scopedEnd}"
 _PTC_HISTORY_PATH="\${PTC_HISTORY_PATH:-${PTC_HISTORY_SANDBOX_PATH}}"
+_PTC_CONTROL_PATH="\${LIBRECHAT_CODE_CONTROL_PATH:-}"
 _PTC_RUNTIME_DIR="\${TMPDIR:-/tmp}"
 _ptc_mktemp() {
     mktemp "\${_PTC_RUNTIME_DIR%/}/$1.XXXXXX"
@@ -333,6 +374,17 @@ _ptc_maybe_emit_pending() {
         _ptc_cleanup_tempfiles
         trap - DEBUG EXIT
         exit 1
+    fi
+    # Native BYOM workers use this private execution-scoped control file so a
+    # large stdout stream cannot truncate away the replay frame. Other
+    # backends continue to consume the stdout sentinel below.
+    if [ -n "$_PTC_CONTROL_PATH" ]; then
+        printf '%s' "$_ptc_payload" > "$_PTC_CONTROL_PATH" || {
+            printf 'failed to persist pending PTC tool calls\n' >&2
+            _ptc_cleanup_tempfiles
+            trap - DEBUG EXIT
+            exit 1
+        }
     fi
     if [ "\${BASH_SUBSHELL:-0}" -eq 1 ]; then
         trap - DEBUG EXIT
@@ -672,8 +724,12 @@ exit $_ptc_user_exit_code
 
 function generateBashToolStub(tool: LCTool): string {
   const fnName = normalizeBashFunctionName(tool.name);
-  const desc = (tool.description ?? '').split('\n').map(l => `# ${l}`).join('\n');
-  const nameComment = fnName !== tool.name ? `# Original tool name: ${tool.name}\n` : '';
+    const desc = (tool.description ?? '')
+        .split('\n')
+        .map(l => `# ${l}`)
+        .join('\n');
+    const nameComment =
+        fnName !== tool.name ? `# Original tool name: ${tool.name}\n` : '';
   const escapedToolName = escapeForBashDoubleQuote(tool.name);
   return `${nameComment}${desc ? desc + '\n' : ''}${fnName}() {
     local _default_input='{}'
@@ -687,7 +743,8 @@ function generateBashToolStub(tool: LCTool): string {
 }
 
 function generateBashPendingDeferHelper(tools: readonly LCTool[]): string {
-  const toolNamesPattern = tools
+    const toolNamesPattern =
+        tools
     .map(tool => normalizeBashFunctionName(tool.name))
     .map(escapeForBashEre)
     .join('|') || 'a^';

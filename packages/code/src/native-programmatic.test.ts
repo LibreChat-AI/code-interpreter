@@ -19,18 +19,24 @@ test('stages skill files privately and returns generated artifacts', async () =>
     assert.equal(req.headers['x-codeapi-egress-grant'], 'grant');
     if (req.method === 'GET') {
       downloadCount += 1;
-      assert.match(req.url ?? '', /\/sessions\/input-session\/objects\/skill-file$/);
+            assert.match(
+                req.url ?? '',
+                /\/sessions\/input-session\/objects\/skill-file$/,
+            );
       res.end('skill-value');
       return;
     }
     assert.equal(req.method, 'PUT');
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
-    uploads.set(decodeURIComponent(req.headers['x-original-filename'] as string), Buffer.concat(chunks));
+        uploads.set(
+            decodeURIComponent(req.headers['x-original-filename'] as string),
+            Buffer.concat(chunks),
+        );
     res.statusCode = 200;
     res.end();
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;
   let observedDataDirectory = '';
   const executor = new NativeWorkspaceProgrammaticExecutor({
@@ -42,7 +48,10 @@ test('stages skill files privately and returns generated artifacts', async () =>
       async executeProgrammatic(request, dataDirectory) {
         observedDataDirectory = dataDirectory;
         assert.equal(
-          await readFile(join(dataDirectory, 'skills/example/reference.txt'), 'utf8'),
+                    await readFile(
+                        join(dataDirectory, 'skills/example/reference.txt'),
+                        'utf8',
+                    ),
           'skill-value',
         );
         await writeFile(join(dataDirectory, 'result.txt'), 'artifact');
@@ -64,6 +73,7 @@ test('stages skill files privately and returns generated artifacts', async () =>
     body: {
       language: 'bash',
       version: '5.2.0',
+            execution_id: 'execution-one',
       session_id: 'execution-session',
       output_session_id: 'output-session',
       egress_grant: 'grant',
@@ -88,12 +98,148 @@ test('stages skill files privately and returns generated artifacts', async () =>
     assert.equal(replay.run.stdout, 'done\n');
     assert.equal(result.session_id, 'output-session');
     assert.equal(downloadCount, 1);
+        await executor.execute(
+            {
+                ...request,
+                body: { ...request.body, execution_id: 'execution-two' },
+            },
+            'primary',
+        );
+        assert.equal(downloadCount, 2);
     assert.equal(result.files.length, 1);
     assert.equal(result.files[0]?.name, 'result.txt');
     assert.equal(uploads.get('result.txt')?.toString(), 'artifact');
-    assert.deepEqual(await readdir(observedDataDirectory).catch(() => []), []);
+        assert.deepEqual(
+            await readdir(observedDataDirectory).catch(() => []),
+            [],
+        );
+    } finally {
+        await new Promise<void>(resolve => server.close(() => resolve()));
+        await rm(scratch, { recursive: true, force: true });
+    }
+});
+
+test('keeps replay probes read-only and commits the script exactly once', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-probe-test-'));
+    const phases: boolean[] = [];
+    const executor = new NativeWorkspaceProgrammaticExecutor({
+        upstreamUrl: 'http://127.0.0.1:1',
+        sandbox: {
+            async createExecutionDirectory() {
+                return await mkdtemp(join(scratch, 'execution-'));
+            },
+            async executeProgrammatic(
+                _request,
+                dataDirectory,
+                _signal,
+                options,
+            ) {
+                phases.push(options?.probe === true);
+                return {
+                    protocolVersion: 1,
+                    operation: 'execute_command' as const,
+                    workspaceId: 'primary',
+                    exitCode: options?.probe ? 1 : 0,
+                    stdout: options?.probe ? 'probe\n' : 'commit\n',
+                    stderr: options?.probe ? 'expected probe denial\n' : '',
+                    truncated: false,
+                    timedOut: false,
+                };
+            },
+        },
+    });
+    try {
+        const result = await executor.execute(
+            {
+                headers: {},
+                body: {
+                    language: 'bash',
+                    version: '5.2.0',
+                    execution_id: 'probe-then-commit',
+                    replay_tool_count: 1,
+                    session_id: 'execution-session',
+                    files: [
+                        { name: 'main.sh', content: 'printf done' },
+                        { name: '_ptc_history.json', content: '{}' },
+                    ],
+                },
+            },
+            'primary',
+        );
+        assert.deepEqual(phases, [true, false]);
+        assert.equal(result.run.stdout, 'commit\n');
+    } finally {
+        await rm(scratch, { recursive: true, force: true });
+    }
+});
+
+test('returns pending calls from the private control file even when stdout truncates', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-control-test-'));
+    let phases = 0;
+    const executor = new NativeWorkspaceProgrammaticExecutor({
+        upstreamUrl: 'http://127.0.0.1:1',
+        sandbox: {
+            async createExecutionDirectory() {
+                return await mkdtemp(join(scratch, 'execution-'));
+            },
+            async executeProgrammatic(
+                _request,
+                dataDirectory,
+                _signal,
+                options,
+            ) {
+                assert.equal(options?.probe, true);
+                phases += 1;
+                await writeFile(
+                    join(dataDirectory, '_ptc_pending_result.json'),
+                    JSON.stringify({
+                        pending: [
+                            {
+                                call_id: 'call_001',
+                                tool_name: 'lookup',
+                                input: {},
+                            },
+                        ],
+                    }),
+                );
+                return {
+                    protocolVersion: 1,
+                    operation: 'execute_command' as const,
+                    workspaceId: 'primary',
+                    exitCode: 0,
+                    stdout: 'x'.repeat(256 * 1024),
+                    stderr: '',
+                    truncated: true,
+                    timedOut: false,
+                };
+            },
+        },
+    });
+    try {
+        const result = await executor.execute(
+            {
+                headers: {},
+                body: {
+                    language: 'bash',
+                    version: '5.2.0',
+                    execution_id: 'truncated-control',
+                    replay_tool_count: 1,
+                    session_id: 'execution-session',
+                    files: [
+                        { name: 'main.sh', content: 'lookup "{}"' },
+                        { name: '_ptc_history.json', content: '{}' },
+                    ],
+                },
+            },
+            'primary',
+        );
+        assert.equal(phases, 1);
+        assert.equal(result.run.stdout, '');
+        assert.equal(result.run.stderr, '');
+        assert.deepEqual(JSON.parse(result.pending_tool_calls_payload ?? ''), {
+            pending: [{ call_id: 'call_001', tool_name: 'lookup', input: {} }],
+        });
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(scratch, { recursive: true, force: true });
   }
 });
@@ -143,7 +289,7 @@ test('stops admitting downloads and drains in-flight transfers before cleanup', 
     }
     setTimeout(() => res.end('in-flight'), 25);
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;
   const executor = new NativeWorkspaceProgrammaticExecutor({
     upstreamUrl: `http://127.0.0.1:${address.port}`,
@@ -185,7 +331,7 @@ test('stops admitting downloads and drains in-flight transfers before cleanup', 
     assert.ok(requestCount <= 4);
     assert.deepEqual(await readdir(executionDirectory).catch(() => []), []);
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+        await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(scratch, { recursive: true, force: true });
   }
 });
