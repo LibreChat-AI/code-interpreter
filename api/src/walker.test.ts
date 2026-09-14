@@ -830,6 +830,31 @@ describe('walkDir / depth cap', () => {
 
     expect(internals.artifactTruncation).toBeUndefined();
   });
+
+  it('bounds depth-cap eligibility probes and reports the capped subtree conservatively', async () => {
+    let cursor = tmpDir;
+    const totalDepth = config.max_nesting_depth + 12;
+    for (let i = 0; i < totalDepth; i++) {
+      cursor = path.join(cursor, `d${i}`);
+      await fsp.mkdir(cursor);
+    }
+    await fsp.writeFile(path.join(cursor, 'cache.bin'), 'ignored');
+    const internals = asInternals(makeJob());
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    const cappedRoot = Array.from(
+      { length: config.max_nesting_depth },
+      (_, i) => `d${i}`,
+    ).join(path.sep);
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { depth: 1 },
+      skipped: [cappedRoot],
+      skipped_count: 1,
+    });
+  });
 });
 
 describe('walkDir / artifact truncation details', () => {

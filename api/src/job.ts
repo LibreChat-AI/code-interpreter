@@ -61,6 +61,8 @@ export {
 const AUTO_LOAD_DIRKEEP_TIMEOUT_MS = 10000;
 const AUTO_LOAD_DIRKEEP_RETRIES = 2;
 const PTC_HISTORY_FILENAME = '_ptc_history.json';
+const DEPTH_TRUNCATION_PROBE_MAX_ENTRIES = 1000;
+const DEPTH_TRUNCATION_PROBE_MAX_LEVELS = 10;
 
 /** Replaying the same sealed grant cannot repair an authorization denial. */
 class InputAuthorizationError extends Error {
@@ -2189,6 +2191,9 @@ export class Job {
   private async findDepthTruncatedArtifact(
     dir: string,
     inputByName: Map<string, TFile>,
+    state = { remainingEntries: DEPTH_TRUNCATION_PROBE_MAX_ENTRIES },
+    probeDepth = 0,
+    rootPath = path.relative(this.submissionDir, dir) || '.',
   ): Promise<string | undefined> {
     let entries: fs.Dirent[];
     try {
@@ -2207,6 +2212,8 @@ export class Job {
 
     let sawVisibleNonHiddenEntry = false;
     for (const entry of visibleEntries) {
+      state.remainingEntries--;
+      if (state.remainingEntries < 0) return rootPath;
       const fullPath = path.join(dir, entry.name);
       const relativePath = path.relative(this.submissionDir, fullPath);
       const kind = await this.classifyDirent(entry, fullPath, relativePath);
@@ -2225,7 +2232,17 @@ export class Job {
       if (kind === 'dir') {
         if (isHiddenDirectory(entry.name) && !inputsLiveUnder(inputByName, relativePath)) continue;
         sawVisibleNonHiddenEntry = true;
-        const nested = await this.findDepthTruncatedArtifact(fullPath, inputByName);
+        /* The probe exists only to avoid false warnings for small, obviously
+         * unsupported-only subtrees. Once either budget is exhausted, report
+         * the capped root conservatively instead of defeating the scan bound. */
+        if (probeDepth >= DEPTH_TRUNCATION_PROBE_MAX_LEVELS) return rootPath;
+        const nested = await this.findDepthTruncatedArtifact(
+          fullPath,
+          inputByName,
+          state,
+          probeDepth + 1,
+          rootPath,
+        );
         if (nested) return nested;
       }
     }

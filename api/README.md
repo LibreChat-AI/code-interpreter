@@ -101,7 +101,9 @@ object counts detected omissions by cause, `skipped_count` reports the total
 detected omissions, and `skipped` contains up to 20 relative paths so callers
 can match an expected output. Intentional filters such as unsupported file
 extensions, hidden runtime directories, and unchanged session files do not
-produce this marker.
+produce this marker when they can be classified within the bounded scan. A
+depth-capped subtree that exceeds the metadata probe budget is reported
+conservatively rather than allowing post-execution traversal to run unbounded.
 
 ### `GET /api/v2/runtimes`
 
