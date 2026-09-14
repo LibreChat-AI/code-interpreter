@@ -691,8 +691,12 @@ policy. It requires commands to be enabled, runs once per worker startup before
 registration, and must be idempotent for restarts. Its timeout is bounded to five
 minutes and captured output to 8 KiB. Setup failure prevents registration. A nonzero
 exit, timeout, crash or uncertain termination retains the workspace quarantine marker;
-inspect the workspace before clearing quarantine with `--reset-workspace-quarantine`.
-Only successful setup clears its marker. No setup output is sent to the model.
+inspect the workspace before running `librechat-code clear-workspace-quarantine
+--worker-dir <environment-root> --workspace-id <environment-name>` with the same
+deployment and identity configuration. Only use the separate
+`--reset-workspace-quarantine <environment-name>` run option afterward if a server
+fence also needs clearing. Only successful setup automatically clears its marker.
+No setup output is sent to the model.
 
 Named actions are fixed commands without model-supplied substitution. The bridge
 advertises only their names and the definition fingerprint, never their shell source

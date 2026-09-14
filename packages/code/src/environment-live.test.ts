@@ -63,10 +63,15 @@ for (const { succeeds, reset, timesOut } of [
             });
             const address = server.address();
             assert.ok(address && typeof address !== 'string');
-            const start = () => spawn(
+            const start = (clear = false) => spawn(
                 process.execPath,
                 [
                     fileURLToPath(new URL('./cli.js', import.meta.url)),
+                    ...(clear ? [
+                        'clear-workspace-quarantine',
+                        '--worker-dir', root,
+                        '--workspace-id', 'project',
+                    ] : [
                     'run',
                     '--environment',
                     path,
@@ -74,6 +79,7 @@ for (const { succeeds, reset, timesOut } of [
                     ...(reset
                         ? ['--reset-workspace-quarantine', 'project']
                         : []),
+                    ]),
                 ],
                 {
                     env: {
@@ -126,6 +132,13 @@ for (const { succeeds, reset, timesOut } of [
                 assert.match(retryStderr, /quarantined/);
                 assert.equal(await readFile(join(root, 'prepared.txt'), 'utf8'), before);
                 assert.equal(await readFile(join(directory, 'quarantine.json'), 'utf8'), marker);
+                assert.equal(registrations, 0);
+                const recovery = start(true);
+                t.after(() => recovery.kill('SIGKILL'));
+                const [recoveryCode] = await once(recovery, 'exit');
+                assert.equal(recoveryCode, 0);
+                await assert.rejects(readFile(join(directory, 'quarantine.json')), { code: 'ENOENT' });
+                assert.equal(await readFile(join(root, 'prepared.txt'), 'utf8'), before);
                 assert.equal(registrations, 0);
             }
         },

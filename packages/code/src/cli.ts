@@ -1014,7 +1014,7 @@ async function run(
             );
             if (result.exitCode !== 0 || result.timedOut) {
                 throw new Error(
-                    `Environment ${id} setup failed; inspect the workspace and clear its quarantine before restarting`,
+                    `Environment ${id} setup failed; inspect the workspace and use clear-workspace-quarantine with its root and workspace ID before restarting`,
                 );
             }
             await guard.clear('setup');
