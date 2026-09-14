@@ -193,6 +193,27 @@ test('environment roots resolve relative to the definition and fingerprints cove
     );
 });
 
+test('accepts an own root through trusted external symlinks without allowing other root identities', async t => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'code-env-own-alias-')));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const root = join(directory, 'project');
+    await mkdir(root);
+    const alias = join(directory, 'alias');
+    await symlink(root, alias);
+    await symlink(alias, join(directory, 'nested-alias'));
+    const path = join(directory, 'environment.yaml');
+    for (const selected of [alias, join(directory, 'nested-alias')]) {
+        await writeFile(path, `name: app\nroot: ${selected}\n`);
+        const loaded = await loadCodeEnvironment(path);
+        assert.equal(loaded.definition.root, root);
+        await assertEnvironmentDefinitionsOutsideRoots([loaded], [{ id: 'app', root }]);
+        await assert.rejects(
+            assertEnvironmentDefinitionsOutsideRoots([loaded], [{ id: 'other', root }]),
+            /root traversal|mount alias/,
+        );
+    }
+});
+
 test('rejects a trusted definition with an in-workspace hard link', async t => {
     const directory = await mkdtemp(join(tmpdir(), 'code-env-hardlink-'));
     t.after(() => rm(directory, { recursive: true, force: true }));

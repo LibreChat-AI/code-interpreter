@@ -362,10 +362,15 @@ export async function assertEnvironmentDefinitionsOutsideRoots(
             {
                 for (const component of environment.rootPaths ?? []) {
                     const path = relative(root.root, component);
-                    if (path === '' && root.id === environment.definition.name)
+                    const sameRoot = (await identity(component)) === rootIdentity;
+                    const descendant = path !== '' && !isAbsolute(path) &&
+                        path !== '..' && !path.startsWith(`..${sep}`);
+                    // A trusted external alias may select its own root, but a
+                    // link beneath that root is still writable by the workspace.
+                    if (sameRoot && !descendant && root.id === environment.definition.name)
                         continue;
                     if (
-                        (await identity(component)) === rootIdentity ||
+                        sameRoot ||
                         path === '' ||
                         (!isAbsolute(path) &&
                             path !== '..' &&
