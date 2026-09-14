@@ -76,7 +76,10 @@ type ProgrammaticResult = {
 type InputBaseline = {
   sha256: string;
   source?: { id: string; storage_session_id: string };
+  readOnly?: boolean;
 };
+
+type CachedInput = { bytes: Buffer; readOnly: boolean };
 
 function sha256(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
@@ -228,7 +231,7 @@ export class NativeWorkspaceProgrammaticExecutor {
   /** Parent-process cache: sandboxed children cannot inspect this memory. */
   private readonly inputCache = new Map<
     string,
-    { bytes: Buffer; lastUsed: number }
+    CachedInput & { lastUsed: number }
   >();
   private inputCacheBytes = 0;
 
@@ -273,14 +276,15 @@ export class NativeWorkspaceProgrammaticExecutor {
             : undefined;
   }
 
-  private cachedInput(key: string): Buffer | undefined {
+  private cachedInput(key: string): CachedInput | undefined {
     const cached = this.inputCache.get(key);
     if (!cached) return undefined;
     cached.lastUsed = Date.now();
-    return cached.bytes;
+    return { bytes: cached.bytes, readOnly: cached.readOnly };
   }
 
-  private cacheInput(key: string, bytes: Buffer): void {
+  private cacheInput(key: string, input: CachedInput): void {
+    const { bytes } = input;
     if (bytes.byteLength > INPUT_CACHE_MAX_BYTES) return;
     const existing = this.inputCache.get(key);
     if (existing) this.inputCacheBytes -= existing.bytes.byteLength;
@@ -301,7 +305,7 @@ export class NativeWorkspaceProgrammaticExecutor {
                 this.inputCache.get(oldestKey)!.bytes.byteLength;
       this.inputCache.delete(oldestKey);
     }
-    this.inputCache.set(key, { bytes, lastUsed: Date.now() });
+    this.inputCache.set(key, { ...input, lastUsed: Date.now() });
     this.inputCacheBytes += bytes.byteLength;
   }
 
@@ -311,7 +315,7 @@ export class NativeWorkspaceProgrammaticExecutor {
         executionId: string | undefined,
     signal?: AbortSignal,
     transferTimeoutMs = TRANSFER_TIMEOUT_MS,
-  ): Promise<Buffer> {
+  ): Promise<CachedInput> {
         const key = this.cacheKey(executionId, file);
     const cached = key ? this.cachedInput(key) : undefined;
     if (cached) return cached;
@@ -342,8 +346,12 @@ export class NativeWorkspaceProgrammaticExecutor {
                 response,
                 controller.signal,
             );
-      if (key) this.cacheInput(key, bytes);
-      return bytes;
+      const input = {
+        bytes,
+        readOnly: response.headers.get('x-read-only')?.toLowerCase() === 'true',
+      };
+      if (key) this.cacheInput(key, input);
+      return input;
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
@@ -394,9 +402,9 @@ export class NativeWorkspaceProgrammaticExecutor {
         request.body.files,
         TRANSFER_CONCURRENCY,
         async (file): Promise<void> => {
-          const bytes =
+          const input =
             'content' in file
-              ? Buffer.from(file.content)
+              ? { bytes: Buffer.from(file.content), readOnly: false }
                             : await this.downloadInput(
                                   file,
                                   grant!,
@@ -404,6 +412,7 @@ export class NativeWorkspaceProgrammaticExecutor {
                                   signal,
                                   request.body.transfer_timeout_ms,
                               );
+          const { bytes } = input;
           totalInputBytes += bytes.byteLength;
                     if (
                         totalInputBytes >
@@ -422,6 +431,7 @@ export class NativeWorkspaceProgrammaticExecutor {
           await writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
           baselines.set(file.name, {
             sha256: sha256(bytes),
+            ...(input.readOnly ? { readOnly: true } : {}),
             ...('id' in file
               ? {
                   source: {
@@ -581,7 +591,11 @@ export class NativeWorkspaceProgrammaticExecutor {
       const outputSessionId = request.body.output_session_id;
       const survivingNames = new Set(await listRegularFiles(dataDirectory));
       const deletedFiles = refFiles
-        .filter(file => !survivingNames.has(file.name))
+        .filter(
+          file =>
+            baselines.get(file.name)?.readOnly !== true &&
+            !survivingNames.has(file.name),
+        )
         .map(file => file.name);
       const outputNames = [...survivingNames].filter(
         name =>

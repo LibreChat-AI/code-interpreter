@@ -172,6 +172,67 @@ test('reports persisted inputs deleted by selected-workspace execution', async t
   assert.deepEqual(result.deleted_files, ['input.txt']);
 });
 
+test('retains read-only persisted inputs removed by selected-workspace execution', async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-readonly-delete-test-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  let downloads = 0;
+  const server = createServer((_req, res) => {
+    downloads++;
+    res.setHeader('X-Read-Only', 'true');
+    res.end('trusted skill');
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const address = server.address() as AddressInfo;
+  const executor = new NativeWorkspaceProgrammaticExecutor({
+    upstreamUrl: `http://127.0.0.1:${address.port}`,
+    sandbox: {
+      async createExecutionDirectory() {
+        return await mkdtemp(join(scratch, 'execution-'));
+      },
+      async executeProgrammatic(request, dataDirectory) {
+        await rm(join(dataDirectory, 'skills', 'review', 'SKILL.md'));
+        return {
+          protocolVersion: 1,
+          operation: 'execute_command' as const,
+          workspaceId: request.workspaceId,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          truncated: false,
+          timedOut: false,
+        };
+      },
+    },
+  });
+  const request = {
+    headers: {},
+    body: {
+      language: 'bash' as const,
+      version: '5.2.0',
+      execution_id: 'readonly-execution',
+      session_id: 'execution-session',
+      egress_grant: 'grant',
+      files: [
+        { name: 'main.sh', content: 'rm skills/review/SKILL.md' },
+        {
+          name: 'skills/review/SKILL.md',
+          id: 'skill-id',
+          storage_session_id: 'skill-session',
+          input_cache_key: 'a'.repeat(64),
+        },
+      ],
+    },
+  };
+
+  const result = await executor.execute(request, 'primary');
+  const replay = await executor.execute(request, 'primary');
+
+  assert.equal(downloads, 1);
+  assert.equal(result.deleted_files, undefined);
+  assert.equal(replay.deleted_files, undefined);
+});
+
 test('reports unsupported and rejected artifacts without invalidating a completed command', async () => {
   const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-artifact-test-'));
   const uploads = new Map<string, string | undefined>();

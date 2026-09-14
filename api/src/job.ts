@@ -1741,6 +1741,7 @@ export class Job {
         if (
           file.id != null &&
           file.storage_session_id != null &&
+          this.inputFileHashes.get(file.name)?.readOnly !== true &&
           !this.presentInputFiles.has(file.name) &&
           !returnedNames.has(file.name)
         ) {
@@ -2422,8 +2423,6 @@ export class Job {
     let skippedHiddenDirs = 0;
 
     for (const entry of entries) {
-      if (isPtcReserved(entry.name)) continue;
-
       const fullPath = path.join(dir, entry.name);
       const relativePath = path.relative(this.submissionDir, fullPath);
       const kind = await this.classifyDirent(entry, fullPath, relativePath);
@@ -2432,6 +2431,12 @@ export class Job {
       if (kind === 'file' && inputByName.has(relativePath)) {
         this.presentInputFiles.add(relativePath);
       }
+
+      /* A by-reference input may legitimately use the reserved replay-history
+       * basename on the ordinary execution endpoint. It remains hidden from
+       * output collection, but must be observed before the runtime fixture is
+       * skipped so an untouched input is not reported as deleted. */
+      if (isPtcReserved(entry.name)) continue;
 
       if (kind === 'dir') {
         /* Skip hidden directories (basename starts with `.`) unless the user

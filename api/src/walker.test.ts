@@ -1282,6 +1282,44 @@ describe('handleSessionFiles / persisted input deletion', () => {
     expect(internals.deletedFiles).toEqual(['removed.txt']);
   });
 
+  it('retains a read-only persisted input when sandbox code removes its local copy', async () => {
+    const inherited: TFile = {
+      id: 'skill-id',
+      storage_session_id: 'skill-session',
+      name: path.join('skills', 'review', 'SKILL.md'),
+    };
+    const internals = asInternals(makeJob({ files: [inherited] }));
+    internals.submissionDir = tmpDir;
+    internals.inputFileHashes.set(inherited.name, {
+      hash: sha256('trusted-skill'),
+      path: path.join(tmpDir, inherited.name),
+      originalId: inherited.id,
+      originalSessionId: inherited.storage_session_id,
+      readOnly: true,
+    });
+
+    await internals.handleSessionFiles();
+
+    expect(internals.deletedFiles).toEqual([]);
+  });
+
+  it('tracks a persisted input using the reserved PTC history basename', async () => {
+    const inherited: TFile = {
+      id: 'history-id',
+      storage_session_id: 'prior-session',
+      name: path.join('fixtures', '_ptc_history.json'),
+    };
+    await fsp.mkdir(path.join(tmpDir, 'fixtures'));
+    await fsp.writeFile(path.join(tmpDir, inherited.name), '{}');
+    const internals = asInternals(makeJob({ files: [inherited] }));
+    internals.submissionDir = tmpDir;
+
+    await internals.handleSessionFiles();
+
+    expect(internals.deletedFiles).toEqual([]);
+    expect(internals.generatedFiles.map(file => file.name)).not.toContain(inherited.name);
+  });
+
   it('does not report a surviving input that is unsupported as an output artifact', async () => {
     const inherited: TFile = {
       id: 'prior-id',
