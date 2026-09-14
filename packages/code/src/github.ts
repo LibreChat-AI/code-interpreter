@@ -197,7 +197,10 @@ export function gitHubCredentialEnvironment(
   credential: GitHubCredential,
 ): Record<string, string> {
   return {
-    [GITHUB_CREDENTIAL_ENV_NAME]: credential.value,
+    [GITHUB_CREDENTIAL_ENV_NAME]: Buffer.from(
+      `x-access-token:${credential.value}`,
+      'utf8',
+    ).toString('base64'),
   };
 }
 
@@ -250,14 +253,14 @@ export function wrapGitHubCredentialCommand(
     return [
       'set "GIT_CONFIG_GLOBAL=NUL"',
       'set "GIT_CONFIG_NOSYSTEM=1"',
-      `set "GIT_CONFIG_PARAMETERS='http.proxyAuthMethod=basic' '${key}=Authorization: Bearer %${GITHUB_CREDENTIAL_ENV_NAME}%'"`,
+      `set "GIT_CONFIG_PARAMETERS='http.proxyAuthMethod=basic' '${key}=Authorization: Basic %${GITHUB_CREDENTIAL_ENV_NAME}%'"`,
       `set "${GITHUB_CREDENTIAL_ENV_NAME}="`,
       command,
     ].join(' && ');
   }
   return [
     'export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1',
-    `export GIT_CONFIG_PARAMETERS="'http.proxyAuthMethod=basic' '${key}=Authorization: Bearer \${${GITHUB_CREDENTIAL_ENV_NAME}}'"`,
+    `export GIT_CONFIG_PARAMETERS="'http.proxyAuthMethod=basic' '${key}=Authorization: Basic \${${GITHUB_CREDENTIAL_ENV_NAME}}'"`,
     `unset ${GITHUB_CREDENTIAL_ENV_NAME}`,
     command,
   ].join(';\n');

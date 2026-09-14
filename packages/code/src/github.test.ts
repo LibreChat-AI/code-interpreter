@@ -137,12 +137,17 @@ test('builds process-scoped Git HTTPS authorization without embedding credential
   const provider = new StaticGitHubCredentialProvider(
     'github_pat_abcdefghijklmnopqrstuvwxyz',
   );
+  const encodedCredential = Buffer.from(
+    'x-access-token:github_pat_abcdefghijklmnopqrstuvwxyz',
+    'utf8',
+  ).toString('base64');
   assert.deepEqual(
     gitHubCredentialEnvironment(await provider.getCredential()),
     {
-      [GITHUB_CREDENTIAL_ENV_NAME]: 'github_pat_abcdefghijklmnopqrstuvwxyz',
+      [GITHUB_CREDENTIAL_ENV_NAME]: encodedCredential,
     },
   );
+  assert.ok(!encodedCredential.includes('github_pat_'));
 });
 
 test('composes the masked credential with SRT Git configuration inside the sandbox', () => {
@@ -155,7 +160,7 @@ test('composes the masked credential with SRT Git configuration inside the sandb
   assert.match(wrapped, /http\.https:\/\/github\.com\/\.extraheader/);
   assert.match(wrapped, /\$\{LIBRECHAT_CODE_GITHUB_AUTHORIZATION\}/);
   assert.match(wrapped, /unset LIBRECHAT_CODE_GITHUB_AUTHORIZATION/);
-  assert.equal(wrapped.match(/Authorization: Bearer/g)?.length, 1);
+  assert.equal(wrapped.match(/Authorization: Basic/g)?.length, 1);
   assert.ok(!wrapped.includes('github_pat_'));
 });
 
