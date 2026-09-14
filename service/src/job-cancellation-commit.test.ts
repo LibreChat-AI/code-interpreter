@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { startTestRedis } from './test/redis';
+import { RedisBridgeStore } from './bridge/store';
 import {
   commitJobResult,
   readCommittedJobResult,
@@ -19,6 +20,115 @@ afterEach(async () => {
   await redis.closeTestServer();
 });
 const target = { queueName: 'other', jobId: 'commit-race' };
+
+for (const stopWins of [false, true])
+  test(`native mutation handoff commits or quarantines before root release (stopWins=${stopWins})`, async () => {
+    const store = new RedisBridgeStore(redis);
+    const workerId = 'handoff-worker';
+    const incarnationId = 'incarnation-handoff-01';
+    await store.register({
+      protocolVersion: 1,
+      workerId,
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'anthropic-srt',
+        runtimes: [],
+        workspaceTools: {
+          protocolVersion: 1,
+          operations: ['execute_command'],
+          programmaticLanguages: ['bash'],
+          workspaces: [{ id: 'primary' }],
+        },
+      },
+    });
+    const controller = new AbortController();
+    const dispatchArgs = {
+      workerId,
+      workspaceId: 'primary',
+      headers: {},
+      body: {
+        language: 'bash',
+        version: '5.2',
+        session_id: 'handoff-session',
+        files: [{ name: 'main.sh', content: 'echo mutation' }],
+      },
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    };
+    const completion = store.dispatch({
+      ...dispatchArgs,
+      finalize: async settlement => {
+        if (stopWins) await requestJobCancellation(redis, target, 60);
+        if (
+          !(await commitJobResult(
+            redis,
+            target,
+            { stdout: 'mutation settled' },
+            60,
+          ))
+        )
+          throw new Error('cancelled before handoff');
+        // This represents Stop during post-handoff egress cleanup. It must no
+        // longer turn the applied mutation into an acknowledged cancellation.
+        expect(await requestJobCancellation(redis, target, 60)).toBe(false);
+        return settlement;
+      },
+    });
+    void completion.catch(() => undefined);
+    const assignment = await store.lease(workerId, incarnationId, 1_000);
+    if (assignment == null) throw new Error('Missing assignment');
+    await store.settle(workerId, assignment.assignmentId, {
+      protocolVersion: 1,
+      incarnationId,
+      generation: assignment.generation,
+      leaseToken: assignment.leaseToken,
+      status: 'fulfilled',
+      result: {
+        session_id: 'handoff-session',
+        language: 'bash',
+        version: '5.2',
+        files: [],
+      },
+    });
+    if (stopWins) {
+      await expect(completion).rejects.toThrow('cancelled before handoff');
+      await expect(store.dispatch(dispatchArgs)).rejects.toMatchObject({
+        code: 'WORKSPACE_QUARANTINED',
+      });
+    } else {
+      await expect(completion).resolves.toMatchObject({
+        status: 'fulfilled',
+      });
+      expect(await readCommittedJobResult(redis, target)).toEqual({
+        result: { stdout: 'mutation settled' },
+      });
+    }
+  });
+
+for (const corrupt of [false, true])
+  test(`invalid committed result fails immediately without Redis retries (corrupt=${corrupt})`, async () => {
+    await commitJobResult(redis, target, { stdout: 'done' }, 60);
+    const key = jobCancellationInternals.cancellationKey(target);
+    if (corrupt) await redis.set(`${key}:result`, '{invalid');
+    else await redis.del(`${key}:result`);
+    let calls = 0;
+    const commands = {
+      eval: (...args: Parameters<typeof redis.eval>) => {
+        calls += 1;
+        return redis.eval(...args);
+      },
+    } as unknown as typeof redis;
+    await expect(
+      fenceJobCancellation({
+        commands,
+        target,
+        ttlSeconds: 60,
+        deadlineAtMs: Date.now() + 30_000,
+      }),
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
 
 test('completion retention includes the API producer across timeout configuration drift', async () => {
   const ttl = jobCancellationRetentionSeconds(30_000, 430);
@@ -42,10 +152,17 @@ test('retention renewal does not lose subsecond time to rounded TTL readings', a
   await commitJobResult(redis, target, { stdout: 'done' }, 60);
   const key = jobCancellationInternals.cancellationKey(target);
   await redis.pexpire(key, 59_900);
-  const expiration = async () => Number(await redis.eval(`
+  const expiration = async () =>
+    Number(
+      await redis.eval(
+        `
     local now = redis.call('TIME')
     return tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000) + redis.call('PTTL', KEYS[1])
-  `, 1, key));
+  `,
+        1,
+        key,
+      ),
+    );
   const before = await expiration();
   await requestJobCancellation(redis, target, 60);
   expect(await expiration()).toBeGreaterThan(before);

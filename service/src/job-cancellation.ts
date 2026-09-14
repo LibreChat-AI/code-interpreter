@@ -272,8 +272,9 @@ async function cancelJobInRedis(
     `
     local state = redis.call('GET', KEYS[1])
     if state == 'completed' then
-      -- The request tombstone is renewed by Stop. Keep its decision and
-      -- result at least as long, even across API/worker config differences.
+      -- Keep completion evidence at least as long as the requesting process
+      -- requires, even across API/worker config differences. Attached request
+      -- tombstones never renew independently of this decision.
       local requestedTtlMs = tonumber(ARGV[1]) * 1000
       for i = 1, 2 do
         if redis.call('PTTL', KEYS[i]) < requestedTtlMs then
@@ -416,27 +417,13 @@ export async function fenceJobCancellation<T = unknown>(args: {
     // winning decision. Never translate a known committed effect to failure.
     const remainingMs = args.deadlineAtMs - Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let decision: unknown;
     try {
-      return await Promise.race([
-        cancelJobInRedis(
-          args.commands,
-          args.target,
-          args.ttlSeconds,
-          true,
-        ).then((decision): JobFenceOutcome<T> => {
-          if (!Array.isArray(decision))
-            throw new Error('Invalid durable cancellation decision');
-          if (decision[0] === 1) return { status: 'cancelled' };
-          if (decision[0] === 0)
-            return {
-              status: 'completed',
-              result: decodeCommittedResult<T>(decision[1]).result,
-            };
-          throw new Error('Invalid durable cancellation decision');
-        }),
-        new Promise<JobFenceOutcome<T>>(resolve => {
+      decision = await Promise.race([
+        cancelJobInRedis(args.commands, args.target, args.ttlSeconds, true),
+        new Promise<undefined>(resolve => {
           timer = setTimeout(
-            () => resolve({ status: 'expired' }),
+            () => resolve(undefined),
             remainingMs > 0 ? remainingMs : 1_000,
           );
         }),
@@ -449,9 +436,22 @@ export async function fenceJobCancellation<T = unknown>(args: {
         ),
       );
       retryMs = Math.min(1_000, retryMs * 2);
+      continue;
     } finally {
       if (timer != null) clearTimeout(timer);
     }
+    // Only transport failures retry. Corrupt/missing durable results are
+    // deterministic invariant failures, not an invitation to extend their TTL.
+    if (decision === undefined) return { status: 'expired' };
+    if (!Array.isArray(decision))
+      throw new Error('Invalid durable cancellation decision');
+    if (decision[0] === 1) return { status: 'cancelled' };
+    if (decision[0] === 0)
+      return {
+        status: 'completed',
+        result: decodeCommittedResult<T>(decision[1]).result,
+      };
+    throw new Error('Invalid durable cancellation decision');
   }
   return { status: 'expired' };
 }

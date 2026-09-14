@@ -4,7 +4,8 @@ import type { AuthenticatedRequest } from './types';
 import { getCredentialId } from './auth/principal';
 import { getExecutionIdentity } from './execution-identity';
 
-export const CODEAPI_PROGRAMMATIC_REQUEST_HEADER = 'X-LibreChat-Code-Request-ID';
+export const CODEAPI_PROGRAMMATIC_REQUEST_HEADER =
+  'X-LibreChat-Code-Request-ID';
 const REQUEST_PREFIX = 'codeapi:programmatic-cancellation:v1';
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 
@@ -21,7 +22,9 @@ function requestKey(requestId: string): string {
   return `${REQUEST_PREFIX}:${requestId}`;
 }
 
-export function normalizeProgrammaticRequestId(value: unknown): string | undefined {
+export function normalizeProgrammaticRequestId(
+  value: unknown,
+): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return REQUEST_ID_PATTERN.test(trimmed) ? trimmed : undefined;
@@ -33,12 +36,14 @@ export function programmaticCancellationOwner(
 ): string {
   const identity = getExecutionIdentity(req, userId);
   return createHash('sha256')
-    .update(JSON.stringify([
-      identity.storageNamespace,
-      identity.canonicalUserId,
-      getCredentialId(req),
-      identity.authContextHash ?? '',
-    ]))
+    .update(
+      JSON.stringify([
+        identity.storageNamespace,
+        identity.canonicalUserId,
+        getCredentialId(req),
+        identity.authContextHash ?? '',
+      ]),
+    )
     .digest('hex');
 }
 
@@ -77,10 +82,12 @@ local existing = redis.call('HGET', key, 'owner')
 if existing and existing ~= owner then return {-1} end
 if not existing then redis.call('HSET', key, 'owner', owner) end
 redis.call('HSET', key, 'cancelled', '1')
-redis.call('EXPIRE', key, ttl)
 local queueName = redis.call('HGET', key, 'queueName')
 local jobId = redis.call('HGET', key, 'jobId')
+-- Once attached, never extend this mapping independently of the job decision.
+-- Its original admission TTL already covers execution and late cancellation.
 if queueName and jobId then return {1, queueName, jobId} end
+redis.call('EXPIRE', key, ttl)
 return {1}
 `;
 
@@ -99,13 +106,15 @@ export async function reserveProgrammaticCancellation(args: {
   owner: string;
   ttlSeconds: number;
 }): Promise<'active' | 'cancelled' | 'duplicate' | 'forbidden'> {
-  const result = Number(await args.redis.eval(
-    RESERVE_SCRIPT,
-    1,
-    requestKey(args.requestId),
-    args.owner,
-    Math.max(1, args.ttlSeconds),
-  ));
+  const result = Number(
+    await args.redis.eval(
+      RESERVE_SCRIPT,
+      1,
+      requestKey(args.requestId),
+      args.owner,
+      Math.max(1, args.ttlSeconds),
+    ),
+  );
   if (result === -1) return 'forbidden';
   if (result === -2) return 'duplicate';
   return result === 1 ? 'cancelled' : 'active';
@@ -118,15 +127,17 @@ export async function attachProgrammaticCancellationTarget(args: {
   target: CancellationTarget;
   ttlSeconds: number;
 }): Promise<'active' | 'cancelled' | 'forbidden'> {
-  const result = Number(await args.redis.eval(
-    ATTACH_SCRIPT,
-    1,
-    requestKey(args.requestId),
-    args.owner,
-    args.target.queueName,
-    args.target.jobId,
-    Math.max(1, args.ttlSeconds),
-  ));
+  const result = Number(
+    await args.redis.eval(
+      ATTACH_SCRIPT,
+      1,
+      requestKey(args.requestId),
+      args.owner,
+      args.target.queueName,
+      args.target.jobId,
+      Math.max(1, args.ttlSeconds),
+    ),
+  );
   if (result < 0) return 'forbidden';
   return result === 1 ? 'cancelled' : 'active';
 }

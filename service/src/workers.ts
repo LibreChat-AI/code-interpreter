@@ -50,7 +50,10 @@ import {
   validateQueuedExecutionProfile,
   validateQueuedSandboxBackend,
 } from './execution-profile';
-import { BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES, programmaticTransferReserveMs } from '../../packages/code/src/protocol';
+import {
+  BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES,
+  programmaticTransferReserveMs,
+} from '../../packages/code/src/protocol';
 
 const { INSTANCE_ID } = env;
 const WORKER_ID = `${INSTANCE_ID}-${process.pid}`;
@@ -97,7 +100,10 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       : undefined;
   let cancellationRegistered = false;
   const deadlineAtMs = jobDeadlineAtMs(
-    job.timestamp, env.JOB_TIMEOUT, Date.now(), job.data.deadlineAtMs,
+    job.timestamp,
+    env.JOB_TIMEOUT,
+    Date.now(),
+    job.data.deadlineAtMs,
   );
   const remainingBudgetMs = Math.max(0, deadlineAtMs - Date.now());
   const timer =
@@ -110,12 +116,20 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
   let revokeReason = 'completed';
   let completedResult = false;
   let resultToCommit: t.ExecuteResult | undefined;
+  let resultCommittedAtHandoff = false;
+  const commitAtHandoff =
+    cancellationTarget != null &&
+    job.data.workspaceId != null &&
+    env.SANDBOX_BACKEND === 'remote-bridge';
 
   try {
     if (cancellationTarget != null) {
       await jobCancellationRegistry.register(cancellationTarget, controller);
       cancellationRegistered = true;
-      const committed = await readCommittedJobResult<t.ExecuteResult>(connection, cancellationTarget);
+      const committed = await readCommittedJobResult<t.ExecuteResult>(
+        connection,
+        cancellationTarget,
+      );
       if (committed != null) return committed.result;
     }
     if (controller.signal.aborted) {
@@ -157,7 +171,13 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
 
     const delivery = prepareInputDelivery(payload, sandboxPayload);
     const sandboxRequest = buildSandboxExecuteRequest({
-      ...(job.data.workspaceId == null ? {} : { programmaticTransferReserveMs: programmaticTransferReserveMs(env.JOB_TIMEOUT) }),
+      ...(job.data.workspaceId == null
+        ? {}
+        : {
+            programmaticTransferReserveMs: programmaticTransferReserveMs(
+              env.JOB_TIMEOUT,
+            ),
+          }),
       payload: delivery.payload,
       egressGrantToken,
       executionManifestClaims,
@@ -190,20 +210,36 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     const finalizeSandboxResult = async (
       result: SandboxRawResponse,
     ): Promise<SandboxRawResponse> => {
-      if (
-        resultRestoreToken === undefined ||
-        resultRestoreToken.length === 0 ||
-        finalizedSandboxResults.has(result)
-      ) {
-        return result;
+      if (finalizedSandboxResults.has(result)) return result;
+      const restored =
+        resultRestoreToken == null || resultRestoreToken.length === 0
+          ? result
+          : await restoreGatewaySandboxResult({
+              grantId: egressGrantId,
+              egressGrantToken: resultRestoreToken,
+              result,
+              isSynthetic: isSyntheticJob,
+              signal: controller.signal,
+            });
+      if (commitAtHandoff && cancellationTarget != null) {
+        // The bridge still owns its mutation fence here. A failed/ambiguous
+        // commit quarantines that root before it can serve a caller retry.
+        throwIfJobAborted(controller.signal);
+        const mapped = mapSandboxResult(restored);
+        const committed = await commitJobResult(
+          connection,
+          cancellationTarget,
+          mapped,
+          jobCancellationRetentionSeconds(
+            env.JOB_TIMEOUT,
+            job.data.cancellationTtlSeconds,
+          ),
+          deadlineAtMs,
+        );
+        if (!committed) throw new Error(JOB_CANCELLED_MESSAGE);
+        resultToCommit = mapped;
+        resultCommittedAtHandoff = true;
       }
-      const restored = await restoreGatewaySandboxResult({
-        grantId: egressGrantId,
-        egressGrantToken: resultRestoreToken,
-        result,
-        isSynthetic: isSyntheticJob,
-        signal: controller.signal,
-      });
       finalizedSandboxResults.add(restored);
       return restored;
     };
@@ -231,7 +267,8 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
          * before checkpointing/reusing the mutated workspace. Stateless/HTTP
          * paths retain the worker-owned fallback immediately below. */
         sessionResultFinalizer:
-          resultRestoreToken !== undefined && resultRestoreToken.length > 0
+          commitAtHandoff ||
+          (resultRestoreToken !== undefined && resultRestoreToken.length > 0)
             ? finalizeSandboxResult
             : undefined,
       },
@@ -240,64 +277,76 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     const responseData = await finalizeSandboxResult(responseRaw);
     // Cancellation can arrive after sandbox exit while artifact restoration
     // yields. Do not let BullMQ commit a success after Stop was acknowledged.
-    throwIfJobAborted(controller.signal);
+    if (!resultCommittedAtHandoff) throwIfJobAborted(controller.signal);
 
-    if (!isSyntheticJob) {
-      logger.info('Sandbox response', summarizeSandboxResponse(responseData));
-    }
+    function mapSandboxResult(
+      responseData: SandboxRawResponse,
+    ): t.ExecuteResult {
+      if (!isSyntheticJob) {
+        logger.info('Sandbox response', summarizeSandboxResponse(responseData));
+      }
 
-    const { files } = responseData;
-    const run = responseData.run;
-    const stdout = applySystemReplacements(run?.stdout ?? '');
-    const stderr = filterSystemLogs(run?.stderr ?? '', isPyPlot);
+      const { files } = responseData;
+      const run = responseData.run;
+      const stdout = applySystemReplacements(run?.stdout ?? '');
+      const stderr = filterSystemLogs(run?.stderr ?? '', isPyPlot);
 
-    const result: t.ExecuteResult = {
-      session_id: responseData.session_id,
-      /* `files` is optional on the sandbox response (e.g. dry-run
-       * execute with no outputs); the public `ExecuteResult.files` is
-       * required and downstream callers always iterate it. Default to
-       * `[]` so the strictened response type from Phase B doesn't
-       * surface a regression that wasn't there before. */
-      files: files ?? [],
-      ...(responseData.artifact_delivery != null
-        ? { artifact_delivery: responseData.artifact_delivery }
-        : {}),
-      ...(responseData.artifact_truncation != null
-        ? { artifact_truncation: responseData.artifact_truncation }
-        : {}),
-      stdout,
-      stderr,
-      ...(responseData.pending_tool_calls_payload != null
-        ? {
-            pending_tool_calls_payload: responseData.pending_tool_calls_payload,
-          }
-        : {}),
-    };
-
-    if (run) {
-      result.code = run.code ?? null;
-      result.signal = run.signal != null ? String(run.signal) : null;
-      result.message = run.message ?? null;
-      result.status = run.status ?? null;
-      result.wall_time =
-        ((run as Record<string, unknown>).wall_time as number | null) ?? null;
-    }
-
-    if (result.message || result.signal) {
-      logger.warn('Sandbox execution error metadata', {
+      const result: t.ExecuteResult = {
         session_id: responseData.session_id,
-        code: result.code,
-        signal: result.signal,
-        message: summarizeText(result.message),
-        status: result.status,
-        wall_time: result.wall_time,
-      });
+        /* `files` is optional on the sandbox response (e.g. dry-run
+         * execute with no outputs); the public `ExecuteResult.files` is
+         * required and downstream callers always iterate it. Default to
+         * `[]` so the strictened response type from Phase B doesn't
+         * surface a regression that wasn't there before. */
+        files: files ?? [],
+        ...(responseData.artifact_delivery != null
+          ? { artifact_delivery: responseData.artifact_delivery }
+          : {}),
+        ...(responseData.artifact_truncation != null
+          ? { artifact_truncation: responseData.artifact_truncation }
+          : {}),
+        stdout,
+        stderr,
+        ...(responseData.pending_tool_calls_payload != null
+          ? {
+              pending_tool_calls_payload:
+                responseData.pending_tool_calls_payload,
+            }
+          : {}),
+      };
+
+      if (run) {
+        result.code = run.code ?? null;
+        result.signal = run.signal != null ? String(run.signal) : null;
+        result.message = run.message ?? null;
+        result.status = run.status ?? null;
+        result.wall_time =
+          ((run as Record<string, unknown>).wall_time as number | null) ?? null;
+      }
+
+      if (result.message || result.signal) {
+        logger.warn('Sandbox execution error metadata', {
+          session_id: responseData.session_id,
+          code: result.code,
+          signal: result.signal,
+          message: summarizeText(result.message),
+          status: result.status,
+          wall_time: result.wall_time,
+        });
+      }
+
+      return result;
     }
 
+    const result = resultToCommit ?? mapSandboxResult(responseData);
     completedResult = true;
     resultToCommit = result;
     return result;
   } catch (error) {
+    // Bridge fence cleanup can fail after the outcome was durably committed.
+    // Preserve the winning result; the bridge retains/quarantines its fence.
+    if (resultCommittedAtHandoff && resultToCommit != null)
+      return resultToCommit;
     const clientDisconnected =
       controller.signal.aborted &&
       controller.signal.reason === CLIENT_DISCONNECT_REASON;
@@ -351,36 +400,47 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
         isSynthetic: isSyntheticJob,
         reason: revokeReason,
         timeoutMs: env.EGRESS_GATEWAY_REVOKE_TIMEOUT_MS,
-      }).catch((error) => {
+      }).catch(error => {
         logger.error('Failed to revoke egress grant', {
           grantId: egressGrantId,
           error: getAxiosErrorDetails(error),
         });
       });
     }
-    let lateCommitFailure = completedResult
-      ? jobResultCommitFailure(controller.signal, env.JOB_TIMEOUT)
-      : undefined;
+    let lateCommitFailure =
+      completedResult && !resultCommittedAtHandoff
+        ? jobResultCommitFailure(controller.signal, env.JOB_TIMEOUT)
+        : undefined;
     if (
-      completedResult && cancellationTarget != null && lateCommitFailure == null
+      completedResult &&
+      !resultCommittedAtHandoff &&
+      cancellationTarget != null &&
+      lateCommitFailure == null
     ) {
       try {
         const committed = await commitJobResult(
-          connection, cancellationTarget, resultToCommit,
-          jobCancellationRetentionSeconds(env.JOB_TIMEOUT, job.data.cancellationTtlSeconds), deadlineAtMs,
+          connection,
+          cancellationTarget,
+          resultToCommit,
+          jobCancellationRetentionSeconds(
+            env.JOB_TIMEOUT,
+            job.data.cancellationTtlSeconds,
+          ),
+          deadlineAtMs,
         );
         if (!committed) {
           lateCommitFailure = new Error(JOB_CANCELLED_MESSAGE);
         }
       } catch (error) {
-        lateCommitFailure = error instanceof Error ? error : new Error('Result commit failed');
+        lateCommitFailure =
+          error instanceof Error ? error : new Error('Result commit failed');
       }
     }
     if (timer) clearTimeout(timer);
     if (cancellationTarget != null && cancellationRegistered) {
       await jobCancellationRegistry
         .unregister(cancellationTarget, controller)
-        .catch((error) => {
+        .catch(error => {
           logger.warn('Failed to clear queued execution cancellation state', {
             queueName: cancellationTarget.queueName,
             jobId: cancellationTarget.jobId,
@@ -418,14 +478,14 @@ export const otherWorker = new Worker(queueNames.other, processJob, {
 workerRunning.set({ worker_type: 'python' }, 1);
 workerRunning.set({ worker_type: 'other' }, 1);
 
-pyWorker.on('completed', (job) => {
+pyWorker.on('completed', job => {
   if (job.data.isSynthetic !== true) {
     logger.info(`[${WORKER_ID}] Python job completed ${job.id}`);
   }
   jobsCompleted.inc({ language: 'python' });
 });
 
-otherWorker.on('completed', (job) => {
+otherWorker.on('completed', job => {
   if (job.data.isSynthetic !== true) {
     logger.info(`[${WORKER_ID}] Other job completed ${job.id}`);
   }
@@ -452,12 +512,12 @@ otherWorker.on('failed', (job, err) => {
   jobsFailed.inc({ language: 'other' });
 });
 
-pyWorker.on('error', (err) => {
+pyWorker.on('error', err => {
   logger.error(`[${WORKER_ID}] Python worker error`, err);
   workerRunning.set({ worker_type: 'python' }, 0);
 });
 
-otherWorker.on('error', (err) => {
+otherWorker.on('error', err => {
   logger.error(`[${WORKER_ID}] Other worker error`, err);
   workerRunning.set({ worker_type: 'other' }, 0);
 });
