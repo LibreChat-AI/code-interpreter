@@ -34,6 +34,7 @@ export async function pollBlockingExecution(
   stderr?: string;
   files?: t.FileRefs;
   artifact_delivery?: t.ArtifactDeliveryFailure;
+  artifact_truncation?: t.ArtifactTruncation;
 }> {
   const start = deps.now();
   while (deps.now() - start < timeout) {
@@ -48,6 +49,7 @@ export async function pollBlockingExecution(
           stderr: result.stderr,
           files: result.files,
           artifact_delivery: result.artifact_delivery,
+          artifact_truncation: result.artifact_truncation,
         };
       }
     }

@@ -26,6 +26,12 @@ interface WalkerInternals {
   generatedFiles: Array<{ id: string; name: string; path: string }>;
   sessionFiles: Array<{ id: string; name: string; storage_session_id: string; modified_from?: { id: string; storage_session_id: string }; inherited?: true; entity_id?: string }>;
   inheritedRefs: Array<{ id: string; name: string; storage_session_id: string; inherited?: true; entity_id?: string }>;
+  artifactTruncation?: {
+    code: 'artifact_truncated';
+    reasons: Partial<Record<'max_files' | 'depth' | 'size' | 'path' | 'unreadable', number>>;
+    skipped: string[];
+    skipped_count: number;
+  };
   pendingSurfaced: Map<string, { name: string; signature: string }>;
   inputFileHashes: Map<string, { hash: string; path: string; originalId?: string; originalSessionId?: string; readOnly?: boolean }>;
   files: TFile[];
@@ -743,6 +749,10 @@ describe('walkDir / output caps', () => {
     await internals.walkDir(tmpDir, 0, new Map());
 
     expect(internals.generatedFiles.length).toBeLessThanOrEqual(cap);
+    expect(internals.artifactTruncation).toMatchObject({
+      code: 'artifact_truncated',
+      reasons: { max_files: 1 },
+    });
   });
 
   it('respects max_output_files cap on inherited refs', async () => {
@@ -771,6 +781,11 @@ describe('walkDir / output caps', () => {
 
     expect(internals.inheritedRefs.length).toBeLessThanOrEqual(cap);
     expect(internals.generatedFiles).toHaveLength(0);
+    expect(internals.artifactTruncation).toMatchObject({
+      code: 'artifact_truncated',
+      reasons: { max_files: 5 },
+      skipped_count: 5,
+    });
   });
 });
 
@@ -792,6 +807,52 @@ describe('walkDir / depth cap', () => {
 
     const deepName = path.relative(tmpDir, path.join(cursor, 'deep.py'));
     expect(internals.generatedFiles.map(f => f.name)).not.toContain(deepName);
+    expect(internals.artifactTruncation).toMatchObject({
+      code: 'artifact_truncated',
+      reasons: { depth: 1 },
+      skipped_count: 1,
+    });
+    expect(internals.artifactTruncation?.skipped[0]).toBe(
+      deepName.split(path.sep).slice(0, config.max_nesting_depth).join(path.sep),
+    );
+  });
+});
+
+describe('walkDir / artifact truncation details', () => {
+  it('reports oversized supported outputs while leaving them out of files', async () => {
+    await fsp.writeFile(path.join(tmpDir, 'large.txt'), 'too large');
+    const job = makeJob({ maxFileSize: 3 });
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.generatedFiles).toHaveLength(0);
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { size: 1 },
+      skipped: ['large.txt'],
+      skipped_count: 1,
+    });
+  });
+
+  it('reports overlong output paths', async () => {
+    const directory = 'a'.repeat(200);
+    await fsp.mkdir(path.join(tmpDir, directory));
+    const name = path.join(directory, `${'b'.repeat(60)}.txt`);
+    await fsp.writeFile(path.join(tmpDir, name), 'content');
+    const job = makeJob();
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { path: 1 },
+      skipped: [name],
+      skipped_count: 1,
+    });
   });
 });
 

@@ -28,6 +28,12 @@ describe('execution log summaries', () => {
         failed: 1,
         detail: 'private storage failure',
       },
+      artifact_truncation: {
+        code: 'artifact_truncated',
+        reasons: { max_files: 2 },
+        skipped: ['secret-one.txt', 'secret-two.txt'],
+        skipped_count: 2,
+      },
       run: {
         code: 0,
         stdout: 'top secret stdout',
@@ -42,6 +48,7 @@ describe('execution log summaries', () => {
     expect(JSON.stringify(summary)).not.toContain('sensitive stderr');
     expect(JSON.stringify(summary)).not.toContain('combined output');
     expect(JSON.stringify(summary)).not.toContain('private storage failure');
+    expect(JSON.stringify(summary)).not.toContain('secret-one.txt');
     expect(summary).toMatchObject({
       session_id: 'sess_123',
       files: { count: 2, inheritedCount: 1, modifiedCount: 1 },
@@ -51,6 +58,12 @@ describe('execution log summaries', () => {
         attempted: 3,
         delivered: 2,
         failed: 1,
+      },
+      artifact_truncation: {
+        code: 'artifact_truncated',
+        reasons: { max_files: 2 },
+        skipped_count: 2,
+        reported_paths: 2,
       },
       run: {
         stdout: { length: 17, present: true },

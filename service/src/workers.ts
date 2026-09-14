@@ -182,6 +182,9 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       ...(responseData.artifact_delivery != null
         ? { artifact_delivery: responseData.artifact_delivery }
         : {}),
+      ...(responseData.artifact_truncation != null
+        ? { artifact_truncation: responseData.artifact_truncation }
+        : {}),
       stdout,
       stderr,
     };

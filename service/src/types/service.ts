@@ -111,6 +111,15 @@ export interface ArtifactDeliveryFailure {
   failed: number;
 }
 
+export type ArtifactTruncationReason = 'max_files' | 'depth' | 'size' | 'path' | 'unreadable';
+
+export interface ArtifactTruncation {
+  code: 'artifact_truncated';
+  reasons: Partial<Record<ArtifactTruncationReason, number>>;
+  skipped: string[];
+  skipped_count: number;
+}
+
 export type ExecuteResponse = {
   run?: {
     stdout: string;
@@ -130,6 +139,7 @@ export type ExecuteResponse = {
   session_id: string;
   files: FileRefs;
   artifact_delivery?: ArtifactDeliveryFailure;
+  artifact_truncation?: ArtifactTruncation;
 };
 
 export interface RequestBody {
@@ -233,6 +243,7 @@ export type ExecuteResult = {
   stderr: string;
   files: FileRefs;
   artifact_delivery?: ArtifactDeliveryFailure;
+  artifact_truncation?: ArtifactTruncation;
   code?: number | null;
   signal?: string | null;
   message?: string | null;
@@ -371,6 +382,7 @@ export interface ProgrammaticResponse {
   stderr?: string;
   files?: FileRefs;
   artifact_delivery?: ArtifactDeliveryFailure;
+  artifact_truncation?: ArtifactTruncation;
   /** Top-level execution session id (one sandbox PTC invocation). */
   session_id?: string;
   tool_calls_made?: number;

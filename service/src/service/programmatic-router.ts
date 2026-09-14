@@ -933,6 +933,7 @@ async function runAndRespond(
     stderr: result.stderr,
     files: result.files,
     artifact_delivery: result.artifact_delivery,
+    artifact_truncation: result.artifact_truncation,
     session_id: state.session_id,
   });
 }
@@ -1152,6 +1153,7 @@ async function handleBlocking(
           stderr: state.stderr ?? '',
           files: state.files ?? [],
           artifact_delivery: state.artifact_delivery,
+          artifact_truncation: state.artifact_truncation,
           session_id: execution.session_id,
         });
       }
@@ -1405,6 +1407,7 @@ async function handleBlocking(
         stderr: state.stderr ?? '',
         files: state.files ?? [],
         artifact_delivery: state.artifact_delivery,
+        artifact_truncation: state.artifact_truncation,
         session_id,
       });
     }

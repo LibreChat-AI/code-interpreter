@@ -39,6 +39,7 @@ import {
   hasRunnableSource,
   isDirkeep,
   isValidPathShape,
+  checkPathShape,
   validateFilePath,
   isValidFilePath,
 } from './validation';
@@ -647,7 +648,19 @@ interface ExecuteResult {
   session_id: string;
   files: FileRef[];
   artifact_delivery?: ArtifactDeliveryFailure;
+  artifact_truncation?: ArtifactTruncation;
 }
+
+export type ArtifactTruncationReason = 'max_files' | 'depth' | 'size' | 'path' | 'unreadable';
+
+export interface ArtifactTruncation {
+  code: 'artifact_truncated';
+  reasons: Partial<Record<ArtifactTruncationReason, number>>;
+  skipped: string[];
+  skipped_count: number;
+}
+
+const MAX_REPORTED_TRUNCATED_PATHS = 20;
 
 const jobQueue: Array<() => void> = [];
 
@@ -693,6 +706,7 @@ export class Job {
   private pendingSurfaced = new Map<string, { name: string; signature: string }>();
   private sessionFiles: FileRef[] = [];
   private inheritedRefs: FileRef[] = [];
+  private artifactTruncation: ArtifactTruncation | undefined;
   private inputFileHashes = new Map<string, InputFileInfo>();
   private inputManifest = new Map<TFile, unknown>();
   private inputDestinations = new Map<string, TFile>();
@@ -1673,6 +1687,7 @@ export class Job {
       version: this.runtime.version.raw,
       session_id: this.outputSessionId,
       files: this.sessionFiles,
+      ...(this.artifactTruncation ? { artifact_truncation: this.artifactTruncation } : {}),
     };
   }
 
@@ -1680,6 +1695,7 @@ export class Job {
     this.generatedFiles = [];
     this.sessionFiles = [];
     this.inheritedRefs = [];
+    this.artifactTruncation = undefined;
 
     const inputByName = new Map<string, TFile>();
     for (const f of this.files) inputByName.set(f.name, f);
@@ -1698,6 +1714,23 @@ export class Job {
     const remaining = Math.max(0, config.max_output_files - this.sessionFiles.length);
     if (remaining > 0 && this.inheritedRefs.length > 0) {
       this.sessionFiles.push(...this.inheritedRefs.slice(0, remaining));
+    }
+    for (const ref of this.inheritedRefs.slice(remaining)) {
+      this.recordArtifactTruncation('max_files', ref.name);
+    }
+  }
+
+  private recordArtifactTruncation(reason: ArtifactTruncationReason, relativePath: string): void {
+    this.artifactTruncation ??= {
+      code: 'artifact_truncated',
+      reasons: {},
+      skipped: [],
+      skipped_count: 0,
+    };
+    this.artifactTruncation.reasons[reason] = (this.artifactTruncation.reasons[reason] ?? 0) + 1;
+    this.artifactTruncation.skipped_count++;
+    if (this.artifactTruncation.skipped.length < MAX_REPORTED_TRUNCATED_PATHS) {
+      this.artifactTruncation.skipped.push(relativePath);
     }
   }
 
@@ -1722,6 +1755,7 @@ export class Job {
         isRegularFile = st.isFile();
       } catch (err) {
         this.log.debug({ path: relativePath, err }, 'walkDir: failed to lstat entry');
+        this.recordArtifactTruncation('unreadable', relativePath);
         return 'skip';
       }
     }
@@ -1770,6 +1804,7 @@ export class Job {
       return this.createDirkeepMarker(keepPath, keepFullPath);
     }
     if (this.generatedFiles.length >= config.max_output_files) {
+      this.recordArtifactTruncation('max_files', keepPath);
       return { collected: false, truncated: true };
     }
     const id = nanoid();
@@ -1819,6 +1854,7 @@ export class Job {
     if (!keepModified || keepInfo?.readOnly === true) return this.echoInheritedKeep(keepPath, inheritedKeep);
 
     if (this.generatedFiles.length >= config.max_output_files) {
+      this.recordArtifactTruncation('max_files', keepPath);
       return { collected: false, truncated: true };
     }
     const refreshedId = nanoid();
@@ -1860,6 +1896,7 @@ export class Job {
     inheritedKeep: TFile,
   ): { collected: boolean; truncated: boolean } {
     if (this.inheritedRefs.length >= config.max_output_files) {
+      this.recordArtifactTruncation('max_files', keepPath);
       return { collected: false, truncated: true };
     }
     this.inheritedRefs.push({
@@ -1886,6 +1923,7 @@ export class Job {
     keepFullPath: string,
   ): Promise<{ collected: boolean; truncated: boolean }> {
     if (this.generatedFiles.length >= config.max_output_files) {
+      this.recordArtifactTruncation('max_files', keepPath);
       return { collected: false, truncated: true };
     }
     try {
@@ -1944,6 +1982,7 @@ export class Job {
 
     if (existingFile.id && existingFile.storage_session_id) {
       if (this.inheritedRefs.length >= config.max_output_files) {
+        this.recordArtifactTruncation('max_files', relativePath);
         return { collected: false, truncated: true };
       }
       this.inheritedRefs.push({
@@ -2003,9 +2042,11 @@ export class Job {
       size = st.size;
     } catch (err) {
       this.log.debug({ path: relativePath, err }, 'walkDir: unable to stat file');
+      this.recordArtifactTruncation('unreadable', relativePath);
       return { collected: false, truncated: false, stopLoop: false };
     }
     if (size > this.runtime.max_file_size) {
+      this.recordArtifactTruncation('size', relativePath);
       return { collected: false, truncated: false, stopLoop: false };
     }
 
@@ -2067,6 +2108,7 @@ export class Job {
     if (echoed) return { ...echoed, stopLoop: false };
 
     if (this.generatedFiles.length >= config.max_output_files) {
+      this.recordArtifactTruncation('max_files', relativePath);
       return { collected: false, truncated: true, stopLoop: true };
     }
 
@@ -2120,14 +2162,22 @@ export class Job {
     depth: number,
     inputByName: Map<string, TFile>,
   ): Promise<'collected' | 'empty' | 'skipped'> {
-    if (depth >= config.max_nesting_depth) return 'skipped';
-    if (this.isOutputCapFull()) return 'skipped';
+    const relativeDir = path.relative(this.submissionDir, dir) || '.';
+    if (depth >= config.max_nesting_depth) {
+      this.recordArtifactTruncation('depth', relativeDir);
+      return 'skipped';
+    }
+    if (this.isOutputCapFull()) {
+      this.recordArtifactTruncation('max_files', relativeDir);
+      return 'skipped';
+    }
 
     let entries: fs.Dirent[];
     try {
       entries = await fsp.readdir(dir, { withFileTypes: true });
     } catch (err) {
       this.log.debug({ dir, err }, 'walkDir: unable to read directory');
+      this.recordArtifactTruncation('unreadable', relativeDir);
       return 'skipped';
     }
 
@@ -2166,12 +2216,18 @@ export class Job {
     let skippedHiddenDirs = 0;
 
     for (const entry of entries) {
-      if (this.isOutputCapFull()) { truncated = true; break; }
       if (isPtcReserved(entry.name)) continue;
 
       const fullPath = path.join(dir, entry.name);
       const relativePath = path.relative(this.submissionDir, fullPath);
-      if (!isValidPathShape(relativePath)) continue;
+      const pathShapeError = checkPathShape(relativePath);
+      if (pathShapeError) {
+        this.recordArtifactTruncation(
+          pathShapeError.includes('nesting depth') ? 'depth' : 'path',
+          relativePath,
+        );
+        continue;
+      }
 
       const kind = await this.classifyDirent(entry, fullPath, relativePath);
       if (kind === 'skip') continue;
