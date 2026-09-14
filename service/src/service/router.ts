@@ -7,7 +7,13 @@ import { Readable } from 'stream';
 import type * as t from '../types';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
 import { sessionAuth } from '../middleware/auth';
-import { executionLimiter, uploadLimiter, downloadLimiter, fetchLimiter } from '../middleware/limits';
+import {
+  executionLimiter,
+  uploadLimiter,
+  downloadLimiter,
+  fetchLimiter,
+  deleteLimiter,
+} from '../middleware/limits';
 import { internalServiceHeaders } from '../internal-service-auth';
 import { resolveSessionKey, resolveOutputBucketSessionKey, SessionKeyResolutionError, parseUploadSessionKeyInput, type SessionKeyInput } from '../session-key';
 import { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, queueNames, connection } from '../queue';
@@ -997,7 +1003,7 @@ const deleteSessionObject = async (req: t.AuthenticatedRequest, res: Response) =
   }
 };
 
-router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, deleteSessionObject);
+router.delete('/files/:session_id/:fileId', deleteLimiter, sessionAuth, deleteSessionObject);
 
 /**
  * Alias of the route above, on the path LibreChat's `deleteCodeEnvFile`
@@ -1013,6 +1019,6 @@ router.delete('/files/:session_id/:fileId', fetchLimiter, sessionAuth, deleteSes
  *
  * GET on this same path is the metadata proxy above.
  */
-router.delete('/sessions/:session_id/objects/:fileId', fetchLimiter, sessionAuth, deleteSessionObject);
+router.delete('/sessions/:session_id/objects/:fileId', deleteLimiter, sessionAuth, deleteSessionObject);
 
 export default router;

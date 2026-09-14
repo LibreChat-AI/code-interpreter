@@ -346,6 +346,12 @@ export const env = {
   // Files List Rate Limits
   FETCH_LIMIT_WINDOW: Number(process.env.FETCH_LIMIT_WINDOW) || 60 * 1000, // 1 minute
   FETCH_MAX_REQUESTS: Number(process.env.FETCH_MAX_REQUESTS) || 120, // 120 requests per minute
+  // File Delete Rate Limits. Fall back to the fetch settings so existing
+  // deployments keep their current limits while using an independent bucket.
+  DELETE_LIMIT_WINDOW:
+    Number(process.env.DELETE_LIMIT_WINDOW) || Number(process.env.FETCH_LIMIT_WINDOW) || 60 * 1000,
+  DELETE_MAX_REQUESTS:
+    Number(process.env.DELETE_MAX_REQUESTS) || Number(process.env.FETCH_MAX_REQUESTS) || 120,
   // Redis Key Cache Config
   SESSION_CACHE_TTL: Number(process.env.SESSION_CACHE_TTL) || 86400,
   /** TTL for the durable `session-owner:<session_id>` record that backs

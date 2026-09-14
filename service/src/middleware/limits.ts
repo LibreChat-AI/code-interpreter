@@ -202,3 +202,14 @@ export const fetchLimiter = createRateLimiter(
   env.FETCH_MAX_REQUESTS,
   { message: 'Too many file list requests.' }
 );
+
+export const deleteLimiter = createRateLimiter(
+  'delete',
+  env.DELETE_LIMIT_WINDOW,
+  env.DELETE_MAX_REQUESTS,
+  {
+    message: 'Too many file deletion requests.',
+    structuredBody: true,
+    logRejections: true,
+  }
+);

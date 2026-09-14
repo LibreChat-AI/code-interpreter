@@ -11,7 +11,7 @@ test('/exec validates timeout before enqueue and forwards its cap to both langua
     mock.module('./src/middleware/auth', () => ({ sessionAuth: passthrough }));
     mock.module('./src/middleware/limits', () => ({
       executionLimiter: passthrough, uploadLimiter: passthrough,
-      downloadLimiter: passthrough, fetchLimiter: passthrough,
+      downloadLimiter: passthrough, fetchLimiter: passthrough, deleteLimiter: passthrough,
     }));
     mock.module('./src/lifecycle', () => ({
       checkServiceStartUp: () => false, checkServiceShutDown: () => false,

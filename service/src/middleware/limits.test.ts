@@ -111,6 +111,40 @@ async function startRateLimitedApp(max: number, windowMs: number): Promise<strin
   return `http://127.0.0.1:${address.port}`;
 }
 
+async function startIndependentFileLimiterApp(max: number, windowMs: number): Promise<string> {
+  const redis = new TestRedisRateLimitStore();
+  setRateLimitRedisForTests(redis);
+
+  const app = express();
+  app.use((req, _res, next) => {
+    applyPrincipal(req as AuthenticatedRequest, {
+      userId: 'user-a',
+      tenantId: 'tenant-a',
+      principalSource: 'librechat_jwt',
+    });
+    next();
+  });
+  app.get(
+    '/v1/files/session-a',
+    createRateLimiter('test-fetch', windowMs, max, { message: 'Too many file list requests.' }),
+    (_req, res) => res.status(200).json({ ok: true }),
+  );
+  app.delete(
+    '/v1/files/session-a/file-a',
+    createRateLimiter('test-delete', windowMs, max, {
+      message: 'Too many file deletion requests.',
+      structuredBody: true,
+    }),
+    (_req, res) => res.status(200).json({ ok: true }),
+  );
+
+  const server = app.listen(0, '127.0.0.1');
+  servers.push(server);
+  await once(server, 'listening');
+  const address = server.address() as AddressInfo;
+  return `http://127.0.0.1:${address.port}`;
+}
+
 function postExec(url: string, headers: Record<string, string> = {}): Promise<Response> {
   return fetch(`${url}/v1/exec`, {
     method: 'POST',
@@ -226,5 +260,27 @@ describe('execution rate limiting', () => {
     expect((await postExec(url)).status).toBe(429);
     await new Promise(resolve => setTimeout(resolve, 125));
     expect((await postExec(url)).status).toBe(200);
+  });
+});
+
+describe('file operation rate limiting', () => {
+  test('keeps deletion traffic out of the file-list bucket and returns structured retry guidance', async () => {
+    const url = await startIndependentFileLimiterApp(1, 30_000);
+
+    expect((await fetch(`${url}/v1/files/session-a`)).status).toBe(200);
+    expect((await fetch(`${url}/v1/files/session-a/file-a`, { method: 'DELETE' })).status).toBe(200);
+
+    const rejectedDelete = await fetch(`${url}/v1/files/session-a/file-a`, { method: 'DELETE' });
+    const body = await rejectedDelete.json() as ReturnType<typeof rateLimitResponseBody>;
+    expect(rejectedDelete.status).toBe(429);
+    expect(rejectedDelete.headers.get('retry-after')).not.toBeNull();
+    expect(body.error).toBe('rate_limited');
+    expect(body.message).toContain('Too many file deletion requests.');
+
+    const rejectedList = await fetch(`${url}/v1/files/session-a`);
+    expect(rejectedList.status).toBe(429);
+    expect(await rejectedList.json()).toEqual({
+      error: expect.stringContaining('Too many file list requests.'),
+    });
   });
 });
