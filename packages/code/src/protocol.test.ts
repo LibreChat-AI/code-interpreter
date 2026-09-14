@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  bridgeArtifactMediaType,
   bridgeWorkerPath,
   comparePortableRelativePaths,
   isBridgeWorkspaceProgrammaticRequest,
+  isSupportedBridgeArtifactName,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
   isWorkspaceToolRequest,
@@ -725,4 +727,35 @@ test('workspace programmatic requests reject non-canonical file paths', () => {
       name,
     );
   }
+});
+
+test('workspace programmatic requests reject ancestor-descendant input conflicts', () => {
+  for (const names of [
+    ['main.sh', 'main.sh/data.txt'],
+    ['main.sh', 'assets', 'assets/logo.png'],
+    ['main.sh', 'deep/path/file.txt', 'deep'],
+  ]) {
+    assert.equal(
+      isBridgeWorkspaceProgrammaticRequest({
+        headers: {},
+        body: {
+          language: 'bash',
+          version: '5.2',
+          session_id: 'session-1',
+          files: names.map(name => ({ name, content: 'data' })),
+        },
+      }),
+      false,
+      names.join(', '),
+    );
+  }
+});
+
+test('bridge artifact policy and media types match the hardened gateway contract', () => {
+  assert.equal(isSupportedBridgeArtifactName('reports/result.json'), true);
+  assert.equal(isSupportedBridgeArtifactName('preview.png'), true);
+  assert.equal(isSupportedBridgeArtifactName('model.bin'), false);
+  assert.equal(bridgeArtifactMediaType('preview.png'), 'image/png');
+  assert.equal(bridgeArtifactMediaType('reports/result.json'), 'application/json');
+  assert.equal(bridgeArtifactMediaType('Dockerfile'), 'application/octet-stream');
 });

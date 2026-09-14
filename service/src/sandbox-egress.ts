@@ -65,6 +65,9 @@ export function timeoutMsToGrantSeconds(timeoutMs: number): number {
 }
 
 const DEFAULT_PROGRAMMATIC_TIMEOUT_MS = 300000;
+const SELECTED_WORKSPACE_REPLAY_PASSES = 2;
+const SELECTED_WORKSPACE_SETTLEMENT_RESERVE_MS = 5_000;
+const SELECTED_WORKSPACE_MAX_QUEUE_RESERVE_MS = 30_000;
 
 export function normalizeProgrammaticTimeoutMs(
   rawTimeout: unknown,
@@ -78,6 +81,31 @@ export function normalizeProgrammaticTimeoutMs(
     throw new Error('timeout must be a positive number of milliseconds');
   }
   return Math.min(Math.ceil(rawTimeout), maxTimeout);
+}
+
+/**
+ * Selected-workspace Bash replay may run one read-only probe and one commit
+ * pass in its final iteration. Bound each pass so both plus settlement reserve
+ * fit inside the worker-owned JOB_TIMEOUT instead of advertising a duration
+ * the assignment cannot complete.
+ */
+export function normalizeSelectedWorkspaceProgrammaticTimeoutMs(
+  rawTimeout: unknown,
+  jobTimeoutMs = env.JOB_TIMEOUT,
+): number {
+  const totalBudget = Math.max(1, Math.floor(jobTimeoutMs));
+  const queueReserve = Math.min(
+    SELECTED_WORKSPACE_MAX_QUEUE_RESERVE_MS,
+    Math.floor(totalBudget / 5),
+  );
+  const executionBudget = Math.max(
+    1,
+    totalBudget - queueReserve - SELECTED_WORKSPACE_SETTLEMENT_RESERVE_MS,
+  );
+  return normalizeProgrammaticTimeoutMs(
+    rawTimeout,
+    Math.max(1, Math.floor(executionBudget / SELECTED_WORKSPACE_REPLAY_PASSES)),
+  );
 }
 
 export async function sealPtcCallbackTokenForGateway(args: {

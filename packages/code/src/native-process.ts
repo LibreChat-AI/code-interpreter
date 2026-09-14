@@ -244,6 +244,8 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
         const processTerminationConfirmed =
           code === 'EXECUTION_ABORTED' &&
           message.requiresQuarantine === false;
+        const mutationMayHaveCommitted =
+          pending.mutation && message.mutation !== false;
         pending.reject(
           new WorkspaceToolError(
             typeof message.errorMessage === 'string' &&
@@ -251,8 +253,8 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
               ? message.errorMessage
               : 'Native executor request failed',
             code,
-            pending.mutation && message.mutation !== false,
-            pending.mutation && !processTerminationConfirmed,
+            mutationMayHaveCommitted,
+            mutationMayHaveCommitted && !processTerminationConfirmed,
           ),
         );
       }

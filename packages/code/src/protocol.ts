@@ -27,6 +27,128 @@ export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 /** How long Code API drains a clean rejection after Stop cancels a workspace mutation. */
 export const BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS = 5_000;
 
+/**
+ * Artifact names accepted by the hardened egress gateway. Keep this policy in
+ * the bridge protocol package so a remote worker can reject unsupported output
+ * locally instead of discovering the mismatch only after mutating a workspace.
+ */
+const BRIDGE_ARTIFACT_EXTENSIONS = new Set([
+  '.c', '.cs', '.cpp', '.go', '.java', '.js', '.kt', '.kts', '.lua',
+  '.php', '.pl', '.ps1', '.py', '.r', '.rb', '.rs', '.scala', '.sh',
+  '.sql', '.swift', '.ts', '.jsx', '.tsx', '.groovy',
+  '.css', '.htm', '.html', '.less', '.sass', '.scss', '.svg', '.svelte', '.vue',
+  '.adoc', '.asciidoc', '.md', '.rst', '.tex', '.txt', '.wiki',
+  '.csv', '.json', '.bson', '.json5', '.jsonl', '.parquet', '.tsv',
+  '.xml', '.yaml', '.yml',
+  '.ics', '.ical', '.ifb', '.icalendar',
+  '.conf', '.env', '.gitignore', '.ini', '.properties', '.toml',
+  '.doc', '.docx', '.pdf', '.ppt', '.pptx', '.xls', '.xlsx',
+  '.odt', '.ods', '.odp', '.rtf',
+  '.avif', '.bmp', '.gif', '.ico', '.jpeg', '.jpg', '.png',
+  '.tif', '.tiff', '.webp',
+  '.eot', '.ttf', '.woff', '.woff2',
+  '.7z', '.bz2', '.gz', '.gzip', '.rar', '.tar', '.zip',
+  '.tf', '.tfvars', '.tfstate', '.hcl',
+  '.dockerfile', '.Dockerfile', '.dockerignore',
+  '.helmignore', '.helmfile', '.jenkinsfile', '.vagrantfile',
+  '.eslintrc', '.prettierrc', '.editorconfig', '.nomad',
+  '.bat', '.cmd', '.deb', '.log', '.rpm', '.vbs',
+]);
+
+function portableBasename(name: string): string {
+  return name.slice(name.lastIndexOf('/') + 1);
+}
+
+/** Apply the gateway's extension allowlist without importing service code. */
+export function isSupportedBridgeArtifactName(name: string): boolean {
+  const basename = portableBasename(name);
+  const dot = basename.lastIndexOf('.');
+  const extension = dot > 0 ? basename.slice(dot).toLowerCase() : '';
+  const dottedBasename = `.${basename}`;
+  return (
+    (extension !== '' && BRIDGE_ARTIFACT_EXTENSIONS.has(extension)) ||
+    BRIDGE_ARTIFACT_EXTENSIONS.has(basename) ||
+    BRIDGE_ARTIFACT_EXTENSIONS.has(basename.toLowerCase()) ||
+    (extension === '' &&
+      (BRIDGE_ARTIFACT_EXTENSIONS.has(dottedBasename) ||
+        BRIDGE_ARTIFACT_EXTENSIONS.has(dottedBasename.toLowerCase())))
+  );
+}
+
+const BRIDGE_ARTIFACT_MEDIA_TYPES: Readonly<Record<string, string>> = {
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
+  '.bz2': 'application/x-bzip2',
+  '.c': 'text/x-c',
+  '.conf': 'text/plain',
+  '.cpp': 'text/x-c++src',
+  '.css': 'text/css',
+  '.csv': 'text/csv',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.gif': 'image/gif',
+  '.gz': 'application/gzip',
+  '.gzip': 'application/gzip',
+  '.htm': 'text/html',
+  '.html': 'text/html',
+  '.ico': 'image/x-icon',
+  '.ics': 'text/calendar',
+  '.ifb': 'text/calendar',
+  '.ical': 'text/calendar',
+  '.icalendar': 'text/calendar',
+  '.ini': 'text/plain',
+  '.java': 'text/x-java-source',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.js': 'text/javascript',
+  '.json': 'application/json',
+  '.json5': 'application/json5',
+  '.jsonl': 'application/x-ndjson',
+  '.jsx': 'text/jsx',
+  '.log': 'text/plain',
+  '.md': 'text/markdown',
+  '.odt': 'application/vnd.oasis.opendocument.text',
+  '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
+  '.odp': 'application/vnd.oasis.opendocument.presentation',
+  '.parquet': 'application/vnd.apache.parquet',
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.py': 'text/x-python',
+  '.rst': 'text/x-rst',
+  '.rtf': 'application/rtf',
+  '.sh': 'application/x-sh',
+  '.sql': 'application/sql',
+  '.svg': 'image/svg+xml',
+  '.tar': 'application/x-tar',
+  '.tex': 'application/x-tex',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.toml': 'application/toml',
+  '.ts': 'text/typescript',
+  '.tsx': 'text/tsx',
+  '.tsv': 'text/tab-separated-values',
+  '.txt': 'text/plain',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.xml': 'application/xml',
+  '.yaml': 'application/yaml',
+  '.yml': 'application/yaml',
+  '.zip': 'application/zip',
+};
+
+/** Infer a safe response media type from an already-validated artifact name. */
+export function bridgeArtifactMediaType(name: string): string {
+  const basename = portableBasename(name).toLowerCase();
+  const dot = basename.lastIndexOf('.');
+  const extension = dot > 0 ? basename.slice(dot) : basename;
+  return BRIDGE_ARTIFACT_MEDIA_TYPES[extension] ?? 'application/octet-stream';
+}
+
 export type BridgeProtocolVersion = typeof BRIDGE_PROTOCOL_VERSION;
 
 export type BridgeWorkspaceToolOperation =
@@ -732,6 +854,14 @@ export function isBridgeWorkspaceProgrammaticRequest(
           !/^[a-f0-9]{64}$/.test(file.input_cache_key)))
     ) {
       return false;
+    }
+  }
+  for (const name of names) {
+    const segments = name.split('/');
+    let ancestor = '';
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      ancestor = ancestor ? `${ancestor}/${segments[index]}` : segments[index]!;
+      if (names.has(ancestor)) return false;
     }
   }
   return (

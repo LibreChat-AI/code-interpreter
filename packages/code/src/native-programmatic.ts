@@ -10,8 +10,10 @@ import {
   BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES,
   BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES,
   BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES,
+  bridgeArtifactMediaType,
   isBridgeWorkspaceProgrammaticRequest,
   isSafePortableRelativePath,
+  isSupportedBridgeArtifactName,
 } from './protocol.js';
 import { validateFileRelayUpstream } from './relay.js';
 import { WorkspaceToolError } from './workspace.js';
@@ -48,6 +50,13 @@ type ProgrammaticResult = {
   version: string;
   session_id: string;
   files: ProgrammaticFileResult[];
+  artifact_delivery?: {
+    code: 'artifact_delivery_failed';
+    status: 'partial' | 'failed';
+    attempted: number;
+    delivered: number;
+    failed: number;
+  };
     pending_tool_calls_payload?: string;
   run: {
     stdout: string;
@@ -225,6 +234,33 @@ export class NativeWorkspaceProgrammaticExecutor {
   constructor(private readonly options: NativeWorkspaceProgrammaticOptions) {
     this.upstream = validateFileRelayUpstream(options.upstreamUrl);
     this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  /**
+   * Prove copy-on-write isolation before the worker advertises Bash PTC.
+   * The probe uses the exact registered root and private scratch path that a
+   * real replay will use, then removes the snapshot before registration.
+   */
+  async prepare(signal?: AbortSignal): Promise<void> {
+    const createProbeWorkspace =
+      this.options.sandbox.createProgrammaticProbeWorkspace;
+    if (createProbeWorkspace == null) {
+      throw new WorkspaceToolError(
+        'Selected-workspace PTC probe isolation is unavailable',
+        'COMMAND_UNAVAILABLE',
+      );
+    }
+    const executionDirectory =
+      await this.options.sandbox.createExecutionDirectory();
+    try {
+      await createProbeWorkspace.call(
+        this.options.sandbox,
+        executionDirectory,
+        signal,
+      );
+    } finally {
+      await rm(executionDirectory, { recursive: true, force: true });
+    }
   }
 
   private cacheKey(
@@ -542,13 +578,10 @@ export class NativeWorkspaceProgrammaticExecutor {
 
       const outputSessionId = request.body.output_session_id;
       const outputNames = (await listRegularFiles(dataDirectory)).filter(
-                name =>
+        name =>
           name !== EXECUTION_MAIN_FILE &&
           name !== EXECUTION_HISTORY_FILE &&
-                    name !== EXECUTION_CONTROL_FILE &&
-                    !name
-                        .split('/')
-                        .some(segment => segment.startsWith('_ptc_')) &&
+          name !== EXECUTION_CONTROL_FILE &&
           !name.startsWith('skills/'),
       );
       const changed: Array<{
@@ -607,20 +640,19 @@ export class NativeWorkspaceProgrammaticExecutor {
           'WRITE_LIMIT_EXCEEDED',
         );
       }
-      if (changed.length > 0 && (!grant || !outputSessionId)) {
+      const uploadable = changed.filter(({ name }) =>
+        isSupportedBridgeArtifactName(name),
+      );
+      if (uploadable.length > 0 && (!grant || !outputSessionId)) {
         throw new WorkspaceToolError(
           'Programmatic output grant is unavailable',
           'COMMAND_UNAVAILABLE',
         );
       }
-      const files = await mapConcurrent(
-        changed,
+      const uploadResults = await mapConcurrent(
+        uploadable,
         TRANSFER_CONCURRENCY,
-                async ({
-                    name,
-                    bytes,
-                    source,
-                }): Promise<ProgrammaticFileResult> => {
+        async ({ name, bytes, source }): Promise<ProgrammaticFileResult | undefined> => {
           const id = outputFileId();
           const controller = new AbortController();
           const abort = (): void => controller.abort(signal?.reason);
@@ -630,31 +662,33 @@ export class NativeWorkspaceProgrammaticExecutor {
                         TRANSFER_TIMEOUT_MS,
                     );
           try {
-            const response = await this.fetchImpl(
-              new URL(
-                `sessions/${encodeURIComponent(outputSessionId!)}/objects/${id}`,
-                `${this.upstream.toString().replace(/\/+$/, '')}/`,
-              ),
-              {
-                method: 'PUT',
-                headers: {
-                  [EGRESS_GRANT_HEADER]: grant!,
-                  'Content-Type': 'application/octet-stream',
-                  'Content-Length': String(bytes.byteLength),
-                                    'X-Original-Filename':
-                                        encodeURIComponent(name),
+            let response: Response;
+            try {
+              response = await this.fetchImpl(
+                new URL(
+                  `sessions/${encodeURIComponent(outputSessionId!)}/objects/${id}`,
+                  `${this.upstream.toString().replace(/\/+$/, '')}/`,
+                ),
+                {
+                  method: 'PUT',
+                  headers: {
+                    [EGRESS_GRANT_HEADER]: grant!,
+                    'Content-Type': bridgeArtifactMediaType(name),
+                    'Content-Length': String(bytes.byteLength),
+                    'X-Original-Filename': encodeURIComponent(name),
+                  },
+                  body: new Uint8Array(bytes),
+                  redirect: 'error',
+                  signal: controller.signal,
                 },
-                body: new Uint8Array(bytes),
-                redirect: 'error',
-                signal: controller.signal,
-              },
-            );
+              );
+            } catch (error) {
+              if (signal?.aborted) throw error;
+              return undefined;
+            }
             await response.body?.cancel();
             if (!response.ok) {
-              throw new WorkspaceToolError(
-                `Programmatic output upload failed with HTTP ${response.status}`,
-                'COMMAND_UNAVAILABLE',
-              );
+              return undefined;
             }
             return {
               id,
@@ -668,11 +702,26 @@ export class NativeWorkspaceProgrammaticExecutor {
           }
         },
       );
+      const files = uploadResults.filter(
+        (file): file is ProgrammaticFileResult => file != null,
+      );
+      const artifactDelivery =
+        files.length < changed.length
+          ? {
+              code: 'artifact_delivery_failed' as const,
+              status: files.length > 0 ? ('partial' as const) : ('failed' as const),
+              attempted: changed.length,
+              delivered: files.length,
+              failed: changed.length - files.length,
+            }
+          : undefined;
             return this.result(
                 request,
                 commandResult,
                 files,
                 performance.now() - startedAt,
+                undefined,
+                artifactDelivery,
             );
     } catch (error) {
       if (!commandDispatched) throw error;
@@ -716,6 +765,7 @@ export class NativeWorkspaceProgrammaticExecutor {
     files: ProgrammaticFileResult[],
     elapsedMs: number,
         pendingToolCallsPayload?: string,
+    artifactDelivery?: ProgrammaticResult['artifact_delivery'],
   ): ProgrammaticResult {
     return {
       language: 'bash',
@@ -726,6 +776,7 @@ export class NativeWorkspaceProgrammaticExecutor {
             session_id:
                 request.body.output_session_id ?? request.body.session_id,
       files,
+      ...(artifactDelivery ? { artifact_delivery: artifactDelivery } : {}),
             ...(pendingToolCallsPayload
                 ? { pending_tool_calls_payload: pendingToolCallsPayload }
                 : {}),

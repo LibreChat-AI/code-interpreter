@@ -285,6 +285,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     private denyWritePaths: string[] = [];
   private scratchDirectory?: string;
   private scratchHandle?: FileHandle;
+  private programmaticNetwork?: SandboxRuntimeConfig['network'];
   private execution?: Promise<WorkspaceExecuteCommandResult>;
   private closing?: Promise<void>;
   private resetFailed = false;
@@ -422,15 +423,16 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     );
     const unrestrictedNetwork =
       commandPolicy.network.outbound === 'unrestricted';
-    const config: SandboxRuntimeConfig = {
-      network: {
+    const network: SandboxRuntimeConfig['network'] = {
         allowedDomains: [...(this.options.allowedDomains ?? [])],
         deniedDomains: [],
         strictAllowlist: !unrestrictedNetwork,
         allowAllUnixSockets: commandPolicy.network.allowAllUnixSockets,
         allowLocalBinding: commandPolicy.network.allowLocalBinding,
         ...(this.options.maskedEnvironment ? { tlsTerminate: {} } : {}),
-      },
+    };
+    const config: SandboxRuntimeConfig = {
+      network,
       filesystem: {
         denyRead: [
           home,
@@ -508,6 +510,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       unrestrictedNetwork ? async () => true : undefined,
     );
     this.canonicalRoot = root;
+    this.programmaticNetwork = network;
         this.denyReadPaths = [
             home,
             ...sharedScratchPaths.filter(path =>
@@ -724,11 +727,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                           ],
                       },
                       network: {
-                          allowedDomains: [],
-                          deniedDomains: [],
-                          strictAllowlist: true,
-                          allowAllUnixSockets: false,
-                          allowLocalBinding: false,
+                          ...this.programmaticNetwork!,
                       },
                   }
                 : undefined,

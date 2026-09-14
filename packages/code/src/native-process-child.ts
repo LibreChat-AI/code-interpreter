@@ -95,6 +95,7 @@ process.on('message', async (raw: unknown) => {
             upstreamUrl: programmaticFileUpstream,
           })
         : undefined;
+      await programmaticExecutor?.prepare();
     } else if (message.type === 'execute' && sandbox) {
       active = { id: message.id, controller: new AbortController() };
       credentials = message.credentials ?? {};

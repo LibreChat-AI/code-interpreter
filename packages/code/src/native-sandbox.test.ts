@@ -150,20 +150,21 @@ function fakeManager(
   };
 }
 
-test('programmatic probe denies workspace writes and all network per execution', async t => {
+test('programmatic probe denies real-workspace writes while preserving network control flow', async t => {
     const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
     t.after(() => rm(root, { recursive: true, force: true }));
     const fake = fakeManager();
     const sandbox = new NativeSrtWorkspaceCommandSandbox({
         workspaceRoot: root,
         manager: fake.manager,
+        allowedDomains: ['api.example.com'],
     });
     const dataDirectory = await sandbox.createExecutionDirectory();
     await sandbox.executeProgrammatic(request, dataDirectory, undefined, {
         probe: true,
     });
     assert.deepEqual(fake.customConfigSeenDuringWrap?.network, {
-        allowedDomains: [],
+        allowedDomains: ['api.example.com'],
         deniedDomains: [],
         strictAllowlist: true,
         allowAllUnixSockets: false,

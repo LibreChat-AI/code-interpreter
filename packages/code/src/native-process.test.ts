@@ -43,7 +43,10 @@ function fixture(
       queueMicrotask(() => {
         if (message.type === 'prepare' && prepare)
           return prepare(child, message);
-        if (message.type === 'execute' && execute)
+        if (
+          (message.type === 'execute' || message.type === 'programmatic') &&
+          execute
+        )
           return execute(child, message);
         if (message.type === 'cancel') return;
         child.emit('message', {
@@ -213,6 +216,43 @@ test('programmatic executor resolves and scopes credentials to its command', asy
   assert.equal(
     message.wrappedCommand,
         'wrapped exec "$LIBRECHAT_CODE_BASH_PATH" "$LIBRECHAT_CODE_DATA_DIR/main.sh"',
+  );
+  await sandbox.close();
+});
+
+test('programmatic executor preserves a child-reported pre-dispatch failure', async () => {
+  const fake = fixture((child, message) =>
+    child.emit('message', {
+      id: message.id,
+      ok: false,
+      code: 'COMMAND_UNAVAILABLE',
+      errorMessage: 'Programmatic input download failed',
+      mutation: false,
+      requiresQuarantine: false,
+    }),
+  );
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    {
+      workspaceRoot: '/workspace',
+      programmaticFileUpstream: 'http://127.0.0.1:3190',
+    },
+    fake.fork,
+  );
+
+  await assert.rejects(
+    sandbox.executeProgrammatic('primary', {
+      headers: {},
+      body: {
+        language: 'bash',
+        version: '5.2.0',
+        session_id: 'session',
+        files: [{ name: 'main.sh', content: 'echo ready' }],
+      },
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      !error.mutationMayHaveCommitted &&
+      !error.requiresQuarantine,
   );
   await sandbox.close();
 });

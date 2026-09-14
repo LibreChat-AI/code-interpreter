@@ -41,6 +41,7 @@ import { publicExecutionFailure } from '../utils';
 import {
   normalizeEgressGatewayUrl,
   normalizeProgrammaticTimeoutMs,
+  normalizeSelectedWorkspaceProgrammaticTimeoutMs,
   prepareSandboxJobSecurity,
   sealPtcCallbackTokenForGateway,
   timeoutMsToGrantSeconds,
@@ -430,9 +431,13 @@ async function handleReplayInitial(
         req.body as t.ProgrammaticRequestBody;
   let timeout: number;
   try {
-        timeout = normalizeProgrammaticTimeoutMs(
-            (req.body as t.ProgrammaticRequestBody).timeout,
-        );
+        timeout = workspaceId != null
+          ? normalizeSelectedWorkspaceProgrammaticTimeoutMs(
+              (req.body as t.ProgrammaticRequestBody).timeout,
+            )
+          : normalizeProgrammaticTimeoutMs(
+              (req.body as t.ProgrammaticRequestBody).timeout,
+            );
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
     return;

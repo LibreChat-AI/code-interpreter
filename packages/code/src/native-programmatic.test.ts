@@ -27,6 +27,7 @@ test('stages skill files privately and returns generated artifacts', async () =>
       return;
     }
     assert.equal(req.method, 'PUT');
+    assert.equal(req.headers['content-type'], 'text/plain');
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
         uploads.set(
@@ -117,6 +118,162 @@ test('stages skill files privately and returns generated artifacts', async () =>
         await new Promise<void>(resolve => server.close(() => resolve()));
         await rm(scratch, { recursive: true, force: true });
     }
+});
+
+test('reports unsupported and rejected artifacts without invalidating a completed command', async () => {
+  const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-artifact-test-'));
+  const uploads = new Map<string, string | undefined>();
+  const server = createServer(async (req, res) => {
+    const name = decodeURIComponent(req.headers['x-original-filename'] as string);
+    uploads.set(name, req.headers['content-type']);
+    for await (const _chunk of req) {
+      // Drain the bounded request body before responding.
+    }
+    res.statusCode = name === 'image.png' ? 503 : 200;
+    res.end();
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address() as AddressInfo;
+  const executor = new NativeWorkspaceProgrammaticExecutor({
+    upstreamUrl: `http://127.0.0.1:${address.port}`,
+    sandbox: {
+      async createExecutionDirectory() {
+        return await mkdtemp(join(scratch, 'execution-'));
+      },
+      async executeProgrammatic(_request, dataDirectory) {
+        await writeFile(join(dataDirectory, '_ptc_report.csv'), 'a,b\n1,2\n');
+        await writeFile(join(dataDirectory, 'image.png'), 'not-a-real-png');
+        await writeFile(join(dataDirectory, 'model.bin'), 'unsupported');
+        return {
+          protocolVersion: 1,
+          operation: 'execute_command' as const,
+          workspaceId: 'primary',
+          exitCode: 0,
+          stdout: 'done\n',
+          stderr: '',
+          truncated: false,
+          timedOut: false,
+        };
+      },
+    },
+  });
+  try {
+    const result = await executor.execute(
+      {
+        headers: {},
+        body: {
+          language: 'bash',
+          version: '5.2.0',
+          session_id: 'execution-session',
+          output_session_id: 'output-session',
+          egress_grant: 'grant',
+          files: [{ name: 'main.sh', content: 'printf done' }],
+        },
+      },
+      'primary',
+    );
+    assert.equal(result.run.code, 0);
+    assert.deepEqual(result.files.map(file => file.name), ['_ptc_report.csv']);
+    assert.deepEqual(result.artifact_delivery, {
+      code: 'artifact_delivery_failed',
+      status: 'partial',
+      attempted: 3,
+      delivered: 1,
+      failed: 2,
+    });
+    assert.equal(uploads.get('_ptc_report.csv'), 'text/csv');
+    assert.equal(uploads.get('image.png'), 'image/png');
+    assert.equal(uploads.has('model.bin'), false);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(scratch, { recursive: true, force: true });
+  }
+});
+
+test('reports artifact transport failure without quarantining a completed command', async () => {
+  const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-artifact-transport-test-'));
+  const executor = new NativeWorkspaceProgrammaticExecutor({
+    upstreamUrl: 'http://127.0.0.1:1',
+    fetchImpl: async () => {
+      throw new TypeError('transport unavailable');
+    },
+    sandbox: {
+      async createExecutionDirectory() {
+        return await mkdtemp(join(scratch, 'execution-'));
+      },
+      async executeProgrammatic(_request, dataDirectory) {
+        await writeFile(join(dataDirectory, 'result.txt'), 'artifact');
+        return {
+          protocolVersion: 1,
+          operation: 'execute_command' as const,
+          workspaceId: 'primary',
+          exitCode: 0,
+          stdout: 'done\n',
+          stderr: '',
+          truncated: false,
+          timedOut: false,
+        };
+      },
+    },
+  });
+  try {
+    const result = await executor.execute(
+      {
+        headers: {},
+        body: {
+          language: 'bash',
+          version: '5.2.0',
+          session_id: 'execution-session',
+          output_session_id: 'output-session',
+          egress_grant: 'grant',
+          files: [{ name: 'main.sh', content: 'printf done' }],
+        },
+      },
+      'primary',
+    );
+    assert.equal(result.run.code, 0);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.artifact_delivery, {
+      code: 'artifact_delivery_failed',
+      status: 'failed',
+      attempted: 1,
+      delivered: 0,
+      failed: 1,
+    });
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+});
+
+test('preflights copy-on-write isolation and removes its private snapshot', async () => {
+  const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-preflight-test-'));
+  let executionDirectory = '';
+  let probes = 0;
+  const executor = new NativeWorkspaceProgrammaticExecutor({
+    upstreamUrl: 'http://127.0.0.1:1',
+    sandbox: {
+      async createExecutionDirectory() {
+        executionDirectory = await mkdtemp(join(scratch, 'execution-'));
+        return executionDirectory;
+      },
+      async createProgrammaticProbeWorkspace(directory) {
+        probes += 1;
+        const workspace = join(directory, 'workspace');
+        await mkdir(workspace);
+        return workspace;
+      },
+      async executeProgrammatic() {
+        throw new Error('unreachable');
+      },
+    },
+  });
+  try {
+    await executor.prepare();
+    assert.equal(probes, 1);
+    assert.deepEqual(await readdir(executionDirectory).catch(() => []), []);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 });
 
 test('keeps replay probes read-only and commits the script exactly once', async () => {

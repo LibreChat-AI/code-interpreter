@@ -45,35 +45,13 @@ import { parseBoundedContentLength } from './http-limits';
 import { validateEgressGatewayHardenedConfig } from './secure-startup';
 import { isOpaqueObjectContentDisposition } from './file-metadata';
 import { mapObjectDetails } from './file-object-resolver';
+import { isSupportedBridgeArtifactName } from '../../packages/code/src/protocol';
 
 export const app: Express = express();
 app.disable('x-powered-by');
 validateEgressGatewayHardenedConfig();
 app.use(traceHttpRequest('codeapi.egress_gateway.request'));
 app.use(httpMetricsMiddleware);
-
-const SUPPORTED_OUTPUT_EXTENSIONS = new Set([
-  '.c', '.cs', '.cpp', '.go', '.java', '.js', '.kt', '.kts', '.lua',
-  '.php', '.pl', '.ps1', '.py', '.r', '.rb', '.rs', '.scala', '.sh',
-  '.sql', '.swift', '.ts', '.jsx', '.tsx', '.groovy',
-  '.css', '.htm', '.html', '.less', '.sass', '.scss', '.svg', '.svelte', '.vue',
-  '.adoc', '.asciidoc', '.md', '.rst', '.tex', '.txt', '.wiki',
-  '.csv', '.json', '.bson', '.json5', '.jsonl', '.parquet', '.tsv',
-  '.xml', '.yaml', '.yml',
-  '.ics', '.ical', '.ifb', '.icalendar',
-  '.conf', '.env', '.gitignore', '.ini', '.properties', '.toml',
-  '.doc', '.docx', '.pdf', '.ppt', '.pptx', '.xls', '.xlsx',
-  '.odt', '.ods', '.odp', '.rtf',
-  '.avif', '.bmp', '.gif', '.ico', '.jpeg', '.jpg', '.png',
-  '.tif', '.tiff', '.webp',
-  '.eot', '.ttf', '.woff', '.woff2',
-  '.7z', '.bz2', '.gz', '.gzip', '.rar', '.tar', '.zip',
-  '.tf', '.tfvars', '.tfstate', '.hcl',
-  '.dockerfile', '.Dockerfile', '.dockerignore',
-  '.helmignore', '.helmfile', '.jenkinsfile', '.vagrantfile',
-  '.eslintrc', '.prettierrc', '.editorconfig', '.nomad',
-  '.bat', '.cmd', '.deb', '.log', '.rpm', '.vbs',
-]);
 
 type EgressAuditFields = {
   execHash?: string;
@@ -248,18 +226,7 @@ function assertOutputFilenameAllowed(name: string): void {
     throw new EgressGrantError('malformed', 'Output filename must be canonical');
   }
   if (!isDirkeepName(name)) {
-    const basename = path.posix.basename(name);
-    const ext = path.posix.extname(basename).toLowerCase();
-    const dottedBasename = `.${basename}`;
-    const allowed =
-      (ext !== '' && SUPPORTED_OUTPUT_EXTENSIONS.has(ext)) ||
-      SUPPORTED_OUTPUT_EXTENSIONS.has(basename) ||
-      SUPPORTED_OUTPUT_EXTENSIONS.has(basename.toLowerCase()) ||
-      (ext === '' && (
-        SUPPORTED_OUTPUT_EXTENSIONS.has(dottedBasename) ||
-        SUPPORTED_OUTPUT_EXTENSIONS.has(dottedBasename.toLowerCase())
-      ));
-    if (!allowed) {
+    if (!isSupportedBridgeArtifactName(name)) {
       throw new EgressGrantError('scope_mismatch', 'Output filename extension is not supported');
     }
   }

@@ -5,6 +5,7 @@ import { env } from './config';
 import {
   normalizeEgressGatewayUrl,
   normalizeProgrammaticTimeoutMs,
+  normalizeSelectedWorkspaceProgrammaticTimeoutMs,
   prepareSandboxJobSecurity,
   refreshEgressGrantClaims,
   timeoutMsToGrantSeconds,
@@ -476,6 +477,13 @@ describe('egress encrypted grants and handles', () => {
     expect(normalizeProgrammaticTimeoutMs(undefined, 1000)).toBe(1000);
     expect(() => normalizeProgrammaticTimeoutMs('300000', 300000)).toThrow('timeout must be a positive number');
     expect(() => normalizeProgrammaticTimeoutMs(0, 300000)).toThrow('timeout must be a positive number');
+  });
+
+  test('budgets both selected-workspace replay passes inside the worker deadline', () => {
+    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(undefined, 300_000)).toBe(132_500);
+    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(120_000, 300_000)).toBe(120_000);
+    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(300_000, 300_000)).toBe(132_500);
+    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(10_000, 20_000)).toBe(5_500);
   });
 
   test('normalizes the gateway callback URL for sandbox-originated PTC', () => {

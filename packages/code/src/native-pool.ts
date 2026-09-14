@@ -96,12 +96,25 @@ export class NativeWorkspaceCommandPool {
   }
 
   async prepare(): Promise<void> {
-    const entry = await this.allocate(this.roots.keys().next().value!);
-    try {
-      await entry.sandbox.prepare();
-    } finally {
-      entry.busy = false;
-    }
+    const workspaceIds = [...this.roots.keys()];
+    let next = 0;
+    await Promise.all(
+      Array.from(
+        { length: Math.min(this.capacity, workspaceIds.length) },
+        async () => {
+          for (;;) {
+            const index = next++;
+            if (index >= workspaceIds.length) return;
+            const entry = await this.allocate(workspaceIds[index]!);
+            try {
+              await entry.sandbox.prepare();
+            } finally {
+              entry.busy = false;
+            }
+          }
+        },
+      ),
+    );
   }
 
   async execute(

@@ -13,6 +13,31 @@ const request = (workspaceId: string): WorkspaceExecuteCommandRequest => ({
   workspaceId,
   command: 'fixture',
 });
+
+test('native pool preflights every registered root with bounded concurrency', async () => {
+  const prepared: string[] = [];
+  let active = 0;
+  let peak = 0;
+  const pool = new NativeWorkspaceCommandPool(roots, 2, (options) => ({
+    async prepare() {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      prepared.push(options.workspaceRoot);
+      active -= 1;
+    },
+    async close() {},
+    async execute() {
+      throw new Error('unreachable');
+    },
+  }));
+
+  await pool.prepare();
+  assert.deepEqual(prepared.sort(), ['/fixture/a', '/fixture/b', '/fixture/c']);
+  assert.equal(peak, 2);
+  await pool.close();
+});
+
 test('a known-clean executor failure is retired without replaying the command', async () => {
   let created = 0;
   let executed = 0;
