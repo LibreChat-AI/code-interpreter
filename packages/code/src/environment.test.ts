@@ -293,6 +293,17 @@ test('rejects a root routed through another workspace and malformed UTF-8', asyn
             ),
         /root traversal/,
     );
+    await symlink(rootA, join(rootA, 'self-pivot'));
+    await writeFile(path, `name: a\nroot: ${join(rootA, 'self-pivot')}\n`);
+    const selfControlled = await loadCodeEnvironment(path);
+    assert.throws(
+        () =>
+            assertEnvironmentDefinitionsOutsideRoots(
+                [selfControlled],
+                [{ id: 'a', root: rootA }],
+            ),
+        /root traversal/,
+    );
     await writeFile(
         path,
         Buffer.concat([

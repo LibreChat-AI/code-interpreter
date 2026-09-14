@@ -313,10 +313,12 @@ export function assertEnvironmentDefinitionsOutsideRoots(
 ): void {
     for (const environment of environments) {
         for (const root of roots) {
-            // A different granted workspace must not control how this root resolves on restart.
-            if (root.id !== environment.definition.name) {
+            // No granted workspace may control how this root resolves on restart.
+            {
                 for (const component of environment.rootPaths ?? []) {
                     const path = relative(root.root, component);
+                    if (path === '' && root.id === environment.definition.name)
+                        continue;
                     if (
                         path === '' ||
                         (!isAbsolute(path) &&
@@ -324,7 +326,7 @@ export function assertEnvironmentDefinitionsOutsideRoots(
                             !path.startsWith(`..${sep}`))
                     ) {
                         throw new Error(
-                            'Environment root traversal crosses another registered workspace',
+                            'Environment root traversal crosses a workspace-controlled component',
                         );
                     }
                 }
