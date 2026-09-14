@@ -227,7 +227,7 @@ test('rejects nested aliases passing through a workspace-controlled link', async
                 [loaded],
                 [{ id: 'app', root }],
             ),
-        /outside/,
+        /outside|mount alias/,
     );
 });
 
@@ -291,7 +291,7 @@ test('rejects a root routed through another workspace and malformed UTF-8', asyn
                     { id: 'b', root: rootB },
                 ],
             ),
-        /root traversal/,
+        /root traversal|mount alias/,
     );
     await symlink(rootA, join(rootA, 'self-pivot'));
     await writeFile(path, `name: a\nroot: ${join(rootA, 'self-pivot')}\n`);
@@ -302,7 +302,7 @@ test('rejects a root routed through another workspace and malformed UTF-8', asyn
                 [selfControlled],
                 [{ id: 'a', root: rootA }],
             ),
-        /root traversal/,
+        /root traversal|mount alias/,
     );
     await writeFile(
         path,
@@ -343,6 +343,6 @@ test('rejects a filesystem-identical control directory despite a different root 
             [loaded],
             [{ id: 'alias', root: alias }],
         ),
-        /outside/,
+        /outside|mount alias/,
     );
 });

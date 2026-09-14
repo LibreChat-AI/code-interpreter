@@ -42,14 +42,19 @@ test('mount coordinates retain safe separate filesystems and escaped paths', () 
         /mount alias/,
     );
     assert.throws(() => assertEnvironmentMountIsolation('invalid', [], []));
+    assertEnvironmentMountIsolation(
+        base + '2 1 9:1 / / rw - ext4 /dev/other rw',
+        ['/operator/app.yaml'],
+        ['/workspace'],
+    );
     assert.throws(
         () =>
             assertEnvironmentMountIsolation(
                 base + '2 1 9:1 / / rw - ext4 /dev/other rw',
-                [],
-                [],
+                ['/workspace/config/app.yaml'],
+                ['/workspace'],
             ),
-        /Ambiguous/,
+        /mount alias/,
     );
     const many = Array.from(
         { length: 257 },

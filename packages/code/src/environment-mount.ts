@@ -40,30 +40,22 @@ export function createEnvironmentMountIsolation(
                 point: decode(fields[4] ?? ''),
             };
         });
-    const mappings = new Map<string, string>();
-    for (const mount of mounts) {
-        const mapping = `${mount.device}:${mount.root}`;
-        const previous = mappings.get(mount.point);
-        if (previous !== undefined && previous !== mapping)
-            throw new Error('Ambiguous environment mount topology');
-        mappings.set(mount.point, mapping);
-    }
-    const cache = new Map<string, { device: string; path: string }>();
-    const coordinate = (path: string): { device: string; path: string } => {
+    const cache = new Map<string, { device: string; path: string }[]>();
+    const coordinate = (path: string): { device: string; path: string }[] => {
         const cached = cache.get(path);
         if (cached) return cached;
-        let mount: Mount | undefined;
-        for (const candidate of mounts)
-            if (
-                inside(candidate.point, path) &&
-                (!mount || candidate.point.length >= mount.point.length)
-            )
-                mount = candidate;
-        if (!mount) throw new Error('Environment path has no mount mapping');
-        const result = {
-            device: mount.device,
-            path: posix.join(mount.root, posix.relative(mount.point, path)),
-        };
+        // Include every possible backing mapping. Hidden/stacked mounts may cause
+        // conservative rejection but must never hide an accessible control path.
+        const result = mounts
+            .filter(mount => inside(mount.point, path))
+            .map(mount => ({
+                device: mount.device,
+                path: posix.join(mount.root, posix.relative(mount.point, path)),
+            }));
+        if (!result.length || result.length > 256)
+            throw new Error(
+                'Environment path has an unsupported mount mapping',
+            );
         cache.set(path, result);
         return result;
     };
@@ -74,14 +66,18 @@ export function createEnvironmentMountIsolation(
                 points.add(mount.point);
         if (points.size > 256)
             throw new Error('Too many workspace mount boundaries');
-        const exposed = [...points].map(coordinate);
+        const exposed = [...points].flatMap(coordinate);
+        if (exposed.length > 1024)
+            throw new Error('Too many workspace mount mappings');
         for (const control of controls) {
             const target = coordinate(control);
             if (
-                exposed.some(
-                    root =>
-                        root.device === target.device &&
-                        inside(root.path, target.path),
+                target.some(target =>
+                    exposed.some(
+                        root =>
+                            root.device === target.device &&
+                            inside(root.path, target.path),
+                    ),
                 )
             ) {
                 throw new Error(

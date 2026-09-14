@@ -682,8 +682,8 @@ the worker's policy identity, and protected from sandbox writes. All definition
 files must be outside every registered root. Unknown fields are rejected.
 On Linux, startup also verifies the mount namespace so bind mounts cannot expose
 definitions or their controlling paths through a workspace. The mount table is
-bounded to 4 MiB, with at most 256 exposed mount boundaries; ambiguous stacked
-mount mappings fail closed. Operators must keep mount topology stable while the
+bounded to 4 MiB, with at most 256 exposed mount boundaries; stacked and hidden
+mount mappings are considered conservatively. Operators must keep mount topology stable while the
 worker runs. This inspection happens at startup, not on the command hot path.
 
 Setup is an operator-authorized startup command under the configured native sandbox
