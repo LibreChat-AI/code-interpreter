@@ -2256,13 +2256,18 @@ export class Job {
     let sawVisibleNonHiddenEntry = false;
     try {
       for await (const entry of directory) {
-        if (entry.name === PTC_HISTORY_FILENAME) continue;
-        sawVisibleEntry = true;
-        state.remainingEntries--;
-        if (state.remainingEntries < 0) return rootPath;
         const fullPath = path.join(dir, entry.name);
         const relativePath = path.relative(this.submissionDir, fullPath);
         const kind = await this.classifyDirent(entry, fullPath, relativePath);
+        if (kind === 'file' && entry.name === PTC_HISTORY_FILENAME) {
+          if (inputByName.has(relativePath)) {
+            this.presentInputFiles.add(relativePath);
+          }
+          continue;
+        }
+        sawVisibleEntry = true;
+        state.remainingEntries--;
+        if (state.remainingEntries < 0) return rootPath;
         if (kind === 'skip') {
           /* Ordinary walking counts symlinks/special entries as non-empty even
            * though it does not surface them, so the probe must not invent a
@@ -2436,7 +2441,7 @@ export class Job {
        * basename on the ordinary execution endpoint. It remains hidden from
        * output collection, but must be observed before the runtime fixture is
        * skipped so an untouched input is not reported as deleted. */
-      if (isPtcReserved(entry.name)) continue;
+      if (kind === 'file' && isPtcReserved(entry.name)) continue;
 
       if (kind === 'dir') {
         /* Skip hidden directories (basename starts with `.`) unless the user

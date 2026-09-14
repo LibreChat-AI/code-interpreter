@@ -1320,6 +1320,45 @@ describe('handleSessionFiles / persisted input deletion', () => {
     expect(internals.generatedFiles.map(file => file.name)).not.toContain(inherited.name);
   });
 
+  it('traverses a directory that uses the reserved PTC history basename', async () => {
+    const inherited: TFile = {
+      id: 'nested-id',
+      storage_session_id: 'prior-session',
+      name: path.join('_ptc_history.json', 'data.csv'),
+    };
+    await fsp.mkdir(path.join(tmpDir, '_ptc_history.json'));
+    await fsp.writeFile(path.join(tmpDir, inherited.name), 'persisted');
+    const internals = asInternals(makeJob({ files: [inherited] }));
+    internals.submissionDir = tmpDir;
+
+    await internals.handleSessionFiles();
+
+    expect(internals.deletedFiles).toEqual([]);
+    expect(internals.presentInputFiles.has(inherited.name)).toBe(true);
+  });
+
+  it('tracks a reserved persisted input during a capped subtree probe', async () => {
+    const inherited: TFile = {
+      id: 'history-id',
+      storage_session_id: 'prior-session',
+      name: path.join('fixtures', '_ptc_history.json'),
+    };
+    const fixtures = path.join(tmpDir, 'fixtures');
+    await fsp.mkdir(fixtures);
+    await fsp.writeFile(path.join(tmpDir, inherited.name), '{}');
+    await fsp.writeFile(path.join(fixtures, 'unsupported.bin'), 'binary');
+    const internals = asInternals(makeJob({ files: [inherited] }));
+    internals.submissionDir = tmpDir;
+
+    const skipped = await internals.findTruncatedArtifact(
+      fixtures,
+      new Map([[inherited.name, inherited]])
+    );
+
+    expect(skipped).toBeUndefined();
+    expect(internals.presentInputFiles.has(inherited.name)).toBe(true);
+  });
+
   it('does not report a surviving input that is unsupported as an output artifact', async () => {
     const inherited: TFile = {
       id: 'prior-id',
