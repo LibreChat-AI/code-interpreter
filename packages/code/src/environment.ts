@@ -307,12 +307,24 @@ export async function loadCodeEnvironment(
 }
 
 /** A workspace must never be able to rewrite a definition used on the next startup. */
-export function assertEnvironmentDefinitionsOutsideRoots(
+export async function assertEnvironmentDefinitionsOutsideRoots(
     environments: readonly LoadedCodeEnvironment[],
     roots: readonly LocalWorkspaceConfig[],
-): void {
+): Promise<void> {
+    const identities = new Map<string, Promise<string>>();
+    const identity = (path: string): Promise<string> => {
+        let result = identities.get(path);
+        if (!result) {
+            result = stat(path).then(
+                metadata => `${metadata.dev}:${metadata.ino}`,
+            );
+            identities.set(path, result);
+        }
+        return result;
+    };
     for (const environment of environments) {
         for (const root of roots) {
+            const rootIdentity = await identity(root.root);
             // No granted workspace may control how this root resolves on restart.
             {
                 for (const component of environment.rootPaths ?? []) {
@@ -320,6 +332,7 @@ export function assertEnvironmentDefinitionsOutsideRoots(
                     if (path === '' && root.id === environment.definition.name)
                         continue;
                     if (
+                        (await identity(component)) === rootIdentity ||
                         path === '' ||
                         (!isAbsolute(path) &&
                             path !== '..' &&
@@ -337,6 +350,7 @@ export function assertEnvironmentDefinitionsOutsideRoots(
             ]) {
                 const path = relative(root.root, controlPath);
                 if (
+                    (await identity(controlPath)) === rootIdentity ||
                     path === '' ||
                     (!isAbsolute(path) &&
                         path !== '..' &&

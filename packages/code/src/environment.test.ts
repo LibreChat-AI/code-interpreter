@@ -153,7 +153,7 @@ test('environment roots resolve relative to the definition and fingerprints cove
     );
     const first = await loadCodeEnvironment(path);
     assert.ok(first.definition.root.endsWith('/project'));
-    assertEnvironmentDefinitionsOutsideRoots(
+    await assertEnvironmentDefinitionsOutsideRoots(
         [first],
         [{ id: 'app', root: first.definition.root }],
     );
@@ -165,7 +165,7 @@ test('environment roots resolve relative to the definition and fingerprints cove
         (await loadCodeEnvironment(path)).fingerprint,
         first.fingerprint,
     );
-    assert.throws(() =>
+    await assert.rejects(() =>
         assertEnvironmentDefinitionsOutsideRoots(
             [first],
             [
@@ -180,7 +180,7 @@ test('environment roots resolve relative to the definition and fingerprints cove
     const alias = await loadCodeEnvironment(
         join(directory, 'project', 'alias.yaml'),
     );
-    assert.throws(() =>
+    await assert.rejects(() =>
         assertEnvironmentDefinitionsOutsideRoots(
             [alias],
             [{ id: 'app', root: first.definition.root }],
@@ -221,7 +221,7 @@ test('rejects nested aliases passing through a workspace-controlled link', async
     const loaded = await loadCodeEnvironment(
         join(directory, 'alias', 'environment.yaml'),
     );
-    assert.throws(
+    await assert.rejects(
         () =>
             assertEnvironmentDefinitionsOutsideRoots(
                 [loaded],
@@ -282,7 +282,7 @@ test('rejects a root routed through another workspace and malformed UTF-8', asyn
     const path = join(directory, 'environment.yaml');
     await writeFile(path, `name: a\nroot: ${join(rootB, 'pivot')}\n`);
     const loaded = await loadCodeEnvironment(path);
-    assert.throws(
+    await assert.rejects(
         () =>
             assertEnvironmentDefinitionsOutsideRoots(
                 [loaded],
@@ -296,7 +296,7 @@ test('rejects a root routed through another workspace and malformed UTF-8', asyn
     await symlink(rootA, join(rootA, 'self-pivot'));
     await writeFile(path, `name: a\nroot: ${join(rootA, 'self-pivot')}\n`);
     const selfControlled = await loadCodeEnvironment(path);
-    assert.throws(
+    await assert.rejects(
         () =>
             assertEnvironmentDefinitionsOutsideRoots(
                 [selfControlled],
@@ -321,4 +321,28 @@ test('rejects a FIFO definition without waiting for a writer', async t => {
     const path = join(directory, 'environment.yaml');
     execFileSync('mkfifo', ['-m', '600', path], { timeout: 2000 });
     await assert.rejects(loadCodeEnvironment(path), /Invalid environment file/);
+});
+
+test('rejects a filesystem-identical control directory despite a different root path', async t => {
+    const directory = await realpath(
+        await mkdtemp(join(tmpdir(), 'code-env-identity-')),
+    );
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const trusted = join(directory, 'trusted');
+    const alias = join(directory, 'alias');
+    const project = join(directory, 'project');
+    await mkdir(trusted);
+    await mkdir(project);
+    await symlink(trusted, alias);
+    const path = join(trusted, 'environment.yaml');
+    await writeFile(path, `name: app\nroot: ${project}\n`);
+    const loaded = await loadCodeEnvironment(path);
+    // Unlike realpath-based containment, inode comparison also covers bind-mount aliases.
+    await assert.rejects(
+        assertEnvironmentDefinitionsOutsideRoots(
+            [loaded],
+            [{ id: 'alias', root: alias }],
+        ),
+        /outside/,
+    );
 });

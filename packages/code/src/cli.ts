@@ -596,7 +596,7 @@ async function run(
             writable: allowWorkspaceWrites,
         });
     }
-    assertEnvironmentDefinitionsOutsideRoots(environments, roots);
+    await assertEnvironmentDefinitionsOutsideRoots(environments, roots);
   for (let i = 0; i < args.length; i++) {
     if (
       args[i] === '--workspace' &&
