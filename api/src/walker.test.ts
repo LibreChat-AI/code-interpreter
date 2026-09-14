@@ -32,6 +32,7 @@ interface WalkerInternals {
     skipped: string[];
     skipped_count: number;
   };
+  truncationProbeState: { remainingEntries: number; remainingHashBytes: number };
   pendingSurfaced: Map<string, { name: string; signature: string }>;
   inputFileHashes: Map<string, { hash: string; path: string; originalId?: string; originalSessionId?: string; readOnly?: boolean }>;
   files: TFile[];
@@ -1121,6 +1122,49 @@ describe('walkDir / artifact truncation details', () => {
     }));
 
     await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toBeUndefined();
+  });
+
+  it('does not reopen capped directories after the shared probe budget is exhausted', async () => {
+    const internals = asInternals(makeJob());
+    internals.submissionDir = tmpDir;
+    internals.truncationProbeState.remainingEntries = 0;
+    internals.generatedFiles = Array.from({ length: config.max_output_files }, (_, i) => ({
+      id: `id-${i}`,
+      name: `file-${i}.txt`,
+      path: path.join(tmpDir, `file-${i}.txt`),
+    }));
+    const absentDir = path.join(tmpDir, 'not-opened');
+
+    await internals.walkDir(absentDir, 1, new Map());
+
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { max_files: 1 },
+      skipped: ['not-opened'],
+      skipped_count: 1,
+    });
+  });
+
+  it('does not report an unchanged inline entrypoint during output-cap probing', async () => {
+    const directory = path.join(tmpDir, 'src');
+    const name = path.join('src', 'main.py');
+    const content = 'print(1)';
+    await fsp.mkdir(directory);
+    await fsp.writeFile(path.join(tmpDir, name), content);
+    const inline: TFile = { name, content };
+    const internals = asInternals(makeJob({ files: [inline] }));
+    internals.submissionDir = tmpDir;
+    internals.entryPointName = name;
+    internals.inputFileHashes.set(name, { hash: sha256(content), path: path.join(tmpDir, name) });
+    internals.generatedFiles = Array.from({ length: config.max_output_files }, (_, i) => ({
+      id: `id-${i}`,
+      name: `file-${i}.txt`,
+      path: path.join(tmpDir, `file-${i}.txt`),
+    }));
+
+    await internals.walkDir(directory, 1, buildInputByName([inline]));
 
     expect(internals.artifactTruncation).toBeUndefined();
   });

@@ -2210,6 +2210,9 @@ export class Job {
     rootPath = path.relative(this.submissionDir, dir) || '.',
     respectSessionSuppression = false,
   ): Promise<string | undefined> {
+    /* The state is shared by every probe in this job. Once exhausted, return
+     * conservatively before opening yet another capped sibling directory. */
+    if (state.remainingEntries <= 0) return rootPath;
     let directory: fs.Dir;
     try {
       directory = await fsp.opendir(dir);
@@ -2241,13 +2244,33 @@ export class Job {
         if (kind === 'file') {
           sawVisibleNonHiddenEntry = true;
           if (entry.name !== DIRKEEP && !isSupportedOutputFilename(entry.name)) continue;
+          const existingFile = inputByName.get(relativePath);
+          const inputFileInfo = this.inputFileHashes.get(relativePath);
+          if (
+            respectSessionSuppression
+            && relativePath === this.entryPointName
+            && existingFile?.id == null
+            && inputFileInfo
+          ) {
+            try {
+              const st = await fsp.lstat(fullPath);
+              if (!st.isFile()) continue;
+              if (st.size > state.remainingHashBytes) return rootPath;
+              state.remainingHashBytes -= st.size;
+              if (await this.computeFileHash(fullPath, true) === inputFileInfo.hash) continue;
+            } catch (err) {
+              this.log.debug({ path: relativePath, err }, 'walkDir: failed during entrypoint cap probe');
+              this.recordArtifactTruncation('unreadable', relativePath);
+              continue;
+            }
+          }
           /* Once generated outputs fill the response cap, a persistent
            * workspace may still contain unchanged artifacts from earlier
            * turns. Ordinary walking suppresses those via their content hash,
            * so the bounded cap probe must do the same or it reports a false
            * max_files warning. Current-request inputs remain reportable: they
            * would otherwise have been echoed into this response. */
-          if (respectSessionSuppression && this.session && !inputByName.has(relativePath)) {
+          if (respectSessionSuppression && this.session && !existingFile) {
             if (this.session.isPrimedReadOnly(relativePath)) continue;
             try {
               const st = await fsp.lstat(fullPath);
