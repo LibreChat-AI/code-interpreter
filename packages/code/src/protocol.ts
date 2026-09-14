@@ -21,7 +21,8 @@ export const BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES = 256 * 1024;
 export const BRIDGE_WORKSPACE_COMMAND_MAX_OUTPUT_BYTES = 1024 * 1024;
 export const BRIDGE_WORKSPACE_COMMAND_SIGNAL_MAX_LENGTH = 32;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES = 100;
-export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_INPUT_FILES = BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES - 2;
+export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_INPUT_FILES =
+    BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES - 2;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_CONCURRENCY = 4;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_TIMEOUT_MS = 30_000;
 
@@ -41,26 +42,119 @@ export const BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS = 5_000;
  * locally instead of discovering the mismatch only after mutating a workspace.
  */
 const BRIDGE_ARTIFACT_EXTENSIONS = new Set([
-  '.c', '.cs', '.cpp', '.go', '.java', '.js', '.kt', '.kts', '.lua',
-  '.php', '.pl', '.ps1', '.py', '.r', '.rb', '.rs', '.scala', '.sh',
-  '.sql', '.swift', '.ts', '.jsx', '.tsx', '.groovy',
-  '.css', '.htm', '.html', '.less', '.sass', '.scss', '.svg', '.svelte', '.vue',
-  '.adoc', '.asciidoc', '.md', '.rst', '.tex', '.txt', '.wiki',
-  '.csv', '.json', '.bson', '.json5', '.jsonl', '.parquet', '.tsv',
-  '.xml', '.yaml', '.yml',
-  '.ics', '.ical', '.ifb', '.icalendar',
-  '.conf', '.env', '.gitignore', '.ini', '.properties', '.toml',
-  '.doc', '.docx', '.pdf', '.ppt', '.pptx', '.xls', '.xlsx',
-  '.odt', '.ods', '.odp', '.rtf',
-  '.avif', '.bmp', '.gif', '.ico', '.jpeg', '.jpg', '.png',
-  '.tif', '.tiff', '.webp',
-  '.eot', '.ttf', '.woff', '.woff2',
-  '.7z', '.bz2', '.gz', '.gzip', '.rar', '.tar', '.zip',
-  '.tf', '.tfvars', '.tfstate', '.hcl',
-  '.dockerfile', '.Dockerfile', '.dockerignore',
-  '.helmignore', '.helmfile', '.jenkinsfile', '.vagrantfile',
-  '.eslintrc', '.prettierrc', '.editorconfig', '.nomad',
-  '.bat', '.cmd', '.deb', '.log', '.rpm', '.vbs',
+    '.c',
+    '.cs',
+    '.cpp',
+    '.go',
+    '.java',
+    '.js',
+    '.kt',
+    '.kts',
+    '.lua',
+    '.php',
+    '.pl',
+    '.ps1',
+    '.py',
+    '.r',
+    '.rb',
+    '.rs',
+    '.scala',
+    '.sh',
+    '.sql',
+    '.swift',
+    '.ts',
+    '.jsx',
+    '.tsx',
+    '.groovy',
+    '.css',
+    '.htm',
+    '.html',
+    '.less',
+    '.sass',
+    '.scss',
+    '.svg',
+    '.svelte',
+    '.vue',
+    '.adoc',
+    '.asciidoc',
+    '.md',
+    '.rst',
+    '.tex',
+    '.txt',
+    '.wiki',
+    '.csv',
+    '.json',
+    '.bson',
+    '.json5',
+    '.jsonl',
+    '.parquet',
+    '.tsv',
+    '.xml',
+    '.yaml',
+    '.yml',
+    '.ics',
+    '.ical',
+    '.ifb',
+    '.icalendar',
+    '.conf',
+    '.env',
+    '.gitignore',
+    '.ini',
+    '.properties',
+    '.toml',
+    '.doc',
+    '.docx',
+    '.pdf',
+    '.ppt',
+    '.pptx',
+    '.xls',
+    '.xlsx',
+    '.odt',
+    '.ods',
+    '.odp',
+    '.rtf',
+    '.avif',
+    '.bmp',
+    '.gif',
+    '.ico',
+    '.jpeg',
+    '.jpg',
+    '.png',
+    '.tif',
+    '.tiff',
+    '.webp',
+    '.eot',
+    '.ttf',
+    '.woff',
+    '.woff2',
+    '.7z',
+    '.bz2',
+    '.gz',
+    '.gzip',
+    '.rar',
+    '.tar',
+    '.zip',
+    '.tf',
+    '.tfvars',
+    '.tfstate',
+    '.hcl',
+    '.dockerfile',
+    '.Dockerfile',
+    '.dockerignore',
+    '.helmignore',
+    '.helmfile',
+    '.jenkinsfile',
+    '.vagrantfile',
+    '.eslintrc',
+    '.prettierrc',
+    '.editorconfig',
+    '.nomad',
+    '.bat',
+    '.cmd',
+    '.deb',
+    '.log',
+    '.rpm',
+    '.vbs',
 ]);
 
 function portableBasename(name: string): string {
@@ -94,7 +188,8 @@ const BRIDGE_ARTIFACT_MEDIA_TYPES: Readonly<Record<string, string>> = {
   '.css': 'text/css',
   '.csv': 'text/csv',
   '.doc': 'application/msword',
-  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.docx':
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.gif': 'image/gif',
   '.gz': 'application/gzip',
   '.gzip': 'application/gzip',
@@ -123,7 +218,8 @@ const BRIDGE_ARTIFACT_MEDIA_TYPES: Readonly<Record<string, string>> = {
   '.pdf': 'application/pdf',
   '.png': 'image/png',
   '.ppt': 'application/vnd.ms-powerpoint',
-  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.pptx':
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   '.py': 'text/x-python',
   '.rst': 'text/x-rst',
   '.rtf': 'application/rtf',
@@ -143,7 +239,8 @@ const BRIDGE_ARTIFACT_MEDIA_TYPES: Readonly<Record<string, string>> = {
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.xls': 'application/vnd.ms-excel',
-  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.xlsx':
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   '.xml': 'application/xml',
   '.yaml': 'application/yaml',
   '.yml': 'application/yaml',
@@ -180,6 +277,12 @@ export interface BridgeWorkspaceDescriptor {
   name?: string;
   /** Optional per-workspace restriction. Omitted by protocol-v1 readers. */
   operations?: BridgeWorkspaceToolOperation[];
+    environment?: {
+        fingerprint: string;
+        repo?: string;
+        ref?: string;
+        actions: string[];
+    };
 }
 
 export interface BridgeWorkspaceToolCapabilities {
@@ -291,7 +394,8 @@ interface WorkspaceEditFileRequestBase {
   expectedBaseSha256?: string;
 }
 
-export interface WorkspaceSingleEditFileRequest extends WorkspaceEditFileRequestBase {
+export interface WorkspaceSingleEditFileRequest
+    extends WorkspaceEditFileRequestBase {
   /** Legacy single-edit form. */
   oldText: string;
   /** Legacy single-edit form. */
@@ -299,7 +403,8 @@ export interface WorkspaceSingleEditFileRequest extends WorkspaceEditFileRequest
   edits?: never;
 }
 
-export interface WorkspaceBatchEditFileRequest extends WorkspaceEditFileRequestBase {
+export interface WorkspaceBatchEditFileRequest
+    extends WorkspaceEditFileRequestBase {
   /** Ordered exact replacements applied atomically as one file mutation. */
   edits: WorkspaceTextEdit[];
   oldText?: never;
@@ -307,7 +412,8 @@ export interface WorkspaceBatchEditFileRequest extends WorkspaceEditFileRequestB
 }
 
 export type WorkspaceEditFileRequest =
-    WorkspaceSingleEditFileRequest | WorkspaceBatchEditFileRequest;
+    | WorkspaceSingleEditFileRequest
+    | WorkspaceBatchEditFileRequest;
 
 export interface WorkspaceTextEdit {
   oldText: string;
@@ -330,20 +436,23 @@ interface WorkspacePreviewEditRequestBase {
   path: string;
 }
 
-export interface WorkspaceSinglePreviewEditRequest extends WorkspacePreviewEditRequestBase {
+export interface WorkspaceSinglePreviewEditRequest
+    extends WorkspacePreviewEditRequestBase {
   oldText: string;
   newText: string;
   edits?: never;
 }
 
-export interface WorkspaceBatchPreviewEditRequest extends WorkspacePreviewEditRequestBase {
+export interface WorkspaceBatchPreviewEditRequest
+    extends WorkspacePreviewEditRequestBase {
   edits: WorkspaceTextEdit[];
   oldText?: never;
   newText?: never;
 }
 
 export type WorkspacePreviewEditRequest =
-    WorkspaceSinglePreviewEditRequest | WorkspaceBatchPreviewEditRequest;
+    | WorkspaceSinglePreviewEditRequest
+    | WorkspaceBatchPreviewEditRequest;
 
 export interface WorkspacePreviewEditResult {
   protocolVersion: BridgeProtocolVersion;
@@ -368,6 +477,7 @@ export interface WorkspaceExecuteCommandRequest {
   timeoutMs?: number;
   /** Aggregate UTF-8 stdout and stderr budget. */
   maxOutputBytes?: number;
+    environmentAction?: { name: string; fingerprint: string };
 }
 
 export interface WorkspaceExecuteCommandResult {
@@ -452,6 +562,7 @@ const WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS = new Set([
 ]);
 const WORKSPACE_TEXT_EDIT_KEYS = new Set(['oldText', 'newText']);
 const WORKSPACE_COMMAND_REQUEST_KEYS = new Set([
+    'environmentAction',
   'protocolVersion',
   'operation',
   'workspaceId',
@@ -720,7 +831,8 @@ export function isWorkspaceToolErrorCode(
 }
 
 export type BridgeSettlement<TResult = object> =
-  BridgeFulfilledSettlement<TResult> | BridgeRejectedSettlement;
+    | BridgeFulfilledSettlement<TResult>
+    | BridgeRejectedSettlement;
 
 export interface BridgeSettlementResponse {
   protocolVersion: BridgeProtocolVersion;
@@ -806,7 +918,8 @@ export function isBridgeWorkspaceProgrammaticRequest(
     (body.transfer_timeout_ms !== undefined &&
       (!Number.isSafeInteger(body.transfer_timeout_ms) ||
         Number(body.transfer_timeout_ms) < 1 ||
-        Number(body.transfer_timeout_ms) > BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_TIMEOUT_MS)) ||
+                Number(body.transfer_timeout_ms) >
+                    BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_TIMEOUT_MS)) ||
     (body.run_timeout !== undefined &&
       (!Number.isSafeInteger(body.run_timeout) ||
         Number(body.run_timeout) < 1 ||
@@ -826,7 +939,8 @@ export function isBridgeWorkspaceProgrammaticRequest(
     if (
       !isSafePortableRelativePath(file.name) ||
       file.name === '.' ||
-      portableBasename(file.name).toLowerCase() === '_ptc_pending_result.json' ||
+            portableBasename(file.name).toLowerCase() ===
+                '_ptc_pending_result.json' ||
       normalizePortableRelativePath(file.name) !== file.name ||
       names.has(file.name)
     ) {
@@ -875,7 +989,9 @@ export function isBridgeWorkspaceProgrammaticRequest(
     const segments = name.split('/');
     let ancestor = '';
     for (let index = 0; index < segments.length - 1; index += 1) {
-      ancestor = ancestor ? `${ancestor}/${segments[index]}` : segments[index]!;
+            ancestor = ancestor
+                ? `${ancestor}/${segments[index]}`
+                : segments[index]!;
       if (names.has(ancestor)) return false;
     }
   }
@@ -1105,6 +1221,22 @@ export function isWorkspaceToolRequest(
   }
   if (request.operation === 'execute_command') {
     return (
+            (request.environmentAction === undefined ||
+                (typeof request.environmentAction === 'object' &&
+                    request.environmentAction !== null &&
+                    Object.keys(request.environmentAction).length === 2 &&
+                    typeof (request.environmentAction as { name?: unknown })
+                        .name === 'string' &&
+                    /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(
+                        (request.environmentAction as { name: string }).name,
+                    ) &&
+                    typeof (
+                        request.environmentAction as { fingerprint?: unknown }
+                    ).fingerprint === 'string' &&
+                    /^[a-f0-9]{64}$/.test(
+                        (request.environmentAction as { fingerprint: string })
+                            .fingerprint,
+                    ))) &&
       hasOnlyKeys(request, WORKSPACE_COMMAND_REQUEST_KEYS) &&
       typeof request.command === 'string' &&
       request.command.trim().length > 0 &&
@@ -1438,11 +1570,17 @@ export function isValidBridgeWorkspaceToolCapabilities(
     const descriptor = workspace as Record<string, unknown>;
     if (
       Object.keys(descriptor).some(
-                key => key !== 'id' && key !== 'name' && key !== 'operations',
+                key =>
+                    key !== 'id' &&
+                    key !== 'name' &&
+                    key !== 'operations' &&
+                    key !== 'environment',
       ) ||
       typeof descriptor.id !== 'string' ||
       !isValidBridgeWorkerId(descriptor.id) ||
       workspaceIds.has(descriptor.id) ||
+            (descriptor.environment !== undefined &&
+                !isValidCodeEnvironmentDescriptor(descriptor.environment)) ||
       (descriptor.name !== undefined &&
         (typeof descriptor.name !== 'string' ||
           descriptor.name.trim().length === 0 ||
@@ -1467,6 +1605,37 @@ export function isValidBridgeWorkspaceToolCapabilities(
     workspaceIds.add(descriptor.id);
     return true;
   });
+}
+
+export function isValidCodeEnvironmentDescriptor(
+    value: unknown,
+): value is NonNullable<BridgeWorkspaceDescriptor['environment']> {
+    if (typeof value !== 'object' || value === null) return false;
+    const environment = value as Record<string, unknown>;
+    return (
+        Object.keys(environment).every(key =>
+            ['fingerprint', 'repo', 'ref', 'actions'].includes(key),
+        ) &&
+        typeof environment.fingerprint === 'string' &&
+        /^[a-f0-9]{64}$/.test(environment.fingerprint) &&
+        (environment.repo === undefined ||
+            (typeof environment.repo === 'string' &&
+                environment.repo.length <= 256 &&
+                /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(environment.repo))) &&
+        (environment.ref === undefined ||
+            (typeof environment.ref === 'string' &&
+                environment.ref.trim().length > 0 &&
+                environment.ref.length <= 256 &&
+                !/[\0\r\n]/.test(environment.ref))) &&
+        Array.isArray(environment.actions) &&
+        environment.actions.length <= 32 &&
+        environment.actions.every(
+            name =>
+                typeof name === 'string' &&
+                /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name),
+        ) &&
+        new Set(environment.actions).size === environment.actions.length
+    );
 }
 
 export function isValidBridgeWorkerCapabilities(

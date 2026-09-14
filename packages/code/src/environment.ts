@@ -1,0 +1,276 @@
+import { createHash } from 'node:crypto';
+import { open, realpath, stat } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { parseDocument } from 'yaml';
+import { BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS } from './protocol.js';
+import type { LocalWorkspaceConfig } from './workspace.js';
+import { WorkspaceToolError } from './workspace.js';
+import type { WorkspaceToolExecutor } from './workspace.js';
+import type { WorkspaceToolRequest, WorkspaceToolResult } from './protocol.js';
+
+export interface CodeEnvironmentDefinition {
+    name: string;
+    root: string;
+    repo?: string;
+    ref?: string;
+    setup?: { command: string; timeoutMs: number };
+    actions?: { name: string; command: string; timeoutMs: number }[];
+}
+
+export interface LoadedCodeEnvironment {
+    path: string;
+    definition: CodeEnvironmentDefinition;
+    fingerprint: string;
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function text(value: unknown, max: number): value is string {
+    return (
+        typeof value === 'string' &&
+        value.trim().length > 0 &&
+        value.length <= max &&
+        !value.includes('\0')
+    );
+}
+
+export function parseCodeEnvironment(
+    source: string,
+): CodeEnvironmentDefinition {
+    if (Buffer.byteLength(source) > 65_536)
+        throw new Error('Environment file exceeds 64 KiB');
+    const document = parseDocument(source, {
+        schema: 'core',
+        uniqueKeys: true,
+    });
+    if (document.errors.length || document.warnings.length) {
+        throw new Error('Invalid environment YAML');
+    }
+    const value: unknown = document.toJS({ maxAliasCount: 0 });
+    if (
+        !record(value) ||
+        Object.keys(value).some(
+            key =>
+                !['name', 'root', 'repo', 'ref', 'setup', 'actions'].includes(
+                    key,
+                ),
+        ) ||
+        !text(value.name, 64) ||
+        !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value.name) ||
+        !text(value.root, 4096) ||
+        (value.repo !== undefined &&
+            (!text(value.repo, 256) ||
+                !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.repo))) ||
+        (value.ref !== undefined &&
+            (!text(value.ref, 256) || /[\r\n]/.test(value.ref)))
+    ) {
+        throw new Error(
+            'Invalid environment definition: expected name, root, optional repo, ref and setup',
+        );
+    }
+    let setup: CodeEnvironmentDefinition['setup'];
+    if (value.setup !== undefined) {
+        if (
+            !record(value.setup) ||
+            Object.keys(value.setup).some(
+                key => !['command', 'timeoutMs'].includes(key),
+            ) ||
+            !text(value.setup.command, 16_384)
+        ) {
+            throw new Error('Invalid environment setup');
+        }
+        const timeoutMs =
+            value.setup.timeoutMs ?? BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS;
+        if (
+            typeof timeoutMs !== 'number' ||
+            !Number.isSafeInteger(timeoutMs) ||
+            timeoutMs < 1 ||
+            timeoutMs > BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS
+        ) {
+            throw new Error(
+                `Environment setup timeout must be between 1 and ${BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS} ms`,
+            );
+        }
+        setup = { command: value.setup.command, timeoutMs };
+    }
+    let actions: CodeEnvironmentDefinition['actions'];
+    if (value.actions !== undefined) {
+        if (!Array.isArray(value.actions) || value.actions.length > 32)
+            throw new Error('Invalid environment actions');
+        const names = new Set<string>();
+        actions = value.actions.map((action: unknown) => {
+            if (
+                !record(action) ||
+                Object.keys(action).some(
+                    key => !['name', 'command', 'timeoutMs'].includes(key),
+                ) ||
+                !text(action.name, 64) ||
+                !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(action.name) ||
+                names.has(action.name) ||
+                !text(action.command, 16_384)
+            )
+                throw new Error('Invalid environment action');
+            const timeoutMs = action.timeoutMs ?? 30_000;
+            if (
+                typeof timeoutMs !== 'number' ||
+                !Number.isSafeInteger(timeoutMs) ||
+                timeoutMs < 1 ||
+                timeoutMs > BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS
+            )
+                throw new Error('Invalid environment action timeout');
+            names.add(action.name);
+            return { name: action.name, command: action.command, timeoutMs };
+        });
+    }
+    return {
+        name: value.name,
+        root: value.root,
+        ...(typeof value.repo === 'string' ? { repo: value.repo } : {}),
+        ...(typeof value.ref === 'string' ? { ref: value.ref } : {}),
+        ...(setup ? { setup } : {}),
+        ...(actions ? { actions } : {}),
+    };
+}
+
+/** Resolve actions only against the worker-owned snapshot, after normal command admission. */
+export class EnvironmentWorkspaceTools implements WorkspaceToolExecutor {
+    readonly mutationFailuresAreAtomic?: true;
+    readonly capabilities: WorkspaceToolExecutor['capabilities'];
+    private readonly environments: Map<string, LoadedCodeEnvironment>;
+
+    constructor(
+        private readonly delegate: WorkspaceToolExecutor,
+        environments: LoadedCodeEnvironment[],
+    ) {
+        this.mutationFailuresAreAtomic = delegate.mutationFailuresAreAtomic;
+        this.environments = new Map(
+            environments.map(environment => [
+                environment.definition.name,
+                environment,
+            ]),
+        );
+        this.capabilities = {
+            ...delegate.capabilities,
+            workspaces: delegate.capabilities.workspaces.map(workspace => {
+                const environment = this.environments.get(workspace.id);
+                if (!environment) return workspace;
+                const operations =
+                    workspace.operations ?? delegate.capabilities.operations;
+                return {
+                    ...workspace,
+                    environment: {
+                        fingerprint: environment.fingerprint,
+                        ...(environment.definition.repo
+                            ? { repo: environment.definition.repo }
+                            : {}),
+                        ...(environment.definition.ref
+                            ? { ref: environment.definition.ref }
+                            : {}),
+                        actions: operations.includes('execute_command')
+                            ? (environment.definition.actions ?? []).map(
+                                  action => action.name,
+                              )
+                            : [],
+                    },
+                };
+            }),
+        };
+    }
+
+    async execute(
+        request: WorkspaceToolRequest,
+        signal?: AbortSignal,
+    ): Promise<WorkspaceToolResult> {
+        if (
+            request.operation !== 'execute_command' ||
+            !request.environmentAction
+        ) {
+            return this.delegate.execute(request, signal);
+        }
+        const environment = this.environments.get(request.workspaceId);
+        const action = environment?.definition.actions?.find(
+            action => action.name === request.environmentAction?.name,
+        );
+        if (
+            !environment ||
+            environment.fingerprint !== request.environmentAction.fingerprint ||
+            !action ||
+            (request.cwd !== undefined && request.cwd !== '.')
+        ) {
+            throw new WorkspaceToolError(
+                'Environment action is unavailable or its definition changed',
+                'INVALID_REQUEST',
+            );
+        }
+        const { environmentAction: _action, ...commandRequest } = request;
+        return this.delegate.execute(
+            {
+                ...commandRequest,
+                command: action.command,
+                timeoutMs: Math.min(
+                    request.timeoutMs ?? action.timeoutMs,
+                    action.timeoutMs,
+                ),
+                cwd: '.',
+            },
+            signal,
+        );
+    }
+}
+
+export async function loadCodeEnvironment(
+    path: string,
+): Promise<LoadedCodeEnvironment> {
+    const canonicalPath = await realpath(path);
+    const handle = await open(canonicalPath, 'r');
+    let definition: CodeEnvironmentDefinition;
+    try {
+        const metadata = await handle.stat();
+        if (!metadata.isFile() || metadata.size > 65_536)
+            throw new Error('Invalid environment file');
+        const buffer = Buffer.alloc(65_537);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        definition = parseCodeEnvironment(
+            buffer.subarray(0, bytesRead).toString('utf8'),
+        );
+    } finally {
+        await handle.close();
+    }
+    const root = await realpath(
+        resolve(dirname(canonicalPath), definition.root),
+    );
+    if (!(await stat(root)).isDirectory())
+        throw new Error('Environment root must be a directory');
+    definition = { ...definition, root };
+    return {
+        path: canonicalPath,
+        definition,
+        fingerprint: createHash('sha256')
+            .update(JSON.stringify(definition))
+            .digest('hex'),
+    };
+}
+
+/** A workspace must never be able to rewrite a definition used on the next startup. */
+export function assertEnvironmentDefinitionsOutsideRoots(
+    environments: readonly LoadedCodeEnvironment[],
+    roots: readonly LocalWorkspaceConfig[],
+): void {
+    for (const environment of environments) {
+        for (const root of roots) {
+            const path = relative(root.root, environment.path);
+            if (
+                path === '' ||
+                (!isAbsolute(path) &&
+                    path !== '..' &&
+                    !path.startsWith(`..${sep}`))
+            ) {
+                throw new Error(
+                    'Environment definitions must be outside every registered workspace root',
+                );
+            }
+        }
+    }
+}

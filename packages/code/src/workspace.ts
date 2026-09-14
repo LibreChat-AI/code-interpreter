@@ -1693,6 +1693,9 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
     if (request.operation !== 'execute_command') {
       return this.options.workspaceTools.execute(request, signal);
     }
+    if (request.environmentAction) {
+      throw new WorkspaceToolError('Environment action was not resolved by this worker', 'INVALID_REQUEST');
+    }
     if (!this.commandWorkspaces.has(request.workspaceId)) {
       throw new WorkspaceToolError(
         'Command execution is disabled for this workspace',

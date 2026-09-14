@@ -5,6 +5,11 @@ import { realpath, stat } from 'node:fs/promises';
 import { basename, resolve, relative, isAbsolute, sep } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
+import {
+    loadCodeEnvironment,
+    assertEnvironmentDefinitionsOutsideRoots,
+    EnvironmentWorkspaceTools,
+} from './environment.js';
 import { startFileRelay } from './relay.js';
 import { DockerFileRelaySupervisor } from './relay-runtime.js';
 import {
@@ -61,7 +66,8 @@ function workspaceSecurityIdentity(
   configuredToken: string | undefined,
 ): string {
   return (
-    pairedPublicKey ?? required('LIBRECHAT_CODE_WORKER_TOKEN', configuredToken)
+        pairedPublicKey ??
+        required('LIBRECHAT_CODE_WORKER_TOKEN', configuredToken)
   );
 }
 
@@ -70,7 +76,8 @@ function workspaceQuarantinePath(options: {
   workerId: string;
   workspaceRoot?: string;
 }): string {
-  const override = process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim();
+    const override =
+        process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim();
   if (override) return override;
   return defaultWorkspaceQuarantinePath({
     ...options,
@@ -88,7 +95,7 @@ function list(value: string | undefined): string[] {
   return (
     value
       ?.split(',')
-      .map((item) => item.trim())
+            .map(item => item.trim())
       .filter(Boolean) ?? []
   );
 }
@@ -127,7 +134,7 @@ function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index >= 0) return args[index + 1];
   return args
-    .find((value) => value.startsWith(`${name}=`))
+        .find(value => value.startsWith(`${name}=`))
     ?.slice(name.length + 1);
 }
 
@@ -175,7 +182,9 @@ function githubCredentials(): {
     try {
       parsedApiUrl = new URL(apiUrl);
     } catch {
-      throw new Error('LIBRECHAT_CODE_GITHUB_API_URL must be a valid URL');
+            throw new Error(
+                'LIBRECHAT_CODE_GITHUB_API_URL must be a valid URL',
+            );
     }
     apiHost =
       parsedApiUrl.hostname.toLowerCase() === 'api.github.com'
@@ -288,7 +297,7 @@ async function relay(): Promise<void> {
   process.stdout.write(
     `librechat-code: file relay listening at ${handle.url}\n`,
   );
-  await new Promise<void>((resolve) => {
+    await new Promise<void>(resolve => {
     process.once('SIGINT', resolve);
     process.once('SIGTERM', resolve);
   });
@@ -299,6 +308,47 @@ async function run(
   runtimeSessionId?: string,
   args: string[] = [],
 ): Promise<void> {
+    const environmentPaths: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--environment') {
+            const path = args[++i];
+            if (!path || path.startsWith('--'))
+                throw new Error('--environment requires a YAML file');
+            environmentPaths.push(path);
+        } else if (args[i].startsWith('--environment=')) {
+            const path = args[i].slice('--environment='.length);
+            if (!path) throw new Error('--environment requires a YAML file');
+            environmentPaths.push(path);
+        }
+    }
+    if (environmentPaths.length > 32)
+        throw new Error('At most 32 environments may be registered');
+    const environments = await Promise.all(
+        environmentPaths.map(loadCodeEnvironment),
+    );
+    if (
+        environments.length &&
+        (runtimeSessionId != null ||
+            args.some(arg =>
+                [
+                    '--worker-dir',
+                    '--default-workspace',
+                    '--workspace',
+                    '--workspace-id',
+                    '--workspace-name',
+                ].some(flag => arg === flag || arg.startsWith(`${flag}=`)),
+            ) ||
+            [
+                process.env.LIBRECHAT_CODE_WORKER_DIR,
+                process.env.LIBRECHAT_CODE_DEFAULT_WORKSPACE,
+                process.env.LIBRECHAT_CODE_WORKSPACE_ID,
+                process.env.LIBRECHAT_CODE_WORKSPACE_NAME,
+            ].some(value => value?.trim()))
+    ) {
+        throw new Error(
+            '--environment cannot be combined with workspace directory, ID, or name settings',
+        );
+    }
   const configuredWorkerId = process.env.LIBRECHAT_CODE_WORKER_ID?.trim();
   const configuredIdentityPath =
     process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
@@ -347,7 +397,8 @@ async function run(
     );
   }
   const nsjailDockerMode =
-    runtimeMode === 'docker-nsjail' || runtimeMode === 'docker-macos-nsjail';
+        runtimeMode === 'docker-nsjail' ||
+        runtimeMode === 'docker-macos-nsjail';
   const sandboxEndpoint =
     process.env.LIBRECHAT_CODE_SANDBOX_ENDPOINT ??
     'http://127.0.0.1:2000/api/v2';
@@ -374,16 +425,18 @@ async function run(
     runtimeSessionId == null &&
     (fileRelayUpstream?.length ?? 0) > 0;
   const workspaceId =
+        environments[0]?.definition.name ??
     option(args, '--workspace-id') ??
     process.env.LIBRECHAT_CODE_WORKSPACE_ID?.trim() ??
     'primary';
   const explicitWorkerDirectory =
-    runtimeSessionId == null
+        environments[0]?.definition.root ??
+        (runtimeSessionId == null
       ? nonEmpty(
           option(args, '--worker-dir') ??
             process.env.LIBRECHAT_CODE_WORKER_DIR?.trim(),
         )
-      : undefined;
+            : undefined);
   const useDefaultWorkspace =
     runtimeSessionId == null &&
     (args.includes('--default-workspace') ||
@@ -403,11 +456,25 @@ async function run(
     option(args, '--command-sandbox') ??
     process.env.LIBRECHAT_CODE_COMMAND_SANDBOX?.trim().toLowerCase() ??
     (nsjailDockerMode ? 'runtime' : 'native-srt');
-  if (commandSandboxMode !== 'native-srt' && commandSandboxMode !== 'runtime') {
+    if (
+        commandSandboxMode !== 'native-srt' &&
+        commandSandboxMode !== 'runtime'
+    ) {
     throw new Error(
       'LIBRECHAT_CODE_COMMAND_SANDBOX must be native-srt or runtime',
     );
   }
+    if (environments.length && commandSandboxMode !== 'native-srt') {
+        throw new Error('Environment definitions require native-srt');
+    }
+    if (
+        environments.some(environment => environment.definition.setup) &&
+        !allowWorkspaceCommands
+    ) {
+        throw new Error(
+            'Environment setup requires --allow-workspace-commands',
+        );
+    }
   const nativeProgrammaticEnabled =
     allowWorkspaceCommands &&
     commandSandboxMode === 'native-srt' &&
@@ -486,7 +553,8 @@ async function run(
     }
   }
   const mutationQuarantinePath =
-    (allowWorkspaceWrites || allowWorkspaceCommands) && canonicalWorkerDirectory
+        (allowWorkspaceWrites || allowWorkspaceCommands) &&
+        canonicalWorkerDirectory
       ? workspaceQuarantinePath({
           codeApiUrl,
           workerId,
@@ -508,14 +576,27 @@ async function run(
           root: canonicalWorkerDirectory,
           writable: allowWorkspaceWrites,
           name:
+                      environments[0]?.definition.name ??
             option(args, '--workspace-name') ??
             process.env.LIBRECHAT_CODE_WORKSPACE_NAME?.trim() ??
             (useDefaultWorkspace
               ? workspaceId
-              : defaultWorkspaceName(workerDirectory!, workspaceId)),
+                          : defaultWorkspaceName(
+                                workerDirectory!,
+                                workspaceId,
+                            )),
         },
       ]
     : [];
+    for (const environment of environments.slice(1)) {
+        roots.push({
+            id: environment.definition.name,
+            name: environment.definition.name,
+            root: environment.definition.root,
+            writable: allowWorkspaceWrites,
+        });
+    }
+    assertEnvironmentDefinitionsOutsideRoots(environments, roots);
   for (let i = 0; i < args.length; i++) {
     if (
       args[i] === '--workspace' &&
@@ -551,16 +632,18 @@ async function run(
   if (roots.length > 32)
     throw new Error('At most 32 workspace roots may be registered');
   const rootIdentities = await Promise.all(
-    roots.map((root) => stat(root.root)),
+        roots.map(root => stat(root.root)),
   );
-  const normalized = roots.map((root) => root.root);
+    const normalized = roots.map(root => root.root);
   for (let i = 0; i < roots.length; i++)
     for (let j = 0; j < i; j++) {
       const inside = (a: string, b: string): boolean => {
         const path = relative(a, b);
         return (
           path === '' ||
-          (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+                    (path !== '..' &&
+                        !path.startsWith(`..${sep}`) &&
+                        !isAbsolute(path))
         );
       };
       if (
@@ -578,7 +661,9 @@ async function run(
     workspaceLeaseSlots > 1 &&
     (!allowWorkspaceCommands || commandSandboxMode !== 'native-srt')
   ) {
-    throw new Error('Concurrent workspace leases require native-srt commands');
+        throw new Error(
+            'Concurrent workspace leases require native-srt commands',
+        );
   }
   if (
     roots.length > 1 &&
@@ -589,7 +674,7 @@ async function run(
     );
   }
   const rootQuarantinePaths = new Map(
-    roots.map((root) => [
+        roots.map(root => [
       root.id,
       workspaceQuarantinePath({
         codeApiUrl,
@@ -676,7 +761,10 @@ async function run(
           token: createHmac(
             'sha256',
             pairedIdentity?.privateKey ??
-              required('LIBRECHAT_CODE_WORKER_TOKEN', configuredToken),
+                          required(
+                              'LIBRECHAT_CODE_WORKER_TOKEN',
+                              configuredToken,
+                          ),
           )
             .update('librechat-code-file-relay-v1')
             .digest('hex'),
@@ -712,8 +800,11 @@ async function run(
           image: runtimeImage,
           ...(nsjailDockerMode && runtimeSessionId == null
             ? (() => {
-                const { seccompProfile, packagesPath, profileRevision } =
-                  nsjailLaunchProfile!;
+                            const {
+                                seccompProfile,
+                                packagesPath,
+                                profileRevision,
+                            } = nsjailLaunchProfile!;
                 return {
                   capabilities: MACOS_NSJAIL_CAPABILITIES,
                   securityOptions: [`seccomp=${seccompProfile}`],
@@ -733,10 +824,12 @@ async function run(
                   httpClient: 'bun' as const,
                   environment: {
                     SANDBOX_USE_CGROUPV2: 'false',
-                    SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP: 'false',
+                                    SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP:
+                                        'false',
                     ...(workspaceMount
                       ? {
-                          SANDBOX_EXTERNAL_WORKSPACE_ENABLED: 'true',
+                                              SANDBOX_EXTERNAL_WORKSPACE_ENABLED:
+                                                  'true',
                           SANDBOX_EXTERNAL_WORKSPACE_ROOT:
                             workspaceMount.target,
                           SANDBOX_EXTERNAL_WORKSPACE_TOKEN:
@@ -745,15 +838,21 @@ async function run(
                       : {}),
                     ...(fileRelayProfile
                       ? {
-                          EGRESS_GATEWAY_URL: fileRelayProfile.url,
+                                              EGRESS_GATEWAY_URL:
+                                                  fileRelayProfile.url,
                           SANDBOX_PRIME_CONCURRENCY: String(
-                            fileRelayLimits!.maxConcurrentRequests,
+                                                  fileRelayLimits!
+                                                      .maxConcurrentRequests,
                           ),
-                          SANDBOX_UPLOAD_CONCURRENCY: String(
-                            fileRelayLimits!.maxConcurrentRequests,
+                                              SANDBOX_UPLOAD_CONCURRENCY:
+                                                  String(
+                                                      fileRelayLimits!
+                                                          .maxConcurrentRequests,
                           ),
-                          SANDBOX_FILE_RELAY_TOKEN: fileRelayProfile.token,
-                          SANDBOX_REQUIRE_EGRESS_MANIFEST: 'true',
+                                              SANDBOX_FILE_RELAY_TOKEN:
+                                                  fileRelayProfile.token,
+                                              SANDBOX_REQUIRE_EGRESS_MANIFEST:
+                                                  'true',
                           SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY:
                             executionManifestPublicKey!,
                         }
@@ -766,8 +865,10 @@ async function run(
                   bindMounts: [workspaceMount],
                   environment: {
                     SANDBOX_EXTERNAL_WORKSPACE_ENABLED: 'true',
-                    SANDBOX_EXTERNAL_WORKSPACE_ROOT: workspaceMount.target,
-                    SANDBOX_EXTERNAL_WORKSPACE_TOKEN: workspaceCommandToken!,
+                                  SANDBOX_EXTERNAL_WORKSPACE_ROOT:
+                                      workspaceMount.target,
+                                  SANDBOX_EXTERNAL_WORKSPACE_TOKEN:
+                                      workspaceCommandToken!,
                   },
                 }
               : {}),
@@ -781,6 +882,7 @@ async function run(
     commandPolicy,
     protectedPaths: [
       identityPath,
+            ...environments.map(environment => environment.path),
       ...rootQuarantinePaths.values(),
       github.privateKeyPath,
     ].filter((path): path is string => path != null),
@@ -814,7 +916,7 @@ async function run(
       ? roots.length > 1 || workspaceLeaseSlots > 1
         ? new NativeWorkspaceCommandPool(
             new Map(
-              roots.map((root) => [
+                          roots.map(root => [
                 root.id,
                 { ...nativeOptions, workspaceRoot: root.root },
               ]),
@@ -826,7 +928,7 @@ async function run(
   if (allowWorkspaceCommands && workspaceTools) {
     workspaceTools = new SandboxWorkspaceTools({
       workspaceTools,
-      commandWorkspaces: roots.map((root) => root.id),
+            commandWorkspaces: roots.map(root => root.id),
       ...(nativeProgrammaticEnabled
         ? { programmaticLanguages: ['bash'] }
         : {}),
@@ -839,6 +941,12 @@ async function run(
         }),
     });
   }
+    if (workspaceTools && environments.length) {
+        workspaceTools = new EnvironmentWorkspaceTools(
+            workspaceTools,
+            environments,
+        );
+    }
   const capabilities = {
     statefulWorkspace,
     sandboxProfile:
@@ -854,6 +962,11 @@ async function run(
     policyDigest: createHash('sha256')
       .update(policy)
       .update(
+                environments.length
+                    ? `\0environments\0${environments.map(environment => environment.fingerprint).join('\0')}`
+                    : '',
+            )
+            .update(
         allowWorkspaceCommands && commandSandboxMode === 'native-srt'
           ? `\0native-srt\0${serializeNativeSrtCommandPolicy(commandPolicy)}\0${commandAllowedDomains.join('\0')}\0${github.policyIdentity}`
           : '',
@@ -863,7 +976,9 @@ async function run(
     ...(workspaceLeaseSlots > 1
       ? { workspaceLeaseSlots, requiresReadyConfirmation: true }
       : {}),
-    ...(workspaceTools ? { workspaceTools: workspaceTools.capabilities } : {}),
+        ...(workspaceTools
+            ? { workspaceTools: workspaceTools.capabilities }
+            : {}),
   };
   if (!isValidBridgeWorkerCapabilities(capabilities)) {
     await fileRelaySupervisor?.stop().catch(() => undefined);
@@ -874,6 +989,39 @@ async function run(
   try {
     await github.provider?.getCredential(controller.signal);
     await nativeCommandSandbox?.prepare();
+        for (const environment of environments) {
+            const setup = environment.definition.setup;
+            if (!setup || !nativeCommandSandbox) continue;
+            const id = environment.definition.name;
+            const guard = workspaceMutationGuard(
+                rootQuarantinePaths.get(id)!,
+                workerId,
+                id,
+                incarnationId,
+            );
+            await guard.assertAvailable();
+            await guard.arm('Environment setup did not settle', 'setup');
+            const result = await nativeCommandSandbox.execute(
+                {
+                    protocolVersion: 1,
+                    operation: 'execute_command',
+                    workspaceId: id,
+                    command: setup.command,
+                    timeoutMs: setup.timeoutMs,
+                    maxOutputBytes: 8192,
+                },
+                controller.signal,
+            );
+            await guard.clear('setup');
+            if (result.exitCode !== 0 || result.timedOut) {
+                throw new Error(
+                    `Environment ${id} setup failed; inspect the setup command before restarting`,
+                );
+            }
+            process.stdout.write(
+                `librechat-code: environment ${id} prepared\n`,
+            );
+        }
   } catch (error) {
     await nativeCommandSandbox?.close().catch(() => undefined);
     await fileRelaySupervisor?.stop().catch(() => undefined);
@@ -895,7 +1043,7 @@ async function run(
       ...(workspaceLeaseSlots > 1 || roots.length > 1
         ? {
             workspaceQuarantines: new Map(
-              roots.map((root) => [
+                          roots.map(root => [
                 root.id,
                 workspaceMutationGuard(
                   rootQuarantinePaths.get(root.id)!,
@@ -913,7 +1061,8 @@ async function run(
         roots.length === 1
           ? {
               async assertAvailable() {
-                const record = await loadWorkspaceMutationQuarantine(
+                              const record =
+                                  await loadWorkspaceMutationQuarantine(
                   mutationQuarantinePath,
                 );
                 if (record != null) {
@@ -925,15 +1074,18 @@ async function run(
                 }
               },
               async arm(reason) {
-                await saveWorkspaceMutationQuarantine(mutationQuarantinePath, {
+                              await saveWorkspaceMutationQuarantine(
+                                  mutationQuarantinePath,
+                                  {
                   version: 1,
                   workerId,
                   workspaceId,
                   ownerId: incarnationId,
                   quarantinedAt: new Date().toISOString(),
                   reason,
-                });
               },
+                              );
+                          },
               async clear() {
                 await clearWorkspaceMutationQuarantine(
                   mutationQuarantinePath,
@@ -950,7 +1102,7 @@ async function run(
           : undefined,
       onIdentityChange:
         pairedIdentity && identityPath
-          ? async (identity) => {
+                    ? async identity => {
               await saveBridgeIdentity(identityPath, {
                 ...pairedIdentity,
                 credential: identity.credential,
@@ -959,10 +1111,12 @@ async function run(
             }
           : undefined,
       onRegistered: fileRelaySupervisor
-        ? async (registration) => {
+                ? async registration => {
             if (
               registration.registrationGeneration == null ||
-              !Number.isSafeInteger(registration.registrationGeneration) ||
+                          !Number.isSafeInteger(
+                              registration.registrationGeneration,
+                          ) ||
               registration.registrationGeneration < 1
             ) {
               throw new Error(
@@ -975,10 +1129,14 @@ async function run(
             );
           }
         : undefined,
-      onError: (error) => {
+            onError: error => {
         const message =
-          error instanceof Error ? error.message : 'unknown bridge error';
-        process.stderr.write(`librechat-code: reconnecting after ${message}\n`);
+                    error instanceof Error
+                        ? error.message
+                        : 'unknown bridge error';
+                process.stderr.write(
+                    `librechat-code: reconnecting after ${message}\n`,
+                );
       },
     });
     if (runtimeSessionId !== undefined) {
@@ -994,7 +1152,10 @@ async function run(
     if (resetNativeRoot != null) {
       await worker.refreshCredential(controller.signal);
       await worker.registerForMaintenance(controller.signal);
-      await worker.resetNativeWorkspace(resetNativeRoot, controller.signal);
+            await worker.resetNativeWorkspace(
+                resetNativeRoot,
+                controller.signal,
+            );
       process.stdout.write(
         `librechat-code: reset acknowledged for native workspace ${resetNativeRoot}\n`,
       );

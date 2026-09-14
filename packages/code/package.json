@@ -65,6 +65,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.75",
-    "koffi": "3.2.1"
+    "koffi": "3.2.1",
+    "yaml": "2.9.1"
   }
 }

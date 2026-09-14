@@ -652,3 +652,50 @@ To recover a quarantined native root:
 
 The workspace selector in LibreChat must preserve these registered IDs. Adding
 roots here does not grant a principal access or change an agent's selected root.
+# Named project environments
+
+An operator can keep a project definition outside the coding workspace and start
+the worker with `librechat-code run --environment /operator/app.yaml
+--allow-workspace-commands --allow-workspace-writes`. Existing pairing settings
+still identify the machine and its principal. Repeat `--environment` for independent,
+non-overlapping roots (up to 32). Do not combine definitions with workspace directory,
+ID, or name flags or environment variables.
+
+```yaml
+name: app-dev
+root: /projects/app
+repo: example/app
+ref: main
+setup:
+  command: npm ci
+  timeoutMs: 300000
+actions:
+  - name: typecheck
+    command: npm run typecheck
+    timeoutMs: 120000
+```
+
+The root must already exist; relative roots resolve from the YAML file's directory.
+Repository and ref are descriptive metadata, not a clone or checkout instruction.
+No Git repository is required. Definitions are loaded once at startup, hashed into
+the worker's policy identity, and protected from sandbox writes. All definition
+files must be outside every registered root. Unknown fields are rejected.
+
+Setup is an operator-authorized startup command under the configured native sandbox
+policy. It requires commands to be enabled, runs once per worker startup before
+registration, and must be idempotent for restarts. Its timeout is bounded to five
+minutes and captured output to 8 KiB. Setup failure prevents registration. A crash
+or uncertain termination retains the existing workspace quarantine marker; inspect
+the workspace before clearing quarantine. No setup output is sent to the model.
+
+Named actions are fixed commands without model-supplied substitution. The bridge
+advertises only their names and the definition fingerprint, never their shell source
+or host root. A command request can select `environmentAction: { name, fingerprint }`;
+the worker resolves the command from its loaded definition and rejects stale revisions,
+unknown names, other roots, or a changed working directory. Actions use ordinary
+command authorization, queueing, cancellation and quarantine. They never override
+deployment approval rules or expand the pairing's principal scope.
+
+Rollout: update Code API and the LibreChat environment-descriptor consumer before
+enabling this opt-in flag on a worker. Older validators reject the additional metadata.
+Existing workers without `--environment` continue to use their existing registration.
