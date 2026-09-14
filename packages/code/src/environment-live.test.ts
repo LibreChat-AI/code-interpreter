@@ -8,13 +8,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-for (const { succeeds, reset } of [
-    { succeeds: true, reset: false },
-    { succeeds: false, reset: false },
-    { succeeds: true, reset: true },
+for (const { succeeds, reset, timesOut } of [
+    { succeeds: true, reset: false, timesOut: false },
+    { succeeds: false, reset: false, timesOut: false },
+    { succeeds: false, reset: false, timesOut: true },
+    { succeeds: true, reset: true, timesOut: false },
 ]) {
     test(
-        `real CLI environment setup gates registration (success=${succeeds}, reset=${reset})`,
+        `real CLI environment setup gates registration (success=${succeeds}, reset=${reset}, timeout=${timesOut})`,
         {
             skip: process.env.LIBRECHAT_CODE_LIVE_SRT_TESTS !== '1',
             timeout: 20_000,
@@ -27,7 +28,7 @@ for (const { succeeds, reset } of [
             const path = join(directory, 'environment.yaml');
             await writeFile(
                 path,
-                `name: project\nroot: project\nsetup:\n  command: 'printf prepared > prepared.txt; exit ${succeeds ? 0 : 2}'\n  timeoutMs: 5000\n`,
+                `name: project\nroot: project\nsetup:\n  command: 'printf prepared >> prepared.txt; ${timesOut ? 'sleep 10' : `exit ${succeeds ? 0 : 2}`}'\n  timeoutMs: ${timesOut ? 1000 : 5000}\n`,
             );
             let registrations = 0;
             let receive: (() => void) | undefined;
@@ -38,6 +39,7 @@ for (const { succeeds, reset } of [
                 request.resume();
                 if (request.url?.endsWith('/register')) {
                     registrations++;
+                    await assert.rejects(readFile(join(directory, 'quarantine.json')), { code: 'ENOENT' });
                     if (reset)
                         await assert.rejects(
                             readFile(join(root, 'prepared.txt')),
@@ -61,7 +63,7 @@ for (const { succeeds, reset } of [
             });
             const address = server.address();
             assert.ok(address && typeof address !== 'string');
-            const child = spawn(
+            const start = () => spawn(
                 process.execPath,
                 [
                     fileURLToPath(new URL('./cli.js', import.meta.url)),
@@ -90,6 +92,7 @@ for (const { succeeds, reset } of [
                     stdio: ['ignore', 'pipe', 'pipe'],
                 },
             );
+            const child = start();
             const exited = once(child, 'exit');
             t.after(() => child.kill('SIGKILL'));
             let stderr = '';
@@ -110,6 +113,19 @@ for (const { succeeds, reset } of [
                 const [code] = await exited;
                 assert.notEqual(code, 0);
                 assert.match(stderr, /Environment project setup failed/);
+                assert.equal(registrations, 0);
+                const marker = await readFile(join(directory, 'quarantine.json'), 'utf8');
+                assert.equal(JSON.parse(marker).workspaceId, 'project');
+                const before = await readFile(join(root, 'prepared.txt'), 'utf8');
+                const retry = start();
+                t.after(() => retry.kill('SIGKILL'));
+                let retryStderr = '';
+                retry.stderr.on('data', chunk => { retryStderr += chunk.toString(); });
+                const [retryCode] = await once(retry, 'exit');
+                assert.notEqual(retryCode, 0);
+                assert.match(retryStderr, /quarantined/);
+                assert.equal(await readFile(join(root, 'prepared.txt'), 'utf8'), before);
+                assert.equal(await readFile(join(directory, 'quarantine.json'), 'utf8'), marker);
                 assert.equal(registrations, 0);
             }
         },

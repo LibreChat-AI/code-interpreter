@@ -689,9 +689,10 @@ worker runs. This inspection happens at startup, not on the command hot path.
 Setup is an operator-authorized startup command under the configured native sandbox
 policy. It requires commands to be enabled, runs once per worker startup before
 registration, and must be idempotent for restarts. Its timeout is bounded to five
-minutes and captured output to 8 KiB. Setup failure prevents registration. A crash
-or uncertain termination retains the existing workspace quarantine marker; inspect
-the workspace before clearing quarantine. No setup output is sent to the model.
+minutes and captured output to 8 KiB. Setup failure prevents registration. A nonzero
+exit, timeout, crash or uncertain termination retains the workspace quarantine marker;
+inspect the workspace before clearing quarantine with `--reset-workspace-quarantine`.
+Only successful setup clears its marker. No setup output is sent to the model.
 
 Named actions are fixed commands without model-supplied substitution. The bridge
 advertises only their names and the definition fingerprint, never their shell source
