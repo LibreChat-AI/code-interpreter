@@ -19,6 +19,7 @@ import {
   removeJobIfWaiting,
   requestJobCancellation,
   fenceJobCancellation,
+  readCommittedJobResult,
   waitForJobWithCancellation,
 } from '../job-cancellation';
 import {
@@ -423,48 +424,56 @@ async function runReplayIteration(
   }
   const submittedAtMs = Date.now();
   const deadlineAtMs = submittedAtMs + env.JOB_TIMEOUT;
-    const job = await queue.add(
-        Jobs.execute,
-        {
-    code: state.userCode ?? '',
-    userId,
-    payload: sandboxSecurity.payload,
-    apiKeyId,
-    isPyPlot: state.isPyPlot ?? false,
-    principalSource: state.principalSource,
-    executionId: state.execution_id,
-    tenantId: state.tenantId,
-    canonicalUserId: state.canonicalUserId,
-    executionProfile: state.executionProfile ?? env.EXECUTION_PROFILE,
-    sandboxBackend: replayBackend,
-            ...(state.bridgeWorkerId != null
-                ? { bridgeWorkerId: state.bridgeWorkerId }
-                : {}),
-            ...(state.workspaceId != null
-                ? { workspaceId: state.workspaceId }
-                : {}),
-    cancellable: true,
-    runtimeSessionMode: 'stateless',
-    runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,
-    executionManifestClaims: sandboxSecurity.executionManifestClaims,
-    egressGrantClaims: sandboxSecurity.egressGrantClaims,
-    egressGrantToken: sandboxSecurity.egressGrantToken,
-        },
-        {
-    removeOnComplete: { age: 60, count: 1 },
-    removeOnFail: { age: 180, count: 1 },
-    attempts: 1,
-    jobId: cancellationTarget.jobId,
-    timestamp: submittedAtMs,
-        },
-    ).catch(async (error) => {
-      // Redis may have enqueued the job even though its reply was lost.
-      // Preserve replay ownership until cancellation is durable or the job's
-      // fixed worker deadline prevents a late admission from executing.
-      await fenceJobCancellation({ commands: connection, target: cancellationTarget,
-        ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS, deadlineAtMs });
-      throw error;
+  let job: Awaited<ReturnType<typeof queue.add>>;
+  try {
+    job = await queue.add(
+      Jobs.execute,
+      {
+        code: state.userCode ?? '',
+        userId,
+        payload: sandboxSecurity.payload,
+        apiKeyId,
+        isPyPlot: state.isPyPlot ?? false,
+        principalSource: state.principalSource,
+        executionId: state.execution_id,
+        tenantId: state.tenantId,
+        canonicalUserId: state.canonicalUserId,
+        executionProfile: state.executionProfile ?? env.EXECUTION_PROFILE,
+        sandboxBackend: replayBackend,
+        ...(state.bridgeWorkerId != null ? { bridgeWorkerId: state.bridgeWorkerId } : {}),
+        ...(state.workspaceId != null ? { workspaceId: state.workspaceId } : {}),
+        cancellable: true,
+        deadlineAtMs,
+        runtimeSessionMode: 'stateless',
+        runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,
+        executionManifestClaims: sandboxSecurity.executionManifestClaims,
+        egressGrantClaims: sandboxSecurity.egressGrantClaims,
+        egressGrantToken: sandboxSecurity.egressGrantToken,
+      },
+      {
+        removeOnComplete: { age: 60, count: 1 },
+        removeOnFail: { age: 180, count: 1 },
+        attempts: 1,
+        jobId: cancellationTarget.jobId,
+        timestamp: submittedAtMs,
+      },
+    );
+  } catch (error) {
+    // Redis may have enqueued the job even though its reply was lost.
+    // Preserve replay ownership until cancellation is durable or the job's
+    // fixed worker deadline prevents a late admission from executing.
+    const cancelled = await fenceJobCancellation({
+      commands: connection, target: cancellationTarget,
+      ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS, deadlineAtMs,
     });
+    if (!cancelled) {
+      const committed = await readCommittedJobResult<t.ExecuteResult>(
+        connection, cancellationTarget,
+      );
+      if (committed != null) return committed.result;
+    }
+    throw error;
+  }
   jobsSubmitted.inc({ language });
 
   return waitForJobWithCancellation({

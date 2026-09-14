@@ -249,13 +249,14 @@ export class JobCancellationRegistry {
     if (this.subscriberRestartTimer != null)
       clearTimeout(this.subscriberRestartTimer);
     this.subscriberRestartTimer = undefined;
-    await this.startPromise?.catch(() => undefined);
     const subscriber = this.subscriber;
     this.subscriber = undefined;
     this.startPromise = undefined;
     if (subscriber == null) return;
     this.detachSubscriber(subscriber);
-    await subscriber.quit();
+    // This socket only carries notifications. Disconnect it before awaiting
+    // anything: subscribe() may be queued through an indefinite Redis outage.
+    subscriber.disconnect(false);
   }
 }
 
@@ -292,29 +293,38 @@ export async function commitJobResult<T>(
   target: JobTarget,
   result: T,
   ttlSeconds: number,
+  deadlineAtMs = Number.MAX_SAFE_INTEGER,
 ): Promise<boolean> {
   const serialized = JSON.stringify({ result });
   if (Buffer.byteLength(serialized) > 16 * 1024 * 1024) {
     throw new Error('Programmatic completion exceeds the 16 MiB result limit');
   }
-  return (
-    (await commands.eval(
-      `
+  const decision = await commands.eval(
+    `
     local state = redis.call('GET', KEYS[1])
     if state == '1' then return 0 end
     if not state then
-      redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
-      redis.call('SET', KEYS[1], 'completed', 'EX', ARGV[2])
+      local now = redis.call('TIME')
+      if tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000) >= tonumber(ARGV[3]) then
+        return -1
+      end
+      -- One write command, so an OOM cannot publish just half the decision.
+      redis.call('MSET', KEYS[1], 'completed', KEYS[2], ARGV[1])
+      redis.call('EXPIRE', KEYS[1], ARGV[2])
+      redis.call('EXPIRE', KEYS[2], ARGV[2])
     end
     return 1
   `,
-      2,
-      cancellationKey(target),
-      `${cancellationKey(target)}:result`,
-      serialized,
-      Math.max(1, ttlSeconds),
-    )) === 1
+    2,
+    cancellationKey(target),
+    `${cancellationKey(target)}:result`,
+    serialized,
+    Math.max(1, ttlSeconds),
+    deadlineAtMs,
   );
+  if (decision === -1)
+    throw new Error('Job result commitment exceeded its deadline');
+  return decision === 1;
 }
 
 export async function readCommittedJobResult<T>(
@@ -342,7 +352,13 @@ export async function fenceJobCancellation(args: {
   deadlineAtMs: number;
 }): Promise<boolean> {
   let retryMs = 25;
-  while (Date.now() < args.deadlineAtMs) {
+  let firstAttempt = true;
+  while (firstAttempt || Date.now() < args.deadlineAtMs) {
+    firstAttempt = false;
+    // If a lost enqueue reply arrives after the execution deadline, still
+    // give a healthy Redis one bounded opportunity to return completion's
+    // winning decision. Never translate a known committed effect to failure.
+    const remainingMs = args.deadlineAtMs - Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
@@ -350,7 +366,7 @@ export async function fenceJobCancellation(args: {
         new Promise<boolean>(resolve => {
           timer = setTimeout(
             () => resolve(true),
-            Math.max(1, args.deadlineAtMs - Date.now()),
+            remainingMs > 0 ? remainingMs : 1_000,
           );
         }),
       ]);
@@ -442,20 +458,28 @@ export async function waitForJobWithCancellation<T>(args: {
     signal,
   } = args;
   const completion = job.waitUntilFinished(events, timeoutMs);
+  // Subscription startup can itself wait for Redis recovery. Own the losing
+  // promise immediately, before any await, rather than after registration.
+  void completion.catch(() => undefined);
   const target = { queueName: job.queueName, jobId: String(job.id) };
+  const deadlineAtMs = args.deadlineAtMs ?? Date.now() + timeoutMs;
+  let fencing: Promise<boolean> | undefined;
   const fence = (): Promise<boolean> =>
-    fenceJobCancellation({
+    (fencing ??= fenceJobCancellation({
       commands,
       target,
       ttlSeconds: cancellationTtlSeconds,
-      deadlineAtMs: args.deadlineAtMs ?? Date.now() + timeoutMs,
-    });
+      deadlineAtMs,
+    }));
   const externalController = new AbortController();
   try {
     await registry.register(target, externalController);
   } catch (error) {
     void completion.catch(() => undefined);
-    await fence();
+    if (!(await fence())) {
+      const committed = await readCommittedJobResult<T>(commands, target);
+      if (committed != null) return committed.result;
+    }
     await removeJobIfWaiting(job).catch(() => false);
     throw error;
   }
@@ -505,7 +529,10 @@ export async function waitForJobWithCancellation<T>(args: {
   } catch (error) {
     // Includes waitUntilFinished timeouts and registration/transport errors,
     // not only explicit Stop. Replay cleanup is unsafe until this barrier.
-    await fence();
+    if (!(await fence())) {
+      const committed = await readCommittedJobResult<T>(commands, target);
+      if (committed != null) return committed.result;
+    }
     throw error;
   } finally {
     removeAbortListener();

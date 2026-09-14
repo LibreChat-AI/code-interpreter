@@ -299,6 +299,8 @@ export type JobData = {
   workspaceId?: string;
   /** Opts replay jobs into durable client-disconnect cancellation. */
   cancellable?: boolean;
+  /** Absolute producer budget; queue-worker configuration may only tighten it. */
+  deadlineAtMs?: number;
   /** Producer deployment identity. Optional only for pre-profile queued jobs. */
   executionProfile?: ExecutionProfile;
   /** Required sandbox transport. Optional only for jobs queued before fencing. */

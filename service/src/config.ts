@@ -95,10 +95,17 @@ export function jobDeadlineAtMs(
   enqueuedAtMs: number | undefined,
   timeoutMs: number,
   nowMs: number = Date.now(),
+  producerDeadlineAtMs?: number,
 ): number {
-  return Number.isFinite(enqueuedAtMs) && (enqueuedAtMs as number) > 0
+  const localDeadline = Number.isFinite(enqueuedAtMs) && (enqueuedAtMs as number) > 0
     ? (enqueuedAtMs as number) + timeoutMs
     : nowMs + timeoutMs;
+  if (producerDeadlineAtMs === undefined) return localDeadline;
+  // A worker with a larger JOB_TIMEOUT must not outlive the admission fence
+  // retained by its API producer. Malformed explicit deadlines fail closed.
+  return Number.isFinite(producerDeadlineAtMs)
+    ? Math.min(localDeadline, producerDeadlineAtMs)
+    : 0;
 }
 
 /** The worker stops user work at JOB_TIMEOUT, then may still need to terminate

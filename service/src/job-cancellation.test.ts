@@ -126,6 +126,21 @@ test('idle registries allocate no subscriber connection', async () => {
   expect(fake.duplicateCalls).toBe(0);
 });
 
+test('shutdown disconnects a subscriber whose startup is still waiting for Redis', async () => {
+  const fake = new FakeRedis();
+  fake.subscriber.subscribe = async () => new Promise<number>(() => {});
+  const registry = new JobCancellationRegistry(redis(fake));
+  void registry
+    .register(
+      { queueName: 'other', jobId: 'shutdown-startup' },
+      new AbortController(),
+    )
+    .catch(() => undefined);
+  await registry.close();
+  expect(fake.subscriber.closed).toBe(true);
+  expect(fake.subscriber.listenerCount('message')).toBe(0);
+}, 1_000);
+
 test('failed subscription startup removes handlers before a bounded retry', async () => {
   const fake = new FakeRedis();
   fake.subscriber.subscribeFailures = 1;
@@ -342,6 +357,7 @@ test('disconnect frees a waiting job and rejects promptly', async () => {
 
   await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
   expect(removed).toBe(true);
+  expect(fake.cancellationAttempts).toBe(1);
   expect(fake.transactions[0]?.operations[0]).toEqual([
     'set',
     jobCancellationInternals.cancellationKey({
@@ -392,6 +408,39 @@ test('registration failure fences and removes the already-enqueued job', async (
     'EX',
     120,
   ]);
+  await registry.close();
+});
+
+test('a result rejection is owned while subscription registration is pending', async () => {
+  const fake = new FakeRedis();
+  let release!: () => void;
+  fake.subscriber.subscribe = async () => {
+    await new Promise<void>(resolve => {
+      release = resolve;
+    });
+    return 1;
+  };
+  const registry = new JobCancellationRegistry(redis(fake));
+  const job = {
+    id: 'pending-registration',
+    queueName: 'other',
+    waitUntilFinished: () => Promise.reject(new Error('completion timeout')),
+    getState: async () => 'active',
+    remove: async () => {},
+  } as unknown as Job<unknown, unknown>;
+  const waiting = waitForJobWithCancellation({
+    commands: redis(fake),
+    registry,
+    job,
+    events: {} as QueueEvents,
+    timeoutMs: 1_000,
+    cancellationTtlSeconds: 60,
+  });
+  const rejection = waiting.catch((error: Error) => error);
+  // An unowned rejection fails the test runner on this event-loop turn.
+  await new Promise(resolve => setImmediate(resolve));
+  release();
+  expect(await rejection).toMatchObject({ message: 'completion timeout' });
   await registry.close();
 });
 

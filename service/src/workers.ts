@@ -95,7 +95,9 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       ? { queueName: job.queueName, jobId: String(job.id) }
       : undefined;
   let cancellationRegistered = false;
-  const deadlineAtMs = jobDeadlineAtMs(job.timestamp, env.JOB_TIMEOUT);
+  const deadlineAtMs = jobDeadlineAtMs(
+    job.timestamp, env.JOB_TIMEOUT, Date.now(), job.data.deadlineAtMs,
+  );
   const remainingBudgetMs = Math.max(0, deadlineAtMs - Date.now());
   const timer =
     remainingBudgetMs > 0
@@ -358,10 +360,15 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     let lateCommitFailure = completedResult
       ? jobResultCommitFailure(controller.signal, env.JOB_TIMEOUT)
       : undefined;
-    if (completedResult && cancellationTarget != null && lateCommitFailure == null) {
+    if (
+      completedResult && cancellationTarget != null && lateCommitFailure == null
+    ) {
       try {
-        if (!(await commitJobResult(connection, cancellationTarget, resultToCommit,
-          Math.ceil(env.JOB_TIMEOUT / 1_000) * 2 + 180))) {
+        const committed = await commitJobResult(
+          connection, cancellationTarget, resultToCommit,
+          Math.ceil(env.JOB_TIMEOUT / 1_000) * 2 + 180, deadlineAtMs,
+        );
+        if (!committed) {
           lateCommitFailure = new Error(JOB_CANCELLED_MESSAGE);
         }
       } catch (error) {

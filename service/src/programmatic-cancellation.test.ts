@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import type IORedis from 'ioredis';
 import { startTestRedis } from './test/redis';
+import { commitJobResult, requestJobCancellation } from './job-cancellation';
 import {
   attachProgrammaticCancellationTarget,
   cancelProgrammaticRequest,
@@ -130,7 +131,7 @@ test('a different principal cannot reserve, attach, cancel, or release a request
   expect(await redis.exists(programmaticCancellationInternals.requestKey(requestId))).toBe(1);
 });
 
-test('the owner releases cancellation state after settlement', async () => {
+test('settlement retains a bounded target tombstone for late Stop classification', async () => {
   const requestId = 'request_release_cancel_1';
   await reserveProgrammaticCancellation({
     redis,
@@ -138,6 +139,17 @@ test('the owner releases cancellation state after settlement', async () => {
     owner: 'owner-a',
     ttlSeconds: 60,
   });
+  const target = { queueName: 'other', jobId: 'settled-job' };
+  await attachProgrammaticCancellationTarget({ redis, requestId, owner: 'owner-a',
+    target, ttlSeconds: 60 });
+  await commitJobResult(redis, target, { stdout: 'done' }, 60);
   await releaseProgrammaticCancellation({ redis, requestId, owner: 'owner-a' });
-  expect(await redis.exists(programmaticCancellationInternals.requestKey(requestId))).toBe(0);
+  const key = programmaticCancellationInternals.requestKey(requestId);
+  expect(await redis.exists(key)).toBe(1);
+  expect(await redis.ttl(key)).toBeGreaterThan(0);
+  expect(await redis.ttl(key)).toBeLessThanOrEqual(60);
+  const cancelled = await cancelProgrammaticRequest({ redis, requestId, owner: 'owner-a',
+    ttlSeconds: 60 });
+  expect(cancelled).toEqual({ status: 'accepted', target });
+  expect(await requestJobCancellation(redis, target, 60)).toBe(false);
 });

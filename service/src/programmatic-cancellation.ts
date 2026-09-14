@@ -86,7 +86,9 @@ return {1}
 
 const RELEASE_SCRIPT = `
 if redis.call('HGET', KEYS[1], 'owner') == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
+  -- Keep the owner/target tombstone through its existing bounded TTL. A Stop
+  -- racing response delivery must still reach the job's completion decision.
+  return redis.call('HSET', KEYS[1], 'finished', '1')
 end
 return 0
 `;

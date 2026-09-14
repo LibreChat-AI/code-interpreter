@@ -99,6 +99,11 @@ describe('egress grant TTL configuration', () => {
 });
 
 describe('job deadline accounting', () => {
+  it('never extends the producer deadline when worker configuration differs', () => {
+    expect(jobDeadlineAtMs(1_000, 300_000, 50_000, 91_000)).toBe(91_000);
+    expect(jobDeadlineAtMs(1_000, 30_000, 50_000, 91_000)).toBe(31_000);
+    expect(jobDeadlineAtMs(1_000, 300_000, 50_000, Number.NaN)).toBe(0);
+  });
   it('counts time spent waiting in BullMQ against JOB_TIMEOUT', () => {
     expect(jobDeadlineAtMs(1_000, 300_000, 50_000)).toBe(301_000);
   });
