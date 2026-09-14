@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink, link } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -157,9 +157,28 @@ test('environment roots resolve relative to the definition and fingerprints cove
         ),
     );
     await symlink(path, join(directory, 'project', 'alias.yaml'));
+    const alias = await loadCodeEnvironment(
+        join(directory, 'project', 'alias.yaml'),
+    );
+    assert.throws(() =>
+        assertEnvironmentDefinitionsOutsideRoots(
+            [alias],
+            [{ id: 'app', root: first.definition.root }],
+        ),
+    );
     assert.equal(
         (await loadCodeEnvironment(join(directory, 'project', 'alias.yaml')))
             .path,
         first.path,
     );
+});
+
+test('rejects a trusted definition with an in-workspace hard link', async t => {
+    const directory = await mkdtemp(join(tmpdir(), 'code-env-hardlink-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    await mkdir(join(directory, 'project'));
+    const path = join(directory, 'environment.yaml');
+    await writeFile(path, 'name: app\nroot: project\n');
+    await link(path, join(directory, 'project', 'alias.yaml'));
+    await assert.rejects(loadCodeEnvironment(path), /one link/);
 });

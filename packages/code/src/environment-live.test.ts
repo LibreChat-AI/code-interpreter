@@ -8,9 +8,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-for (const succeeds of [true, false]) {
+for (const { succeeds, reset } of [
+    { succeeds: true, reset: false },
+    { succeeds: false, reset: false },
+    { succeeds: true, reset: true },
+]) {
     test(
-        `real CLI environment setup gates registration (success=${succeeds})`,
+        `real CLI environment setup gates registration (success=${succeeds}, reset=${reset})`,
         {
             skip: process.env.LIBRECHAT_CODE_LIVE_SRT_TESTS !== '1',
             timeout: 20_000,
@@ -34,10 +38,16 @@ for (const succeeds of [true, false]) {
                 request.resume();
                 if (request.url?.endsWith('/register')) {
                     registrations++;
-                    assert.equal(
-                        await readFile(join(root, 'prepared.txt'), 'utf8'),
-                        'prepared',
-                    );
+                    if (reset)
+                        await assert.rejects(
+                            readFile(join(root, 'prepared.txt')),
+                            { code: 'ENOENT' },
+                        );
+                    else
+                        assert.equal(
+                            await readFile(join(root, 'prepared.txt'), 'utf8'),
+                            'prepared',
+                        );
                     receive?.();
                 }
                 response.writeHead(503).end();
@@ -59,6 +69,9 @@ for (const succeeds of [true, false]) {
                     '--environment',
                     path,
                     '--allow-workspace-commands',
+                    ...(reset
+                        ? ['--reset-workspace-quarantine', 'project']
+                        : []),
                 ],
                 {
                     env: {

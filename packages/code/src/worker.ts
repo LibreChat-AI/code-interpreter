@@ -236,7 +236,9 @@ function registrationCompatibleCapabilities(
       return [];
     }
     const { operations: _operations, ...compatibleWorkspace } = workspace;
-    return [compatibleWorkspace];
+    return [{ ...compatibleWorkspace, ...(workspace.environment ? {
+      environment: { ...workspace.environment, actions: [] },
+    } : {}) }];
   });
   if (workspaces.length === 0) {
     const { workspaceTools: _workspaceTools, ...compatible } = capabilities;
@@ -312,13 +314,17 @@ function supportedWorkspaceCapabilities(
     editOperations.has(operation),
   );
   const workspaces = desired.workspaces.flatMap((workspace) => {
-    if (workspace.operations == null) return [workspace];
-    const workspaceOperations = workspace.operations.filter((operation) =>
+    const workspaceOperations = (workspace.operations ?? operations).filter((operation) =>
       operations.includes(operation),
     );
     return workspaceOperations.length === 0
       ? []
-      : [{ ...workspace, operations: workspaceOperations }];
+      : [{ ...workspace,
+          ...(workspace.operations ? { operations: workspaceOperations } : {}),
+          ...(workspace.environment && !workspaceOperations.includes('execute_command') ? {
+            environment: { ...workspace.environment, actions: [] },
+          } : {}),
+        }];
   });
   if (workspaces.length === 0) return undefined;
   const editFileFeatures = desired.editFileFeatures?.filter((feature) =>

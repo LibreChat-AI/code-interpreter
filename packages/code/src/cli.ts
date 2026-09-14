@@ -989,7 +989,7 @@ async function run(
   try {
     await github.provider?.getCredential(controller.signal);
     await nativeCommandSandbox?.prepare();
-        for (const environment of environments) {
+        for (const environment of option(args, '--reset-workspace-quarantine') == null ? environments : []) {
             const setup = environment.definition.setup;
             if (!setup || !nativeCommandSandbox) continue;
             const id = environment.definition.name;

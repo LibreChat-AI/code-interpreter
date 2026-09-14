@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto';
 import { open, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { parseDocument } from 'yaml';
+import {
+    assertPrivateStorageAcl,
+    assertPrivateStorageAncestors,
+} from './private-storage.js';
 import { BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS } from './protocol.js';
 import type { LocalWorkspaceConfig } from './workspace.js';
 import { WorkspaceToolError } from './workspace.js';
@@ -19,6 +23,7 @@ export interface CodeEnvironmentDefinition {
 
 export interface LoadedCodeEnvironment {
     path: string;
+    sourceParents?: string[];
     definition: CodeEnvironmentDefinition;
     fingerprint: string;
 }
@@ -223,11 +228,29 @@ export class EnvironmentWorkspaceTools implements WorkspaceToolExecutor {
 export async function loadCodeEnvironment(
     path: string,
 ): Promise<LoadedCodeEnvironment> {
-    const canonicalPath = await realpath(path);
+    const sourcePath = resolve(path);
+    await assertPrivateStorageAncestors(sourcePath);
+    const canonicalPath = await realpath(sourcePath);
+    const sourceParents: string[] = [];
+    for (let parent = dirname(sourcePath); ; parent = dirname(parent)) {
+        sourceParents.push(await realpath(parent));
+        if (parent === dirname(parent)) break;
+    }
     const handle = await open(canonicalPath, 'r');
     let definition: CodeEnvironmentDefinition;
     try {
         const metadata = await handle.stat();
+        const self = process.getuid?.();
+        if (
+            metadata.nlink !== 1 ||
+            (metadata.mode & 0o022) !== 0 ||
+            (self !== undefined && metadata.uid !== self && metadata.uid !== 0)
+        ) {
+            throw new Error(
+                'Environment definitions must have one link, a trusted owner and no group or other write permissions',
+            );
+        }
+        await assertPrivateStorageAcl(handle, canonicalPath);
         if (!metadata.isFile() || metadata.size > 65_536)
             throw new Error('Invalid environment file');
         const buffer = Buffer.alloc(65_537);
@@ -246,6 +269,7 @@ export async function loadCodeEnvironment(
     definition = { ...definition, root };
     return {
         path: canonicalPath,
+        sourceParents,
         definition,
         fingerprint: createHash('sha256')
             .update(JSON.stringify(definition))
@@ -260,16 +284,21 @@ export function assertEnvironmentDefinitionsOutsideRoots(
 ): void {
     for (const environment of environments) {
         for (const root of roots) {
-            const path = relative(root.root, environment.path);
-            if (
-                path === '' ||
-                (!isAbsolute(path) &&
-                    path !== '..' &&
-                    !path.startsWith(`..${sep}`))
-            ) {
-                throw new Error(
-                    'Environment definitions must be outside every registered workspace root',
-                );
+            for (const controlPath of [
+                environment.path,
+                ...(environment.sourceParents ?? []),
+            ]) {
+                const path = relative(root.root, controlPath);
+                if (
+                    path === '' ||
+                    (!isAbsolute(path) &&
+                        path !== '..' &&
+                        !path.startsWith(`..${sep}`))
+                ) {
+                    throw new Error(
+                        'Environment definitions must be outside every registered workspace root',
+                    );
+                }
             }
         }
     }
