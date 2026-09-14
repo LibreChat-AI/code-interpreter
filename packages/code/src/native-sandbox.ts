@@ -243,6 +243,36 @@ function normalizedEnvironmentName(
   return platform === 'win32' ? name.toUpperCase() : name;
 }
 
+/** Distinguishes an unsupported host filesystem from an implementation fault. */
+export class CopyOnWriteCloneUnavailableError extends WorkspaceToolError {
+  constructor() {
+    super(
+      'Selected-workspace PTC requires copy-on-write filesystem cloning',
+      'COMMAND_UNAVAILABLE',
+    );
+    this.name = 'CopyOnWriteCloneUnavailableError';
+  }
+}
+
+function isCopyOnWriteUnsupported(
+  error: unknown,
+  platform: NodeJS.Platform,
+): boolean {
+  if (platform === 'win32') return true;
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error.code === 'ENOTSUP' || error.code === 'EOPNOTSUPP')
+  ) {
+    return true;
+  }
+  return (
+    error instanceof Error &&
+    error.message.toLowerCase().includes('operation not supported')
+  );
+}
+
 export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox {
   readonly mutationFailuresAreAtomic = true as const;
   private readonly manager: NativeSandboxManager;
@@ -600,7 +630,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         });
       });
       return await realpath(destination);
-    } catch {
+    } catch (error) {
       await rm(destination, { recursive: true, force: true }).catch(
         () => undefined,
       );
@@ -610,8 +640,11 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           'EXECUTION_ABORTED',
         );
       }
+      if (isCopyOnWriteUnsupported(error, this.platform)) {
+        throw new CopyOnWriteCloneUnavailableError();
+      }
       throw new WorkspaceToolError(
-        'Selected-workspace PTC requires copy-on-write filesystem cloning',
+        'Copy-on-write workspace clone failed unexpectedly',
         'COMMAND_UNAVAILABLE',
       );
     }

@@ -26,7 +26,10 @@ import type {
 } from '@anthropic-ai/sandbox-runtime';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
-import { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
+import {
+  CopyOnWriteCloneUnavailableError,
+  NativeSrtWorkspaceCommandSandbox,
+} from './native-sandbox.js';
 import { restoreScratchTraversal } from './native-scratch.js';
 import { WorkspaceToolError } from './workspace.js';
 
@@ -196,10 +199,7 @@ test('programmatic probes use a copy-on-write workspace without mutating the pro
   try {
     snapshot = await sandbox.createProgrammaticProbeWorkspace(executionDirectory);
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.includes('requires copy-on-write filesystem cloning')
-    ) {
+    if (error instanceof CopyOnWriteCloneUnavailableError) {
       t.skip('host filesystem does not support copy-on-write cloning');
       return;
     }
@@ -208,6 +208,28 @@ test('programmatic probes use a copy-on-write workspace without mutating the pro
   await writeFile(join(snapshot, 'state.txt'), 'probe-only');
   assert.equal(await readFile(join(root, 'state.txt'), 'utf8'), 'original');
   assert.equal(await readFile(join(snapshot, 'state.txt'), 'utf8'), 'probe-only');
+});
+
+test('programmatic probes do not hide clone implementation failures as unsupported filesystems', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    manager: fakeManager().manager,
+    spawnCommand() {
+      throw Object.assign(new Error('spawn /bin/cp ENOENT'), { code: 'ENOENT' });
+    },
+  });
+  t.after(() => sandbox.close());
+  const executionDirectory = await sandbox.createExecutionDirectory();
+
+  await assert.rejects(
+    sandbox.createProgrammaticProbeWorkspace(executionDirectory),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      !(error instanceof CopyOnWriteCloneUnavailableError) &&
+      error.message === 'Copy-on-write workspace clone failed unexpectedly',
+  );
 });
 
 test('exclusive lifecycle rejects a second workspace sharing an SRT manager', async t => {
