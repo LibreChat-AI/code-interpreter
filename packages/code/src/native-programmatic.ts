@@ -309,6 +309,7 @@ export class NativeWorkspaceProgrammaticExecutor {
     grant: string,
         executionId: string | undefined,
     signal?: AbortSignal,
+    transferTimeoutMs = TRANSFER_TIMEOUT_MS,
   ): Promise<Buffer> {
         const key = this.cacheKey(executionId, file);
     const cached = key ? this.cachedInput(key) : undefined;
@@ -316,7 +317,7 @@ export class NativeWorkspaceProgrammaticExecutor {
     const controller = new AbortController();
     const abort = (): void => controller.abort(signal?.reason);
     signal?.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(() => controller.abort(), TRANSFER_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), transferTimeoutMs);
     try {
       const response = await this.fetchImpl(
         new URL(
@@ -400,6 +401,7 @@ export class NativeWorkspaceProgrammaticExecutor {
                                   grant!,
                                   request.body.execution_id,
                                   signal,
+                                  request.body.transfer_timeout_ms,
                               );
           totalInputBytes += bytes.byteLength;
                     if (
@@ -443,7 +445,7 @@ export class NativeWorkspaceProgrammaticExecutor {
                     errorOnExist: true,
                     mode: constants.COPYFILE_FICLONE,
                 });
-      commandDispatched = true;
+      if (!probe) commandDispatched = true;
                 return await this.options.sandbox.executeProgrammatic(
         {
           protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -557,7 +559,6 @@ export class NativeWorkspaceProgrammaticExecutor {
                  * and their resulting exit status are evaluated exactly once. */
             }
 
-            commandDispatched = true;
             const commandResult = await run(dataDirectory, false);
             if (await readPending(dataDirectory)) {
                 throw new WorkspaceToolError(
@@ -592,6 +593,11 @@ export class NativeWorkspaceProgrammaticExecutor {
       let totalOutputBytes = 0;
       for (const name of outputNames) {
         const path = localPath(dataDirectory, name);
+        const baseline = baselines.get(name);
+        const maxOutputFileBytes = Math.min(
+          request.body.max_output_file_bytes ?? BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES,
+          BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES,
+        );
         let bytes: Buffer;
                 const handle = await open(
                     path,
@@ -600,12 +606,10 @@ export class NativeWorkspaceProgrammaticExecutor {
         try {
           const metadata = await handle.stat();
           if (!metadata.isFile()) continue;
-                    const maxOutputFileBytes = Math.min(
-                        request.body.max_output_file_bytes ??
-                            BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES,
-                        BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES,
-                    );
-                    if (metadata.size > maxOutputFileBytes) {
+                    // An unchanged input is not an output. It may legitimately
+                    // exceed the negotiated output ceiling, but never the
+                    // protocol's bounded input limit.
+                    if (metadata.size > (baseline ? BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES : maxOutputFileBytes)) {
             throw new WorkspaceToolError(
               'Programmatic output exceeds the file limit',
               'WRITE_LIMIT_EXCEEDED',
@@ -614,6 +618,13 @@ export class NativeWorkspaceProgrammaticExecutor {
           bytes = await handle.readFile();
         } finally {
           await handle.close();
+        }
+        if (baseline?.sha256 === sha256(bytes)) continue;
+        if (bytes.byteLength > maxOutputFileBytes) {
+          throw new WorkspaceToolError(
+            'Programmatic output exceeds the file limit',
+            'WRITE_LIMIT_EXCEEDED',
+          );
         }
         totalOutputBytes += bytes.byteLength;
                 if (
@@ -625,8 +636,6 @@ export class NativeWorkspaceProgrammaticExecutor {
             'WRITE_LIMIT_EXCEEDED',
           );
         }
-        const baseline = baselines.get(name);
-        if (baseline?.sha256 === sha256(bytes)) continue;
         changed.push({ name, bytes, source: baseline?.source });
       }
             const maxOutputFiles = Math.min(
@@ -659,7 +668,7 @@ export class NativeWorkspaceProgrammaticExecutor {
           signal?.addEventListener('abort', abort, { once: true });
                     const timer = setTimeout(
                         () => controller.abort(),
-                        TRANSFER_TIMEOUT_MS,
+                        request.body.transfer_timeout_ms ?? TRANSFER_TIMEOUT_MS,
                     );
           try {
             let response: Response;
@@ -724,7 +733,17 @@ export class NativeWorkspaceProgrammaticExecutor {
                 artifactDelivery,
             );
     } catch (error) {
-      if (!commandDispatched) throw error;
+      if (!commandDispatched) {
+        // The low-level command runner classifies any launched process as a
+        // possible mutation. A probe can only mutate its disposable snapshot,
+        // so translate that classification at this ownership boundary.
+        throw new WorkspaceToolError(
+          error instanceof Error ? error.message : 'Programmatic preparation failed',
+          error instanceof WorkspaceToolError ? error.code : 'COMMAND_UNAVAILABLE',
+          false,
+          false,
+        );
+      }
       if (error instanceof WorkspaceToolError) {
                 if (
                     error.mutationMayHaveCommitted ||

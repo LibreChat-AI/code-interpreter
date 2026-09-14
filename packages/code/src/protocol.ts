@@ -21,6 +21,14 @@ export const BRIDGE_WORKSPACE_COMMAND_DEFAULT_OUTPUT_BYTES = 256 * 1024;
 export const BRIDGE_WORKSPACE_COMMAND_MAX_OUTPUT_BYTES = 1024 * 1024;
 export const BRIDGE_WORKSPACE_COMMAND_SIGNAL_MAX_LENGTH = 32;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES = 100;
+export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_INPUT_FILES = BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES - 2;
+export const BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_CONCURRENCY = 4;
+export const BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_TIMEOUT_MS = 30_000;
+
+/** Reserve a bounded share for all input/output batches, not per-file grants. */
+export function programmaticTransferReserveMs(jobTimeoutMs: number): number {
+  return Math.max(1, Math.floor(jobTimeoutMs / 3));
+}
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES = 10 * 1024 * 1024;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_HISTORY_BYTES = 40_000_000;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
@@ -62,6 +70,7 @@ function portableBasename(name: string): string {
 /** Apply the gateway's extension allowlist without importing service code. */
 export function isSupportedBridgeArtifactName(name: string): boolean {
   const basename = portableBasename(name);
+  if (basename === '.dirkeep') return true;
   const dot = basename.lastIndexOf('.');
   const extension = dot > 0 ? basename.slice(dot).toLowerCase() : '';
   const dottedBasename = `.${basename}`;
@@ -606,6 +615,7 @@ export interface BridgeWorkspaceProgrammaticBody {
     /** Declared replay tools; zero allows the worker to skip the probe pass. */
     replay_tool_count?: number;
   run_timeout?: number;
+  transfer_timeout_ms?: number;
     /** Manifest-bound upload ceiling negotiated by Code API. */
     max_output_files?: number;
     /** Effective per-file upload ceiling negotiated by Code API. */
@@ -793,6 +803,10 @@ export function isBridgeWorkspaceProgrammaticRequest(
       (typeof body.egress_grant !== 'string' ||
         body.egress_grant.length === 0 ||
         body.egress_grant.length > 256 * 1024)) ||
+    (body.transfer_timeout_ms !== undefined &&
+      (!Number.isSafeInteger(body.transfer_timeout_ms) ||
+        Number(body.transfer_timeout_ms) < 1 ||
+        Number(body.transfer_timeout_ms) > BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_TIMEOUT_MS)) ||
     (body.run_timeout !== undefined &&
       (!Number.isSafeInteger(body.run_timeout) ||
         Number(body.run_timeout) < 1 ||
@@ -812,6 +826,7 @@ export function isBridgeWorkspaceProgrammaticRequest(
     if (
       !isSafePortableRelativePath(file.name) ||
       file.name === '.' ||
+      portableBasename(file.name).toLowerCase() === '_ptc_pending_result.json' ||
       normalizePortableRelativePath(file.name) !== file.name ||
       names.has(file.name)
     ) {

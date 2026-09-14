@@ -15,8 +15,9 @@ export const PTC_HISTORY_SANDBOX_PATH = `/mnt/data/${PTC_HISTORY_FILENAME}`;
  * Returns `true` for any filename the submission layer must refuse.
  *
  * Two things make a name "reserved":
- *   1. Its post-normalization basename is `_ptc_history.json` — the single
- *      runtime fixture the replay preamble injects into the submission dir.
+ *   1. Its post-normalization basename is `_ptc_history.json` or
+ *      `_ptc_pending_result.json`, compared case-insensitively for macOS.
+ *      These are the replay input and output control channels.
  *      Any user-supplied file with that exact basename would shadow our
  *      injected history and silently corrupt replay correctness, so we
  *      reject it on the request path. The bash preamble's `_ptc_pending.*`
@@ -61,7 +62,7 @@ export function isReservedPtcFilename(name: string): boolean {
   }
   if (escapes) return true;
   const basename = segments.length > 0 ? segments[segments.length - 1] : '';
-  return basename === PTC_HISTORY_FILENAME;
+  return [PTC_HISTORY_FILENAME, '_ptc_pending_result.json'].includes(basename.toLowerCase());
 }
 
 /**

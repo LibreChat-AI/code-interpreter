@@ -1,12 +1,28 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ChildProcess, ForkOptions } from 'node:child_process';
 import {
   NativeProcessWorkspaceCommandSandbox,
   nativeExecutorEnvironment,
+  trustedProgrammaticExecutable,
 } from './native-process.js';
 import { WorkspaceToolError } from './workspace.js';
+
+test('preflight rejects relative and workspace-controlled executables including symlinks', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'native-ptc-path-'));
+  const outside = await mkdtemp(join(tmpdir(), 'native-ptc-link-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); });
+  const executable = join(root, 'bash');
+  await writeFile(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  await symlink(executable, join(outside, 'bash'));
+  await assert.rejects(trustedProgrammaticExecutable('./bash', root), /absolute/);
+  await assert.rejects(trustedProgrammaticExecutable(executable, root), /outside the workspace/);
+  await assert.rejects(trustedProgrammaticExecutable(join(outside, 'bash'), root), /outside the workspace/);
+});
 
 const request = {
   protocolVersion: 1 as const,
@@ -181,7 +197,7 @@ test('programmatic executor resolves and scopes credentials to its command', asy
   const fake = fixture();
   const sandbox = new NativeProcessWorkspaceCommandSandbox(
     {
-      workspaceRoot: '/workspace',
+      workspaceRoot: tmpdir(),
       programmaticFileUpstream: 'http://127.0.0.1:3190',
       maskedEnvironment: {
         variables: [{ name: 'TOKEN', injectHosts: ['github.com'] }],
@@ -233,7 +249,7 @@ test('programmatic executor preserves a child-reported pre-dispatch failure', as
   );
   const sandbox = new NativeProcessWorkspaceCommandSandbox(
     {
-      workspaceRoot: '/workspace',
+      workspaceRoot: tmpdir(),
       programmaticFileUpstream: 'http://127.0.0.1:3190',
     },
     fake.fork,

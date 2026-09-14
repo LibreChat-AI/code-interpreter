@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { NativeWorkspaceProgrammaticExecutor } from './native-programmatic.js';
+import { WorkspaceToolError } from './workspace.js';
 
 import type { AddressInfo } from 'node:net';
 import type { BridgeWorkspaceProgrammaticRequest } from './protocol.js';
@@ -497,6 +498,53 @@ test('rejects artifacts above the negotiated byte ceiling before upload', async 
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
+});
+
+for (const failure of ['truncated', 'process-error']) test(`a failed speculative probe does not quarantine the real workspace (${failure})`, async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-failed-probe-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const executor = new NativeWorkspaceProgrammaticExecutor({
+    upstreamUrl: 'http://127.0.0.1:1',
+    sandbox: {
+      async createExecutionDirectory() { return await mkdtemp(join(scratch, 'execution-')); },
+      async createProgrammaticProbeWorkspace(directory) { const root = join(directory, 'workspace'); await mkdir(root); return root; },
+      async executeProgrammatic(request, _directory, _signal, options) {
+        assert.equal(options?.probe, true);
+        if (failure === 'process-error') throw new WorkspaceToolError('probe output exceeded its limit', 'COMMAND_UNAVAILABLE', true, true);
+        return { protocolVersion: 1, operation: 'execute_command', workspaceId: request.workspaceId,
+          exitCode: 0, stdout: '', stderr: '', truncated: true, timedOut: false };
+      },
+    },
+  });
+  await assert.rejects(executor.execute({ headers: {}, body: {
+    language: 'bash', version: '5.2.0', session_id: 'session', replay_tool_count: 1,
+    files: [{ name: 'main.sh', content: 'true' }],
+  } }, 'primary'), (error: unknown) => {
+    assert.match(String(error), /probe output exceeded/);
+    assert.equal((error as { requiresQuarantine: boolean }).requiresQuarantine, false);
+    assert.equal((error as { mutationMayHaveCommitted: boolean }).mutationMayHaveCommitted, false);
+    return true;
+  });
+});
+
+test('unchanged inputs do not consume the negotiated output budget', async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-unchanged-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const executor = new NativeWorkspaceProgrammaticExecutor({
+    upstreamUrl: 'http://127.0.0.1:1',
+    sandbox: {
+      async createExecutionDirectory() { return await mkdtemp(join(scratch, 'execution-')); },
+      async executeProgrammatic(request) {
+        return { protocolVersion: 1, operation: 'execute_command', workspaceId: request.workspaceId,
+          exitCode: 0, stdout: '', stderr: '', truncated: false, timedOut: false };
+      },
+    },
+  });
+  const result = await executor.execute({ headers: {}, body: {
+    language: 'bash', version: '5.2.0', session_id: 'session', max_output_file_bytes: 1,
+    files: [{ name: 'main.sh', content: 'true' }, { name: 'input.txt', content: 'unchanged input' }],
+  } }, 'primary');
+  assert.deepEqual(result.files, []);
 });
 
 test('stops admitting downloads and drains in-flight transfers before cleanup', async () => {

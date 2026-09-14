@@ -56,6 +56,20 @@ function claims(
 }
 
 describe('sandbox execute request dispatch', () => {
+  test('budgets every input and output batch before signing the request', () => {
+    const request = buildSandboxExecuteRequest({
+      payload: payload({ files: Array.from({ length: 9 }, (_, index) => ({ name: `${index}.txt`, id: `file_${index}`, storage_session_id: 'input' })) }),
+      programmaticTransferReserveMs: 60_000,
+      executionManifestClaims: claims({ max_output_files: 10 }),
+      executionManifestSecret: SECRET,
+      executionManifestTtlSeconds: 300,
+      nowSeconds: 1_000,
+    });
+    // Three download batches plus three upload batches share one reserve.
+    expect(request.body.transfer_timeout_ms).toBe(10_000);
+    const verified = verifyExecutionManifest(request.body.execution_manifest!, SECRET, { nowSeconds: 1_000 });
+    expect(verified.execute_body_sha256).toBe(executionManifestBodySha256(request.body));
+  });
   test('keeps large egress grants out of HTTP headers', () => {
     const largeGrant = `ceg1.${'a'.repeat(24_000)}`;
     const request = buildSandboxExecuteRequest({

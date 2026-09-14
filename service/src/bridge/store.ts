@@ -984,6 +984,9 @@ export class RedisBridgeStore {
         generation,
         leaseToken,
         leaseTokenHash: tokenHash(leaseToken),
+        ...(selectedWorkspaceId == null ? {} : {
+          workspaceFence: `native-workspace:${selectedWorkspaceId}`,
+        }),
         ...(workspaceLeaseSlot === undefined
           ? {}
           : {
@@ -1105,11 +1108,24 @@ export class RedisBridgeStore {
         resultCommitted = true;
         return result;
       } catch (error) {
-        if (args.runtimeSessionId !== undefined) {
+        if (assignment.workspaceFence != null) {
+          // Native roots retain their own fence through result restoration.
+          // Do not quarantine unrelated roots or invalidate the worker lease.
+          await boundedCommand(this.redis.eval(
+            [
+              "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
+              "redis.call('SET', KEYS[1], 'quarantined:' .. ARGV[1])",
+              'return 1',
+            ].join('\n'),
+            1,
+            workspaceQuarantineKey(args.workerId, assignment.workspaceFence),
+            assignment.assignmentId,
+          ), this.redisCommandTimeoutMs, 'Bridge native workspace finalization quarantine');
+        } else if (assignmentWorkspace(assignment) !== undefined) {
           await this.quarantine(
             args.workerId,
             assignment.incarnationId,
-            args.runtimeSessionId,
+            assignmentWorkspace(assignment)!,
           );
         }
         throw error;

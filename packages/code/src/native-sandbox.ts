@@ -139,6 +139,7 @@ interface NativeSandboxManager {
         stderr: string,
     ): string;
   cleanupAfterCommand(): void;
+  updateConfig?(config: SandboxRuntimeConfig): void;
   reset(): Promise<void>;
 }
 
@@ -281,11 +282,11 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private readonly platform: NodeJS.Platform;
   private initialized?: Promise<void>;
   private canonicalRoot?: string;
+  private runtimeConfig?: SandboxRuntimeConfig;
     private denyReadPaths: string[] = [];
     private denyWritePaths: string[] = [];
   private scratchDirectory?: string;
   private scratchHandle?: FileHandle;
-  private programmaticNetwork?: SandboxRuntimeConfig['network'];
   private execution?: Promise<WorkspaceExecuteCommandResult>;
   private closing?: Promise<void>;
   private resetFailed = false;
@@ -510,7 +511,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       unrestrictedNetwork ? async () => true : undefined,
     );
     this.canonicalRoot = root;
-    this.programmaticNetwork = network;
+    this.runtimeConfig = config;
         this.denyReadPaths = [
             home,
             ...sharedScratchPaths.filter(path =>
@@ -691,7 +692,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         'INVALID_PATH',
       );
     }
-        const execution = this.executeExclusive(
+        const execute = () => this.executeExclusive(
             request,
             signal,
             {
@@ -727,18 +728,53 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                           ],
                       },
                       network: {
-                          ...this.programmaticNetwork!,
+                          // A probe is speculative, even on a trusted VM.
+                          // Copy-on-write protects files, not remote mutations.
+                          allowedDomains: [],
+                          deniedDomains: [],
+                          strictAllowlist: true,
+                          allowUnixSockets: [],
+                          allowAllUnixSockets: false,
+                          allowLocalBinding: false,
                       },
                   }
                 : undefined,
             canonicalDataDirectory,
             canonicalWorkspaceRoot,
         );
+    const execution = options?.probe ? this.withProbeNetwork(execute) : execute();
     this.execution = execution;
     try {
       return await execution;
     } finally {
       this.execution = undefined;
+    }
+  }
+
+  private async withProbeNetwork<T>(execute: () => Promise<T>): Promise<T> {
+    const config = this.runtimeConfig;
+    if (!config || !this.manager.updateConfig) {
+      throw new WorkspaceToolError('Native probe network isolation is unavailable', 'COMMAND_UNAVAILABLE');
+    }
+    // SRT's proxies and Unix/local socket rules read session configuration,
+    // not wrapWithSandboxArgv's per-command override.
+    this.manager.updateConfig({ ...config, network: {
+      allowedDomains: [], deniedDomains: [], strictAllowlist: true,
+      allowUnixSockets: [], allowAllUnixSockets: false, allowLocalBinding: false,
+    } });
+    try {
+      return await execute();
+    } finally {
+      try {
+        // Revoke the probe's proxy endpoints and credentials before restoring
+        // network access. A lingering probe must never inherit the commit's
+        // permissive proxy session through a live updateConfig.
+        await this.manager.reset();
+        await this.manager.initialize(config, config.network.strictAllowlist ? undefined : async () => true);
+      } catch {
+        this.resetFailed = true;
+        throw new WorkspaceToolError('Native probe network cleanup failed', 'COMMAND_UNAVAILABLE');
+      }
     }
   }
 

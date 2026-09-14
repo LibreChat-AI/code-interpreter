@@ -77,7 +77,7 @@ test('dispatches a workspace tool only to a worker advertising its workspace and
   });
 });
 
-test('dispatches programmatic Bash only inside an advertised workspace', async () => {
+for (const finalizationFails of [false, true]) test(`single-slot programmatic finalization retains the workspace fence (failure=${finalizationFails})`, async () => {
   await store.register({
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
     workerId: 'workspace-worker',
@@ -107,6 +107,10 @@ test('dispatches programmatic Bash only inside an advertised workspace', async (
     workspaceId: 'primary',
     deadlineAtMs: Date.now() + 5_000,
     signal: new AbortController().signal,
+    finalize: async settlement => {
+      if (finalizationFails) throw new Error('artifact restoration failed');
+      return settlement;
+    },
   });
 
   const assignment = await store.lease('workspace-worker', incarnationId, 1_000);
@@ -141,6 +145,14 @@ test('dispatches programmatic Bash only inside an advertised workspace', async (
     },
   });
 
+  if (finalizationFails) {
+    await expect(completion).rejects.toThrow('artifact restoration failed');
+    await expect(store.dispatch({ workerId: 'workspace-worker', body, headers: {},
+      workspaceId: 'primary', deadlineAtMs: Date.now() + 1000,
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
+    return;
+  }
   await expect(completion).resolves.toMatchObject({
     status: 'fulfilled',
     result: { session_id: 'session-1' },

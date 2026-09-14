@@ -1,8 +1,8 @@
 import { execFile, fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { access } from 'node:fs/promises';
-import { delimiter, join } from 'node:path';
+import { access, realpath } from 'node:fs/promises';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { WorkspaceToolError } from './workspace.js';
 import { NATIVE_PROGRAMMATIC_COMMAND } from './native-programmatic.js';
@@ -30,20 +30,33 @@ export type NativeProcessSandboxOptions = Omit<
 
 const execFileAsync = promisify(execFile);
 
-async function executableOnPath(
+async function systemProgrammaticExecutable(
     name: string,
-    environment: NodeJS.ProcessEnv,
+    workspaceRoot: string,
 ): Promise<string | undefined> {
-    for (const directory of (environment.PATH ?? '').split(delimiter)) {
-        if (!directory) continue;
+    // Preflight runs outside SRT. Never execute a workspace-controlled PATH
+    // entry (including cwd, node_modules/.bin, or a symlink to another root).
+    for (const directory of ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/home/linuxbrew/.linuxbrew/bin']) {
         const candidate = join(directory, name);
         try {
-            await access(candidate, fsConstants.X_OK);
-            return candidate;
+            const canonical = await trustedProgrammaticExecutable(candidate, workspaceRoot);
+            if (!['/opt/homebrew/', '/usr/local/', '/usr/bin/', '/bin/', '/home/linuxbrew/.linuxbrew/'].some(root => canonical.startsWith(root))) continue;
+            return canonical;
         } catch {
             // Continue through the bounded PATH entries.
         }
     }
+}
+
+export async function trustedProgrammaticExecutable(candidate: string, workspaceRoot: string): Promise<string> {
+    if (!isAbsolute(candidate)) throw new Error('Programmatic executable must be absolute');
+    const [canonical, root] = await Promise.all([realpath(candidate), realpath(workspaceRoot)]);
+    const path = relative(root, canonical);
+    if (path === '' || (!isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`))) {
+        throw new Error('Programmatic executable must be outside the workspace');
+    }
+    await access(canonical, fsConstants.X_OK);
+    return canonical;
 }
 
 async function resolveProgrammaticShell(
@@ -51,11 +64,13 @@ async function resolveProgrammaticShell(
 ): Promise<string> {
     const environment = options.environment ?? process.env;
     const shellPath =
-        options.shellPath ?? (await executableOnPath('bash', environment));
-    const jqPath = await executableOnPath('jq', environment);
+        options.shellPath != null
+          ? await trustedProgrammaticExecutable(options.shellPath, options.workspaceRoot)
+          : await systemProgrammaticExecutable('bash', options.workspaceRoot);
+    const jqPath = await systemProgrammaticExecutable('jq', options.workspaceRoot);
     if (!shellPath || !jqPath) {
         throw new WorkspaceToolError(
-            'Native programmatic execution requires Bash 5.2 or newer and jq on PATH',
+            'Native programmatic execution requires trusted host installations of Bash 5.2 or newer and jq',
             'COMMAND_UNAVAILABLE',
         );
     }
@@ -80,7 +95,7 @@ async function resolveProgrammaticShell(
         }
     } catch {
         throw new WorkspaceToolError(
-            'Native programmatic execution requires Bash 5.2 or newer and jq on PATH',
+            'Native programmatic execution requires trusted host installations of Bash 5.2 or newer and jq',
             'COMMAND_UNAVAILABLE',
         );
     }
@@ -401,7 +416,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
                         (request.body.max_output_files ??
                             BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES) / 4,
                     )) *
-                    30_000 +
+                    (request.body.transfer_timeout_ms ?? 30_000) +
                 5_000,
       true,
       signal,

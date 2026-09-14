@@ -163,10 +163,23 @@ artifacts use an owner-only per-execution directory under the worker's private
 SRT scratch root, exposed to code as `LIBRECHAT_CODE_DATA_DIR`. That directory
 is removed after every iteration and is never placed in the repository.
 
+Replay probes run against a disposable copy-on-write snapshot with network and
+socket access denied, including under `trusted-vm`. External effects must not
+repeat while discovering pending tools. Use registered tools for network-dependent
+replay control flow; the final commit pass runs once under the configured policy.
+Each probe's SRT proxy session is revoked before restoring the commit policy;
+per-command network overrides alone do not restrict SRT's session-level proxies.
+Probe failures do not quarantine the real workspace. Once the commit pass starts,
+its fence remains until result restoration succeeds; uncertain finalization
+quarantines only that workspace.
+
 Reference inputs and artifact outputs travel only through the configured
 `LIBRECHAT_CODE_FILE_RELAY_UPSTREAM`, using Code API's execution-scoped opaque
 egress grant. The worker rejects redirects and bounds each transfer to 10 MiB,
 each execution to 100 files and 100 MiB total, and transfer concurrency to four.
+Caller inputs are limited to 98 files, reserving two for the script and replay
+history. Code API reserves one third of the job budget for all transfer batches
+and negotiates each transfer's deadline before signing the request.
 Its parent process keeps a 64-entry/32-MiB LRU input cache keyed by a stable,
 Code-API-authorized digest; sandboxed commands cannot read that cache. Requests
 against one workspace remain serialized, while negotiated lease slots allow

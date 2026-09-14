@@ -1,5 +1,10 @@
 import type * as t from './types';
 import {
+  BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES,
+  BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_CONCURRENCY,
+  BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_TIMEOUT_MS,
+} from '../../packages/code/src/protocol';
+import {
     executionManifestBodySha256,
     signExecutionManifestWithKey,
     type ExecutionManifestClaims,
@@ -14,6 +19,7 @@ interface BuildSandboxExecuteRequestArgs {
   executionManifestTtlSeconds: number;
   nowSeconds?: number;
   maxOutputFileBytes?: number;
+  programmaticTransferReserveMs?: number;
 }
 
 interface SandboxExecuteRequest {
@@ -39,6 +45,14 @@ export function buildSandboxExecuteRequest(
   }
   if (args.maxOutputFileBytes != null) {
     body.max_output_file_bytes = args.maxOutputFileBytes;
+  }
+  if (args.programmaticTransferReserveMs != null) {
+    const batches = Math.max(1,
+      Math.ceil(body.files.filter(file => 'id' in file).length / BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_CONCURRENCY) +
+      Math.ceil((args.executionManifestClaims?.max_output_files ?? BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES) / BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_CONCURRENCY),
+    );
+    body.transfer_timeout_ms = Math.min(BRIDGE_WORKSPACE_PROGRAMMATIC_TRANSFER_TIMEOUT_MS,
+      Math.max(1, Math.floor(args.programmaticTransferReserveMs / batches)));
   }
 
   if (args.executionManifestClaims) {

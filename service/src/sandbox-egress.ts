@@ -3,6 +3,7 @@ import { env } from './config';
 import { createGatewayPtcCallbackToken } from './egress-gateway-client';
 import type { ExecutionManifestClaims } from './execution-manifest';
 import type * as t from './types';
+import { programmaticTransferReserveMs } from '../../packages/code/src/protocol';
 
 export type SandboxJobSecurity = {
   payload: t.PayloadBody;
@@ -100,7 +101,7 @@ export function normalizeSelectedWorkspaceProgrammaticTimeoutMs(
   );
   const executionBudget = Math.max(
     1,
-    totalBudget - queueReserve - SELECTED_WORKSPACE_SETTLEMENT_RESERVE_MS,
+    totalBudget - queueReserve - SELECTED_WORKSPACE_SETTLEMENT_RESERVE_MS - programmaticTransferReserveMs(totalBudget),
   );
   return normalizeProgrammaticTimeoutMs(
     rawTimeout,

@@ -16,6 +16,23 @@ import type {
   WorkspacePreviewEditRequest,
 } from './protocol.js';
 
+test('accepts gateway directory markers as artifacts', () => {
+  assert.equal(isSupportedBridgeArtifactName('.dirkeep'), true);
+  assert.equal(isSupportedBridgeArtifactName('nested/.dirkeep'), true);
+  assert.equal(isSupportedBridgeArtifactName('nested/.dirkeep.exe'), false);
+});
+
+test('rejects caller-supplied programmatic control payloads', () => {
+  for (const name of ['_ptc_pending_result.json', '_PTC_PENDING_RESULT.JSON', 'nested/_ptc_pending_result.json']) {
+    assert.equal(isBridgeWorkspaceProgrammaticRequest({
+      headers: {},
+      body: { language: 'bash', version: '5.2.0', session_id: 'session', files: [
+        { name: 'main.sh', content: 'true' }, { name, content: '{}' },
+      ] },
+    }), false);
+  }
+});
+
 const validSingleEditRequest: WorkspaceEditFileRequest = {
   protocolVersion: 1,
   operation: 'edit_file',

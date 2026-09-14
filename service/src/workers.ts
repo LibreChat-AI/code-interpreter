@@ -21,7 +21,7 @@ import {
   validateQueuedExecutionProfile,
   validateQueuedSandboxBackend,
 } from './execution-profile';
-import { BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES } from '../../packages/code/src/protocol';
+import { BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES, programmaticTransferReserveMs } from '../../packages/code/src/protocol';
 
 const { INSTANCE_ID } = env;
 const WORKER_ID = `${INSTANCE_ID}-${process.pid}`;
@@ -92,6 +92,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
 
     const delivery = prepareInputDelivery(payload, sandboxPayload);
     const sandboxRequest = buildSandboxExecuteRequest({
+      ...(job.data.workspaceId == null ? {} : { programmaticTransferReserveMs: programmaticTransferReserveMs(env.JOB_TIMEOUT) }),
       payload: delivery.payload,
       egressGrantToken,
       executionManifestClaims,

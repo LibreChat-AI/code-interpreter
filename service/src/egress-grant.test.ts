@@ -480,10 +480,10 @@ describe('egress encrypted grants and handles', () => {
   });
 
   test('budgets both selected-workspace replay passes inside the worker deadline', () => {
-    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(undefined, 300_000)).toBe(132_500);
-    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(120_000, 300_000)).toBe(120_000);
-    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(300_000, 300_000)).toBe(132_500);
-    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(10_000, 20_000)).toBe(5_500);
+    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(undefined, 300_000)).toBe(82_500);
+    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(120_000, 300_000)).toBe(82_500);
+    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(300_000, 300_000)).toBe(82_500);
+    expect(normalizeSelectedWorkspaceProgrammaticTimeoutMs(10_000, 20_000)).toBe(2_167);
   });
 
   test('normalizes the gateway callback URL for sandbox-originated PTC', () => {

@@ -200,6 +200,7 @@ export interface PayloadBody {
     max_output_files?: number;
     /** Effective per-file ceiling after manifest and gateway policy intersect. */
     max_output_file_bytes?: number;
+    transfer_timeout_ms?: number;
   run_memory_limit?: number;
   run_timeout?: number;
   run_cpu_time?: number;

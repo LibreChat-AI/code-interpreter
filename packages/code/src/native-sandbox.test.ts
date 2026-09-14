@@ -58,6 +58,7 @@ function fakeManager(
   let credentialSeenDuringWrap: string | undefined;
   let gitLfsRequiredSeenDuringWrap: string | undefined;
   let scratchSelectorSeenDuringWrap: string | undefined;
+  let networkSeenDuringWrap: SandboxRuntimeConfig['network'] | undefined;
     let customConfigSeenDuringWrap: Partial<SandboxRuntimeConfig> | undefined;
   const manager = {
     isSupportedPlatform: () => true,
@@ -72,12 +73,14 @@ function fakeManager(
       askCallback = callback;
       if (options.initializeError) throw options.initializeError;
     },
+    updateConfig(value: SandboxRuntimeConfig) { config = value; },
         async wrapWithSandboxArgv(
             command: string,
             _binShell?: string,
             customConfig?: Partial<SandboxRuntimeConfig>,
         ) {
       await options.beforeWrap?.();
+      networkSeenDuringWrap = config?.network;
             customConfigSeenDuringWrap = customConfig;
             credentialSeenDuringWrap =
                 process.env.LIBRECHAT_CODE_TEST_CREDENTIAL;
@@ -144,13 +147,14 @@ function fakeManager(
     get scratchSelectorSeenDuringWrap() {
       return scratchSelectorSeenDuringWrap;
     },
+    get networkSeenDuringWrap() { return networkSeenDuringWrap; },
         get customConfigSeenDuringWrap() {
             return customConfigSeenDuringWrap;
         },
   };
 }
 
-test('programmatic probe denies real-workspace writes while preserving network control flow', async t => {
+for (const trustedVm of [false, true]) test(`programmatic probe denies real-workspace writes and external effects (trusted=${trustedVm})`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
     t.after(() => rm(root, { recursive: true, force: true }));
     const fake = fakeManager();
@@ -158,18 +162,25 @@ test('programmatic probe denies real-workspace writes while preserving network c
         workspaceRoot: root,
         manager: fake.manager,
         allowedDomains: ['api.example.com'],
+        ...(trustedVm ? { commandPolicy: { version: 1 as const, preset: 'trusted-vm' as const,
+          network: { outbound: 'unrestricted' as const, allowLocalBinding: true, allowAllUnixSockets: true },
+        } } : {}),
     });
     const dataDirectory = await sandbox.createExecutionDirectory();
     await sandbox.executeProgrammatic(request, dataDirectory, undefined, {
         probe: true,
     });
     assert.deepEqual(fake.customConfigSeenDuringWrap?.network, {
-        allowedDomains: ['api.example.com'],
+        allowedDomains: [],
         deniedDomains: [],
         strictAllowlist: true,
+        allowUnixSockets: [],
         allowAllUnixSockets: false,
         allowLocalBinding: false,
     });
+    assert.deepEqual(fake.networkSeenDuringWrap, fake.customConfigSeenDuringWrap?.network);
+    assert.equal(fake.config?.network.strictAllowlist, !trustedVm);
+    assert.equal(fake.reset, true, 'probe proxy session must be revoked before restoring policy');
     assert.deepEqual(fake.customConfigSeenDuringWrap?.filesystem?.allowWrite, [
         await realpath(dataDirectory),
     ]);
@@ -183,6 +194,20 @@ test('programmatic probe denies real-workspace writes while preserving network c
         ),
     );
     await sandbox.close();
+});
+
+test('probe network cleanup failure fences executor reuse', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-probe-cleanup-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({ workspaceRoot: root, manager: fake.manager });
+  const directory = await sandbox.createExecutionDirectory();
+  const reset = fake.manager.reset;
+  fake.manager.reset = async () => { throw new Error('proxy shutdown failed'); };
+  await assert.rejects(sandbox.executeProgrammatic(request, directory, undefined, { probe: true }), /probe network cleanup failed/);
+  await assert.rejects(sandbox.execute(request));
+  fake.manager.reset = reset;
+  await sandbox.close();
 });
 
 test('programmatic probes use a copy-on-write workspace without mutating the project', async t => {
