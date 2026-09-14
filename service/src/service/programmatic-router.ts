@@ -920,6 +920,9 @@ async function runAndRespond(
       error: errorMessage,
       stdout: cleanStdout,
       stderr: result.stderr,
+      files: result.files,
+      artifact_delivery: result.artifact_delivery,
+      artifact_truncation: result.artifact_truncation,
       session_id: state.session_id,
     });
     return;

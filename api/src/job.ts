@@ -36,10 +36,9 @@ import {
   SANDBOX_DIR_MODE,
   SANDBOX_FILE_MODE,
   ValidationError,
+  checkPathShape,
   hasRunnableSource,
   isDirkeep,
-  isValidPathShape,
-  checkPathShape,
   validateFilePath,
   isValidFilePath,
 } from './validation';
@@ -1776,7 +1775,14 @@ export class Job {
     inputByName: Map<string, TFile>,
   ): Promise<{ collected: boolean; truncated: boolean }> {
     const keepPath = path.join(relativePath, DIRKEEP);
-    if (!isValidPathShape(keepPath)) return { collected: false, truncated: false };
+    const pathShapeError = checkPathShape(keepPath);
+    if (pathShapeError) {
+      this.recordArtifactTruncation(
+        pathShapeError.includes('nesting depth') ? 'depth' : 'path',
+        keepPath,
+      );
+      return { collected: false, truncated: true };
+    }
     const keepFullPath = path.join(fullPath, DIRKEEP);
     const inheritedKeep = inputByName.get(keepPath);
 
@@ -2045,11 +2051,6 @@ export class Job {
       this.recordArtifactTruncation('unreadable', relativePath);
       return { collected: false, truncated: false, stopLoop: false };
     }
-    if (size > this.runtime.max_file_size) {
-      this.recordArtifactTruncation('size', relativePath);
-      return { collected: false, truncated: false, stopLoop: false };
-    }
-
     /* Session mode output diffing + input-modification detection. Hash by
      * CONTENT (not size+mtime): a program can rewrite a surfaced output with
      * different bytes while preserving size+mtime (os.utime / touch -r), which a
@@ -2097,6 +2098,20 @@ export class Job {
     if (inputFileInfo && contentHash != null) {
       wasModified = contentHash !== inputFileInfo.hash;
       if (wasModified) this.log.info({ file: relativePath }, 'Input file was modified');
+    }
+
+    /* The unchanged inline entrypoint is executable request input, not an
+     * output artifact. Suppress it before applying output-size reporting;
+     * downloaded inputs still flow through the size limit below, preserving
+     * the existing response-cap behavior for inherited refs. */
+    if (!wasModified && inputFileInfo && existingFile?.id == null
+      && relativePath === this.entryPointName) {
+      return { collected: true, truncated: false, stopLoop: false };
+    }
+
+    if (size > this.runtime.max_file_size) {
+      this.recordArtifactTruncation('size', relativePath);
+      return { collected: false, truncated: false, stopLoop: false };
     }
 
     const echoed = this.tryEchoUnchangedInput({
@@ -2167,11 +2182,6 @@ export class Job {
       this.recordArtifactTruncation('depth', relativeDir);
       return 'skipped';
     }
-    if (this.isOutputCapFull()) {
-      this.recordArtifactTruncation('max_files', relativeDir);
-      return 'skipped';
-    }
-
     let entries: fs.Dirent[];
     try {
       entries = await fsp.readdir(dir, { withFileTypes: true });
@@ -2220,15 +2230,6 @@ export class Job {
 
       const fullPath = path.join(dir, entry.name);
       const relativePath = path.relative(this.submissionDir, fullPath);
-      const pathShapeError = checkPathShape(relativePath);
-      if (pathShapeError) {
-        this.recordArtifactTruncation(
-          pathShapeError.includes('nesting depth') ? 'depth' : 'path',
-          relativePath,
-        );
-        continue;
-      }
-
       const kind = await this.classifyDirent(entry, fullPath, relativePath);
       if (kind === 'skip') continue;
 
@@ -2248,6 +2249,20 @@ export class Job {
         const res = await this.walkSubdirectory(relativePath, fullPath, depth, inputByName);
         if (res.collected) hasCollectedChild = true;
         if (res.truncated) truncated = true;
+        if (this.artifactTruncation?.reasons.max_files) break;
+        continue;
+      }
+
+      /* Check intentional filename filtering before path limits. Unsupported
+       * files never belong in files[], regardless of how long their path is. */
+      if (entry.name !== DIRKEEP && !isSupportedOutputFilename(entry.name)) continue;
+
+      const pathShapeError = checkPathShape(relativePath);
+      if (pathShapeError) {
+        this.recordArtifactTruncation(
+          pathShapeError.includes('nesting depth') ? 'depth' : 'path',
+          relativePath,
+        );
         continue;
       }
 

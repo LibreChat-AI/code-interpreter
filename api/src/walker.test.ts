@@ -854,6 +854,72 @@ describe('walkDir / artifact truncation details', () => {
       skipped_count: 1,
     });
   });
+
+  it('does not report an overlong path for an unsupported output', async () => {
+    const directory = 'a'.repeat(200);
+    await fsp.mkdir(path.join(tmpDir, directory));
+    await fsp.writeFile(path.join(tmpDir, directory, `${'b'.repeat(60)}.bin`), 'ignored');
+    const job = makeJob();
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.generatedFiles).toHaveLength(0);
+    expect(internals.artifactTruncation).toBeUndefined();
+  });
+
+  it('reports an empty-directory marker whose appended path is too long', async () => {
+    const directory = 'a'.repeat(config.max_path_length - 6);
+    await fsp.mkdir(path.join(tmpDir, directory));
+    const job = makeJob();
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { path: 1 },
+      skipped: [path.join(directory, DIRKEEP)],
+      skipped_count: 1,
+    });
+  });
+
+  it('does not report an unchanged oversized inline entrypoint', async () => {
+    const name = 'main.py';
+    const content = 'print(1)';
+    const full = path.join(tmpDir, name);
+    await fsp.writeFile(full, content);
+    const inline: TFile = { name, content };
+    const job = makeJob({ files: [inline], maxFileSize: 3 });
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+    internals.entryPointName = name;
+    internals.inputFileHashes.set(name, { hash: sha256(content), path: full });
+
+    await internals.walkDir(tmpDir, 0, buildInputByName([inline]));
+
+    expect(internals.generatedFiles).toHaveLength(0);
+    expect(internals.artifactTruncation).toBeUndefined();
+  });
+
+  it('inspects a capped directory before deciding whether an artifact was omitted', async () => {
+    const job = makeJob();
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+    internals.generatedFiles = Array.from({ length: config.max_output_files }, (_, i) => ({
+      id: `id-${i}`,
+      name: `file-${i}.txt`,
+      path: path.join(tmpDir, `file-${i}.txt`),
+    }));
+    await fsp.mkdir(path.join(tmpDir, 'ignored'));
+    await fsp.writeFile(path.join(tmpDir, 'ignored', 'cache.bin'), 'ignored');
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toBeUndefined();
+  });
 });
 
 describe('handleSessionFiles / priority-fill composition', () => {
