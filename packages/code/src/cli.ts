@@ -340,10 +340,10 @@ async function run(
             ) ||
             [
                 process.env.LIBRECHAT_CODE_WORKER_DIR,
-                process.env.LIBRECHAT_CODE_DEFAULT_WORKSPACE,
                 process.env.LIBRECHAT_CODE_WORKSPACE_ID,
                 process.env.LIBRECHAT_CODE_WORKSPACE_NAME,
-            ].some(value => value?.trim()))
+            ].some(value => value?.trim()) ||
+            process.env.LIBRECHAT_CODE_DEFAULT_WORKSPACE?.trim().toLowerCase() === 'true')
     ) {
         throw new Error(
             '--environment cannot be combined with workspace directory, ID, or name settings',

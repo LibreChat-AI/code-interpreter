@@ -81,6 +81,7 @@ for (const { succeeds, reset } of [
                         LIBRECHAT_CODE_URL: `http://127.0.0.1:${address.port}/v1`,
                         LIBRECHAT_CODE_WORKER_ID: 'environment-test',
                         LIBRECHAT_CODE_WORKER_TOKEN: 'test-only-token',
+                        LIBRECHAT_CODE_DEFAULT_WORKSPACE: 'false',
                         LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE: join(
                             directory,
                             'quarantine.json',

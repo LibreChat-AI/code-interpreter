@@ -28,6 +28,7 @@ export interface CodeEnvironmentDefinition {
 export interface LoadedCodeEnvironment {
     path: string;
     sourceParents?: string[];
+    rootPaths?: string[];
     definition: CodeEnvironmentDefinition;
     fingerprint: string;
 }
@@ -281,20 +282,23 @@ export async function loadCodeEnvironment(
             throw new Error('Environment definition changed while reading');
         }
         definition = parseCodeEnvironment(
-            buffer.subarray(0, bytesRead).toString('utf8'),
+            new TextDecoder('utf-8', { fatal: true }).decode(
+                buffer.subarray(0, bytesRead),
+            ),
         );
     } finally {
         await handle.close();
     }
-    const root = await realpath(
-        resolve(dirname(canonicalPath), definition.root),
-    );
+    const rootPath = resolve(dirname(canonicalPath), definition.root);
+    const rootPaths = await assertPrivateStorageAncestors(rootPath);
+    const root = await realpath(rootPath);
     if (!(await stat(root)).isDirectory())
         throw new Error('Environment root must be a directory');
     definition = { ...definition, root };
     return {
         path: canonicalPath,
         sourceParents,
+        rootPaths,
         definition,
         fingerprint: createHash('sha256')
             .update(JSON.stringify(definition))
@@ -309,6 +313,22 @@ export function assertEnvironmentDefinitionsOutsideRoots(
 ): void {
     for (const environment of environments) {
         for (const root of roots) {
+            // A different granted workspace must not control how this root resolves on restart.
+            if (root.id !== environment.definition.name) {
+                for (const component of environment.rootPaths ?? []) {
+                    const path = relative(root.root, component);
+                    if (
+                        path === '' ||
+                        (!isAbsolute(path) &&
+                            path !== '..' &&
+                            !path.startsWith(`..${sep}`))
+                    ) {
+                        throw new Error(
+                            'Environment root traversal crosses another registered workspace',
+                        );
+                    }
+                }
+            }
             for (const controlPath of [
                 environment.path,
                 ...(environment.sourceParents ?? []),

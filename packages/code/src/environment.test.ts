@@ -269,6 +269,41 @@ test('reads complete definitions despite short filesystem reads', async t => {
     );
 });
 
+test('rejects a root routed through another workspace and malformed UTF-8', async t => {
+    const directory = await realpath(
+        await mkdtemp(join(tmpdir(), 'code-env-root-')),
+    );
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const rootA = join(directory, 'a');
+    const rootB = join(directory, 'b');
+    await mkdir(rootA);
+    await mkdir(rootB);
+    await symlink(rootA, join(rootB, 'pivot'));
+    const path = join(directory, 'environment.yaml');
+    await writeFile(path, `name: a\nroot: ${join(rootB, 'pivot')}\n`);
+    const loaded = await loadCodeEnvironment(path);
+    assert.throws(
+        () =>
+            assertEnvironmentDefinitionsOutsideRoots(
+                [loaded],
+                [
+                    { id: 'a', root: rootA },
+                    { id: 'b', root: rootB },
+                ],
+            ),
+        /root traversal/,
+    );
+    await writeFile(
+        path,
+        Buffer.concat([
+            Buffer.from(`name: a\nroot: ${rootA}\nsetup: { command: echo `),
+            Buffer.from([0xff]),
+            Buffer.from(' }'),
+        ]),
+    );
+    await assert.rejects(loadCodeEnvironment(path), /encoded data/);
+});
+
 test('rejects a FIFO definition without waiting for a writer', async t => {
     const directory = await mkdtemp(join(tmpdir(), 'code-env-fifo-'));
     t.after(() => rm(directory, { recursive: true, force: true }));
