@@ -2208,7 +2208,7 @@ export class Job {
     state = this.truncationProbeState,
     probeDepth = 0,
     rootPath = path.relative(this.submissionDir, dir) || '.',
-    respectSessionSuppression = false,
+    isOutputCapProbe = false,
   ): Promise<string | undefined> {
     /* The state is shared by every probe in this job. Once exhausted, return
      * conservatively before opening yet another capped sibling directory. */
@@ -2246,17 +2246,51 @@ export class Job {
           if (entry.name !== DIRKEEP && !isSupportedOutputFilename(entry.name)) continue;
           const existingFile = inputByName.get(relativePath);
           const inputFileInfo = this.inputFileHashes.get(relativePath);
+          let capProbeStat: fs.Stats | undefined;
+          if (isOutputCapProbe) {
+            const pathShapeError = checkPathShape(relativePath);
+            if (pathShapeError) {
+              this.recordArtifactTruncation(
+                pathShapeError.includes('nesting depth') ? 'depth' : 'path',
+                relativePath,
+              );
+              continue;
+            }
+            try {
+              capProbeStat = await fsp.lstat(fullPath);
+              if (!capProbeStat.isFile()) continue;
+            } catch (err) {
+              this.log.debug({ path: relativePath, err }, 'walkDir: failed during cap-probe stat');
+              this.recordArtifactTruncation('unreadable', relativePath);
+              continue;
+            }
+            if (capProbeStat.size > this.runtime.max_file_size) {
+              /* Match handleRegularFile's one exception: an unchanged inline
+               * entrypoint is request input rather than an oversized output. */
+              if (!inputFileInfo || existingFile?.id != null || relativePath !== this.entryPointName) {
+                this.recordArtifactTruncation('size', relativePath);
+                continue;
+              }
+              if (capProbeStat.size > state.remainingHashBytes) return rootPath;
+              state.remainingHashBytes -= capProbeStat.size;
+              try {
+                if (await this.computeFileHash(fullPath, true) === inputFileInfo.hash) continue;
+              } catch (err) {
+                this.log.debug({ path: relativePath, err }, 'walkDir: failed during oversized entrypoint cap probe');
+              }
+              this.recordArtifactTruncation('size', relativePath);
+              continue;
+            }
+          }
           if (
-            respectSessionSuppression
+            isOutputCapProbe
             && relativePath === this.entryPointName
             && existingFile?.id == null
             && inputFileInfo
           ) {
             try {
-              const st = await fsp.lstat(fullPath);
-              if (!st.isFile()) continue;
-              if (st.size > state.remainingHashBytes) return rootPath;
-              state.remainingHashBytes -= st.size;
+              if (capProbeStat!.size > state.remainingHashBytes) return rootPath;
+              state.remainingHashBytes -= capProbeStat!.size;
               if (await this.computeFileHash(fullPath, true) === inputFileInfo.hash) continue;
             } catch (err) {
               this.log.debug({ path: relativePath, err }, 'walkDir: failed during entrypoint cap probe');
@@ -2270,13 +2304,11 @@ export class Job {
            * so the bounded cap probe must do the same or it reports a false
            * max_files warning. Current-request inputs remain reportable: they
            * would otherwise have been echoed into this response. */
-          if (respectSessionSuppression && this.session && !existingFile) {
+          if (isOutputCapProbe && this.session && !existingFile) {
             if (this.session.isPrimedReadOnly(relativePath)) continue;
             try {
-              const st = await fsp.lstat(fullPath);
-              if (!st.isFile()) continue;
-              if (st.size > state.remainingHashBytes) return rootPath;
-              state.remainingHashBytes -= st.size;
+              if (capProbeStat!.size > state.remainingHashBytes) return rootPath;
+              state.remainingHashBytes -= capProbeStat!.size;
               const hash = await this.computeFileHash(fullPath, true);
               if (this.session.isSurfaced(relativePath, hash)) continue;
               if (
@@ -2303,7 +2335,7 @@ export class Job {
           state,
           probeDepth + 1,
           rootPath,
-          respectSessionSuppression,
+          isOutputCapProbe,
         );
         if (nested) return nested;
       }

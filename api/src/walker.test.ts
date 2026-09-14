@@ -1021,6 +1021,49 @@ describe('walkDir / artifact truncation details', () => {
     });
   });
 
+  it('classifies an oversized supported file by size when the output cap is full', async () => {
+    await fsp.writeFile(path.join(tmpDir, 'oversized.txt'), 'too large');
+    const internals = asInternals(makeJob({ maxFileSize: 3 }));
+    internals.submissionDir = tmpDir;
+    internals.generatedFiles = Array.from({ length: config.max_output_files }, (_, i) => ({
+      id: `id-${i}`,
+      name: `file-${i}.txt`,
+      path: path.join(tmpDir, `file-${i}.txt`),
+    }));
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { size: 1 },
+      skipped: ['oversized.txt'],
+      skipped_count: 1,
+    });
+  });
+
+  it('classifies an overlong supported path by path when the output cap is full', async () => {
+    const directory = 'a'.repeat(200);
+    const filename = path.join(directory, `${'b'.repeat(60)}.txt`);
+    await fsp.mkdir(path.join(tmpDir, directory));
+    await fsp.writeFile(path.join(tmpDir, filename), 'output');
+    const internals = asInternals(makeJob());
+    internals.submissionDir = tmpDir;
+    internals.generatedFiles = Array.from({ length: config.max_output_files }, (_, i) => ({
+      id: `id-${i}`,
+      name: `file-${i}.txt`,
+      path: path.join(tmpDir, `file-${i}.txt`),
+    }));
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { path: 1 },
+      skipped: [filename],
+      skipped_count: 1,
+    });
+  });
+
   it('does not hash ordinary oversized files in session mode', async () => {
     await fsp.writeFile(path.join(tmpDir, 'large.txt'), 'too large');
     const session = new SessionWorkspace({ runtimeSessionId: 'rt_large' });
