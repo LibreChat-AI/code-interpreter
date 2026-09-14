@@ -1,24 +1,45 @@
 import axios from 'axios';
 import { Worker } from 'bullmq';
 import type * as t from './types';
-import { filterSystemLogs, applySystemReplacements, getAxiosErrorDetails, sandboxErrorMessageFromAxios } from './utils';
-import { jobProcessingDuration, jobsCancelled, jobsCompleted, jobsFailed, activeJobs, workerRunning } from './metrics';
+import {
+  filterSystemLogs,
+  applySystemReplacements,
+  getAxiosErrorDetails,
+  sandboxErrorMessageFromAxios,
+} from './utils';
+import {
+  jobProcessingDuration,
+  jobsCancelled,
+  jobsCompleted,
+  jobsFailed,
+  activeJobs,
+  workerRunning,
+} from './metrics';
 import { connection, jobCancellationRegistry, queueNames } from './queue';
 import { env, jobDeadlineAtMs } from './config';
 import { summarizeSandboxResponse, summarizeText } from './execution-log';
-import { createGatewayEgressGrant, restoreGatewaySandboxResult, revokeGatewayEgressGrant } from './egress-gateway-client';
+import {
+  createGatewayEgressGrant,
+  restoreGatewaySandboxResult,
+  revokeGatewayEgressGrant,
+} from './egress-gateway-client';
 import { refreshEgressGrantClaims } from './sandbox-egress';
 import { buildSandboxExecuteRequest } from './sandbox-dispatch';
 import { prepareInputDelivery } from './runtime-session/input-delivery';
 import { SessionFilesError } from './runtime-session/files';
 import { resolveRuntimeSessionForJob } from './runtime-session/job-policy';
-import { getSandboxBackend, SandboxBackendError, type SandboxRawResponse } from './sandbox-backend';
+import {
+  getSandboxBackend,
+  SandboxBackendError,
+  type SandboxRawResponse,
+} from './sandbox-backend';
 import { isSyntheticPrincipalSource } from './auth/synthetic';
 import { withSpan, withTraceContext } from './telemetry';
 import { workerDeadlineFailure } from './worker-error';
 import {
   CLIENT_DISCONNECT_REASON,
   JOB_CANCELLED_MESSAGE,
+  jobResultCommitFailure,
   throwIfJobAborted,
 } from './job-cancellation';
 import logger from './logger';
@@ -32,41 +53,57 @@ const { INSTANCE_ID } = env;
 const WORKER_ID = `${INSTANCE_ID}-${process.pid}`;
 
 function isAbortError(error: unknown): boolean {
-  return axios.isAxiosError(error) && (error.name === 'AbortError' || error.code === 'ERR_CANCELED');
+  return (
+    axios.isAxiosError(error) &&
+    (error.name === 'AbortError' || error.code === 'ERR_CANCELED')
+  );
 }
 
 async function processJob(job: t.ExecuteJob): Promise<t.ExecuteResult> {
-  return withTraceContext(job.data._otel, () => withSpan('codeapi.job.process', {
-    'messaging.system': 'bullmq',
-    'messaging.operation.name': 'process',
-    'messaging.message.id': typeof job.id === 'string' ? job.id : String(job.id ?? ''),
-    'codeapi.language': job.data.payload?.language ?? 'unknown',
-    'codeapi.execution_profile': job.data.executionProfile ?? 'legacy',
-    'codeapi.worker_execution_profile': env.EXECUTION_PROFILE,
-  }, () => processJobInner(job), 'CONSUMER'));
+  return withTraceContext(job.data._otel, () =>
+    withSpan(
+      'codeapi.job.process',
+      {
+        'messaging.system': 'bullmq',
+        'messaging.operation.name': 'process',
+        'messaging.message.id':
+          typeof job.id === 'string' ? job.id : String(job.id ?? ''),
+        'codeapi.language': job.data.payload?.language ?? 'unknown',
+        'codeapi.execution_profile': job.data.executionProfile ?? 'legacy',
+        'codeapi.worker_execution_profile': env.EXECUTION_PROFILE,
+      },
+      () => processJobInner(job),
+      'CONSUMER',
+    ),
+  );
 }
 
 async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
   const { payload, isPyPlot } = job.data;
-  const isSyntheticJob = job.data.isSynthetic === true || isSyntheticPrincipalSource(job.data.principalSource);
+  const isSyntheticJob =
+    job.data.isSynthetic === true ||
+    isSyntheticPrincipalSource(job.data.principalSource);
   const language = payload?.language ?? 'unknown';
   const endTimer = jobProcessingDuration.startTimer({ language });
   activeJobs.inc({ language });
 
   const controller = new AbortController();
-  const cancellationTarget = job.data.cancellable === true && job.id != null
-    ? { queueName: job.queueName, jobId: String(job.id) }
-    : undefined;
+  const cancellationTarget =
+    job.data.cancellable === true && job.id != null
+      ? { queueName: job.queueName, jobId: String(job.id) }
+      : undefined;
   let cancellationRegistered = false;
   const deadlineAtMs = jobDeadlineAtMs(job.timestamp, env.JOB_TIMEOUT);
   const remainingBudgetMs = Math.max(0, deadlineAtMs - Date.now());
-  const timer = remainingBudgetMs > 0
-    ? setTimeout(() => controller.abort('deadline'), remainingBudgetMs)
-    : undefined;
+  const timer =
+    remainingBudgetMs > 0
+      ? setTimeout(() => controller.abort('deadline'), remainingBudgetMs)
+      : undefined;
   if (remainingBudgetMs === 0) controller.abort('deadline');
   let egressGrantId: string | undefined;
   let egressGrantTokenForRestore: string | undefined;
   let revokeReason = 'completed';
+  let completedResult = false;
 
   try {
     if (cancellationTarget != null) {
@@ -76,7 +113,10 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     if (controller.signal.aborted) {
       throw new Error(`Job timed out after ${env.JOB_TIMEOUT}ms`);
     }
-    validateQueuedExecutionProfile(job.data.executionProfile, env.EXECUTION_PROFILE);
+    validateQueuedExecutionProfile(
+      job.data.executionProfile,
+      env.EXECUTION_PROFILE,
+    );
     validateQueuedSandboxBackend(
       job.data.sandboxBackend,
       env.SANDBOX_BACKEND,
@@ -90,7 +130,10 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       const nowSeconds = Math.floor(Date.now() / 1000);
       const prepared = await createGatewayEgressGrant({
         payload,
-        claims: refreshEgressGrantClaims(job.data.egressGrantClaims, nowSeconds),
+        claims: refreshEgressGrantClaims(
+          job.data.egressGrantClaims,
+          nowSeconds,
+        ),
         isSynthetic: isSyntheticJob,
         signal: controller.signal,
       });
@@ -98,9 +141,10 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       sandboxPayload = prepared.payload;
       egressGrantToken = prepared.egressGrantToken;
       egressGrantTokenForRestore = prepared.egressGrantToken;
-      executionManifestClaims = (env.EXECUTION_MANIFEST_PRIVATE_KEY || env.EXECUTION_MANIFEST_SECRET)
-        ? prepared.executionManifestClaims
-        : undefined;
+      executionManifestClaims =
+        env.EXECUTION_MANIFEST_PRIVATE_KEY || env.EXECUTION_MANIFEST_SECRET
+          ? prepared.executionManifestClaims
+          : undefined;
     }
 
     const delivery = prepareInputDelivery(payload, sandboxPayload);
@@ -110,7 +154,8 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       egressGrantToken,
       executionManifestClaims,
       maxOutputFileBytes: Math.min(
-        executionManifestClaims?.max_upload_bytes ?? env.EGRESS_GATEWAY_MAX_FILE_BYTES,
+        executionManifestClaims?.max_upload_bytes ??
+          env.EGRESS_GATEWAY_MAX_FILE_BYTES,
         env.EGRESS_GATEWAY_MAX_FILE_BYTES,
         BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES,
       ),
@@ -134,7 +179,9 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
      * the transformed object makes that second call an idempotent no-op. */
     const resultRestoreToken = egressGrantTokenForRestore;
     const finalizedSandboxResults = new WeakSet<SandboxRawResponse>();
-    const finalizeSandboxResult = async (result: SandboxRawResponse): Promise<SandboxRawResponse> => {
+    const finalizeSandboxResult = async (
+      result: SandboxRawResponse,
+    ): Promise<SandboxRawResponse> => {
       if (
         resultRestoreToken === undefined ||
         resultRestoreToken.length === 0 ||
@@ -175,9 +222,10 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
         /* Stateful backends run this as a commit barrier after user code but
          * before checkpointing/reusing the mutated workspace. Stateless/HTTP
          * paths retain the worker-owned fallback immediately below. */
-        sessionResultFinalizer: resultRestoreToken !== undefined && resultRestoreToken.length > 0
-          ? finalizeSandboxResult
-          : undefined,
+        sessionResultFinalizer:
+          resultRestoreToken !== undefined && resultRestoreToken.length > 0
+            ? finalizeSandboxResult
+            : undefined,
       },
     );
 
@@ -212,7 +260,9 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       stdout,
       stderr,
       ...(responseData.pending_tool_calls_payload != null
-        ? { pending_tool_calls_payload: responseData.pending_tool_calls_payload }
+        ? {
+            pending_tool_calls_payload: responseData.pending_tool_calls_payload,
+          }
         : {}),
     };
 
@@ -221,7 +271,8 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       result.signal = run.signal != null ? String(run.signal) : null;
       result.message = run.message ?? null;
       result.status = run.status ?? null;
-      result.wall_time = (run as Record<string, unknown>).wall_time as number | null ?? null;
+      result.wall_time =
+        ((run as Record<string, unknown>).wall_time as number | null) ?? null;
     }
 
     if (result.message || result.signal) {
@@ -235,10 +286,12 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       });
     }
 
+    completedResult = true;
     return result;
   } catch (error) {
     const clientDisconnected =
-      controller.signal.aborted && controller.signal.reason === CLIENT_DISCONNECT_REASON;
+      controller.signal.aborted &&
+      controller.signal.reason === CLIENT_DISCONNECT_REASON;
     revokeReason = clientDisconnected
       ? 'cancelled'
       : controller.signal.aborted || isAbortError(error)
@@ -283,26 +336,37 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     if (egressGrantId || egressGrantTokenForRestore) {
       await revokeGatewayEgressGrant({
         grantId: egressGrantId,
-        egressGrantToken: egressGrantId ? undefined : egressGrantTokenForRestore,
+        egressGrantToken: egressGrantId
+          ? undefined
+          : egressGrantTokenForRestore,
         isSynthetic: isSyntheticJob,
         reason: revokeReason,
         timeoutMs: env.EGRESS_GATEWAY_REVOKE_TIMEOUT_MS,
-      }).catch(error => {
-        logger.error('Failed to revoke egress grant', { grantId: egressGrantId, error: getAxiosErrorDetails(error) });
-      });
-    }
-    if (timer) clearTimeout(timer);
-    if (cancellationTarget != null && cancellationRegistered) {
-      await jobCancellationRegistry.unregister(cancellationTarget, controller).catch(error => {
-        logger.warn('Failed to clear queued execution cancellation state', {
-          queueName: cancellationTarget.queueName,
-          jobId: cancellationTarget.jobId,
+      }).catch((error) => {
+        logger.error('Failed to revoke egress grant', {
+          grantId: egressGrantId,
           error: getAxiosErrorDetails(error),
         });
       });
     }
+    const lateCommitFailure = completedResult
+      ? jobResultCommitFailure(controller.signal, env.JOB_TIMEOUT)
+      : undefined;
+    if (timer) clearTimeout(timer);
+    if (cancellationTarget != null && cancellationRegistered) {
+      await jobCancellationRegistry
+        .unregister(cancellationTarget, controller)
+        .catch((error) => {
+          logger.warn('Failed to clear queued execution cancellation state', {
+            queueName: cancellationTarget.queueName,
+            jobId: cancellationTarget.jobId,
+            error: getAxiosErrorDetails(error),
+          });
+        });
+    }
     endTimer();
     activeJobs.dec({ language });
+    if (lateCommitFailure != null) throw lateCommitFailure;
   }
 }
 
@@ -330,14 +394,14 @@ export const otherWorker = new Worker(queueNames.other, processJob, {
 workerRunning.set({ worker_type: 'python' }, 1);
 workerRunning.set({ worker_type: 'other' }, 1);
 
-pyWorker.on('completed', job => {
+pyWorker.on('completed', (job) => {
   if (job.data.isSynthetic !== true) {
     logger.info(`[${WORKER_ID}] Python job completed ${job.id}`);
   }
   jobsCompleted.inc({ language: 'python' });
 });
 
-otherWorker.on('completed', job => {
+otherWorker.on('completed', (job) => {
   if (job.data.isSynthetic !== true) {
     logger.info(`[${WORKER_ID}] Other job completed ${job.id}`);
   }

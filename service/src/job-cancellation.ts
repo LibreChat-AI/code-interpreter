@@ -16,7 +16,9 @@ function targetKey(target: JobTarget): string {
 }
 
 function cancellationKey(target: JobTarget): string {
-  return `${JOB_CANCELLATION_PREFIX}:${encodeURIComponent(target.queueName)}:${encodeURIComponent(target.jobId)}`;
+  return `${JOB_CANCELLATION_PREFIX}:${encodeURIComponent(
+    target.queueName,
+  )}:${encodeURIComponent(target.jobId)}`;
 }
 
 function parseTarget(raw: string): JobTarget | undefined {
@@ -53,27 +55,32 @@ export class JobCancellationRegistry {
     { target: JobTarget; controllers: Set<AbortController> }
   >();
   private startPromise?: Promise<void>;
+  private readonly subscriberEndHandlers = new WeakMap<IORedis, () => void>();
   private reconcileTimer?: ReturnType<typeof setTimeout>;
+  private subscriberRestartTimer?: ReturnType<typeof setTimeout>;
   private reconcileRetryMs = 100;
   private closed = false;
 
   constructor(private readonly commands: IORedis) {}
 
   private readonly onSubscriberError = (): void => {
-      // ioredis reconnects using the shared policy. The listener prevents a
-      // transient subscriber outage from becoming an uncaught process error.
+    // ioredis reconnects using the shared policy. The listener prevents a
+    // transient subscriber outage from becoming an uncaught process error.
   };
 
   private readonly onSubscriberReady = (): void => {
     this.scheduleReconcile(0);
   };
 
-  private readonly onSubscriberMessage = (channel: string, raw: string): void => {
+  private readonly onSubscriberMessage = (
+    channel: string,
+    raw: string,
+  ): void => {
     if (channel !== JOB_CANCELLATION_CHANNEL) return;
     const target = parseTarget(raw);
     if (target == null) return;
-    for (const controller of
-      this.controllers.get(targetKey(target))?.controllers ?? []) {
+    for (const controller of this.controllers.get(targetKey(target))
+      ?.controllers ?? []) {
       controller.abort(CLIENT_DISCONNECT_REASON);
     }
   };
@@ -82,6 +89,49 @@ export class JobCancellationRegistry {
     subscriber.removeListener('error', this.onSubscriberError);
     subscriber.removeListener('ready', this.onSubscriberReady);
     subscriber.removeListener('message', this.onSubscriberMessage);
+    const onEnd = this.subscriberEndHandlers.get(subscriber);
+    if (onEnd != null) subscriber.removeListener('end', onEnd);
+    this.subscriberEndHandlers.delete(subscriber);
+  }
+
+  private restartAfterTerminalDisconnect(subscriber: IORedis): void {
+    if (this.closed || this.subscriber !== subscriber) return;
+    this.detachSubscriber(subscriber);
+    this.subscriber = undefined;
+    this.startPromise = undefined;
+    if (this.controllers.size === 0) return;
+    void this.start().then(
+      () => this.scheduleReconcile(0),
+      () => this.scheduleSubscriberRestart(),
+    );
+  }
+
+  private scheduleSubscriberRestart(): void {
+    if (
+      this.closed ||
+      this.controllers.size === 0 ||
+      this.startPromise != null ||
+      this.subscriberRestartTimer != null
+    )
+      return;
+    const retryMs = this.reconcileRetryMs;
+    this.reconcileRetryMs = Math.min(2_000, retryMs * 2);
+    this.subscriberRestartTimer = setTimeout(() => {
+      this.subscriberRestartTimer = undefined;
+      if (
+        this.closed ||
+        this.controllers.size === 0 ||
+        this.startPromise != null
+      )
+        return;
+      void this.start().then(
+        () => {
+          this.reconcileRetryMs = 100;
+          this.scheduleReconcile(0);
+        },
+        () => this.scheduleSubscriberRestart(),
+      );
+    }, retryMs);
   }
 
   private async reconcile(): Promise<void> {
@@ -133,6 +183,9 @@ export class JobCancellationRegistry {
       subscriber.on('error', this.onSubscriberError);
       subscriber.on('ready', this.onSubscriberReady);
       subscriber.on('message', this.onSubscriberMessage);
+      const onEnd = (): void => this.restartAfterTerminalDisconnect(subscriber);
+      this.subscriberEndHandlers.set(subscriber, onEnd);
+      subscriber.on('end', onEnd);
       try {
         await subscriber.subscribe(JOB_CANCELLATION_CHANNEL);
       } catch (error) {
@@ -149,7 +202,10 @@ export class JobCancellationRegistry {
     return starting;
   }
 
-  async register(target: JobTarget, controller: AbortController): Promise<void> {
+  async register(
+    target: JobTarget,
+    controller: AbortController,
+  ): Promise<void> {
     const key = targetKey(target);
     const entry = this.controllers.get(key) ?? {
       target,
@@ -190,6 +246,9 @@ export class JobCancellationRegistry {
     this.controllers.clear();
     if (this.reconcileTimer != null) clearTimeout(this.reconcileTimer);
     this.reconcileTimer = undefined;
+    if (this.subscriberRestartTimer != null)
+      clearTimeout(this.subscriberRestartTimer);
+    this.subscriberRestartTimer = undefined;
     await this.startPromise?.catch(() => undefined);
     const subscriber = this.subscriber;
     this.subscriber = undefined;
@@ -211,7 +270,9 @@ export async function requestJobCancellation(
   transaction.publish(JOB_CANCELLATION_CHANNEL, payload);
   const result = await transaction.exec();
   if (result == null) {
-    throw new Error('Redis transaction aborted while cancelling queued execution');
+    throw new Error(
+      'Redis transaction aborted while cancelling queued execution',
+    );
   }
   const failure = result.find(([error]) => error != null)?.[0];
   if (failure != null) throw failure;
@@ -240,7 +301,10 @@ export async function removeJobIfWaiting(
 }
 
 export function programmaticCancellationError(): Error {
-  return new DOMException('Programmatic execution request disconnected', 'AbortError');
+  return new DOMException(
+    'Programmatic execution request disconnected',
+    'AbortError',
+  );
 }
 
 /** Commit barrier for result-processing stages that may yield after execution. */
@@ -250,6 +314,20 @@ export function throwIfJobAborted(signal: AbortSignal): void {
   throw new DOMException(
     typeof signal.reason === 'string' ? signal.reason : 'Job aborted',
     'AbortError',
+  );
+}
+
+/** Maps cancellation observed during asynchronous result cleanup to the same
+ * stable worker failure used by the main execution catch path. */
+export function jobResultCommitFailure(
+  signal: AbortSignal,
+  jobTimeoutMs: number,
+): Error | undefined {
+  if (!signal.aborted) return undefined;
+  return new Error(
+    signal.reason === CLIENT_DISCONNECT_REASON
+      ? JOB_CANCELLED_MESSAGE
+      : `Job timed out after ${jobTimeoutMs}ms`,
   );
 }
 
@@ -278,6 +356,10 @@ export async function waitForJobWithCancellation<T>(args: {
     await registry.register(target, externalController);
   } catch (error) {
     void completion.catch(() => undefined);
+    await Promise.allSettled([
+      requestJobCancellation(commands, target, cancellationTtlSeconds),
+      removeJobIfWaiting(job),
+    ]);
     throw error;
   }
 
@@ -297,14 +379,22 @@ export async function waitForJobWithCancellation<T>(args: {
         .then(() => reject(programmaticCancellationError()), reject);
     };
     if (signal != null) {
-      removeAbortListener = (): void => signal.removeEventListener('abort', cancel);
+      removeAbortListener = (): void =>
+        signal.removeEventListener('abort', cancel);
       signal.addEventListener('abort', cancel, { once: true });
       if (signal.aborted) cancel();
     }
   });
   const cancelled = new Promise<never>((_, reject) => {
-    const cancel = (): void => reject(programmaticCancellationError());
-    externalController.signal.addEventListener('abort', cancel, { once: true });
+    const cancel = (): void => {
+      void removeJobIfWaiting(job).then(
+        () => reject(programmaticCancellationError()),
+        () => reject(programmaticCancellationError()),
+      );
+    };
+    externalController.signal.addEventListener('abort', cancel, {
+      once: true,
+    });
     if (externalController.signal.aborted) cancel();
   });
 
@@ -315,7 +405,9 @@ export async function waitForJobWithCancellation<T>(args: {
     return await Promise.race([completion, disconnected, cancelled]);
   } finally {
     removeAbortListener();
-    await registry.unregister(target, externalController).catch(() => undefined);
+    await registry
+      .unregister(target, externalController)
+      .catch(() => undefined);
   }
 }
 

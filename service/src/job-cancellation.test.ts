@@ -5,6 +5,7 @@ import type { Job, QueueEvents } from 'bullmq';
 import {
   CLIENT_DISCONNECT_REASON,
   JobCancellationRegistry,
+  jobResultCommitFailure,
   jobCancellationInternals,
   removeJobIfWaiting,
   requestJobCancellation,
@@ -236,6 +237,23 @@ test('subscriber reconnect retries durable-marker reconciliation', async () => {
   await registry.close();
 });
 
+test('terminal subscriber disconnect rebuilds the subscription and reconciles markers', async () => {
+  const fake = new FakeRedis();
+  const registry = new JobCancellationRegistry(redis(fake));
+  const target = { queueName: 'other', jobId: 'job-terminal-reconnect' };
+  const controller = new AbortController();
+  await registry.register(target, controller);
+  fake.existing.add(jobCancellationInternals.cancellationKey(target));
+
+  fake.subscriber.emit('end');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(fake.duplicateCalls).toBe(2);
+  expect(controller.signal.aborted).toBe(true);
+  expect(controller.signal.reason).toBe(CLIENT_DISCONNECT_REASON);
+  await registry.close();
+});
+
 test('cancellation writes a durable marker before publishing', async () => {
   const fake = new FakeRedis();
   const target = { queueName: 'other', jobId: 'job-3' };
@@ -256,6 +274,23 @@ test('result commit barrier rejects cancellation observed after execution', () =
   expect(() => throwIfJobAborted(controller.signal)).toThrow(
     CLIENT_DISCONNECT_REASON,
   );
+});
+
+test('result cleanup maps late cancellation to stable worker failures', () => {
+  const disconnected = new AbortController();
+  disconnected.abort(CLIENT_DISCONNECT_REASON);
+  expect(jobResultCommitFailure(disconnected.signal, 30_000)?.message).toBe(
+    'Job cancelled after client disconnected',
+  );
+
+  const deadline = new AbortController();
+  deadline.abort('deadline');
+  expect(jobResultCommitFailure(deadline.signal, 30_000)?.message).toBe(
+    'Job timed out after 30000ms',
+  );
+  expect(
+    jobResultCommitFailure(new AbortController().signal, 30_000),
+  ).toBeUndefined();
 });
 
 test('disconnect frees a waiting job and rejects promptly', async () => {
@@ -289,11 +324,88 @@ test('disconnect frees a waiting job and rejects promptly', async () => {
   expect(removed).toBe(true);
   expect(fake.transactions[0]?.operations[0]).toEqual([
     'set',
-    jobCancellationInternals.cancellationKey({ queueName: 'other', jobId: 'job-4' }),
+    jobCancellationInternals.cancellationKey({
+      queueName: 'other',
+      jobId: 'job-4',
+    }),
     '1',
     'EX',
     120,
   ]);
+  await registry.close();
+});
+
+test('registration failure fences and removes the already-enqueued job', async () => {
+  const fake = new FakeRedis();
+  fake.subscriber.subscribeFailures = 1;
+  let removed = false;
+  const job = {
+    id: 'job-register-failure',
+    queueName: 'other',
+    waitUntilFinished: () => new Promise<never>(() => {}),
+    getState: async () => 'waiting',
+    remove: async () => {
+      removed = true;
+    },
+  } as unknown as Job<unknown, unknown>;
+  const registry = new JobCancellationRegistry(redis(fake));
+
+  await expect(
+    waitForJobWithCancellation({
+      commands: redis(fake),
+      registry,
+      job,
+      events: {} as QueueEvents,
+      timeoutMs: 60_000,
+      cancellationTtlSeconds: 120,
+    }),
+  ).rejects.toThrow('subscriber unavailable');
+
+  expect(removed).toBe(true);
+  expect(fake.transactions[0]?.operations[0]).toEqual([
+    'set',
+    jobCancellationInternals.cancellationKey({
+      queueName: 'other',
+      jobId: 'job-register-failure',
+    }),
+    '1',
+    'EX',
+    120,
+  ]);
+  await registry.close();
+});
+
+test('external cancellation frees a waiting job before rejecting its waiter', async () => {
+  const fake = new FakeRedis();
+  const registry = new JobCancellationRegistry(redis(fake));
+  let removed = false;
+  const job = {
+    id: 'job-external-waiting',
+    queueName: 'other',
+    waitUntilFinished: () => new Promise<never>(() => {}),
+    getState: async () => 'waiting',
+    remove: async () => {
+      removed = true;
+    },
+  } as unknown as Job<unknown, unknown>;
+  const waiting = waitForJobWithCancellation({
+    commands: redis(fake),
+    registry,
+    job,
+    events: {} as QueueEvents,
+    timeoutMs: 60_000,
+    cancellationTtlSeconds: 120,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  fake.subscriber.emit(
+    'message',
+    jobCancellationInternals.channel,
+    JSON.stringify({ queueName: 'other', jobId: 'job-external-waiting' }),
+  );
+
+  await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
+  expect(removed).toBe(true);
   await registry.close();
 });
 
@@ -344,18 +456,22 @@ test('queued removal never removes an active job', async () => {
 
 test('queued removal frees waiting capacity and tolerates an activation race', async () => {
   let removals = 0;
-  expect(await removeJobIfWaiting({
-    getState: async () => 'waiting',
-    remove: async () => {
-      removals += 1;
-    },
-  })).toBe(true);
-  expect(await removeJobIfWaiting({
-    getState: async () => 'waiting',
-    remove: async () => {
-      removals += 1;
-      throw new Error('job is active');
-    },
-  })).toBe(false);
+  expect(
+    await removeJobIfWaiting({
+      getState: async () => 'waiting',
+      remove: async () => {
+        removals += 1;
+      },
+    }),
+  ).toBe(true);
+  expect(
+    await removeJobIfWaiting({
+      getState: async () => 'waiting',
+      remove: async () => {
+        removals += 1;
+        throw new Error('job is active');
+      },
+    }),
+  ).toBe(false);
   expect(removals).toBe(2);
 });

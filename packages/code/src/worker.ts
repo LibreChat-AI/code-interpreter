@@ -164,26 +164,29 @@ function workspaceCapabilitiesMatch(
     advertised.writeFileModes?.length === executor.writeFileModes?.length &&
     (advertised.writeFileModes?.every(
       (mode, index) => mode === executor.writeFileModes?.[index],
-    ) ?? executor.writeFileModes == null) &&
+    ) ??
+      executor.writeFileModes == null) &&
     advertised.editFileModes?.length === executor.editFileModes?.length &&
     (advertised.editFileModes?.every(
       (mode, index) => mode === executor.editFileModes?.[index],
-    ) ?? executor.editFileModes == null) &&
-    advertised.editFileFeatures?.length ===
-      executor.editFileFeatures?.length &&
+    ) ??
+      executor.editFileModes == null) &&
+    advertised.editFileFeatures?.length === executor.editFileFeatures?.length &&
     (advertised.editFileFeatures?.every(
       (feature, index) => feature === executor.editFileFeatures?.[index],
-    ) ?? executor.editFileFeatures == null) &&
-    advertised.listFileFeatures?.length ===
-      executor.listFileFeatures?.length &&
+    ) ??
+      executor.editFileFeatures == null) &&
+    advertised.listFileFeatures?.length === executor.listFileFeatures?.length &&
     (advertised.listFileFeatures?.every(
       (feature, index) => feature === executor.listFileFeatures?.[index],
-    ) ?? executor.listFileFeatures == null) &&
+    ) ??
+      executor.listFileFeatures == null) &&
     advertised.programmaticLanguages?.length ===
       executor.programmaticLanguages?.length &&
     (advertised.programmaticLanguages?.every(
       (language, index) => language === executor.programmaticLanguages?.[index],
-    ) ?? executor.programmaticLanguages == null) &&
+    ) ??
+      executor.programmaticLanguages == null) &&
     advertised.workspaces.length === executor.workspaces.length &&
     advertised.workspaces.every(
       (workspace, index) =>
@@ -195,7 +198,8 @@ function workspaceCapabilitiesMatch(
           (operation, operationIndex) =>
             operation ===
             executor.workspaces[index]?.operations?.[operationIndex],
-        ) ?? executor.workspaces[index]?.operations == null),
+        ) ??
+          executor.workspaces[index]?.operations == null),
     )
   );
 }
@@ -207,8 +211,7 @@ function registrationCompatibleCapabilities(
   if (
     workspaceTools == null ||
     (workspaceTools.operations.every(
-      (operation) =>
-        operation === 'read_file' || operation === 'search_text',
+      (operation) => operation === 'read_file' || operation === 'search_text',
     ) &&
       workspaceTools.workspaces.every(
         (workspace) => workspace.operations == null,
@@ -217,8 +220,7 @@ function registrationCompatibleCapabilities(
     return capabilities;
   }
   const operations = workspaceTools.operations.filter(
-    (operation) =>
-      operation === 'read_file' || operation === 'search_text',
+    (operation) => operation === 'read_file' || operation === 'search_text',
   );
   if (operations.length === 0) {
     const { workspaceTools: _workspaceTools, ...compatible } = capabilities;
@@ -227,7 +229,9 @@ function registrationCompatibleCapabilities(
   const workspaces = workspaceTools.workspaces.flatMap((workspace) => {
     if (
       workspace.operations != null &&
-      !operations.every((operation) => workspace.operations?.includes(operation))
+      !operations.every((operation) =>
+        workspace.operations?.includes(operation),
+      )
     ) {
       return [];
     }
@@ -392,7 +396,11 @@ export class BridgeWorker {
   private negotiatedWorkspaceSlots = 1;
   private concurrentRunning = false;
   private registrationInFlight?: Promise<BridgeWorkerRegistrationResponse>;
-  private credentialInFlight?: Promise<void>;
+  private credentialInFlight?: {
+    promise: Promise<void>;
+    controller: AbortController;
+    waiters: number;
+  };
   private serverClockOffsetMs = MAX_PROOF_CLOCK_SKEW_MS;
 
   constructor(private readonly options: BridgeWorkerOptions) {
@@ -440,7 +448,8 @@ export class BridgeWorker {
       (options.workspaceProgrammatic != null) !==
       (options.capabilities.workspaceTools?.programmaticLanguages?.includes(
         'bash',
-      ) === true)
+      ) ===
+        true)
     ) {
       throw new BridgeProtocolError(
         'Workspace programmatic capability requires a matching executor',
@@ -559,7 +568,9 @@ export class BridgeWorker {
     if (signal?.aborted) {
       abortRegistration();
     } else {
-      signal?.addEventListener('abort', abortRegistration, { once: true });
+      signal?.addEventListener('abort', abortRegistration, {
+        once: true,
+      });
     }
     const timeoutMs = Math.min(
       Math.max(1, this.registrationTtlMs - 1),
@@ -581,7 +592,10 @@ export class BridgeWorker {
             workerId: this.options.workerId,
             incarnationId: this.incarnationId,
             capabilities: this.maintenanceOnly
-              ? { ...capabilities, requiresReadyConfirmation: true }
+              ? {
+                  ...capabilities,
+                  requiresReadyConfirmation: true,
+                }
               : capabilities,
           },
           registrationController.signal,
@@ -715,7 +729,9 @@ export class BridgeWorker {
     }
     await this.runtimeSupervisor.reset(runtimeSessionId, signal);
     await this.timedRequest(
-      `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/workspaces/reset`,
+      `${this.codeApiUrl}${bridgeWorkerPath(
+        this.options.workerId,
+      )}/workspaces/reset`,
       {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         incarnationId: this.incarnationId,
@@ -751,7 +767,9 @@ export class BridgeWorker {
     // machine-local guard before the remote fence can be removed.
     await guard.assertAvailable();
     await this.timedRequest(
-      `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/workspaces/reset`,
+      `${this.codeApiUrl}${bridgeWorkerPath(
+        this.options.workerId,
+      )}/workspaces/reset`,
       {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         incarnationId: this.incarnationId,
@@ -1057,20 +1075,58 @@ export class BridgeWorker {
     transportTimeoutMs = Number.POSITIVE_INFINITY,
   ): Promise<void> {
     while (this.credentialInFlight) {
-      await this.credentialInFlight;
+      await this.waitForCredentialRefresh(this.credentialInFlight, signal);
       // A longer-lived caller may still need another refresh after this one.
     }
+    const controller = new AbortController();
     const pending = this.refreshCredentialOwned(
-      signal,
+      controller.signal,
       validThroughMs,
       transportTimeoutMs,
     );
-    this.credentialInFlight = pending;
+    const entry = { promise: pending, controller, waiters: 0 };
+    this.credentialInFlight = entry;
+    void pending.then(
+      () => {
+        if (this.credentialInFlight === entry)
+          this.credentialInFlight = undefined;
+      },
+      () => {
+        if (this.credentialInFlight === entry)
+          this.credentialInFlight = undefined;
+      },
+    );
+    await this.waitForCredentialRefresh(entry, signal);
+  }
+
+  private async waitForCredentialRefresh(
+    entry: NonNullable<BridgeWorker['credentialInFlight']>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    entry.waiters += 1;
+    let removeAbortListener = (): void => {};
+    const aborted = new Promise<never>((_, reject) => {
+      if (signal == null) return;
+      const abort = (): void =>
+        reject(
+          signal.reason instanceof Error
+            ? signal.reason
+            : new DOMException('aborted', 'AbortError'),
+        );
+      removeAbortListener = (): void =>
+        signal.removeEventListener('abort', abort);
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    });
     try {
-      await pending;
+      await Promise.race([entry.promise, aborted]);
     } finally {
-      if (this.credentialInFlight === pending)
+      removeAbortListener();
+      entry.waiters -= 1;
+      if (entry.waiters === 0 && this.credentialInFlight === entry) {
         this.credentialInFlight = undefined;
+        entry.controller.abort();
+      }
     }
   }
 
@@ -1151,8 +1207,7 @@ export class BridgeWorker {
           error instanceof BridgeProtocolError &&
           (error.status === 401 || error.status === 403);
         const credentialRemainingMs =
-          Date.parse(identity.expiresAt) -
-          (Date.now() + serverClockOffsetMs);
+          Date.parse(identity.expiresAt) - (Date.now() + serverClockOffsetMs);
         if (terminal || credentialRemainingMs <= 0) throw error;
         await abortableDelay(
           Math.min(
@@ -1686,7 +1741,8 @@ export class BridgeWorker {
       const knownAtomicProgrammaticFailure =
         assignment.executionKind === 'workspace_programmatic' &&
         error instanceof WorkspaceToolError &&
-        this.options.workspaceProgrammatic?.mutationFailuresAreAtomic === true &&
+        this.options.workspaceProgrammatic?.mutationFailuresAreAtomic ===
+          true &&
         !error.requiresQuarantine;
       if (
         workspaceMutationApplied ||
@@ -1724,13 +1780,16 @@ export class BridgeWorker {
     clearTimeout(deadlineTimer);
     cancellationController.abort();
     await cancellationWatcher;
-    const credentialInFlight = this.credentialInFlight;
+    const credentialInFlight = this.credentialInFlight?.promise;
     if (credentialInFlight != null && !credentialController.signal.aborted) {
       let drainTimer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         credentialInFlight.catch(() => undefined),
         new Promise<void>((resolve) => {
-          drainTimer = setTimeout(resolve, CREDENTIAL_REFRESH_SETTLEMENT_GRACE_MS);
+          drainTimer = setTimeout(
+            resolve,
+            CREDENTIAL_REFRESH_SETTLEMENT_GRACE_MS,
+          );
         }),
       ]);
       if (drainTimer != null) clearTimeout(drainTimer);
@@ -1936,7 +1995,9 @@ export class BridgeWorker {
       return await lease.execute({ body, headers, signal });
     }
     if (lease.endpoint == null) {
-      throw new BridgeProtocolError('Runtime lease does not provide an execution transport');
+      throw new BridgeProtocolError(
+        'Runtime lease does not provide an execution transport',
+      );
     }
     const endpoint = lease.endpoint.replace(/\/+$/, '');
     const response = await this.fetchImpl(`${endpoint}/execute`, {
