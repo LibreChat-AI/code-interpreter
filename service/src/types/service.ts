@@ -141,6 +141,7 @@ export type ExecuteResponse = {
   /** Top-level execution session id (one sandbox `/exec` invocation). */
   session_id: string;
   files: FileRefs;
+  deleted_files?: string[];
   artifact_delivery?: ArtifactDeliveryFailure;
   artifact_truncation?: ArtifactTruncation;
 };
@@ -259,6 +260,7 @@ export type ExecuteResult = {
   stdout: string;
   stderr: string;
   files: FileRefs;
+  deleted_files?: string[];
   artifact_delivery?: ArtifactDeliveryFailure;
   artifact_truncation?: ArtifactTruncation;
   code?: number | null;
@@ -408,6 +410,7 @@ export interface ProgrammaticResponse {
   stdout?: string;
   stderr?: string;
   files?: FileRefs;
+  deleted_files?: string[];
   artifact_delivery?: ArtifactDeliveryFailure;
   artifact_truncation?: ArtifactTruncation;
   /** Top-level execution session id (one sandbox PTC invocation). */

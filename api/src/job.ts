@@ -655,6 +655,8 @@ interface ExecuteResult {
   /** Top-level execution session id (one sandbox `/exec` invocation). */
   session_id: string;
   files: FileRef[];
+  /** Persisted input paths that no longer exist after this execution. */
+  deleted_files?: string[];
   artifact_delivery?: ArtifactDeliveryFailure;
   artifact_truncation?: ArtifactTruncation;
 }
@@ -714,6 +716,8 @@ export class Job {
   private pendingSurfaced = new Map<string, { name: string; signature: string }>();
   private sessionFiles: FileRef[] = [];
   private inheritedRefs: FileRef[] = [];
+  private presentInputFiles = new Set<string>();
+  private deletedFiles: string[] = [];
   private artifactTruncation: ArtifactTruncation | undefined;
   private truncationProbeState: TruncationProbeState = {
     remainingEntries: TRUNCATION_PROBE_MAX_ENTRIES,
@@ -1699,6 +1703,9 @@ export class Job {
       version: this.runtime.version.raw,
       session_id: this.outputSessionId,
       files: this.sessionFiles,
+      ...(this.deletedFiles.length > 0
+        ? { deleted_files: this.deletedFiles }
+        : {}),
       ...(this.artifactTruncation ? { artifact_truncation: this.artifactTruncation } : {}),
     };
   }
@@ -1707,6 +1714,8 @@ export class Job {
     this.generatedFiles = [];
     this.sessionFiles = [];
     this.inheritedRefs = [];
+    this.presentInputFiles.clear();
+    this.deletedFiles = [];
     this.artifactTruncation = undefined;
     this.truncationProbeState = {
       remainingEntries: TRUNCATION_PROBE_MAX_ENTRIES,
@@ -1720,6 +1729,19 @@ export class Job {
       await this.walkDir(this.submissionDir, 0, inputByName);
     } catch (error) {
       this.log.error({ err: error }, 'Error scanning submission directory');
+      this.recordArtifactTruncation('unreadable', '.');
+    }
+
+    if (this.artifactTruncation == null) {
+      for (const file of this.files) {
+        if (
+          file.id != null &&
+          file.storage_session_id != null &&
+          !this.presentInputFiles.has(file.name)
+        ) {
+          this.deletedFiles.push(file.name);
+        }
+      }
     }
 
     /* Generated files get priority in sessionFiles; fill remaining slots up
@@ -2397,6 +2419,10 @@ export class Job {
       const relativePath = path.relative(this.submissionDir, fullPath);
       const kind = await this.classifyDirent(entry, fullPath, relativePath);
       if (kind === 'skip') continue;
+
+      if (kind === 'file' && inputByName.has(relativePath)) {
+        this.presentInputFiles.add(relativePath);
+      }
 
       if (kind === 'dir') {
         /* Skip hidden directories (basename starts with `.`) unless the user

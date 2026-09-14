@@ -33,6 +33,7 @@ export async function pollBlockingExecution(
   stdout?: string;
   stderr?: string;
   files?: t.FileRefs;
+  deleted_files?: string[];
   artifact_delivery?: t.ArtifactDeliveryFailure;
   artifact_truncation?: t.ArtifactTruncation;
 }> {
@@ -48,6 +49,7 @@ export async function pollBlockingExecution(
           stdout: result.stdout,
           stderr: result.stderr,
           files: result.files,
+          deleted_files: result.deleted_files,
           artifact_delivery: result.artifact_delivery,
           artifact_truncation: result.artifact_truncation,
         };

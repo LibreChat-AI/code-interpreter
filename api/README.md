@@ -94,6 +94,13 @@ Other package-format-compatible runtimes (Go, Rust, Java, GCC) can be installed 
 
 Execute code in a sandboxed environment.
 
+When a persisted input file is removed during execution, a complete artifact
+scan reports its relative path in `deleted_files`. Callers can use this
+explicit list to remove stale file references from their next session request.
+The field is omitted when no persisted inputs were removed or when artifact
+scanning is incomplete, so truncation or unreadable paths cannot be mistaken
+for deletions.
+
 When supported output files are omitted because the response reaches its file
 count limit, nesting or path limits, file-size limit, or a filesystem entry
 cannot be read, the response includes `artifact_truncation`. Its `reasons`

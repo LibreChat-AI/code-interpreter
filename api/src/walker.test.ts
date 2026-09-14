@@ -26,6 +26,8 @@ interface WalkerInternals {
   generatedFiles: Array<{ id: string; name: string; path: string }>;
   sessionFiles: Array<{ id: string; name: string; storage_session_id: string; modified_from?: { id: string; storage_session_id: string }; inherited?: true; entity_id?: string }>;
   inheritedRefs: Array<{ id: string; name: string; storage_session_id: string; inherited?: true; entity_id?: string }>;
+  presentInputFiles: Set<string>;
+  deletedFiles: string[];
   artifactTruncation?: {
     code: 'artifact_truncated';
     reasons: Partial<Record<'max_files' | 'depth' | 'size' | 'path' | 'unreadable', number>>;
@@ -1254,6 +1256,54 @@ describe('handleSessionFiles / priority-fill composition', () => {
     const inheritedIds = new Set(internals.inheritedRefs.map(r => r.id));
     const leakedInherited = internals.sessionFiles.filter(f => inheritedIds.has(f.id));
     expect(leakedInherited).toHaveLength(0);
+  });
+});
+
+describe('handleSessionFiles / persisted input deletion', () => {
+  it('reports a persisted input that no longer exists', async () => {
+    const inherited: TFile = {
+      id: 'prior-id',
+      storage_session_id: 'prior-session',
+      name: 'removed.txt',
+    };
+    const internals = asInternals(makeJob({ files: [inherited] }));
+    internals.submissionDir = tmpDir;
+
+    await internals.handleSessionFiles();
+
+    expect(internals.deletedFiles).toEqual(['removed.txt']);
+  });
+
+  it('does not report a surviving input that is unsupported as an output artifact', async () => {
+    const inherited: TFile = {
+      id: 'prior-id',
+      storage_session_id: 'prior-session',
+      name: 'archive.bin',
+    };
+    await fsp.writeFile(path.join(tmpDir, inherited.name), 'binary-placeholder');
+    const internals = asInternals(makeJob({ files: [inherited] }));
+    internals.submissionDir = tmpDir;
+
+    await internals.handleSessionFiles();
+
+    expect(internals.generatedFiles).toHaveLength(0);
+    expect(internals.deletedFiles).toEqual([]);
+  });
+
+  it('suppresses deletion reporting when the artifact scan is incomplete', async () => {
+    const inherited: TFile = {
+      id: 'prior-id',
+      storage_session_id: 'prior-session',
+      name: 'removed.txt',
+    };
+    await fsp.writeFile(path.join(tmpDir, 'too-large.txt'), 'too large');
+    const internals = asInternals(makeJob({ files: [inherited], maxFileSize: 3 }));
+    internals.submissionDir = tmpDir;
+
+    await internals.handleSessionFiles();
+
+    expect(internals.artifactTruncation?.reasons).toEqual({ size: 1 });
+    expect(internals.deletedFiles).toEqual([]);
   });
 });
 

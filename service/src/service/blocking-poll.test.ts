@@ -4,6 +4,7 @@ import type * as t from '../types';
 
 const result: t.ExecuteResult = {
   session_id: 'session', stdout: 'successful code', stderr: '', files: [],
+  deleted_files: ['removed.txt'],
   artifact_delivery: {
     code: 'artifact_delivery_failed', status: 'failed', attempted: 1, delivered: 0, failed: 1,
   },
@@ -29,6 +30,7 @@ describe('blocking worker settlement', () => {
     const deps = fixture();
     expect(await pollBlockingExecution('exec', 5, deps)).toEqual({
       status: 'completed', stdout: result.stdout, stderr: '', files: [],
+      deleted_files: result.deleted_files,
       artifact_delivery: result.artifact_delivery,
       artifact_truncation: result.artifact_truncation,
     });
