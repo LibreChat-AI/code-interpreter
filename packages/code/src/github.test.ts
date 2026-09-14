@@ -17,6 +17,9 @@ import {
   GitHubAppCredentialProvider,
   StaticGitHubCredentialProvider,
   gitHubAuthenticationPolicyIdentity,
+  gitHubCliTokenEnvironmentName,
+  gitHubCommandCredentialEnvironment,
+  gitHubMaskedCredentialVariables,
   GITHUB_CREDENTIAL_ENV_NAME,
   gitHubCredentialEnvironment,
   normalizeGitHubHost,
@@ -150,6 +153,65 @@ test('builds process-scoped Git HTTPS authorization without embedding credential
   assert.ok(!encodedCredential.includes('github_pat_'));
 });
 
+test('adds a GitHub CLI token only to the command-sandbox credential bundle', async () => {
+  const provider = new StaticGitHubCredentialProvider(
+    'github_pat_abcdefghijklmnopqrstuvwxyz',
+  );
+  const credential = await provider.getCredential();
+  assert.deepEqual(gitHubCommandCredentialEnvironment(credential), {
+    [GITHUB_CREDENTIAL_ENV_NAME]: Buffer.from(
+      'x-access-token:github_pat_abcdefghijklmnopqrstuvwxyz',
+      'utf8',
+    ).toString('base64'),
+    GH_TOKEN: 'github_pat_abcdefghijklmnopqrstuvwxyz',
+  });
+  assert.deepEqual(
+    gitHubCommandCredentialEnvironment(credential, 'github.example.test'),
+    {
+      [GITHUB_CREDENTIAL_ENV_NAME]: Buffer.from(
+        'x-access-token:github_pat_abcdefghijklmnopqrstuvwxyz',
+        'utf8',
+      ).toString('base64'),
+      GH_ENTERPRISE_TOKEN: 'github_pat_abcdefghijklmnopqrstuvwxyz',
+    },
+  );
+});
+
+test('selects the GitHub CLI token variable for public and enterprise hosts', () => {
+  assert.equal(gitHubCliTokenEnvironmentName('github.com'), 'GH_TOKEN');
+  assert.equal(
+    gitHubCliTokenEnvironmentName('github.example.test'),
+    'GH_ENTERPRISE_TOKEN',
+  );
+});
+
+test('restricts Git and GitHub CLI credential substitution to their respective hosts', () => {
+  assert.deepEqual(gitHubMaskedCredentialVariables('github.com'), [
+    {
+      name: GITHUB_CREDENTIAL_ENV_NAME,
+      extract: '^(.+)$',
+      injectHosts: ['github.com'],
+    },
+    {
+      name: 'GH_TOKEN',
+      extract: '^(.+)$',
+      injectHosts: ['api.github.com'],
+    },
+  ]);
+  assert.deepEqual(gitHubMaskedCredentialVariables('github.example.test'), [
+    {
+      name: GITHUB_CREDENTIAL_ENV_NAME,
+      extract: '^(.+)$',
+      injectHosts: ['github.example.test'],
+    },
+    {
+      name: 'GH_ENTERPRISE_TOKEN',
+      extract: '^(.+)$',
+      injectHosts: ['github.example.test'],
+    },
+  ]);
+});
+
 test('composes the masked credential with SRT Git configuration inside the sandbox', () => {
   const wrapped = wrapGitHubCredentialCommand(
     'git push',
@@ -160,8 +222,19 @@ test('composes the masked credential with SRT Git configuration inside the sandb
   assert.match(wrapped, /http\.https:\/\/github\.com\/\.extraheader/);
   assert.match(wrapped, /\$\{LIBRECHAT_CODE_GITHUB_AUTHORIZATION\}/);
   assert.match(wrapped, /unset LIBRECHAT_CODE_GITHUB_AUTHORIZATION/);
+  assert.doesNotMatch(wrapped, /unset GH_TOKEN/);
   assert.equal(wrapped.match(/Authorization: Basic/g)?.length, 1);
   assert.ok(!wrapped.includes('github_pat_'));
+});
+
+test('targets GitHub CLI at an enterprise host without exposing its token', () => {
+  const wrapped = wrapGitHubCredentialCommand(
+    'gh pr create',
+    'github.example.test',
+    'linux',
+  );
+  assert.match(wrapped, /GH_HOST=github\.example\.test/);
+  assert.doesNotMatch(wrapped, /GH_ENTERPRISE_TOKEN=/);
 });
 
 test('rejects an insecure GitHub App API endpoint before reading the private key', () => {

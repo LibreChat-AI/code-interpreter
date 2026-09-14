@@ -38,11 +38,11 @@ import type { NativeProcessSandboxOptions } from './native-process.js';
 import type { LocalWorkspaceConfig } from './workspace.js';
 import {
   GITHUB_ALLOWED_DOMAINS,
-  GITHUB_CREDENTIAL_ENV_NAME,
   GitHubAppCredentialProvider,
+  gitHubCommandCredentialEnvironment,
+  gitHubMaskedCredentialVariables,
   StaticGitHubCredentialProvider,
   gitHubAuthenticationPolicyIdentity,
-  gitHubCredentialEnvironment,
   normalizeGitHubHost,
   wrapGitHubCredentialCommand,
 } from './github.js';
@@ -783,16 +783,11 @@ async function run(
     ...(github.provider
       ? {
           maskedEnvironment: {
-            variables: [
-              {
-                name: GITHUB_CREDENTIAL_ENV_NAME,
-                extract: '^(.+)$',
-                injectHosts: [github.host],
-              },
-            ],
+            variables: gitHubMaskedCredentialVariables(github.host),
             async resolve(signal?: AbortSignal) {
-              return gitHubCredentialEnvironment(
+              return gitHubCommandCredentialEnvironment(
                 await github.provider!.getCredential(signal),
+                github.host,
               );
             },
             wrapCommand(command: string, platform: NodeJS.Platform) {

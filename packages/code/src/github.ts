@@ -204,6 +204,43 @@ export function gitHubCredentialEnvironment(
   };
 }
 
+export function gitHubCommandCredentialEnvironment(
+  credential: GitHubCredential,
+  host = 'github.com',
+): Record<string, string> {
+  return {
+    ...gitHubCredentialEnvironment(credential),
+    [gitHubCliTokenEnvironmentName(host)]: credential.value,
+  };
+}
+
+export function gitHubCliTokenEnvironmentName(host: string): string {
+  return host === 'github.com' ? 'GH_TOKEN' : 'GH_ENTERPRISE_TOKEN';
+}
+
+export function gitHubApiHost(host: string): string {
+  return host === 'github.com' ? 'api.github.com' : host;
+}
+
+export function gitHubMaskedCredentialVariables(host: string): Array<{
+  name: string;
+  injectHosts: string[];
+  extract: string;
+}> {
+  return [
+    {
+      name: GITHUB_CREDENTIAL_ENV_NAME,
+      extract: '^(.+)$',
+      injectHosts: [host],
+    },
+    {
+      name: gitHubCliTokenEnvironmentName(host),
+      extract: '^(.+)$',
+      injectHosts: [gitHubApiHost(host)],
+    },
+  ];
+}
+
 export function gitHubAuthenticationPolicyIdentity(options: {
   mode?: 'app' | 'token';
   host: string;
@@ -249,10 +286,12 @@ export function wrapGitHubCredentialCommand(
   platform: NodeJS.Platform = process.platform,
 ): string {
   const key = `http.https://${host}/.extraheader`;
+  const cliHost = host === 'github.com' ? undefined : host;
   if (platform === 'win32') {
     return [
       'set "GIT_CONFIG_GLOBAL=NUL"',
       'set "GIT_CONFIG_NOSYSTEM=1"',
+      ...(cliHost ? [`set "GH_HOST=${cliHost}"`] : []),
       `set "GIT_CONFIG_PARAMETERS='http.proxyAuthMethod=basic' '${key}=Authorization: Basic %${GITHUB_CREDENTIAL_ENV_NAME}%'"`,
       `set "${GITHUB_CREDENTIAL_ENV_NAME}="`,
       command,
@@ -260,6 +299,7 @@ export function wrapGitHubCredentialCommand(
   }
   return [
     'export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1',
+    ...(cliHost ? [`export GH_HOST=${cliHost}`] : []),
     `export GIT_CONFIG_PARAMETERS="'http.proxyAuthMethod=basic' '${key}=Authorization: Basic \${${GITHUB_CREDENTIAL_ENV_NAME}}'"`,
     `unset ${GITHUB_CREDENTIAL_ENV_NAME}`,
     command,

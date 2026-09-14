@@ -180,14 +180,17 @@ verification are implemented; use macOS, Linux, or WSL2. This also applies to Gi
 private keys.
 
 Git receives authentication through process-scoped `GIT_CONFIG_*` variables.
-The same isolated config supplies the standard Git LFS filters; hosts using LFS
-must install `git-lfs`, and checkout fails instead of silently leaving pointer
-files when it is unavailable.
-SRT replaces only the bearer-token portion with a sentinel inside the sandbox
-and substitutes the real value in its host proxy only for `github.com` HTTPS
-traffic. TLS termination is enabled for that substitution. The worker restores
-the parent environment immediately after constructing the sandbox command; it
-never writes credentials into the repository, a remote URL, or Git config.
+When the GitHub CLI is installed, `gh api`, pull-request, issue, and workflow
+commands receive the same installation scope through `GH_TOKEN` (or
+`GH_ENTERPRISE_TOKEN` for GHES). The same isolated Git config supplies the
+standard Git LFS filters; hosts using LFS must install `git-lfs`, and checkout
+fails instead of silently leaving pointer files when it is unavailable.
+SRT replaces each real credential with a sentinel inside the sandbox and
+substitutes the real value in its host proxy only for the corresponding Git or
+GitHub API host. TLS termination is enabled for that substitution. The worker
+restores the parent environment immediately after constructing the sandbox
+command; it never writes credentials into the repository, a remote URL, Git
+config, or the GitHub CLI credential store.
 GitHub's required domains are added to the command egress allowlist only when
 authentication is configured. The worker identity, GitHub App key path, token
 source variables, and mutation-quarantine record remain denied to sandboxed
