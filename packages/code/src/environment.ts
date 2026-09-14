@@ -13,6 +13,10 @@ import {
 } from './protocol.js';
 import type { LocalWorkspaceConfig } from './workspace.js';
 import { WorkspaceToolError } from './workspace.js';
+import {
+    createEnvironmentMountIsolation,
+    readEnvironmentMountTable,
+} from './environment-mount.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
 import type { WorkspaceToolRequest, WorkspaceToolResult } from './protocol.js';
 
@@ -311,6 +315,35 @@ export async function assertEnvironmentDefinitionsOutsideRoots(
     environments: readonly LoadedCodeEnvironment[],
     roots: readonly LocalWorkspaceConfig[],
 ): Promise<void> {
+    if (!environments.length) return;
+    const mountTable = await readEnvironmentMountTable();
+    if (mountTable !== undefined) {
+        const assertMountIsolation =
+            createEnvironmentMountIsolation(mountTable);
+        assertMountIsolation(
+            environments.flatMap(environment => [
+                environment.path,
+                ...(environment.sourceParents ?? []),
+            ]),
+            roots.map(root => root.root),
+        );
+        for (const environment of environments) {
+            assertMountIsolation(
+                environment.rootPaths ?? [],
+                roots
+                    .filter(root => root.id !== environment.definition.name)
+                    .map(root => root.root),
+            );
+            assertMountIsolation(
+                (environment.rootPaths ?? []).filter(
+                    path => path !== environment.definition.root,
+                ),
+                roots
+                    .filter(root => root.id === environment.definition.name)
+                    .map(root => root.root),
+            );
+        }
+    }
     const identities = new Map<string, Promise<string>>();
     const identity = (path: string): Promise<string> => {
         let result = identities.get(path);
