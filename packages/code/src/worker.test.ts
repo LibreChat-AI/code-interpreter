@@ -694,6 +694,109 @@ test('worker continues cancellation polling after a stalled response', async () 
   assert.equal(settlementAttempted, true);
 });
 
+test('worker stops an outstanding cancellation request before settling completed work', async () => {
+  let startCancellation!: () => void;
+  const cancellationStarted = new Promise<void>((resolve) => {
+    startCancellation = resolve;
+  });
+  let cancellationAborted = false;
+  let settlementAttempted = false;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/execute')) {
+      await cancellationStarted;
+      return Response.json({ session_id: 'run-1', files: [] });
+    }
+    if (url.endsWith('/cancellation')) {
+      startCancellation();
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => {
+            cancellationAborted = true;
+            reject(new DOMException('aborted', 'AbortError'));
+          },
+          { once: true },
+        );
+      });
+    }
+    settlementAttempted = true;
+    return Response.json({ protocolVersion: 1, accepted: true });
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    cancellationPollIntervalMs: 1,
+    cancellationTransportTimeoutMs: 10_000,
+    fetchImpl,
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'complete-while-cancellation-polling',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    remainingMs: 1_000,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(cancellationAborted, true);
+  assert.equal(settlementAttempted, true);
+});
+
+test('worker stops its cancellation delay before settling immediately completed work', async () => {
+  let settlementAttempted = false;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: ['bash'],
+    },
+    cancellationPollIntervalMs: 10_000,
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.endsWith('/execute')) {
+        return Response.json({ session_id: 'run-1', files: [] });
+      }
+      if (url.endsWith('/cancellation')) {
+        throw new Error('cancellation transport should not start');
+      }
+      settlementAttempted = true;
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'complete-before-cancellation-polling',
+    workerId: 'vm-1',
+    incarnationId: 'incarnation-00000001',
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    remainingMs: 1_000,
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+
+  assert.equal(settlementAttempted, true);
+});
+
 test('worker routes a hintless assignment to an ephemeral template session', async () => {
   let executeUrl = '';
   let runtimeSessionHeader = '';

@@ -38,6 +38,11 @@ export interface BridgeWorkerOptions {
   capabilities: BridgeWorkerCapabilities;
   workspaceTools?: WorkspaceToolExecutor;
   workspaceProgrammatic?: {
+    /**
+     * True when a WorkspaceToolError without mutation uncertainty proves the
+     * selected workspace was not changed.
+     */
+    mutationFailuresAreAtomic?: true;
     executeProgrammatic(
       workspaceId: string,
       request: BridgeWorkspaceProgrammaticRequest,
@@ -1674,14 +1679,21 @@ export class BridgeWorker {
       ) {
         workspaceMutationGuardError = error;
       }
+      const knownAtomicWorkspaceToolFailure =
+        assignment.executionKind === 'workspace_tool' &&
+        error instanceof WorkspaceToolError &&
+        this.options.workspaceTools?.mutationFailuresAreAtomic === true &&
+        !error.requiresQuarantine;
+      const knownAtomicProgrammaticFailure =
+        assignment.executionKind === 'workspace_programmatic' &&
+        error instanceof WorkspaceToolError &&
+        this.options.workspaceProgrammatic?.mutationFailuresAreAtomic === true &&
+        !error.requiresQuarantine;
       if (
         workspaceMutationApplied ||
         (workspaceMutationArmed &&
-          !(
-            error instanceof WorkspaceToolError &&
-            this.options.workspaceTools?.mutationFailuresAreAtomic === true &&
-            !error.requiresQuarantine
-          ))
+          !knownAtomicWorkspaceToolFailure &&
+          !knownAtomicProgrammaticFailure)
       ) {
         ambiguousWorkspaceMutationError = error;
       }
@@ -1719,6 +1731,7 @@ export class BridgeWorker {
       if (workspaceMutationGuardError != null)
         throw workspaceMutationGuardError;
       if (ambiguousWorkspaceMutationError != null) {
+        this.options.onError?.(ambiguousWorkspaceMutationError);
         throw await this.quarantineWorkspace(
           undefined,
           'Worker stopped after a workspace mutation completed without a fulfilled settlement',
@@ -2170,17 +2183,23 @@ export class BridgeWorker {
     signal: AbortSignal,
   ): Promise<void> {
     while (!signal.aborted && !executionController.signal.aborted) {
-      await this.delay(
-        Math.max(
-          1,
-          this.options.cancellationPollIntervalMs ??
-            DEFAULT_CANCELLATION_POLL_INTERVAL_MS,
-        ),
-        signal,
-      );
+      try {
+        await this.delay(
+          Math.max(
+            1,
+            this.options.cancellationPollIntervalMs ??
+              DEFAULT_CANCELLATION_POLL_INTERVAL_MS,
+          ),
+          signal,
+        );
+      } catch (error) {
+        if (signal.aborted || executionController.signal.aborted) return;
+        throw error;
+      }
       if (signal.aborted || executionController.signal.aborted) return;
       const pollController = new AbortController();
       const abortPoll = (): void => pollController.abort();
+      signal.addEventListener('abort', abortPoll, { once: true });
       executionController.signal.addEventListener('abort', abortPoll, {
         once: true,
       });
@@ -2213,6 +2232,7 @@ export class BridgeWorker {
         if (signal.aborted) return;
       } finally {
         clearTimeout(timeout);
+        signal.removeEventListener('abort', abortPoll);
         executionController.signal.removeEventListener('abort', abortPoll);
       }
     }

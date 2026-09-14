@@ -1032,6 +1032,250 @@ test('worker executes programmatic Bash in the selected workspace and preserves 
   ]);
 });
 
+test('worker keeps a selected workspace usable after an atomic programmatic setup failure', async () => {
+  const lifecycle: string[] = [];
+  let settlement: Record<string, unknown> | undefined;
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['execute_command' as const],
+    programmaticLanguages: ['bash' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      mutationFailuresAreAtomic: true,
+      async execute() {
+        throw new Error('workspace tool executor must not run');
+      },
+    },
+    workspaceProgrammatic: {
+      mutationFailuresAreAtomic: true,
+      async executeProgrammatic() {
+        throw new WorkspaceToolError(
+          'Programmatic input download failed',
+          'COMMAND_UNAVAILABLE',
+        );
+      },
+    },
+    workspaceQuarantines: new Map([
+      [
+        'primary',
+        mutationQuarantine(
+          () => lifecycle.push('quarantine'),
+          () => lifecycle.push('arm'),
+          () => lifecycle.push('clear'),
+        ),
+      ],
+    ]),
+    fetchImpl: async (_input, init) => {
+      settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-programmatic-setup-failure',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_programmatic',
+    workspaceId: 'primary',
+    request: {
+      body: {
+        language: 'bash',
+        version: '5.2',
+        session_id: 'session-1',
+        files: [{ name: 'main.sh', content: 'echo ready' }],
+      },
+      headers: {},
+    },
+  });
+
+  assert.deepEqual(lifecycle, ['arm', 'clear']);
+  assert.equal(settlement?.status, 'rejected');
+  assert.equal(settlement?.errorCode, 'COMMAND_UNAVAILABLE');
+});
+
+test('worker keeps a selected workspace usable after confirmed programmatic cancellation cleanup', async () => {
+  const lifecycle: string[] = [];
+  let settlement: Record<string, unknown> | undefined;
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['execute_command' as const],
+    programmaticLanguages: ['bash' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      mutationFailuresAreAtomic: true,
+      async execute() {
+        throw new Error('workspace tool executor must not run');
+      },
+    },
+    workspaceProgrammatic: {
+      mutationFailuresAreAtomic: true,
+      async executeProgrammatic() {
+        throw new WorkspaceToolError(
+          'Workspace command execution aborted',
+          'EXECUTION_ABORTED',
+          true,
+          false,
+        );
+      },
+    },
+    workspaceQuarantines: new Map([
+      [
+        'primary',
+        mutationQuarantine(
+          () => lifecycle.push('quarantine'),
+          () => lifecycle.push('arm'),
+          () => lifecycle.push('clear'),
+        ),
+      ],
+    ]),
+    fetchImpl: async (_input, init) => {
+      settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-programmatic-cancelled-cleanly',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_programmatic',
+    workspaceId: 'primary',
+    request: {
+      body: {
+        language: 'bash',
+        version: '5.2',
+        session_id: 'session-1',
+        files: [{ name: 'main.sh', content: 'sleep 30' }],
+      },
+      headers: {},
+    },
+  });
+
+  assert.deepEqual(lifecycle, ['arm', 'clear']);
+  assert.equal(settlement?.status, 'rejected');
+  assert.equal(settlement?.errorCode, 'EXECUTION_ABORTED');
+});
+
+test('worker reports the underlying cause before quarantining an uncertain programmatic mutation', async () => {
+  const rootCause = new WorkspaceToolError(
+    'Programmatic output upload failed',
+    'COMMAND_UNAVAILABLE',
+    true,
+    true,
+  );
+  let reported: unknown;
+  let quarantined = false;
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['execute_command' as const],
+    programmaticLanguages: ['bash' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      mutationFailuresAreAtomic: true,
+      async execute() {
+        throw new Error('workspace tool executor must not run');
+      },
+    },
+    workspaceProgrammatic: {
+      mutationFailuresAreAtomic: true,
+      async executeProgrammatic() {
+        throw rootCause;
+      },
+    },
+    workspaceQuarantines: new Map([
+      [
+        'primary',
+        mutationQuarantine(() => {
+          quarantined = true;
+        }),
+      ],
+    ]),
+    onError(error) {
+      reported = error;
+    },
+    fetchImpl: async () => {
+      throw new Error('settlement must not run');
+    },
+  });
+
+  await assert.rejects(
+    worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'assignment-programmatic-uncertain-failure',
+      workerId: 'vm-1',
+      incarnationId,
+      generation: 4,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 5_000).toISOString(),
+      executionKind: 'workspace_programmatic',
+      workspaceId: 'primary',
+      request: {
+        body: {
+          language: 'bash',
+          version: '5.2',
+          session_id: 'session-1',
+          files: [{ name: 'main.sh', content: 'echo ready' }],
+        },
+        headers: {},
+      },
+    }),
+    BridgeWorkspaceQuarantinedError,
+  );
+
+  assert.equal(reported, rootCause);
+  assert.equal(quarantined, true);
+});
+
 test('worker stops after Code API rejects a fulfilled workspace mutation', async () => {
   let quarantinedReason: string | undefined;
   let armed = 0;
