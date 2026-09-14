@@ -192,6 +192,13 @@ function workspaceCapabilitiesMatch(
       (workspace, index) =>
         workspace.id === executor.workspaces[index]?.id &&
         workspace.name === executor.workspaces[index]?.name &&
+        workspace.environment?.fingerprint === executor.workspaces[index]?.environment?.fingerprint &&
+        workspace.environment?.repo === executor.workspaces[index]?.environment?.repo &&
+        workspace.environment?.ref === executor.workspaces[index]?.environment?.ref &&
+        workspace.environment?.actions.length === executor.workspaces[index]?.environment?.actions.length &&
+        (workspace.environment?.actions.every(
+          (action, actionIndex) => action === executor.workspaces[index]?.environment?.actions[actionIndex],
+        ) ?? executor.workspaces[index]?.environment == null) &&
         workspace.operations?.length ===
           executor.workspaces[index]?.operations?.length &&
         (workspace.operations?.every(

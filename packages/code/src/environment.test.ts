@@ -1,5 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink, link } from 'node:fs/promises';
+import {
+    mkdtemp,
+    mkdir,
+    writeFile,
+    rm,
+    symlink,
+    link,
+    open,
+    realpath,
+} from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -33,6 +43,16 @@ test('environment YAML validates setup and rejects unsupported policy or action 
         );
     assert.throws(() => parseCodeEnvironment('name: &id app\nroot: *id'));
     assert.throws(() => parseCodeEnvironment('x'.repeat(65_537)));
+    for (const field of ['setup', 'actions']) {
+        const command = '漢'.repeat(12_000);
+        const suffix =
+            field === 'setup'
+                ? `setup: { command: '${command}' }`
+                : `actions: [{ name: test, command: '${command}' }]`;
+        assert.throws(() =>
+            parseCodeEnvironment(`name: app\nroot: project\n${suffix}`),
+        );
+    }
 });
 
 test('named actions use the loaded definition, reject stale revisions and preserve command restrictions', async t => {
@@ -181,4 +201,78 @@ test('rejects a trusted definition with an in-workspace hard link', async t => {
     await writeFile(path, 'name: app\nroot: project\n');
     await link(path, join(directory, 'project', 'alias.yaml'));
     await assert.rejects(loadCodeEnvironment(path), /one link/);
+});
+
+test('rejects nested aliases passing through a workspace-controlled link', async t => {
+    const directory = await realpath(
+        await mkdtemp(join(tmpdir(), 'code-env-nested-')),
+    );
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const root = join(directory, 'project');
+    const trusted = join(directory, 'trusted');
+    await mkdir(root);
+    await mkdir(trusted);
+    await writeFile(
+        join(trusted, 'environment.yaml'),
+        `name: app\nroot: ${root}\n`,
+    );
+    await symlink(trusted, join(root, 'pivot'));
+    await symlink(join(root, 'pivot'), join(directory, 'alias'));
+    const loaded = await loadCodeEnvironment(
+        join(directory, 'alias', 'environment.yaml'),
+    );
+    assert.throws(
+        () =>
+            assertEnvironmentDefinitionsOutsideRoots(
+                [loaded],
+                [{ id: 'app', root }],
+            ),
+        /outside/,
+    );
+});
+
+test('reads complete definitions despite short filesystem reads', async t => {
+    const directory = await mkdtemp(join(tmpdir(), 'code-env-short-read-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    await mkdir(join(directory, 'project'));
+    const path = join(directory, 'environment.yaml');
+    await writeFile(
+        path,
+        'name: app\nroot: project\nsetup: { command: echo prepared }\n',
+    );
+    const sample = await open(path);
+    const prototype = Object.getPrototypeOf(sample);
+    const read = prototype.read;
+    await sample.close();
+    t.mock.method(
+        prototype,
+        'read',
+        function (
+            this: unknown,
+            buffer: Buffer,
+            offset: number,
+            length: number,
+            position: number,
+        ) {
+            return read.call(
+                this,
+                buffer,
+                offset,
+                Math.min(length, 7),
+                position,
+            );
+        },
+    );
+    assert.equal(
+        (await loadCodeEnvironment(path)).definition.setup?.command,
+        'echo prepared',
+    );
+});
+
+test('rejects a FIFO definition without waiting for a writer', async t => {
+    const directory = await mkdtemp(join(tmpdir(), 'code-env-fifo-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const path = join(directory, 'environment.yaml');
+    execFileSync('mkfifo', ['-m', '600', path], { timeout: 2000 });
+    await assert.rejects(loadCodeEnvironment(path), /Invalid environment file/);
 });

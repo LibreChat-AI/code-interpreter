@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
 import { open, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -6,7 +7,10 @@ import {
     assertPrivateStorageAcl,
     assertPrivateStorageAncestors,
 } from './private-storage.js';
-import { BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS } from './protocol.js';
+import {
+    BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
+    BRIDGE_WORKSPACE_COMMAND_MAX_BYTES,
+} from './protocol.js';
 import type { LocalWorkspaceConfig } from './workspace.js';
 import { WorkspaceToolError } from './workspace.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
@@ -82,7 +86,9 @@ export function parseCodeEnvironment(
             Object.keys(value.setup).some(
                 key => !['command', 'timeoutMs'].includes(key),
             ) ||
-            !text(value.setup.command, 16_384)
+            !text(value.setup.command, 16_384) ||
+            Buffer.byteLength(value.setup.command) >
+                BRIDGE_WORKSPACE_COMMAND_MAX_BYTES
         ) {
             throw new Error('Invalid environment setup');
         }
@@ -114,7 +120,9 @@ export function parseCodeEnvironment(
                 !text(action.name, 64) ||
                 !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(action.name) ||
                 names.has(action.name) ||
-                !text(action.command, 16_384)
+                !text(action.command, 16_384) ||
+                Buffer.byteLength(action.command) >
+                    BRIDGE_WORKSPACE_COMMAND_MAX_BYTES
             )
                 throw new Error('Invalid environment action');
             const timeoutMs = action.timeoutMs ?? 30_000;
@@ -229,14 +237,12 @@ export async function loadCodeEnvironment(
     path: string,
 ): Promise<LoadedCodeEnvironment> {
     const sourcePath = resolve(path);
-    await assertPrivateStorageAncestors(sourcePath);
+    const sourceParents = await assertPrivateStorageAncestors(sourcePath);
     const canonicalPath = await realpath(sourcePath);
-    const sourceParents: string[] = [];
-    for (let parent = dirname(sourcePath); ; parent = dirname(parent)) {
-        sourceParents.push(await realpath(parent));
-        if (parent === dirname(parent)) break;
-    }
-    const handle = await open(canonicalPath, 'r');
+    const handle = await open(
+        canonicalPath,
+        constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+    );
     let definition: CodeEnvironmentDefinition;
     try {
         const metadata = await handle.stat();
@@ -254,7 +260,26 @@ export async function loadCodeEnvironment(
         if (!metadata.isFile() || metadata.size > 65_536)
             throw new Error('Invalid environment file');
         const buffer = Buffer.alloc(65_537);
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        let bytesRead = 0;
+        while (bytesRead < buffer.length) {
+            const result = await handle.read(
+                buffer,
+                bytesRead,
+                buffer.length - bytesRead,
+                bytesRead,
+            );
+            if (result.bytesRead === 0) break;
+            bytesRead += result.bytesRead;
+        }
+        const after = await handle.stat();
+        if (
+            bytesRead !== metadata.size ||
+            after.size !== metadata.size ||
+            after.mtimeMs !== metadata.mtimeMs ||
+            after.ctimeMs !== metadata.ctimeMs
+        ) {
+            throw new Error('Environment definition changed while reading');
+        }
         definition = parseCodeEnvironment(
             buffer.subarray(0, bytesRead).toString('utf8'),
         );

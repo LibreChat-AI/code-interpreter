@@ -2446,6 +2446,32 @@ test('worker refuses to advertise workspace tools without a matching executor', 
   );
 });
 
+test('worker refuses environment metadata that differs from its executor', () => {
+  const environment = { fingerprint: 'a'.repeat(64), repo: 'owner/repo', ref: 'main', actions: [] as string[] };
+  const workspaceTools = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const],
+    workspaces: [{ id: 'primary', environment }],
+  };
+  for (const changed of [
+    undefined,
+    { ...environment, fingerprint: 'b'.repeat(64) },
+    { ...environment, repo: 'other/repo' },
+    { ...environment, ref: 'other' },
+    { ...environment, actions: ['test'] },
+  ]) {
+    assert.throws(() => new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1', token: 'worker-secret', workerId: 'vm-1', incarnationId,
+      sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: { statefulWorkspace: true, sandboxProfile: 'nsjail', runtimes: ['bash'], workspaceTools },
+      workspaceTools: {
+        capabilities: { ...workspaceTools, workspaces: [{ id: 'primary', ...(changed ? { environment: changed } : {}) }] },
+        async execute() { throw new Error('not executed'); },
+      },
+    }), /workspace tool capabilities require a matching executor/i);
+  }
+});
+
 test('worker requires durable quarantine before advertising command execution', () => {
   const workspaceCapabilities = {
     protocolVersion: 1 as const,
