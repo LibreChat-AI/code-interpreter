@@ -150,6 +150,7 @@ _PTC_SENTINEL_START="${scopedStart}"
 _PTC_SENTINEL_END="${scopedEnd}"
 _PTC_HISTORY_PATH="\${PTC_HISTORY_PATH:-${PTC_HISTORY_SANDBOX_PATH}}"
 _PTC_CONTROL_PATH="\${LIBRECHAT_CODE_CONTROL_PATH:-}"
+_PTC_JQ_PATH="\${LIBRECHAT_CODE_JQ_PATH:-jq}"
 _PTC_RUNTIME_DIR="\${TMPDIR:-/tmp}"
 _ptc_mktemp() {
     mktemp "\${_PTC_RUNTIME_DIR%/}/$1.XXXXXX"
@@ -222,7 +223,7 @@ _ptc_sha256() {
 
 _ptc_hash_input() {
     local _ptc_canonical
-    _ptc_canonical=$(printf '%s' "$1" | jq -cS . 2>/dev/null) || return 1
+    _ptc_canonical=$(printf '%s' "$1" | "$_PTC_JQ_PATH" -cS . 2>/dev/null) || return 1
     printf '%s' "$_ptc_canonical" | _ptc_sha256
 }
 
@@ -369,7 +370,7 @@ _ptc_maybe_emit_pending() {
         return 0
     fi
     local _ptc_payload
-    if ! _ptc_payload=$(jq -c -s '{pending:.}' "$_PTC_PENDING_FILE" 2>/dev/null); then
+    if ! _ptc_payload=$("$_PTC_JQ_PATH" -c -s '{pending:.}' "$_PTC_PENDING_FILE" 2>/dev/null); then
         printf 'failed to serialize pending PTC tool calls\\n' >&2
         _ptc_cleanup_tempfiles
         trap - DEBUG EXIT
@@ -480,7 +481,7 @@ _ptc_history_matches_by_signature() {
         return 0
     fi
     # Path, not inline: large input can exceed ARG_MAX via --argjson.
-    jq -c \\
+    "$_PTC_JQ_PATH" -c \\
         --arg nm "$_ptc_name" \\
         --arg site "$_ptc_call_site" \\
         --arg hash "$_ptc_input_hash" \\
@@ -504,7 +505,7 @@ _ptc_first_unconsumed_history_match() {
     local _ptc_key
     while IFS= read -r _ptc_match; do
         [ -n "$_ptc_match" ] || continue
-        _ptc_key=$(printf '%s' "$_ptc_match" | jq -r '.key // empty' 2>/dev/null)
+        _ptc_key=$(printf '%s' "$_ptc_match" | "$_PTC_JQ_PATH" -r '.key // empty' 2>/dev/null)
         if [ -n "$_ptc_key" ] && ! grep -Fxq "$_ptc_key" "$_PTC_CONSUMED_FILE" 2>/dev/null; then
             printf '%s' "$_ptc_match"
             return 0
@@ -516,15 +517,15 @@ _ptc_first_unconsumed_history_match() {
 _ptc_print_history_entry() {
     local _ptc_entry="$1"
     local _ptc_is_err
-    _ptc_is_err=$(printf '%s' "$_ptc_entry" | jq -r 'if type == "object" then (.is_error // false) else false end' 2>/dev/null)
+    _ptc_is_err=$(printf '%s' "$_ptc_entry" | "$_PTC_JQ_PATH" -r 'if type == "object" then (.is_error // false) else false end' 2>/dev/null)
     if [ "$_ptc_is_err" = "true" ]; then
         local _ptc_msg
-        _ptc_msg=$(printf '%s' "$_ptc_entry" | jq -r '.error_message // "tool execution failed"' 2>/dev/null)
+        _ptc_msg=$(printf '%s' "$_ptc_entry" | "$_PTC_JQ_PATH" -r '.error_message // "tool execution failed"' 2>/dev/null)
         _ptc_write_error "$_ptc_msg"
         exit 1
     fi
     local _ptc_result
-    _ptc_result=$(printf '%s' "$_ptc_entry" | jq -c 'if type == "object" and has("result") then .result else . end' 2>/dev/null || printf 'null')
+    _ptc_result=$(printf '%s' "$_ptc_entry" | "$_PTC_JQ_PATH" -c 'if type == "object" and has("result") then .result else . end' 2>/dev/null || printf 'null')
     printf '%s' "$_ptc_result"
     return 0
 }
@@ -535,7 +536,7 @@ _ptc_history_entry_matches_current_call() {
     local _ptc_input_file="$3"
     local _ptc_input_hash="$4"
     # Path, same ARG_MAX reason as above.
-    printf '%s' "$_ptc_entry" | jq -e \\
+    printf '%s' "$_ptc_entry" | "$_PTC_JQ_PATH" -e \\
         --arg nm "$_ptc_name" \\
         --arg hash "$_ptc_input_hash" \\
         --slurpfile inp_arr "$_ptc_input_file" \\
@@ -555,7 +556,7 @@ _ptc_call_tool() {
     local _ptc_call_site="\${BASH_LINENO[1]:-\${BASH_LINENO[0]:-0}}"
 
     # Reject extra trailing JSON values instead of silently dropping them.
-    if ! printf '%s' "$_ptc_input" | jq -e -n '[inputs] as $docs | ($docs | length) == 1 and ($docs[0] | type) == "object"' >/dev/null 2>&1; then
+    if ! printf '%s' "$_ptc_input" | "$_PTC_JQ_PATH" -e -n '[inputs] as $docs | ($docs | length) == 1 and ($docs[0] | type) == "object"' >/dev/null 2>&1; then
         _ptc_write_error "tool input for $_ptc_name must be a single JSON object, got: $_ptc_input"
         exit 1
     fi
@@ -583,8 +584,8 @@ _ptc_call_tool() {
     if [ -n "$_ptc_match" ] && [ "$_ptc_match" != "null" ]; then
         local _ptc_matched_call_id
         local _ptc_matched_entry
-        _ptc_matched_call_id=$(printf '%s' "$_ptc_match" | jq -r '.key' 2>/dev/null)
-        _ptc_matched_entry=$(printf '%s' "$_ptc_match" | jq -c '.value' 2>/dev/null)
+        _ptc_matched_call_id=$(printf '%s' "$_ptc_match" | "$_PTC_JQ_PATH" -r '.key' 2>/dev/null)
+        _ptc_matched_entry=$(printf '%s' "$_ptc_match" | "$_PTC_JQ_PATH" -c '.value' 2>/dev/null)
         printf '%s\\n' "$_ptc_matched_call_id" >> "$_PTC_CONSUMED_FILE"
         _ptc_mark_counter_at_least "$_ptc_matched_call_id"
         _ptc_release_lock
@@ -598,7 +599,7 @@ _ptc_call_tool() {
     while :; do
         _ptc_call_id=$(_ptc_next_call_id)
         if [ -r "$_PTC_HISTORY_PATH" ]; then
-            _ptc_entry=$(jq -c --arg id "$_ptc_call_id" '.[$id] // empty' "$_PTC_HISTORY_PATH" 2>/dev/null || printf '')
+            _ptc_entry=$("$_PTC_JQ_PATH" -c --arg id "$_ptc_call_id" '.[$id] // empty' "$_PTC_HISTORY_PATH" 2>/dev/null || printf '')
         else
             _ptc_entry=""
         fi
@@ -614,7 +615,7 @@ _ptc_call_tool() {
         fi
     done
 
-    if ! printf '%s' "$_ptc_input" | jq -c -n \\
+    if ! printf '%s' "$_ptc_input" | "$_PTC_JQ_PATH" -c -n \\
         --arg cid "$_ptc_call_id" \\
         --arg nm "$_ptc_name" \\
         --arg hash "$_ptc_input_hash" \\

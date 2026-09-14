@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { ChildProcess, ForkOptions } from 'node:child_process';
 import {
   NativeProcessWorkspaceCommandSandbox,
@@ -199,6 +199,7 @@ test('programmatic executor resolves and scopes credentials to its command', asy
     {
       workspaceRoot: tmpdir(),
       programmaticFileUpstream: 'http://127.0.0.1:3190',
+      environment: { PATH: '/sandbox-only' },
       maskedEnvironment: {
         variables: [{ name: 'TOKEN', injectHosts: ['github.com'] }],
         async resolve() {
@@ -225,9 +226,18 @@ test('programmatic executor resolves and scopes credentials to its command', asy
     JSON.stringify(fake.options).includes('per-programmatic-secret'),
     false,
   );
-    const message = fake.messages.find(
+  const message = fake.messages.find(
         candidate => candidate.type === 'programmatic',
     )!;
+  const prepareMessage = fake.messages.find(
+    candidate => candidate.type === 'prepare',
+  )!;
+  assert.equal(typeof prepareMessage.options.jqPath, 'string');
+  assert.equal(prepareMessage.options.jqPath.startsWith('/'), true);
+  assert.equal(
+    '/sandbox-only'.split(':').includes(dirname(prepareMessage.options.jqPath)),
+    false,
+  );
   assert.deepEqual(message.credentials, { TOKEN: 'per-programmatic-secret' });
   assert.equal(
     message.wrappedCommand,

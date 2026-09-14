@@ -169,6 +169,8 @@ export interface NativeSrtWorkspaceCommandSandboxOptions {
   platform?: NodeJS.Platform;
   /** Trusted shell path used by SRT on POSIX hosts. */
   shellPath?: string;
+  /** Trusted jq path used by generated programmatic scripts. */
+  jqPath?: string;
   /** Host-owned credentials exposed only as SRT sentinels inside the sandbox. */
   maskedEnvironment?: {
     variables: Array<{
@@ -702,6 +704,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                     '_ptc_pending_result.json',
                 ),
                 LIBRECHAT_CODE_BASH_PATH: this.options.shellPath ?? '/bin/bash',
+                ...(this.options.jqPath
+                    ? { LIBRECHAT_CODE_JQ_PATH: this.options.jqPath }
+                    : {}),
                 PTC_HISTORY_PATH: join(
                     canonicalDataDirectory,
                     '_ptc_history.json',

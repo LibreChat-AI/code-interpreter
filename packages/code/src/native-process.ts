@@ -61,7 +61,7 @@ export async function trustedProgrammaticExecutable(candidate: string, workspace
 
 async function resolveProgrammaticShell(
     options: NativeProcessSandboxOptions,
-): Promise<string> {
+): Promise<{ shellPath: string; jqPath: string }> {
     const environment = options.environment ?? process.env;
     const shellPath =
         options.shellPath != null
@@ -99,7 +99,7 @@ async function resolveProgrammaticShell(
             'COMMAND_UNAVAILABLE',
         );
     }
-    return shellPath;
+    return { shellPath, jqPath };
 }
 
 /** Only OS discovery and conventional proxy settings cross into the executor.
@@ -211,9 +211,9 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
   }
 
   private async start(): Promise<void> {
-        const programmaticShellPath = this.options.programmaticFileUpstream
+        const programmaticExecutables = this.options.programmaticFileUpstream
             ? await resolveProgrammaticShell(this.options)
-            : this.options.shellPath;
+            : undefined;
     const child = this.forkExecutor(
       new URL('./native-process-child.js', import.meta.url),
       [],
@@ -299,7 +299,8 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
           protectedPaths,
           allowedDomains,
           homeDirectory,
-                    shellPath: programmaticShellPath ?? shellPath,
+                    shellPath: programmaticExecutables?.shellPath ?? shellPath,
+                    jqPath: programmaticExecutables?.jqPath,
           programmaticFileUpstream,
           variables: this.options.maskedEnvironment?.variables,
         },

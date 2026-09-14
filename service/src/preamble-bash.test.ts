@@ -186,6 +186,14 @@ printf '%s\\n' "$_PTC_PENDING_FILE" "$_PTC_ERROR_FILE" "$_PTC_COUNTER_FILE"
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test('uses the trusted jq path instead of resolving jq through PATH', () => {
+    const preamble = generateBashReplayPreamble({ executionId, tools });
+    expect(preamble).toContain(
+      '_PTC_JQ_PATH="${LIBRECHAT_CODE_JQ_PATH:-jq}"',
+    );
+    expect(preamble).not.toMatch(/(^|[|;(]\s*)jq\s/m);
+  });
 });
 
 describe('generateBashReplayPreamble - command substitution pending emission', () => {
