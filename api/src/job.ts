@@ -63,6 +63,12 @@ const AUTO_LOAD_DIRKEEP_RETRIES = 2;
 const PTC_HISTORY_FILENAME = '_ptc_history.json';
 const TRUNCATION_PROBE_MAX_ENTRIES = 1000;
 const TRUNCATION_PROBE_MAX_LEVELS = 10;
+const TRUNCATION_PROBE_MAX_HASH_BYTES = 50_000_000;
+
+interface TruncationProbeState {
+  remainingEntries: number;
+  remainingHashBytes: number;
+}
 
 /** Replaying the same sealed grant cannot repair an authorization denial. */
 class InputAuthorizationError extends Error {
@@ -709,6 +715,10 @@ export class Job {
   private sessionFiles: FileRef[] = [];
   private inheritedRefs: FileRef[] = [];
   private artifactTruncation: ArtifactTruncation | undefined;
+  private truncationProbeState: TruncationProbeState = {
+    remainingEntries: TRUNCATION_PROBE_MAX_ENTRIES,
+    remainingHashBytes: TRUNCATION_PROBE_MAX_HASH_BYTES,
+  };
   private inputFileHashes = new Map<string, InputFileInfo>();
   private inputManifest = new Map<TFile, unknown>();
   private inputDestinations = new Map<string, TFile>();
@@ -1698,6 +1708,10 @@ export class Job {
     this.sessionFiles = [];
     this.inheritedRefs = [];
     this.artifactTruncation = undefined;
+    this.truncationProbeState = {
+      remainingEntries: TRUNCATION_PROBE_MAX_ENTRIES,
+      remainingHashBytes: TRUNCATION_PROBE_MAX_HASH_BYTES,
+    };
 
     const inputByName = new Map<string, TFile>();
     for (const f of this.files) inputByName.set(f.name, f);
@@ -2191,9 +2205,10 @@ export class Job {
   private async findTruncatedArtifact(
     dir: string,
     inputByName: Map<string, TFile>,
-    state = { remainingEntries: TRUNCATION_PROBE_MAX_ENTRIES },
+    state = this.truncationProbeState,
     probeDepth = 0,
     rootPath = path.relative(this.submissionDir, dir) || '.',
+    respectSessionSuppression = false,
   ): Promise<string | undefined> {
     let directory: fs.Dir;
     try {
@@ -2225,8 +2240,33 @@ export class Job {
         }
         if (kind === 'file') {
           sawVisibleNonHiddenEntry = true;
-          if (entry.name === DIRKEEP || isSupportedOutputFilename(entry.name)) return relativePath;
-          continue;
+          if (entry.name !== DIRKEEP && !isSupportedOutputFilename(entry.name)) continue;
+          /* Once generated outputs fill the response cap, a persistent
+           * workspace may still contain unchanged artifacts from earlier
+           * turns. Ordinary walking suppresses those via their content hash,
+           * so the bounded cap probe must do the same or it reports a false
+           * max_files warning. Current-request inputs remain reportable: they
+           * would otherwise have been echoed into this response. */
+          if (respectSessionSuppression && this.session && !inputByName.has(relativePath)) {
+            if (this.session.isPrimedReadOnly(relativePath)) continue;
+            try {
+              const st = await fsp.lstat(fullPath);
+              if (!st.isFile()) continue;
+              if (st.size > state.remainingHashBytes) return rootPath;
+              state.remainingHashBytes -= st.size;
+              const hash = await this.computeFileHash(fullPath, true);
+              if (this.session.isSurfaced(relativePath, hash)) continue;
+              if (
+                this.session.isPrimedInput(relativePath)
+                && this.session.primedHash(relativePath) === hash
+              ) continue;
+            } catch (err) {
+              this.log.debug({ path: relativePath, err }, 'walkDir: failed during cap-probe hashing');
+              this.recordArtifactTruncation('unreadable', relativePath);
+              continue;
+            }
+          }
+          return relativePath;
         }
         if (isHiddenDirectory(entry.name) && !inputsLiveUnder(inputByName, relativePath)) continue;
         sawVisibleNonHiddenEntry = true;
@@ -2240,6 +2280,7 @@ export class Job {
           state,
           probeDepth + 1,
           rootPath,
+          respectSessionSuppression,
         );
         if (nested) return nested;
       }
@@ -2273,7 +2314,14 @@ export class Job {
       return 'skipped';
     }
     if (this.isOutputCapFull()) {
-      const skippedPath = await this.findTruncatedArtifact(dir, inputByName);
+      const skippedPath = await this.findTruncatedArtifact(
+        dir,
+        inputByName,
+        this.truncationProbeState,
+        0,
+        relativeDir,
+        true,
+      );
       if (skippedPath) this.recordArtifactTruncation('max_files', skippedPath);
       return 'skipped';
     }
@@ -2340,6 +2388,24 @@ export class Job {
           skippedHiddenDirs++;
           continue;
         }
+        const pathShapeError = checkPathShape(relativePath);
+        if (pathShapeError) {
+          const skippedPath = await this.findTruncatedArtifact(
+            fullPath,
+            inputByName,
+            this.truncationProbeState,
+            0,
+            relativePath,
+          );
+          if (skippedPath) {
+            this.recordArtifactTruncation(
+              pathShapeError.includes('nesting depth') ? 'depth' : 'path',
+              skippedPath,
+            );
+            truncated = true;
+          }
+          continue;
+        }
         const res = await this.walkSubdirectory(relativePath, fullPath, depth, inputByName);
         if (res.collected) hasCollectedChild = true;
         if (res.truncated) truncated = true;
@@ -2357,6 +2423,7 @@ export class Job {
           pathShapeError.includes('nesting depth') ? 'depth' : 'path',
           relativePath,
         );
+        truncated = true;
         continue;
       }
 

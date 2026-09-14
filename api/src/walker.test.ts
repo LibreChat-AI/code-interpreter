@@ -925,6 +925,45 @@ describe('walkDir / artifact truncation details', () => {
     });
   });
 
+  it('reports an explicit overlong .dirkeep exactly once', async () => {
+    const directory = 'a'.repeat(config.max_path_length - 6);
+    await fsp.mkdir(path.join(tmpDir, directory));
+    const keepName = path.join(directory, DIRKEEP);
+    await fsp.writeFile(path.join(tmpDir, keepName), '');
+    const internals = asInternals(makeJob());
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { path: 1 },
+      skipped: [keepName],
+      skipped_count: 1,
+    });
+  });
+
+  it('uses a bounded probe instead of recursively walking an overlong directory', async () => {
+    const first = 'a'.repeat(200);
+    const second = 'b'.repeat(60);
+    const overlongDir = path.join(first, second);
+    await fsp.mkdir(path.join(tmpDir, overlongDir), { recursive: true });
+    for (let i = 0; i < 1001; i++) {
+      await fsp.writeFile(path.join(tmpDir, overlongDir, `ignored-${i}.bin`), 'ignored');
+    }
+    const internals = asInternals(makeJob());
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { path: 1 },
+      skipped: [overlongDir],
+      skipped_count: 1,
+    });
+  });
+
   it('does not report an unchanged oversized inline entrypoint', async () => {
     const name = 'main.py';
     const content = 'print(1)';
@@ -1043,6 +1082,47 @@ describe('walkDir / artifact truncation details', () => {
       skipped: ['.'],
       skipped_count: 1,
     });
+  });
+
+  it('shares the output-cap probe budget across sibling subtrees', async () => {
+    for (const dirname of ['b-ignored', 'c-ignored']) {
+      await fsp.mkdir(path.join(tmpDir, dirname));
+      for (let i = 0; i < 600; i++) {
+        await fsp.writeFile(path.join(tmpDir, dirname, `ignored-${i}.bin`), 'ignored');
+      }
+    }
+    const internals = asInternals(makeJob());
+    internals.submissionDir = tmpDir;
+    internals.generatedFiles = Array.from({ length: config.max_output_files }, (_, i) => ({
+      id: `id-${i}`,
+      name: `file-${i}.txt`,
+      path: path.join(tmpDir, `file-${i}.txt`),
+    }));
+
+    await internals.walkDir(path.join(tmpDir, 'b-ignored'), 1, new Map());
+    await internals.walkDir(path.join(tmpDir, 'c-ignored'), 1, new Map());
+
+    expect(internals.artifactTruncation?.reasons).toEqual({ max_files: 1 });
+    expect(internals.artifactTruncation?.skipped).toEqual(['c-ignored']);
+  });
+
+  it('does not report surfaced session artifacts during output-cap probing', async () => {
+    const name = 'old-output.txt';
+    const content = 'already returned';
+    await fsp.writeFile(path.join(tmpDir, name), content);
+    const session = new SessionWorkspace({ runtimeSessionId: 'rt_capped' });
+    session.markSurfaced(name, sha256(content));
+    const internals = asInternals(makeJob({ session }));
+    internals.submissionDir = tmpDir;
+    internals.generatedFiles = Array.from({ length: config.max_output_files }, (_, i) => ({
+      id: `id-${i}`,
+      name: `file-${i}.txt`,
+      path: path.join(tmpDir, `file-${i}.txt`),
+    }));
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toBeUndefined();
   });
 });
 
