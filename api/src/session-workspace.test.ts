@@ -113,6 +113,11 @@ describe('SessionWorkspace state', () => {
       expect(ws.isPrimedInput('in.csv')).toBe(false);
       ws.markPrimed('in.csv', 'file_abc');
       expect(ws.primedInputId('in.csv')).toBe('file_abc');
+      ws.markSurfaced('in.csv', 'old-output');
+      ws.forgetPrimed('in.csv');
+      expect(ws.primedInputId('in.csv')).toBeUndefined();
+      expect(ws.isSurfaced('in.csv', 'old-output')).toBe(false);
+      ws.markPrimed('in.csv', 'file_abc');
 
       /* read-only primes report as not-primed so the caller re-downloads them
        * (a reused on-disk copy could have been tampered via the writable dir). */

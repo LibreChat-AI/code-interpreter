@@ -41,6 +41,14 @@ interface WalkerInternals {
   reusePrimedInput: (file: TFile) => Promise<boolean>;
   writeFile: (file: TFile) => Promise<void>;
   computeFileHash: (filePath: string, noFollow?: boolean) => Promise<string>;
+  findTruncatedArtifact: (
+    dir: string,
+    inputByName: Map<string, TFile>,
+    state?: { remainingEntries: number; remainingHashBytes: number },
+    probeDepth?: number,
+    rootPath?: string,
+    respectSessionSuppression?: boolean,
+  ) => Promise<string | undefined>;
   walkDir: (dir: string, depth: number, inputByName: Map<string, TFile>) => Promise<'collected' | 'empty' | 'skipped'>;
   handleSessionFiles: () => Promise<void>;
 }
@@ -1304,6 +1312,67 @@ describe('handleSessionFiles / persisted input deletion', () => {
 
     expect(internals.artifactTruncation?.reasons).toEqual({ size: 1 });
     expect(internals.deletedFiles).toEqual([]);
+  });
+
+  it('does not report an inherited marker that is returned for an empty directory', async () => {
+    const name = path.join('empty', DIRKEEP);
+    const inherited: TFile = {
+      id: 'marker-id',
+      storage_session_id: 'prior-session',
+      name,
+    };
+    await fsp.mkdir(path.join(tmpDir, 'empty'));
+    const internals = asInternals(makeJob({ files: [inherited] }));
+    internals.submissionDir = tmpDir;
+
+    await internals.handleSessionFiles();
+
+    expect(internals.deletedFiles).toEqual([]);
+    expect([
+      ...internals.sessionFiles,
+      ...internals.inheritedRefs,
+    ].map(file => file.name)).toContain(name);
+  });
+
+  it('clears stateful priming lineage when a persisted input is deleted', async () => {
+    const inherited: TFile = {
+      id: 'prior-id',
+      storage_session_id: 'prior-session',
+      name: 'removed.txt',
+    };
+    const session = new SessionWorkspace({ runtimeSessionId: 'rt_deleted' });
+    session.markPrimed(inherited.name, inherited.id!, true, 'old-hash');
+    session.markSurfaced(inherited.name, 'old-output-hash');
+    const internals = asInternals(makeJob({ files: [inherited], session }));
+    internals.submissionDir = tmpDir;
+
+    await internals.handleSessionFiles();
+
+    expect(internals.deletedFiles).toEqual([inherited.name]);
+    expect(session.isPrimedInput(inherited.name)).toBe(false);
+    expect(session.isSurfaced(inherited.name, 'old-output-hash')).toBe(false);
+  });
+
+  it('tracks surviving persisted inputs during capped subtree probes', async () => {
+    const inherited: TFile = {
+      id: 'prior-id',
+      storage_session_id: 'prior-session',
+      name: path.join('assets', 'model.bin'),
+    };
+    await fsp.mkdir(path.join(tmpDir, 'assets'));
+    await fsp.writeFile(
+      path.join(tmpDir, inherited.name),
+      'unsupported-but-persisted',
+    );
+    const internals = asInternals(makeJob({ files: [inherited] }));
+    internals.submissionDir = tmpDir;
+
+    await internals.findTruncatedArtifact(
+      tmpDir,
+      new Map([[inherited.name, inherited]]),
+    );
+
+    expect(internals.presentInputFiles.has(inherited.name)).toBe(true);
   });
 });
 

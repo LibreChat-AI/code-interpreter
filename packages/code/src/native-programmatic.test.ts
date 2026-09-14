@@ -121,6 +121,57 @@ test('stages skill files privately and returns generated artifacts', async () =>
     }
 });
 
+test('reports persisted inputs deleted by selected-workspace execution', async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-delete-test-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const server = createServer((_req, res) => res.end('persisted input'));
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const address = server.address() as AddressInfo;
+  const executor = new NativeWorkspaceProgrammaticExecutor({
+    upstreamUrl: `http://127.0.0.1:${address.port}`,
+    sandbox: {
+      async createExecutionDirectory() {
+        return await mkdtemp(join(scratch, 'execution-'));
+      },
+      async executeProgrammatic(request, dataDirectory) {
+        await rm(join(dataDirectory, 'input.txt'));
+        return {
+          protocolVersion: 1,
+          operation: 'execute_command' as const,
+          workspaceId: request.workspaceId,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          truncated: false,
+          timedOut: false,
+        };
+      },
+    },
+  });
+
+  const result = await executor.execute({
+    headers: {},
+    body: {
+      language: 'bash',
+      version: '5.2.0',
+      session_id: 'execution-session',
+      egress_grant: 'grant',
+      files: [
+        { name: 'main.sh', content: 'rm input.txt' },
+        {
+          name: 'input.txt',
+          id: 'input-id',
+          storage_session_id: 'input-session',
+        },
+      ],
+    },
+  }, 'primary');
+
+  assert.deepEqual(result.files, []);
+  assert.deepEqual(result.deleted_files, ['input.txt']);
+});
+
 test('reports unsupported and rejected artifacts without invalidating a completed command', async () => {
   const scratch = await mkdtemp(join(tmpdir(), 'native-ptc-artifact-test-'));
   const uploads = new Map<string, string | undefined>();

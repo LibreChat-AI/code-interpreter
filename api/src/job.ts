@@ -1733,13 +1733,19 @@ export class Job {
     }
 
     if (this.artifactTruncation == null) {
+      const returnedNames = new Set([
+        ...this.sessionFiles.map(file => file.name),
+        ...this.inheritedRefs.map(file => file.name),
+      ]);
       for (const file of this.files) {
         if (
           file.id != null &&
           file.storage_session_id != null &&
-          !this.presentInputFiles.has(file.name)
+          !this.presentInputFiles.has(file.name) &&
+          !returnedNames.has(file.name)
         ) {
           this.deletedFiles.push(file.name);
+          this.session?.forgetPrimed(file.name);
         }
       }
     }
@@ -2265,6 +2271,9 @@ export class Job {
         }
         if (kind === 'file') {
           sawVisibleNonHiddenEntry = true;
+          if (inputByName.has(relativePath)) {
+            this.presentInputFiles.add(relativePath);
+          }
           if (entry.name !== DIRKEEP && !isSupportedOutputFilename(entry.name)) continue;
           const existingFile = inputByName.get(relativePath);
           const inputFileInfo = this.inputFileHashes.get(relativePath);

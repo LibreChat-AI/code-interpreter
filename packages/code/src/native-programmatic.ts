@@ -50,6 +50,7 @@ type ProgrammaticResult = {
   version: string;
   session_id: string;
   files: ProgrammaticFileResult[];
+  deleted_files?: string[];
   artifact_delivery?: {
     code: 'artifact_delivery_failed';
     status: 'partial' | 'failed';
@@ -578,7 +579,11 @@ export class NativeWorkspaceProgrammaticExecutor {
             }
 
       const outputSessionId = request.body.output_session_id;
-      const outputNames = (await listRegularFiles(dataDirectory)).filter(
+      const survivingNames = new Set(await listRegularFiles(dataDirectory));
+      const deletedFiles = refFiles
+        .filter(file => !survivingNames.has(file.name))
+        .map(file => file.name);
+      const outputNames = [...survivingNames].filter(
         name =>
           name !== EXECUTION_MAIN_FILE &&
           name !== EXECUTION_HISTORY_FILE &&
@@ -731,6 +736,7 @@ export class NativeWorkspaceProgrammaticExecutor {
                 performance.now() - startedAt,
                 undefined,
                 artifactDelivery,
+                deletedFiles,
             );
     } catch (error) {
       if (!commandDispatched) {
@@ -785,6 +791,7 @@ export class NativeWorkspaceProgrammaticExecutor {
     elapsedMs: number,
         pendingToolCallsPayload?: string,
     artifactDelivery?: ProgrammaticResult['artifact_delivery'],
+    deletedFiles: string[] = [],
   ): ProgrammaticResult {
     return {
       language: 'bash',
@@ -795,6 +802,7 @@ export class NativeWorkspaceProgrammaticExecutor {
             session_id:
                 request.body.output_session_id ?? request.body.session_id,
       files,
+      ...(deletedFiles.length > 0 ? { deleted_files: deletedFiles } : {}),
       ...(artifactDelivery ? { artifact_delivery: artifactDelivery } : {}),
             ...(pendingToolCallsPayload
                 ? { pending_tool_calls_payload: pendingToolCallsPayload }

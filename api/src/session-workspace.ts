@@ -202,6 +202,12 @@ export class SessionWorkspace {
     this.primed.set(relPath, { id: storageFileId, readOnly, hash });
   }
 
+  /** Clears input lineage after execution proves that the path was deleted. */
+  forgetPrimed(relPath: string): void {
+    this.primed.delete(relPath);
+    this.forget(relPath);
+  }
+
   markDirty(reason: string): void {
     this.dirty = reason;
     logger.error(
