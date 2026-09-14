@@ -11,6 +11,7 @@ import {
   trustedProgrammaticExecutable,
 } from './native-process.js';
 import { WorkspaceToolError } from './workspace.js';
+import { BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS } from './protocol.js';
 
 test('preflight rejects relative and workspace-controlled executables including symlinks', async t => {
   const root = await mkdtemp(join(tmpdir(), 'native-ptc-path-'));
@@ -97,6 +98,24 @@ function fixture(
       return child;
     },
   };
+}
+
+class ObservedWatchdogSandbox extends NativeProcessWorkspaceCommandSandbox {
+  readonly watchdogTimeouts: number[] = [];
+  readonly watchdogCallbacks: Array<() => void> = [];
+
+  protected override scheduleRpcTimeout(
+    callback: () => void,
+    timeoutMs: number,
+  ): ReturnType<typeof setTimeout> {
+    this.watchdogTimeouts.push(timeoutMs);
+    this.watchdogCallbacks.push(callback);
+    return super.scheduleRpcTimeout(callback, timeoutMs);
+  }
+
+  fireLatestWatchdog(): void {
+    this.watchdogCallbacks.at(-1)?.();
+  }
 }
 
 test('executor bootstrap excludes bridge credentials and Node injection variables', async () => {
@@ -229,13 +248,12 @@ test('programmatic executor resolves and scopes credentials to its command', asy
   const message = fake.messages.find(
         candidate => candidate.type === 'programmatic',
     )!;
-  const prepareMessage = fake.messages.find(
-    candidate => candidate.type === 'prepare',
-  )!;
-  assert.equal(typeof prepareMessage.options.jqPath, 'string');
-  assert.equal(prepareMessage.options.jqPath.startsWith('/'), true);
+  assert.equal(typeof message.programmaticShellPath, 'string');
+  assert.equal(message.programmaticShellPath.startsWith('/'), true);
+  assert.equal(typeof message.programmaticJqPath, 'string');
+  assert.equal(message.programmaticJqPath.startsWith('/'), true);
   assert.equal(
-    '/sandbox-only'.split(':').includes(dirname(prepareMessage.options.jqPath)),
+    '/sandbox-only'.split(':').includes(dirname(message.programmaticJqPath)),
     false,
   );
   assert.deepEqual(message.credentials, { TOKEN: 'per-programmatic-secret' });
@@ -246,8 +264,109 @@ test('programmatic executor resolves and scopes credentials to its command', asy
   await sandbox.close();
 });
 
+test('omitted PTC timeout gives the commit watchdog the protocol execution default', async () => {
+  const fake = fixture((child, message) => {
+    if (message.type !== 'programmatic') return;
+    child.emit('message', { id: message.id, phase: 'commit' });
+    child.emit('message', { id: message.id, ok: true, result: {} });
+  });
+  const sandbox = new ObservedWatchdogSandbox(
+    {
+      workspaceRoot: tmpdir(),
+      programmaticFileUpstream: 'http://127.0.0.1:3190',
+    },
+    fake.fork,
+  );
+
+  await sandbox.executeProgrammatic('primary', {
+    headers: {},
+    body: {
+      language: 'bash',
+      version: '5.2.0',
+      session_id: 'session',
+      replay_tool_count: 0,
+      max_output_files: 0,
+      files: [{ name: 'main.sh', content: 'sleep 45' }],
+    },
+  });
+  assert.ok(
+    sandbox.watchdogTimeouts.at(-1)! >
+      BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
+  );
+  await sandbox.close();
+});
+
+test('PTC watchdog budgets staging separately and resets when commit begins', async () => {
+  const fake = fixture((child, message) => {
+    if (message.type !== 'programmatic') return;
+    child.emit('message', { id: message.id, phase: 'commit' });
+    child.emit('message', { id: message.id, ok: true, result: {} });
+  });
+  const sandbox = new ObservedWatchdogSandbox(
+    {
+      workspaceRoot: tmpdir(),
+      programmaticFileUpstream: 'http://127.0.0.1:3190',
+    },
+    fake.fork,
+  );
+
+  await sandbox.executeProgrammatic('primary', {
+    headers: {},
+    body: {
+      language: 'bash',
+      version: '5.2.0',
+      session_id: 'session',
+      run_timeout: 1_000,
+      replay_tool_count: 0,
+      max_output_files: 0,
+      files: [{ name: 'main.sh', content: 'echo ready' }],
+    },
+  });
+  assert.deepEqual(sandbox.watchdogTimeouts.slice(-2), [65_000, 6_000]);
+  assert.ok(
+    fake.messages.some(message => message.type === 'commit-ack'),
+    'the child must not enter the mutating phase before the parent arms it',
+  );
+  await sandbox.close();
+});
+
+test('PTC-only preflight failures do not disable ordinary native commands', async () => {
+  const fake = fixture();
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    {
+      workspaceRoot: '/workspace',
+      shellPath: '/definitely/missing/bash',
+      programmaticFileUpstream: 'http://127.0.0.1:3190',
+    },
+    fake.fork,
+  );
+
+  assert.deepEqual(await sandbox.execute(request), result);
+  await assert.rejects(
+    sandbox.executeProgrammatic('primary', {
+      headers: {},
+      body: {
+        language: 'bash',
+        version: '5.2.0',
+        session_id: 'session',
+        files: [{ name: 'main.sh', content: 'echo ready' }],
+      },
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'COMMAND_UNAVAILABLE' &&
+      !error.mutationMayHaveCommitted,
+  );
+  assert.deepEqual(await sandbox.execute(request), result);
+  await sandbox.close();
+});
+
 test('programmatic executor preserves a child-reported pre-dispatch failure', async () => {
-  const fake = fixture((child, message) =>
+  const fake = fixture((child, message) => {
+    if (message.type !== 'programmatic') {
+      child.emit('message', { id: message.id, ok: true, result });
+      return;
+    }
     child.emit('message', {
       id: message.id,
       ok: false,
@@ -255,8 +374,8 @@ test('programmatic executor preserves a child-reported pre-dispatch failure', as
       errorMessage: 'Programmatic input download failed',
       mutation: false,
       requiresQuarantine: false,
-    }),
-  );
+    });
+  });
   const sandbox = new NativeProcessWorkspaceCommandSandbox(
     {
       workspaceRoot: tmpdir(),
@@ -279,6 +398,107 @@ test('programmatic executor preserves a child-reported pre-dispatch failure', as
       error instanceof WorkspaceToolError &&
       !error.mutationMayHaveCommitted &&
       !error.requiresQuarantine,
+  );
+  assert.deepEqual(await sandbox.execute(request), result);
+  await sandbox.close();
+});
+
+test('executor loss during programmatic staging is not an uncertain workspace mutation', async () => {
+  const fake = fixture((child, message) => {
+    if (message.type === 'programmatic') child.emit('exit', 1);
+  });
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    {
+      workspaceRoot: tmpdir(),
+      programmaticFileUpstream: 'http://127.0.0.1:3190',
+    },
+    fake.fork,
+  );
+
+  await assert.rejects(
+    sandbox.executeProgrammatic('primary', {
+      headers: {},
+      body: {
+        language: 'bash',
+        version: '5.2.0',
+        session_id: 'session',
+        files: [{ name: 'main.sh', content: 'echo ready' }],
+      },
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      !error.mutationMayHaveCommitted &&
+      !error.requiresQuarantine,
+  );
+  await sandbox.close();
+});
+
+test('programmatic staging watchdog expires without claiming a workspace mutation', async () => {
+  let staged!: () => void;
+  const staging = new Promise<void>(resolve => {
+    staged = resolve;
+  });
+  const fake = fixture((_child, message) => {
+    if (message.type === 'programmatic') staged();
+  });
+  const sandbox = new ObservedWatchdogSandbox(
+    {
+      workspaceRoot: tmpdir(),
+      programmaticFileUpstream: 'http://127.0.0.1:3190',
+    },
+    fake.fork,
+  );
+  const execution = sandbox.executeProgrammatic('primary', {
+    headers: {},
+    body: {
+      language: 'bash',
+      version: '5.2.0',
+      session_id: 'session',
+      files: [{ name: 'main.sh', content: 'echo ready' }],
+    },
+  });
+  await staging;
+  sandbox.fireLatestWatchdog();
+
+  await assert.rejects(
+    execution,
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      !error.mutationMayHaveCommitted &&
+      !error.requiresQuarantine,
+  );
+  assert.equal(fake.killCalls, 1);
+  await sandbox.close();
+});
+
+test('executor loss after programmatic commit starts remains an uncertain mutation', async () => {
+  const fake = fixture((child, message) => {
+    if (message.type !== 'programmatic') return;
+    child.emit('message', { id: message.id, phase: 'commit' });
+    child.emit('exit', 1);
+  });
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    {
+      workspaceRoot: tmpdir(),
+      programmaticFileUpstream: 'http://127.0.0.1:3190',
+    },
+    fake.fork,
+  );
+
+  await assert.rejects(
+    sandbox.executeProgrammatic('primary', {
+      headers: {},
+      body: {
+        language: 'bash',
+        version: '5.2.0',
+        session_id: 'session',
+        files: [{ name: 'main.sh', content: 'echo ready' }],
+      },
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.mutationMayHaveCommitted &&
+      error.requiresQuarantine,
   );
   await sandbox.close();
 });

@@ -661,7 +661,12 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     request: WorkspaceExecuteCommandRequest,
     dataDirectory: string,
     signal?: AbortSignal,
-        options?: { probe?: boolean; workspaceRoot?: string },
+        options?: {
+          probe?: boolean;
+          workspaceRoot?: string;
+          shellPath?: string;
+          jqPath?: string;
+        },
   ): Promise<WorkspaceExecuteCommandResult> {
     if (this.execution || this.closing) {
       throw new WorkspaceToolError(
@@ -703,9 +708,13 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                     canonicalDataDirectory,
                     '_ptc_pending_result.json',
                 ),
-                LIBRECHAT_CODE_BASH_PATH: this.options.shellPath ?? '/bin/bash',
-                ...(this.options.jqPath
-                    ? { LIBRECHAT_CODE_JQ_PATH: this.options.jqPath }
+                LIBRECHAT_CODE_BASH_PATH:
+                  options?.shellPath ?? this.options.shellPath ?? '/bin/bash',
+                ...((options?.jqPath ?? this.options.jqPath)
+                    ? {
+                          LIBRECHAT_CODE_JQ_PATH:
+                              options?.jqPath ?? this.options.jqPath,
+                      }
                     : {}),
                 PTC_HISTORY_PATH: join(
                     canonicalDataDirectory,

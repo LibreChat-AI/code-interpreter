@@ -216,6 +216,8 @@ export interface NativeWorkspaceProgrammaticOptions {
       Pick<NativeSrtWorkspaceCommandSandbox, 'createProgrammaticProbeWorkspace'>
     >;
   upstreamUrl: string;
+  shellPath?: string;
+  jqPath?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -362,6 +364,7 @@ export class NativeWorkspaceProgrammaticExecutor {
     request: BridgeWorkspaceProgrammaticRequest,
     workspaceId: string,
     signal?: AbortSignal,
+    lifecycle?: { beforeCommit?(): Promise<void> | void },
   ): Promise<ProgrammaticResult> {
     if (!isBridgeWorkspaceProgrammaticRequest(request)) {
       throw new WorkspaceToolError(
@@ -456,7 +459,10 @@ export class NativeWorkspaceProgrammaticExecutor {
                     errorOnExist: true,
                     mode: constants.COPYFILE_FICLONE,
                 });
-      if (!probe) commandDispatched = true;
+      if (!probe) {
+        await lifecycle?.beforeCommit?.();
+        commandDispatched = true;
+      }
                 return await this.options.sandbox.executeProgrammatic(
         {
           protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -473,7 +479,12 @@ export class NativeWorkspaceProgrammaticExecutor {
         },
                     directory,
         signal,
-                    { probe, workspaceRoot },
+                    {
+                      probe,
+                      workspaceRoot,
+                      shellPath: this.options.shellPath,
+                      jqPath: this.options.jqPath,
+                    },
                 );
             };
 

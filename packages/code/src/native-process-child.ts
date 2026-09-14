@@ -11,7 +11,12 @@ import type {
 // argv credentials, bridge token, or persisted pairing material is required.
 let sandbox: NativeSrtWorkspaceCommandSandbox | undefined;
 let programmaticExecutor: NativeWorkspaceProgrammaticExecutor | undefined;
+let programmaticReady: Promise<void> | undefined;
+let programmaticFileUpstream: string | undefined;
 let active: { id: string; controller: AbortController } | undefined;
+let commitAcknowledgement:
+  | { id: string; acknowledge(): void }
+  | undefined;
 let busy = false;
 let credentials: Record<string, string> = {};
 let wrappedCommand: string | undefined;
@@ -24,6 +29,33 @@ function reply(message: object): void {
   } catch {
     /* Parent was lost. */
   }
+}
+async function awaitCommitAcknowledgement(
+  id: string,
+  signal: AbortSignal,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => {
+      commitAcknowledgement = undefined;
+      reject(
+        new WorkspaceToolError(
+          'Programmatic execution aborted before commit',
+          'EXECUTION_ABORTED',
+        ),
+      );
+    };
+    commitAcknowledgement = {
+      id,
+      acknowledge() {
+        signal.removeEventListener('abort', abort);
+        commitAcknowledgement = undefined;
+        resolve();
+      },
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    reply({ id, phase: 'commit' });
+    if (signal.aborted) abort();
+  });
 }
 let shuttingDown = false;
 const shutdown = () => {
@@ -59,19 +91,29 @@ process.on('message', async (raw: unknown) => {
     workspaceId?: string;
     credentials?: Record<string, string>;
     wrappedCommand?: string;
+    programmaticShellPath?: string;
+    programmaticJqPath?: string;
   };
   if (!message || typeof message.id !== 'string') return;
   if (message.type === 'cancel') {
     if (active?.id === message.id) active.controller.abort();
     return;
   }
+  if (message.type === 'commit-ack') {
+    if (commitAcknowledgement?.id === message.id) {
+      commitAcknowledgement.acknowledge();
+    }
+    return;
+  }
   if (busy) return;
   busy = true;
+  let mutationStarted = false;
   try {
     let result: unknown;
     if (message.type === 'prepare' && !sandbox) {
-      const { variables, programmaticFileUpstream, ...options } =
+      const { variables, programmaticFileUpstream: upstream, ...options } =
         message.options;
+      programmaticFileUpstream = upstream;
       sandbox = new NativeSrtWorkspaceCommandSandbox({
         ...options,
         ...(variables
@@ -89,32 +131,55 @@ process.on('message', async (raw: unknown) => {
           : {}),
       });
       await sandbox.prepare();
-      programmaticExecutor = programmaticFileUpstream
-        ? new NativeWorkspaceProgrammaticExecutor({
-            sandbox,
-            upstreamUrl: programmaticFileUpstream,
-          })
-        : undefined;
-      await programmaticExecutor?.prepare();
     } else if (message.type === 'execute' && sandbox) {
       active = { id: message.id, controller: new AbortController() };
       credentials = message.credentials ?? {};
       wrappedCommand = message.wrappedCommand;
+      mutationStarted = true;
       result = await sandbox.execute(message.request, active.controller.signal);
     } else if (
       message.type === 'programmatic' &&
       sandbox &&
-      programmaticExecutor &&
+      programmaticFileUpstream &&
       message.programmaticRequest &&
-      typeof message.workspaceId === 'string'
+      typeof message.workspaceId === 'string' &&
+      typeof message.programmaticShellPath === 'string' &&
+      typeof message.programmaticJqPath === 'string'
     ) {
       active = { id: message.id, controller: new AbortController() };
       credentials = message.credentials ?? {};
       wrappedCommand = message.wrappedCommand;
+      if (!programmaticExecutor) {
+        programmaticExecutor = new NativeWorkspaceProgrammaticExecutor({
+          sandbox,
+          upstreamUrl: programmaticFileUpstream,
+          shellPath: message.programmaticShellPath,
+          jqPath: message.programmaticJqPath,
+        });
+        programmaticReady = programmaticExecutor.prepare(
+          active.controller.signal,
+        );
+      }
+      try {
+        await programmaticReady;
+      } catch (error) {
+        programmaticExecutor = undefined;
+        programmaticReady = undefined;
+        throw error;
+      }
       result = await programmaticExecutor.execute(
         message.programmaticRequest,
         message.workspaceId,
         active.controller.signal,
+        {
+          async beforeCommit() {
+            await awaitCommitAcknowledgement(
+              message.id,
+              active!.controller.signal,
+            );
+            mutationStarted = true;
+          },
+        },
       );
     } else if (message.type === 'close' && sandbox) {
       await sandbox.close();
@@ -134,11 +199,11 @@ process.on('message', async (raw: unknown) => {
       mutation:
         error instanceof WorkspaceToolError
           ? error.mutationMayHaveCommitted
-          : true,
+          : mutationStarted,
       requiresQuarantine:
         error instanceof WorkspaceToolError
           ? error.requiresQuarantine
-          : true,
+          : mutationStarted,
     });
   } finally {
     active = undefined;

@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { WorkspaceToolError } from './workspace.js';
 import { NATIVE_PROGRAMMATIC_COMMAND } from './native-programmatic.js';
 import {
+    BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
     BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES,
     isWorkspaceToolRequest,
     isWorkspaceToolResult,
@@ -29,6 +30,13 @@ export type NativeProcessSandboxOptions = Omit<
 };
 
 const execFileAsync = promisify(execFile);
+const PROGRAMMATIC_STAGING_TIMEOUT_MS = 60_000;
+const PROGRAMMATIC_TRANSFER_TIMEOUT_MS = 30_000;
+const RPC_SETTLEMENT_SLACK_MS = 5_000;
+
+type RpcTimeoutBudget =
+  | number
+  | { stagingMs: number; commitMs: number };
 
 async function systemProgrammaticExecutable(
     name: string,
@@ -183,11 +191,16 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
   private closing?: Promise<void>;
   private failed = false;
   private terminationTimer?: ReturnType<typeof setTimeout>;
+  private programmaticExecutables?: Promise<{
+    shellPath: string;
+    jqPath: string;
+  }>;
   private pending?: {
     id: string;
     resolve(value: unknown): void;
     reject(error: Error): void;
     mutation: boolean;
+    commit?(): void;
   };
 
   constructor(
@@ -198,6 +211,14 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
       options: ForkOptions,
     ) => ChildProcess = fork,
   ) {}
+
+  /** Overridable only for deterministic watchdog tests. */
+  protected scheduleRpcTimeout(
+    callback: () => void,
+    timeoutMs: number,
+  ): ReturnType<typeof setTimeout> {
+    return setTimeout(callback, timeoutMs);
+  }
 
   async prepare(): Promise<void> {
     if (this.failed || this.closing) throw this.unavailable(false);
@@ -210,10 +231,22 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
     return new NativeExecutorUnavailableError(mutation);
   }
 
+  private async resolveProgrammaticExecutables(): Promise<{
+    shellPath: string;
+    jqPath: string;
+  }> {
+    this.programmaticExecutables ??= resolveProgrammaticShell(this.options);
+    try {
+      return await this.programmaticExecutables;
+    } catch (error) {
+      // An operator may install or repair this optional dependency while the
+      // worker stays online. Keep ordinary execution live and let PTC retry.
+      this.programmaticExecutables = undefined;
+      throw error;
+    }
+  }
+
   private async start(): Promise<void> {
-        const programmaticExecutables = this.options.programmaticFileUpstream
-            ? await resolveProgrammaticShell(this.options)
-            : undefined;
     const child = this.forkExecutor(
       new URL('./native-process-child.js', import.meta.url),
       [],
@@ -237,6 +270,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
         code?: unknown;
         errorMessage?: unknown;
         fatal?: unknown;
+        phase?: unknown;
       };
       if (
         !message ||
@@ -246,6 +280,25 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
         return;
       const pending = this.pending;
       if (!pending) return;
+      if (message.phase === 'commit') {
+        pending.mutation = true;
+        const commit = pending.commit;
+        pending.commit = undefined;
+        commit?.();
+        try {
+          child.send({ type: 'commit-ack', id: pending.id }, error => {
+            if (!error) return;
+            this.failed = true;
+            this.terminate();
+            pending.reject(this.unavailable(true));
+          });
+        } catch {
+          this.failed = true;
+          this.terminate();
+          pending.reject(this.unavailable(true));
+        }
+        return;
+      }
       if (message.fatal === true) this.failed = true;
       if (message.ok === true) pending.resolve(message.result);
       else {
@@ -299,8 +352,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
           protectedPaths,
           allowedDomains,
           homeDirectory,
-                    shellPath: programmaticExecutables?.shellPath ?? shellPath,
-                    jqPath: programmaticExecutables?.jqPath,
+          shellPath,
           programmaticFileUpstream,
           variables: this.options.maskedEnvironment?.variables,
         },
@@ -376,8 +428,11 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
             );
     let credentials: Record<string, string> | undefined;
     let wrappedCommand: string | undefined;
+    let programmaticExecutables: { shellPath: string; jqPath: string };
     try {
       await this.prepare();
+      if (signal?.aborted) throw new Error('aborted');
+      programmaticExecutables = await this.resolveProgrammaticExecutables();
       if (signal?.aborted) throw new Error('aborted');
       credentials = await this.options.maskedEnvironment?.resolve(signal);
       if (signal?.aborted) throw new Error('aborted');
@@ -407,19 +462,11 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
         workspaceId,
         credentials,
         wrappedCommand,
+        programmaticShellPath: programmaticExecutables.shellPath,
+        programmaticJqPath: programmaticExecutables.jqPath,
       },
-            (request.body.run_timeout ?? 30_000) *
-                ((request.body.replay_tool_count ?? 0) > 0 ? 2 : 1) +
-                (Math.ceil(
-                    request.body.files.filter(file => 'id' in file).length / 4,
-                ) +
-                    Math.ceil(
-                        (request.body.max_output_files ??
-                            BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES) / 4,
-                    )) *
-                    (request.body.transfer_timeout_ms ?? 30_000) +
-                5_000,
-      true,
+      this.programmaticWatchdogBudget(request),
+      false,
       signal,
     );
     if (signal?.aborted) {
@@ -435,6 +482,35 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
       throw this.unavailable(true);
     }
     return result;
+  }
+
+  private programmaticWatchdogBudget(
+    request: BridgeWorkspaceProgrammaticRequest,
+  ): Exclude<RpcTimeoutBudget, number> {
+    const runTimeoutMs = Math.min(
+      request.body.run_timeout ?? BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
+      BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
+    );
+    const transferTimeoutMs =
+      request.body.transfer_timeout_ms ?? PROGRAMMATIC_TRANSFER_TIMEOUT_MS;
+    const inputBatches = Math.ceil(
+      request.body.files.filter(file => 'id' in file).length / 4,
+    );
+    const outputBatches = Math.ceil(
+      (request.body.max_output_files ??
+        BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILES) / 4,
+    );
+    return {
+      stagingMs:
+        PROGRAMMATIC_STAGING_TIMEOUT_MS +
+        inputBatches * transferTimeoutMs +
+        ((request.body.replay_tool_count ?? 0) > 0 ? runTimeoutMs : 0) +
+        RPC_SETTLEMENT_SLACK_MS,
+      commitMs:
+        runTimeoutMs +
+        outputBatches * transferTimeoutMs +
+        RPC_SETTLEMENT_SLACK_MS,
+    };
   }
 
   private async executeOnce(
@@ -498,7 +574,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
   private async rpc(
     type: string,
     payload: object,
-    timeoutMs: number,
+    timeout: RpcTimeoutBudget,
     mutation: boolean,
     signal?: AbortSignal,
   ): Promise<unknown> {
@@ -506,7 +582,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
       throw this.unavailable(false);
     const id = randomUUID();
     const child = this.child;
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const abort = () => {
       try {
         if (child.connected)
@@ -518,12 +594,24 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
     };
     try {
       return await new Promise((resolve, reject) => {
-        this.pending = { id, resolve, reject, mutation };
-        timer = setTimeout(() => {
-          this.failed = true;
-          this.terminate();
-          reject(this.unavailable(mutation));
-        }, timeoutMs);
+        const schedule = (timeoutMs: number): void => {
+          if (timer) clearTimeout(timer);
+          timer = this.scheduleRpcTimeout(() => {
+            this.failed = true;
+            this.terminate();
+            reject(this.unavailable(this.pending?.mutation ?? mutation));
+          }, timeoutMs);
+        };
+        this.pending = {
+          id,
+          resolve,
+          reject,
+          mutation,
+          ...(typeof timeout === 'number'
+            ? {}
+            : { commit: () => schedule(timeout.commitMs) }),
+        };
+        schedule(typeof timeout === 'number' ? timeout : timeout.stagingMs);
         signal?.addEventListener('abort', abort, { once: true });
         const sendFailed = () => {
           this.failed = true;
@@ -540,7 +628,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
         if (signal?.aborted) abort();
       });
     } finally {
-      clearTimeout(timer!);
+      if (timer) clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
       this.pending = undefined;
     }
