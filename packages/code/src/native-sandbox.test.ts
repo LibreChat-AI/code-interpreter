@@ -192,8 +192,19 @@ test('programmatic probes use a copy-on-write workspace without mutating the pro
   });
   t.after(() => sandbox.close());
   const executionDirectory = await sandbox.createExecutionDirectory();
-  const snapshot =
-    await sandbox.createProgrammaticProbeWorkspace(executionDirectory);
+  let snapshot: string;
+  try {
+    snapshot = await sandbox.createProgrammaticProbeWorkspace(executionDirectory);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes('requires copy-on-write filesystem cloning')
+    ) {
+      t.skip('host filesystem does not support copy-on-write cloning');
+      return;
+    }
+    throw error;
+  }
   await writeFile(join(snapshot, 'state.txt'), 'probe-only');
   assert.equal(await readFile(join(root, 'state.txt'), 'utf8'), 'original');
   assert.equal(await readFile(join(snapshot, 'state.txt'), 'utf8'), 'probe-only');
