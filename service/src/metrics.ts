@@ -117,6 +117,12 @@ export const jobsFailed = new Counter({
   labelNames: ['language'] as const,
 });
 
+export const jobsCancelled = new Counter({
+  name: 'codeapi_jobs_cancelled_total',
+  help: 'Total number of jobs cancelled after the calling client disconnected',
+  labelNames: ['language'] as const,
+});
+
 export const activeJobs = new Gauge({
   name: 'codeapi_active_jobs',
   help: 'Number of jobs currently being processed',

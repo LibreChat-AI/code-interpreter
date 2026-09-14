@@ -4,13 +4,28 @@ import { Router } from 'express';
 import type { Response } from 'express';
 import type * as t from '../types';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
-import { executionLimiter } from '../middleware/limits';
+import { cancellationLimiter, executionLimiter } from '../middleware/limits';
 import {
   pyQueue,
   pyQueueEvents,
   connection,
   getExecutionQueueBinding,
 } from '../queue';
+import {
+  CLIENT_DISCONNECT_REASON,
+  JOB_CANCELLED_MESSAGE,
+  requestJobCancellation,
+  waitForJobWithCancellation,
+} from '../job-cancellation';
+import {
+  CODEAPI_PROGRAMMATIC_REQUEST_HEADER,
+  attachProgrammaticCancellationTarget,
+  cancelProgrammaticRequest,
+  normalizeProgrammaticRequestId,
+  programmaticCancellationOwner,
+  releaseProgrammaticCancellation,
+  reserveProgrammaticCancellation,
+} from '../programmatic-cancellation';
 import {
     createProgrammaticPayload,
     extractPendingFromControlPayload,
@@ -107,6 +122,8 @@ const JOB_COMPLETION_WAIT_TIMEOUT_MS = jobCompletionWaitTimeoutMs(
   env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS,
   env.EGRESS_GATEWAY_REVOKE_TIMEOUT_MS,
 );
+const PROGRAMMATIC_CANCELLATION_TTL_SECONDS =
+  Math.ceil(JOB_COMPLETION_WAIT_TIMEOUT_MS / 1000) + 60;
 
 const router = Router();
 
@@ -322,6 +339,8 @@ async function runReplayIteration(
   state: ExecutionState,
   apiKeyId: string,
   userId: string,
+  signal?: AbortSignal,
+  cancellation?: { requestId: string; owner: string },
 ): Promise<t.ExecuteResult> {
   const history = await loadToolHistory(state.execution_id);
   const rawPayload = buildReplayPayload(req, state, history);
@@ -389,6 +408,7 @@ async function runReplayIteration(
             ...(state.workspaceId != null
                 ? { workspaceId: state.workspaceId }
                 : {}),
+    cancellable: true,
     runtimeSessionMode: 'stateless',
     runtimeSessionExemption: PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION,
     executionManifestClaims: sandboxSecurity.executionManifestClaims,
@@ -403,7 +423,44 @@ async function runReplayIteration(
     );
   jobsSubmitted.inc({ language });
 
-  return job.waitUntilFinished(events, JOB_COMPLETION_WAIT_TIMEOUT_MS);
+  if (cancellation != null) {
+    const target = { queueName: job.queueName, jobId: String(job.id) };
+    try {
+      const attachment = await attachProgrammaticCancellationTarget({
+        redis: connection,
+        requestId: cancellation.requestId,
+        owner: cancellation.owner,
+        target,
+        ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+      });
+      if (attachment === 'forbidden') {
+        throw new Error('Programmatic cancellation request ownership changed');
+      }
+      if (attachment === 'cancelled') {
+        await requestJobCancellation(
+          connection,
+          target,
+          PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+        );
+      }
+    } catch (error) {
+      await requestJobCancellation(
+        connection,
+        target,
+        PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+      ).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  return waitForJobWithCancellation({
+    commands: connection,
+    job,
+    events,
+    timeoutMs: JOB_COMPLETION_WAIT_TIMEOUT_MS,
+    cancellationTtlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+    signal,
+  });
 }
 
 function isSandboxRunSuccess(result: t.ExecuteResult): boolean {
@@ -858,26 +915,62 @@ async function runAndRespond(
   apiKeyId: string,
   userId: string,
 ): Promise<void> {
-  /** Read disconnect state through `isDisconnected()` rather than a
-   * direct boolean. The `req.on('close', ...)` handler flips the flag
-   * during awaits, but `@typescript-eslint/no-unnecessary-condition`
-   * (correctly per TS semantics) narrows a directly-mutated `let`/object
-   * member to its literal value after an early-return `if (...) return`,
-   * even across awaits. A function call is opaque to that narrowing. */
-  let disconnected = false;
-  const isDisconnected = (): boolean => disconnected;
-  req.on('close', () => {
-    if (!res.writableEnded) disconnected = true;
-  });
+  const rawRequestId = req.header(CODEAPI_PROGRAMMATIC_REQUEST_HEADER);
+  const requestId = normalizeProgrammaticRequestId(rawRequestId);
+  const cancellationOwner =
+    requestId != null ? programmaticCancellationOwner(req, userId) : undefined;
+  if (requestId != null && cancellationOwner != null) {
+    const reservation = await reserveProgrammaticCancellation({
+      redis: connection,
+      requestId,
+      owner: cancellationOwner,
+      ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+    });
+    if (reservation === 'forbidden') {
+      res.status(409).json({ error: 'Programmatic request ID is already in use' });
+      return;
+    }
+  }
+  const disconnectController = new AbortController();
+  const disconnect = (): void => {
+    if (!res.writableFinished) {
+      disconnectController.abort(CLIENT_DISCONNECT_REASON);
+      disposeDisconnectListeners();
+    }
+  };
+  const disposeDisconnectListeners = (): void => {
+    req.removeListener('aborted', disconnect);
+    req.removeListener('close', disconnect);
+    res.removeListener('close', disconnect);
+    res.removeListener('finish', disposeDisconnectListeners);
+  };
+  req.once('aborted', disconnect);
+  req.once('close', disconnect);
+  res.once('close', disconnect);
+  res.once('finish', disposeDisconnectListeners);
+  const isDisconnected = (): boolean => disconnectController.signal.aborted;
 
   let result: t.ExecuteResult;
   try {
-    result = await runReplayIteration(req, state, apiKeyId, userId);
+    result = await runReplayIteration(
+      req,
+      state,
+      apiKeyId,
+      userId,
+      disconnectController.signal,
+      requestId != null && cancellationOwner != null
+        ? { requestId, owner: cancellationOwner }
+        : undefined,
+    );
   } catch (err) {
-        logger.error('Replay iteration failed', {
-            execution_id: state.execution_id,
-            err,
-        });
+    const cancelled =
+      (err as Error).name === 'AbortError' ||
+      (err as Error).message === JOB_CANCELLED_MESSAGE;
+    logger.log(cancelled ? 'info' : 'error', 'Replay iteration failed', {
+      execution_id: state.execution_id,
+      cancelled,
+      err,
+    });
     await cleanupExecution(state.execution_id, 'replay');
     if (!isDisconnected()) {
       const publicFailure = publicExecutionFailure(err);
@@ -890,6 +983,19 @@ async function runAndRespond(
       });
     }
     return;
+  } finally {
+    if (requestId != null && cancellationOwner != null) {
+      await releaseProgrammaticCancellation({
+        redis: connection,
+        requestId,
+        owner: cancellationOwner,
+      }).catch(error => {
+        logger.warn('Failed to release programmatic cancellation request', {
+          requestId,
+          error: (error as Error).message,
+        });
+      });
+    }
   }
 
   if (isDisconnected()) {
@@ -1077,6 +1183,49 @@ async function runAndRespond(
 // ---------------------------------------------------------------------------
 
 router.post(
+  '/exec/programmatic/cancel',
+  cancellationLimiter,
+  async (req: t.AuthenticatedRequest, res) => {
+    const principal = getPrincipalOrReject(req, res);
+    if (!principal) return;
+    const requestId = normalizeProgrammaticRequestId(
+      (req.body as Record<string, unknown>)?.request_id,
+    );
+    if (requestId == null) {
+      res.status(400).json({ error: 'Invalid or missing request_id' });
+      return;
+    }
+    try {
+      const owner = programmaticCancellationOwner(req, principal.userId);
+      const cancellation = await cancelProgrammaticRequest({
+        redis: connection,
+        requestId,
+        owner,
+        ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+      });
+      if (cancellation.status === 'forbidden') {
+        res.status(403).json({ error: 'Programmatic request belongs to another principal' });
+        return;
+      }
+      if (cancellation.target != null) {
+        await requestJobCancellation(
+          connection,
+          cancellation.target,
+          PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+        );
+      }
+      res.status(202).json({ status: 'cancellation_requested' });
+    } catch (error) {
+      logger.error('Failed to request programmatic execution cancellation', {
+        requestId,
+        error: (error as Error).message,
+      });
+      res.status(503).json({ error: 'Cancellation service unavailable' });
+    }
+  },
+);
+
+router.post(
     '/exec/programmatic',
     executionLimiter,
     async (req: t.AuthenticatedRequest, res) => {
@@ -1095,6 +1244,10 @@ router.post(
         const { continuation_token, tool_results } =
             req.body as t.ProgrammaticRequestBody;
   const rawBody = req.body as Record<string, unknown>;
+  const rawRequestId = req.header(CODEAPI_PROGRAMMATIC_REQUEST_HEADER);
+  if (rawRequestId != null && normalizeProgrammaticRequestId(rawRequestId) == null) {
+    return res.status(400).json({ error: 'Invalid programmatic request ID' });
+  }
   const requestedLanguage: unknown = rawBody.language ?? rawBody.lang;
   let bridgeWorkerId: string | undefined;
   let workspaceId: string | undefined;

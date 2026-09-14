@@ -2,8 +2,8 @@ import axios from 'axios';
 import { Worker } from 'bullmq';
 import type * as t from './types';
 import { filterSystemLogs, applySystemReplacements, getAxiosErrorDetails, sandboxErrorMessageFromAxios } from './utils';
-import { jobProcessingDuration, jobsCompleted, jobsFailed, activeJobs, workerRunning } from './metrics';
-import { connection, queueNames } from './queue';
+import { jobProcessingDuration, jobsCancelled, jobsCompleted, jobsFailed, activeJobs, workerRunning } from './metrics';
+import { connection, jobCancellationRegistry, queueNames } from './queue';
 import { env, jobDeadlineAtMs } from './config';
 import { summarizeSandboxResponse, summarizeText } from './execution-log';
 import { createGatewayEgressGrant, restoreGatewaySandboxResult, revokeGatewayEgressGrant } from './egress-gateway-client';
@@ -16,6 +16,10 @@ import { getSandboxBackend, SandboxBackendError, type SandboxRawResponse } from 
 import { isSyntheticPrincipalSource } from './auth/synthetic';
 import { withSpan, withTraceContext } from './telemetry';
 import { workerDeadlineFailure } from './worker-error';
+import {
+  CLIENT_DISCONNECT_REASON,
+  JOB_CANCELLED_MESSAGE,
+} from './job-cancellation';
 import logger from './logger';
 import {
   validateQueuedExecutionProfile,
@@ -49,17 +53,25 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
   activeJobs.inc({ language });
 
   const controller = new AbortController();
+  const cancellationTarget = job.data.cancellable === true && job.id != null
+    ? { queueName: job.queueName, jobId: String(job.id) }
+    : undefined;
+  let cancellationRegistered = false;
   const deadlineAtMs = jobDeadlineAtMs(job.timestamp, env.JOB_TIMEOUT);
   const remainingBudgetMs = Math.max(0, deadlineAtMs - Date.now());
   const timer = remainingBudgetMs > 0
-    ? setTimeout(() => controller.abort(), remainingBudgetMs)
+    ? setTimeout(() => controller.abort('deadline'), remainingBudgetMs)
     : undefined;
-  if (remainingBudgetMs === 0) controller.abort();
+  if (remainingBudgetMs === 0) controller.abort('deadline');
   let egressGrantId: string | undefined;
   let egressGrantTokenForRestore: string | undefined;
   let revokeReason = 'completed';
 
   try {
+    if (cancellationTarget != null) {
+      await jobCancellationRegistry.register(cancellationTarget, controller);
+      cancellationRegistered = true;
+    }
     if (controller.signal.aborted) {
       throw new Error(`Job timed out after ${env.JOB_TIMEOUT}ms`);
     }
@@ -221,17 +233,33 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
 
     return result;
   } catch (error) {
-    revokeReason = controller.signal.aborted || isAbortError(error) ? 'timeout' : 'failed';
+    const clientDisconnected =
+      controller.signal.aborted && controller.signal.reason === CLIENT_DISCONNECT_REASON;
+    revokeReason = clientDisconnected
+      ? 'cancelled'
+      : controller.signal.aborted || isAbortError(error)
+        ? 'timeout'
+        : 'failed';
     const errorDetails = getAxiosErrorDetails(error);
-    logger.error('Error processing job', errorDetails);
+    if (clientDisconnected) {
+      logger.info('Job cancelled after client disconnected', {
+        queueName: job.queueName,
+        jobId: job.id,
+        executionId: job.data.executionId,
+      });
+    } else {
+      logger.error('Error processing job', errorDetails);
+    }
 
     const deadlineFailure = workerDeadlineFailure(
       error,
-      controller.signal.aborted,
+      controller.signal.aborted && !clientDisconnected,
       env.JOB_TIMEOUT,
     );
     if (deadlineFailure) {
       throw deadlineFailure;
+    } else if (clientDisconnected) {
+      throw new Error(JOB_CANCELLED_MESSAGE);
     } else if (error instanceof SandboxBackendError) {
       throw new Error(`${error.code}: ${error.message}`);
     } else if (error instanceof SessionFilesError) {
@@ -260,6 +288,15 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
       });
     }
     if (timer) clearTimeout(timer);
+    if (cancellationTarget != null && cancellationRegistered) {
+      await jobCancellationRegistry.unregister(cancellationTarget).catch(error => {
+        logger.warn('Failed to clear queued execution cancellation state', {
+          queueName: cancellationTarget.queueName,
+          jobId: cancellationTarget.jobId,
+          error: getAxiosErrorDetails(error),
+        });
+      });
+    }
     endTimer();
     activeJobs.dec({ language });
   }
@@ -304,11 +341,21 @@ otherWorker.on('completed', job => {
 });
 
 pyWorker.on('failed', (job, err) => {
+  if (err.message === JOB_CANCELLED_MESSAGE) {
+    logger.info(`[${WORKER_ID}] Python job ${job?.id} cancelled`);
+    jobsCancelled.inc({ language: 'python' });
+    return;
+  }
   logger.error(`[${WORKER_ID}] Python job ${job?.id} failed`, err);
   jobsFailed.inc({ language: 'python' });
 });
 
 otherWorker.on('failed', (job, err) => {
+  if (err.message === JOB_CANCELLED_MESSAGE) {
+    logger.info(`[${WORKER_ID}] Other job ${job?.id} cancelled`);
+    jobsCancelled.inc({ language: 'other' });
+    return;
+  }
   logger.error(`[${WORKER_ID}] Other job ${job?.id} failed`, err);
   jobsFailed.inc({ language: 'other' });
 });

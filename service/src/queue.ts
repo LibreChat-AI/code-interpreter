@@ -19,6 +19,7 @@ import type {
 import logger from './logger';
 import { redisKeepAliveOptions } from './redis-options';
 import { bullmqQueueJobs, registerBullmqQueueMetricsCollector } from './metrics';
+import { JobCancellationRegistry } from './job-cancellation';
 
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = 2000;
@@ -60,6 +61,7 @@ const connection = new IORedis({
     ? { dnsLookup: (address: string, callback: (err: Error | null, addr: string) => void): void => callback(null, address) }
     : {})
 });
+const jobCancellationRegistry = new JobCancellationRegistry(connection);
 
 // Global queues - no INSTANCE_ID prefix
 // This enables horizontal scaling where any worker can process any job
@@ -163,8 +165,16 @@ export async function closeQueueConnections(): Promise<void> {
     [...queueResources.values()].flatMap(({ queue, events }) => [
       queue.close(),
       events.close(),
-    ]),
+    ]).concat(jobCancellationRegistry.close()),
   );
 }
 
-export { pyQueue, otherQueue, pyQueueEvents, otherQueueEvents, queueNames, connection };
+export {
+  pyQueue,
+  otherQueue,
+  pyQueueEvents,
+  otherQueueEvents,
+  queueNames,
+  connection,
+  jobCancellationRegistry,
+};

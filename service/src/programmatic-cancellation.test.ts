@@ -1,0 +1,125 @@
+import { afterEach, beforeEach, expect, test } from 'bun:test';
+import type IORedis from 'ioredis';
+import { startTestRedis } from './test/redis';
+import {
+  attachProgrammaticCancellationTarget,
+  cancelProgrammaticRequest,
+  normalizeProgrammaticRequestId,
+  programmaticCancellationInternals,
+  releaseProgrammaticCancellation,
+  reserveProgrammaticCancellation,
+} from './programmatic-cancellation';
+
+let redis: IORedis & { closeTestServer(): Promise<void> };
+
+beforeEach(async () => {
+  redis = await startTestRedis();
+});
+
+afterEach(async () => {
+  await redis.closeTestServer();
+});
+
+test('normalizes only bounded opaque request IDs', () => {
+  expect(normalizeProgrammaticRequestId('request_123456789')).toBe('request_123456789');
+  expect(normalizeProgrammaticRequestId(' short ')).toBeUndefined();
+  expect(normalizeProgrammaticRequestId('../request_123456789')).toBeUndefined();
+  expect(normalizeProgrammaticRequestId('a'.repeat(129))).toBeUndefined();
+});
+
+test('cancellation before queue attachment is retained atomically', async () => {
+  const requestId = 'request_early_cancel_123';
+  const owner = 'owner-a';
+  expect(await cancelProgrammaticRequest({
+    redis,
+    requestId,
+    owner,
+    ttlSeconds: 60,
+  })).toEqual({ status: 'accepted' });
+
+  expect(await reserveProgrammaticCancellation({
+    redis,
+    requestId,
+    owner,
+    ttlSeconds: 60,
+  })).toBe('cancelled');
+  expect(await attachProgrammaticCancellationTarget({
+    redis,
+    requestId,
+    owner,
+    target: { queueName: 'other', jobId: '42' },
+    ttlSeconds: 60,
+  })).toBe('cancelled');
+});
+
+test('cancellation after attachment returns the exact queue target', async () => {
+  const requestId = 'request_attached_cancel_1';
+  const owner = 'owner-a';
+  expect(await reserveProgrammaticCancellation({
+    redis,
+    requestId,
+    owner,
+    ttlSeconds: 60,
+  })).toBe('active');
+  expect(await attachProgrammaticCancellationTarget({
+    redis,
+    requestId,
+    owner,
+    target: { queueName: 'other', jobId: '43' },
+    ttlSeconds: 60,
+  })).toBe('active');
+
+  expect(await cancelProgrammaticRequest({
+    redis,
+    requestId,
+    owner,
+    ttlSeconds: 60,
+  })).toEqual({
+    status: 'accepted',
+    target: { queueName: 'other', jobId: '43' },
+  });
+});
+
+test('a different principal cannot reserve, attach, cancel, or release a request', async () => {
+  const requestId = 'request_owned_cancel_123';
+  await reserveProgrammaticCancellation({
+    redis,
+    requestId,
+    owner: 'owner-a',
+    ttlSeconds: 60,
+  });
+
+  expect(await reserveProgrammaticCancellation({
+    redis,
+    requestId,
+    owner: 'owner-b',
+    ttlSeconds: 60,
+  })).toBe('forbidden');
+  expect(await attachProgrammaticCancellationTarget({
+    redis,
+    requestId,
+    owner: 'owner-b',
+    target: { queueName: 'other', jobId: '44' },
+    ttlSeconds: 60,
+  })).toBe('forbidden');
+  expect(await cancelProgrammaticRequest({
+    redis,
+    requestId,
+    owner: 'owner-b',
+    ttlSeconds: 60,
+  })).toEqual({ status: 'forbidden' });
+  await releaseProgrammaticCancellation({ redis, requestId, owner: 'owner-b' });
+  expect(await redis.exists(programmaticCancellationInternals.requestKey(requestId))).toBe(1);
+});
+
+test('the owner releases cancellation state after settlement', async () => {
+  const requestId = 'request_release_cancel_1';
+  await reserveProgrammaticCancellation({
+    redis,
+    requestId,
+    owner: 'owner-a',
+    ttlSeconds: 60,
+  });
+  await releaseProgrammaticCancellation({ redis, requestId, owner: 'owner-a' });
+  expect(await redis.exists(programmaticCancellationInternals.requestKey(requestId))).toBe(0);
+});

@@ -182,6 +182,19 @@ export const executionLimiter = createRateLimiter(
   }
 );
 
+/** Keep Stop available when execution admission is full, while independently
+ * bounding request-id churn in the cancellation registry. */
+export const cancellationLimiter = createRateLimiter(
+  'exec-cancel',
+  env.EXEC_LIMIT_WINDOW,
+  Math.max(80, env.EXEC_MAX_REQUESTS * 4),
+  {
+    message: 'Too many CodeAPI cancellation requests.',
+    structuredBody: true,
+    logRejections: true,
+  }
+);
+
 export const uploadLimiter = createRateLimiter(
   'upload',
   env.UPLOAD_LIMIT_WINDOW,
