@@ -40,6 +40,8 @@ import {
   CLIENT_DISCONNECT_REASON,
   JOB_CANCELLED_MESSAGE,
   jobResultCommitFailure,
+  commitJobResult,
+  readCommittedJobResult,
   throwIfJobAborted,
 } from './job-cancellation';
 import logger from './logger';
@@ -104,11 +106,14 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
   let egressGrantTokenForRestore: string | undefined;
   let revokeReason = 'completed';
   let completedResult = false;
+  let resultToCommit: t.ExecuteResult | undefined;
 
   try {
     if (cancellationTarget != null) {
       await jobCancellationRegistry.register(cancellationTarget, controller);
       cancellationRegistered = true;
+      const committed = await readCommittedJobResult<t.ExecuteResult>(connection, cancellationTarget);
+      if (committed != null) return committed.result;
     }
     if (controller.signal.aborted) {
       throw new Error(`Job timed out after ${env.JOB_TIMEOUT}ms`);
@@ -287,6 +292,7 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     }
 
     completedResult = true;
+    resultToCommit = result;
     return result;
   } catch (error) {
     const clientDisconnected =
@@ -349,9 +355,19 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
         });
       });
     }
-    const lateCommitFailure = completedResult
+    let lateCommitFailure = completedResult
       ? jobResultCommitFailure(controller.signal, env.JOB_TIMEOUT)
       : undefined;
+    if (completedResult && cancellationTarget != null && lateCommitFailure == null) {
+      try {
+        if (!(await commitJobResult(connection, cancellationTarget, resultToCommit,
+          Math.ceil(env.JOB_TIMEOUT / 1_000) * 2 + 180))) {
+          lateCommitFailure = new Error(JOB_CANCELLED_MESSAGE);
+        }
+      } catch (error) {
+        lateCommitFailure = error instanceof Error ? error : new Error('Result commit failed');
+      }
+    }
     if (timer) clearTimeout(timer);
     if (cancellationTarget != null && cancellationRegistered) {
       await jobCancellationRegistry

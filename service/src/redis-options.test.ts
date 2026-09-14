@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { redisKeepAliveMs, redisKeepAliveOptions } from './redis-options';
+import {
+  redisKeepAliveMs,
+  redisKeepAliveOptions,
+  redisReconnectDelay,
+} from './redis-options';
+
+test('long-lived command connections keep recovering with a bounded retry delay', () => {
+  expect(redisReconnectDelay(1)).toBe(100);
+  expect(redisReconnectDelay(6)).toBe(600);
+  expect(redisReconnectDelay(1_000)).toBe(2_000);
+});
 
 describe('Redis keepalive options', () => {
   afterEach(() => {

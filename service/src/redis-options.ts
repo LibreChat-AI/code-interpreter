@@ -1,5 +1,11 @@
 import type { CommonRedisOptions } from 'ioredis';
 
+/** Long-lived queue/cancellation command and subscriber connections must both
+ * recover after an outage. Never leave a live process with a terminal client. */
+export function redisReconnectDelay(attempt: number): number {
+  return Math.min(2_000, 100 * Math.max(1, attempt));
+}
+
 export function redisKeepAliveMs(): number {
   const raw = process.env.REDIS_KEEP_ALIVE_MS;
   const trimmed = raw?.trim();

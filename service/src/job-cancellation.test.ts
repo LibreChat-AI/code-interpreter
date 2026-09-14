@@ -11,6 +11,7 @@ import {
   requestJobCancellation,
   throwIfJobAborted,
   waitForJobWithCancellation,
+  fenceJobCancellation,
 } from './job-cancellation';
 
 class FakeSubscriber extends EventEmitter {
@@ -62,14 +63,33 @@ class FakeRedis {
   readonly deleted: string[] = [];
   readonly transactions: FakeTransaction[] = [];
   mgetFailures = 0;
+  cancellationFailures = 0;
+  cancellationAttempts = 0;
 
   duplicate(): FakeSubscriber {
     this.duplicateCalls += 1;
     return this.subscriber;
   }
 
-  async exists(key: string): Promise<number> {
-    return this.existing.has(key) ? 1 : 0;
+  async get(key: string): Promise<string | null> {
+    return this.existing.has(key) ? '1' : null;
+  }
+
+  async eval(
+    _script: string,
+    _keys: number,
+    key: string,
+    ttl: number,
+    channel: string,
+    payload: string,
+  ): Promise<number> {
+    this.cancellationAttempts += 1;
+    if (this.cancellationFailures-- > 0) throw new Error('Redis unavailable');
+    const transaction = this.multi();
+    transaction.set(key, '1', 'EX', ttl);
+    transaction.publish(channel, payload);
+    await transaction.exec();
+    return 1;
   }
 
   async mget(...keys: string[]): Promise<Array<string | null>> {
@@ -77,7 +97,7 @@ class FakeRedis {
       this.mgetFailures -= 1;
       throw new Error('command connection unavailable');
     }
-    return keys.map((key) => (this.existing.has(key) ? '1' : null));
+    return keys.map(key => (this.existing.has(key) ? '1' : null));
   }
 
   async del(key: string): Promise<number> {
@@ -213,7 +233,7 @@ test('subscriber reconnect reconciles active jobs against durable markers', asyn
   fake.existing.add(jobCancellationInternals.cancellationKey(target));
 
   fake.subscriber.emit('ready');
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise(resolve => setTimeout(resolve, 10));
 
   expect(controller.signal.aborted).toBe(true);
   expect(controller.signal.reason).toBe(CLIENT_DISCONNECT_REASON);
@@ -230,7 +250,7 @@ test('subscriber reconnect retries durable-marker reconciliation', async () => {
   fake.mgetFailures = 1;
 
   fake.subscriber.emit('ready');
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  await new Promise(resolve => setTimeout(resolve, 150));
 
   expect(controller.signal.aborted).toBe(true);
   expect(controller.signal.reason).toBe(CLIENT_DISCONNECT_REASON);
@@ -246,7 +266,7 @@ test('terminal subscriber disconnect rebuilds the subscription and reconciles ma
   fake.existing.add(jobCancellationInternals.cancellationKey(target));
 
   fake.subscriber.emit('end');
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise(resolve => setTimeout(resolve, 10));
 
   expect(fake.duplicateCalls).toBe(2);
   expect(controller.signal.aborted).toBe(true);
@@ -396,7 +416,7 @@ test('external cancellation frees a waiting job before rejecting its waiter', as
     timeoutMs: 60_000,
     cancellationTtlSeconds: 120,
   });
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>(resolve => setImmediate(resolve));
 
   fake.subscriber.emit(
     'message',
@@ -429,7 +449,7 @@ test('a separate cancellation request wakes the original job waiter', async () =
     timeoutMs: 60_000,
     cancellationTtlSeconds: 120,
   });
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>(resolve => setImmediate(resolve));
   fake.subscriber.emit(
     'message',
     jobCancellationInternals.channel,
@@ -452,6 +472,58 @@ test('queued removal never removes an active job', async () => {
 
   expect(await removeJobIfWaiting(job)).toBe(false);
   expect(removed).toBe(false);
+});
+
+test('a failed cancellation write retains ownership until a durable retry succeeds', async () => {
+  const fake = new FakeRedis();
+  fake.cancellationFailures = 2;
+  const target = { queueName: 'other', jobId: 'ambiguous-enqueue' };
+  let released = false;
+  const fencing = fenceJobCancellation({
+    commands: redis(fake),
+    target,
+    ttlSeconds: 60,
+    deadlineAtMs: Date.now() + 500,
+  }).then(() => {
+    released = true;
+  });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  expect(released).toBe(false);
+  await fencing;
+  expect(fake.cancellationAttempts).toBe(3);
+  expect(released).toBe(true);
+});
+
+test('an unavailable Redis cannot release ownership before the fixed job deadline', async () => {
+  const fake = new FakeRedis();
+  fake.cancellationFailures = 1_000;
+  const startedAt = Date.now();
+  await fenceJobCancellation({
+    commands: redis(fake),
+    target: { queueName: 'other', jobId: 'offline' },
+    ttlSeconds: 60,
+    deadlineAtMs: startedAt + 80,
+  });
+  expect(Date.now() - startedAt).toBeGreaterThanOrEqual(80);
+  expect(fake.cancellationAttempts).toBeLessThanOrEqual(4);
+});
+
+test('a pending Redis write allocates no retry backlog and waits until the deadline', async () => {
+  const fake = new FakeRedis();
+  let calls = 0;
+  fake.eval = async () => {
+    calls += 1;
+    return new Promise<number>(() => {});
+  };
+  const startedAt = Date.now();
+  await fenceJobCancellation({
+    commands: redis(fake),
+    target: { queueName: 'other', jobId: 'pending-write' },
+    ttlSeconds: 60,
+    deadlineAtMs: startedAt + 40,
+  });
+  expect(Date.now() - startedAt).toBeGreaterThanOrEqual(39);
+  expect(calls).toBe(1);
 });
 
 test('queued removal frees waiting capacity and tolerates an activation race', async () => {

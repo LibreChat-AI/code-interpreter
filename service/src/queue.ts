@@ -18,20 +18,13 @@ import type {
   SandboxBackendName,
 } from './execution-profile';
 import logger from './logger';
-import { redisKeepAliveOptions } from './redis-options';
+import { redisKeepAliveOptions, redisReconnectDelay } from './redis-options';
 import { bullmqQueueJobs, registerBullmqQueueMetricsCollector } from './metrics';
 import { JobCancellationRegistry } from './job-cancellation';
 
-const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_DELAY = 2000;
-
 const retryStrategy: CommonRedisOptions['retryStrategy'] = (times) => {
-  if (times > MAX_RECONNECT_ATTEMPTS) {
-    logger.error(`Failed to connect to Redis after ${times} attempts`);
-    return null;
-  }
   logger.warn(`Retrying Redis connection attempt ${times}`);
-  return RECONNECT_DELAY;
+  return redisReconnectDelay(times);
 };
 
 const reconnectOnError: CommonRedisOptions['reconnectOnError'] = (err) => {

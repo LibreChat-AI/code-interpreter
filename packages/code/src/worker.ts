@@ -1180,6 +1180,7 @@ export class BridgeWorker {
     assignment: BridgeAssignment,
     stopSignal: AbortSignal,
     serverClockOffsetMs: number,
+    maintenance: { refresh?: Promise<void> },
   ): Promise<void> {
     const identity = this.options.identity;
     if (identity == null) return;
@@ -1197,10 +1198,11 @@ export class BridgeWorker {
       await abortableDelay(waitMs, stopSignal);
       if (stopSignal.aborted || Date.now() >= assignmentDeadlineMs) return;
       try {
-        await this.refreshCredential(
+        maintenance.refresh = this.refreshCredential(
           stopSignal,
           Date.now() + serverClockOffsetMs + refreshWindowMs,
         );
+        await maintenance.refresh;
       } catch (error) {
         if (stopSignal.aborted) return;
         const terminal =
@@ -1216,6 +1218,8 @@ export class BridgeWorker {
           ),
           stopSignal,
         );
+      } finally {
+        maintenance.refresh = undefined;
       }
     }
   }
@@ -1412,6 +1416,7 @@ export class BridgeWorker {
     );
     let credentialMaintenanceError: unknown;
     let credentialMaintenance: Promise<void> | undefined;
+    const ownCredentialMaintenance: { refresh?: Promise<void> } = {};
     let settlement: BridgeSettlement;
     let ambiguousSandboxError: unknown;
     let ambiguousWorkspaceMutationError: unknown;
@@ -1428,6 +1433,7 @@ export class BridgeWorker {
         assignment,
         credentialController.signal,
         serverClockOffsetMs,
+        ownCredentialMaintenance,
       ).catch((error) => {
         credentialMaintenanceError = error;
         executionController.abort();
@@ -1780,7 +1786,9 @@ export class BridgeWorker {
     clearTimeout(deadlineTimer);
     cancellationController.abort();
     await cancellationWatcher;
-    const credentialInFlight = this.credentialInFlight?.promise;
+    // Only drain renewal joined by this assignment, never an unrelated lane's
+    // refresh. Leave settlement time inside the original assignment budget.
+    const credentialInFlight = ownCredentialMaintenance.refresh;
     if (credentialInFlight != null && !credentialController.signal.aborted) {
       let drainTimer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
@@ -1788,7 +1796,8 @@ export class BridgeWorker {
         new Promise<void>((resolve) => {
           drainTimer = setTimeout(
             resolve,
-            CREDENTIAL_REFRESH_SETTLEMENT_GRACE_MS,
+            Math.min(CREDENTIAL_REFRESH_SETTLEMENT_GRACE_MS,
+              Math.max(0, Date.parse(assignment.expiresAt) - serverClockOffsetMs - Date.now() - 5_000)),
           );
         }),
       ]);

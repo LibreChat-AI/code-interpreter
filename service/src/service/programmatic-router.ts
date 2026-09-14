@@ -18,6 +18,7 @@ import {
   programmaticCancellationError,
   removeJobIfWaiting,
   requestJobCancellation,
+  fenceJobCancellation,
   waitForJobWithCancellation,
 } from '../job-cancellation';
 import {
@@ -404,11 +405,8 @@ async function runReplayIteration(
     state.executionProfileSource ?? env.EXECUTION_PROFILE_SOURCE,
   );
   if (signal?.aborted) throw programmaticCancellationError();
-  let cancellationTarget:
-    | { queueName: string; jobId: string }
-    | undefined;
+  const cancellationTarget = { queueName: queue.name, jobId: nanoid() };
   if (cancellation != null) {
-    cancellationTarget = { queueName: queue.name, jobId: nanoid() };
     const attachment = await attachProgrammaticCancellationTarget({
       redis: connection,
       requestId: cancellation.requestId,
@@ -423,6 +421,8 @@ async function runReplayIteration(
       throw programmaticCancellationError();
     }
   }
+  const submittedAtMs = Date.now();
+  const deadlineAtMs = submittedAtMs + env.JOB_TIMEOUT;
     const job = await queue.add(
         Jobs.execute,
         {
@@ -454,9 +454,17 @@ async function runReplayIteration(
     removeOnComplete: { age: 60, count: 1 },
     removeOnFail: { age: 180, count: 1 },
     attempts: 1,
-    ...(cancellationTarget != null ? { jobId: cancellationTarget.jobId } : {}),
+    jobId: cancellationTarget.jobId,
+    timestamp: submittedAtMs,
         },
-    );
+    ).catch(async (error) => {
+      // Redis may have enqueued the job even though its reply was lost.
+      // Preserve replay ownership until cancellation is durable or the job's
+      // fixed worker deadline prevents a late admission from executing.
+      await fenceJobCancellation({ commands: connection, target: cancellationTarget,
+        ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS, deadlineAtMs });
+      throw error;
+    });
   jobsSubmitted.inc({ language });
 
   return waitForJobWithCancellation({
@@ -466,6 +474,7 @@ async function runReplayIteration(
     events,
     timeoutMs: JOB_COMPLETION_WAIT_TIMEOUT_MS,
     cancellationTtlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+    deadlineAtMs,
     signal,
   });
 }
@@ -1202,11 +1211,15 @@ router.post(
         return;
       }
       if (cancellation.target != null) {
-        await requestJobCancellation(
+        const accepted = await requestJobCancellation(
           connection,
           cancellation.target,
           PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
         );
+        if (!accepted) {
+          res.status(200).json({ status: 'already_completed' });
+          return;
+        }
         try {
           const queuedJob = await getExistingExecutionJob(
             cancellation.target.queueName,

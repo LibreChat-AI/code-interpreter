@@ -3197,6 +3197,30 @@ test('sandbox completion does not cancel an in-flight credential rotation', asyn
   );
 });
 
+test('settlement does not drain another lane credential renewal', async () => {
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1', workerId: 'vm-1', token: 'fixture',
+    incarnationId, sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: { statefulWorkspace: true, sandboxProfile: 'nsjail', runtimes: ['bash'] },
+    fetchImpl: async (input) => String(input).endsWith('/execute')
+      ? Response.json({ session_id: 'independent-lane', files: [] })
+      : Response.json({ protocolVersion: 1, accepted: true }),
+  });
+  // A different lane owns this pending renewal. The settling lane has no
+  // maintenance waiter and must not consume its own lease on that promise.
+  Object.assign(worker, { credentialInFlight: {
+    promise: new Promise<void>(() => {}), controller: new AbortController(), waiters: 1,
+  }, refreshCredential: async () => {} });
+  const startedAt = Date.now();
+  await worker.executeAndSettle({
+    protocolVersion: 1, assignmentId: 'independent-lane', workerId: 'vm-1',
+    incarnationId, generation: 5, leaseToken: 'independent-lane-lease-token',
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    request: { body: { language: 'bash' }, headers: {} },
+  });
+  assert.ok(Date.now() - startedAt < 500, 'unrelated renewal must not add a one-second drain');
+});
+
 test('reconnect delay uses bounded exponential jitter', () => {
   assert.equal(
     reconnectDelayMs(0, 1_000, 30_000, () => 0),

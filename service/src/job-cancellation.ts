@@ -141,7 +141,7 @@ export class JobCancellationRegistry {
       ...entries.map(({ target }) => cancellationKey(target)),
     );
     cancelled.forEach((value, index) => {
-      if (value != null) {
+      if (value === '1') {
         for (const controller of entries[index]?.controllers ?? []) {
           controller.abort(CLIENT_DISCONNECT_REASON);
         }
@@ -215,7 +215,7 @@ export class JobCancellationRegistry {
     this.controllers.set(key, entry);
     try {
       await this.start();
-      if (await this.commands.exists(cancellationKey(target))) {
+      if ((await this.commands.get(cancellationKey(target))) === '1') {
         controller.abort(CLIENT_DISCONNECT_REASON);
       }
     } catch (error) {
@@ -263,19 +263,110 @@ export async function requestJobCancellation(
   commands: IORedis,
   target: JobTarget,
   ttlSeconds: number,
-): Promise<void> {
-  const payload = JSON.stringify(target);
-  const transaction = commands.multi();
-  transaction.set(cancellationKey(target), '1', 'EX', Math.max(1, ttlSeconds));
-  transaction.publish(JOB_CANCELLATION_CHANNEL, payload);
-  const result = await transaction.exec();
-  if (result == null) {
-    throw new Error(
-      'Redis transaction aborted while cancelling queued execution',
-    );
+): Promise<boolean> {
+  // Cancellation and result publication have ONE durable winner. Pub/sub is
+  // only a notification; it must not decide whether Stop was accepted.
+  return (
+    (await commands.eval(
+      `
+    local state = redis.call('GET', KEYS[1])
+    if state and state ~= '1' then return 0 end
+    redis.call('SET', KEYS[1], '1', 'EX', ARGV[1])
+    redis.call('PUBLISH', ARGV[2], ARGV[3])
+    return 1
+  `,
+      1,
+      cancellationKey(target),
+      Math.max(1, ttlSeconds),
+      JOB_CANCELLATION_CHANNEL,
+      JSON.stringify(target),
+    )) === 1
+  );
+}
+
+/** Retain the actual result so a BullMQ retry after a lost completion reply
+ * cannot repeat sandbox mutations. Keep the status small: reconnect MGETs must
+ * never load every active job's output into each API/worker replica. */
+export async function commitJobResult<T>(
+  commands: IORedis,
+  target: JobTarget,
+  result: T,
+  ttlSeconds: number,
+): Promise<boolean> {
+  const serialized = JSON.stringify({ result });
+  if (Buffer.byteLength(serialized) > 16 * 1024 * 1024) {
+    throw new Error('Programmatic completion exceeds the 16 MiB result limit');
   }
-  const failure = result.find(([error]) => error != null)?.[0];
-  if (failure != null) throw failure;
+  return (
+    (await commands.eval(
+      `
+    local state = redis.call('GET', KEYS[1])
+    if state == '1' then return 0 end
+    if not state then
+      redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+      redis.call('SET', KEYS[1], 'completed', 'EX', ARGV[2])
+    end
+    return 1
+  `,
+      2,
+      cancellationKey(target),
+      `${cancellationKey(target)}:result`,
+      serialized,
+      Math.max(1, ttlSeconds),
+    )) === 1
+  );
+}
+
+export async function readCommittedJobResult<T>(
+  commands: IORedis,
+  target: JobTarget,
+): Promise<{ result: T } | undefined> {
+  const state = await commands.get(cancellationKey(target));
+  if (state !== 'completed') return undefined;
+  const value = await commands.get(`${cancellationKey(target)}:result`);
+  if (value == null)
+    throw new Error(
+      'Committed programmatic result expired; refusing re-execution',
+    );
+  return JSON.parse(value);
+}
+
+/** Do not release replay ownership on an ambiguous Redis failure. Keep one
+ * outstanding marker write, retry rejected writes with bounded backoff, and
+ * retain ownership until it succeeds or the job's ORIGINAL deadline expires.
+ * A delayed queue.add must carry that same timestamp into the worker. */
+export async function fenceJobCancellation(args: {
+  commands: IORedis;
+  target: JobTarget;
+  ttlSeconds: number;
+  deadlineAtMs: number;
+}): Promise<boolean> {
+  let retryMs = 25;
+  while (Date.now() < args.deadlineAtMs) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        requestJobCancellation(args.commands, args.target, args.ttlSeconds),
+        new Promise<boolean>(resolve => {
+          timer = setTimeout(
+            () => resolve(true),
+            Math.max(1, args.deadlineAtMs - Date.now()),
+          );
+        }),
+      ]);
+    } catch {
+      await new Promise<void>(resolve =>
+        setTimeout(
+          resolve,
+          Math.min(retryMs, Math.max(0, args.deadlineAtMs - Date.now())),
+        ),
+      );
+      retryMs = Math.min(1_000, retryMs * 2);
+    } finally {
+      if (timer != null) clearTimeout(timer);
+    }
+  }
+  return true;
 }
 
 const REMOVABLE_JOB_STATES = new Set([
@@ -338,6 +429,7 @@ export async function waitForJobWithCancellation<T>(args: {
   events: QueueEvents;
   timeoutMs: number;
   cancellationTtlSeconds: number;
+  deadlineAtMs?: number;
   signal?: AbortSignal;
 }): Promise<T> {
   const {
@@ -351,15 +443,20 @@ export async function waitForJobWithCancellation<T>(args: {
   } = args;
   const completion = job.waitUntilFinished(events, timeoutMs);
   const target = { queueName: job.queueName, jobId: String(job.id) };
+  const fence = (): Promise<boolean> =>
+    fenceJobCancellation({
+      commands,
+      target,
+      ttlSeconds: cancellationTtlSeconds,
+      deadlineAtMs: args.deadlineAtMs ?? Date.now() + timeoutMs,
+    });
   const externalController = new AbortController();
   try {
     await registry.register(target, externalController);
   } catch (error) {
     void completion.catch(() => undefined);
-    await Promise.allSettled([
-      requestJobCancellation(commands, target, cancellationTtlSeconds),
-      removeJobIfWaiting(job),
-    ]);
+    await fence();
+    await removeJobIfWaiting(job).catch(() => false);
     throw error;
   }
 
@@ -369,14 +466,16 @@ export async function waitForJobWithCancellation<T>(args: {
     const cancel = (): void => {
       if (cancelling) return;
       cancelling = true;
-      void requestJobCancellation(commands, target, cancellationTtlSeconds)
-        .then(async () => {
+      void fence()
+        .then(async accepted => {
+          if (!accepted) return;
           // Removing a waiting job immediately frees queue capacity. An active
           // job cannot be removed; its worker observes the durable marker or
           // pub/sub event and aborts the sandbox transport instead.
           await removeJobIfWaiting(job).catch(() => false);
+          reject(programmaticCancellationError());
         })
-        .then(() => reject(programmaticCancellationError()), reject);
+        .catch(reject);
     };
     if (signal != null) {
       removeAbortListener = (): void =>
@@ -403,6 +502,11 @@ export async function waitForJobWithCancellation<T>(args: {
   void completion.catch(() => undefined);
   try {
     return await Promise.race([completion, disconnected, cancelled]);
+  } catch (error) {
+    // Includes waitUntilFinished timeouts and registration/transport errors,
+    // not only explicit Stop. Replay cleanup is unsafe until this barrier.
+    await fence();
+    throw error;
   } finally {
     removeAbortListener();
     await registry
