@@ -37,6 +37,7 @@ interface WalkerInternals {
   files: TFile[];
   reusePrimedInput: (file: TFile) => Promise<boolean>;
   writeFile: (file: TFile) => Promise<void>;
+  computeFileHash: (filePath: string, noFollow?: boolean) => Promise<string>;
   walkDir: (dir: string, depth: number, inputByName: Map<string, TFile>) => Promise<'collected' | 'empty' | 'skipped'>;
   handleSessionFiles: () => Promise<void>;
 }
@@ -812,9 +813,22 @@ describe('walkDir / depth cap', () => {
       reasons: { depth: 1 },
       skipped_count: 1,
     });
-    expect(internals.artifactTruncation?.skipped[0]).toBe(
-      deepName.split(path.sep).slice(0, config.max_nesting_depth).join(path.sep),
-    );
+    expect(internals.artifactTruncation?.skipped[0]).toBe(deepName);
+  });
+
+  it('does not report a depth cap when the skipped subtree has only unsupported files', async () => {
+    let cursor = tmpDir;
+    for (let i = 0; i < config.max_nesting_depth; i++) {
+      cursor = path.join(cursor, `d${i}`);
+      await fsp.mkdir(cursor);
+    }
+    await fsp.writeFile(path.join(cursor, 'cache.bin'), 'ignored');
+    const internals = asInternals(makeJob());
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toBeUndefined();
   });
 });
 
@@ -919,6 +933,68 @@ describe('walkDir / artifact truncation details', () => {
     await internals.walkDir(tmpDir, 0, new Map());
 
     expect(internals.artifactTruncation).toBeUndefined();
+  });
+
+  it('reports a capped empty-directory marker', async () => {
+    const job = makeJob();
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+    internals.generatedFiles = Array.from({ length: config.max_output_files }, (_, i) => ({
+      id: `id-${i}`,
+      name: `file-${i}.txt`,
+      path: path.join(tmpDir, `file-${i}.txt`),
+    }));
+    await fsp.mkdir(path.join(tmpDir, 'empty'));
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.artifactTruncation).toEqual({
+      code: 'artifact_truncated',
+      reasons: { max_files: 1 },
+      skipped: [path.join('empty', DIRKEEP)],
+      skipped_count: 1,
+    });
+  });
+
+  it('does not hash ordinary oversized files in session mode', async () => {
+    await fsp.writeFile(path.join(tmpDir, 'large.txt'), 'too large');
+    const session = new SessionWorkspace({ runtimeSessionId: 'rt_large' });
+    const internals = asInternals(makeJob({ maxFileSize: 3, session }));
+    internals.submissionDir = tmpDir;
+    let hashCalls = 0;
+    internals.computeFileHash = async () => {
+      hashCalls++;
+      return sha256('too large');
+    };
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(hashCalls).toBe(0);
+    expect(internals.artifactTruncation?.reasons).toEqual({ size: 1 });
+  });
+
+  it('keeps scanning for generated outputs when only inherited refs are capped', async () => {
+    await fsp.mkdir(path.join(tmpDir, 'a-ignored'));
+    await fsp.writeFile(path.join(tmpDir, 'a-ignored', 'cache.bin'), 'ignored');
+    await fsp.writeFile(path.join(tmpDir, 'z-generated.txt'), 'new');
+    const internals = asInternals(makeJob());
+    internals.submissionDir = tmpDir;
+    internals.inheritedRefs = Array.from({ length: config.max_output_files }, (_, i) => ({
+      id: `id-${i}`,
+      name: `inherited-${i}.txt`,
+      storage_session_id: 'previous',
+      inherited: true,
+    }));
+    internals.artifactTruncation = {
+      code: 'artifact_truncated',
+      reasons: { max_files: 1 },
+      skipped: ['another-inherited.txt'],
+      skipped_count: 1,
+    };
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    expect(internals.generatedFiles.map(file => file.name)).toContain('z-generated.txt');
   });
 });
 

@@ -60,6 +60,7 @@ export {
 
 const AUTO_LOAD_DIRKEEP_TIMEOUT_MS = 10000;
 const AUTO_LOAD_DIRKEEP_RETRIES = 2;
+const PTC_HISTORY_FILENAME = '_ptc_history.json';
 
 /** Replaying the same sealed grant cannot repair an authorization denial. */
 class InputAuthorizationError extends Error {
@@ -2051,14 +2052,35 @@ export class Job {
       this.recordArtifactTruncation('unreadable', relativePath);
       return { collected: false, truncated: false, stopLoop: false };
     }
+
+    const inputFileInfo = this.inputFileHashes.get(relativePath);
+    const existingFile = inputByName.get(relativePath);
+    if (size > this.runtime.max_file_size) {
+      /* Only an inline entrypoint needs hashing to decide whether this is
+       * intentional request-input suppression. Every other oversized file
+       * is rejected immediately, preserving the scan's bounded I/O cost. */
+      if (!inputFileInfo || existingFile?.id != null || relativePath !== this.entryPointName) {
+        this.recordArtifactTruncation('size', relativePath);
+        return { collected: false, truncated: false, stopLoop: false };
+      }
+      try {
+        const currentHash = await this.computeFileHash(fullPath, true);
+        if (currentHash === inputFileInfo.hash) {
+          return { collected: true, truncated: false, stopLoop: false };
+        }
+      } catch (err) {
+        this.log.debug({ path: relativePath, err }, 'walkDir: failed to hash oversized entrypoint');
+      }
+      this.recordArtifactTruncation('size', relativePath);
+      return { collected: false, truncated: false, stopLoop: false };
+    }
+
     /* Session mode output diffing + input-modification detection. Hash by
      * CONTENT (not size+mtime): a program can rewrite a surfaced output with
      * different bytes while preserving size+mtime (os.utime / touch -r), which a
      * stat-only signature would wrongly suppress. Compute once per session/input
      * file and reuse for the suppression check, wasModified, and the surfaced
      * mark; non-session jobs still only hash their inputs. */
-    const inputFileInfo = this.inputFileHashes.get(relativePath);
-    const existingFile = inputByName.get(relativePath);
     let contentHash: string | undefined;
     if (inputFileInfo != null || this.session != null) {
       try {
@@ -2109,11 +2131,6 @@ export class Job {
       return { collected: true, truncated: false, stopLoop: false };
     }
 
-    if (size > this.runtime.max_file_size) {
-      this.recordArtifactTruncation('size', relativePath);
-      return { collected: false, truncated: false, stopLoop: false };
-    }
-
     const echoed = this.tryEchoUnchangedInput({
       wasModified,
       inputFileInfo,
@@ -2162,8 +2179,59 @@ export class Job {
     const childStatus = await this.walkDir(fullPath, parentDepth + 1, inputByName);
     if (childStatus === 'collected') return { collected: true, truncated: false };
     if (childStatus === 'skipped') return { collected: false, truncated: true };
-    if (this.isOutputCapFull()) return { collected: false, truncated: true };
     return this.handleEmptyDirectory(relativePath, fullPath, inputByName);
+  }
+
+  /** Finds the first artifact that a depth cap would hide without reading file
+   * contents. Files below this boundary cannot be valid primed inputs, and
+   * symlinks/unsupported files/hidden runtime directories remain intentional
+   * exclusions. An empty directory represents a reportable `.dirkeep`. */
+  private async findDepthTruncatedArtifact(
+    dir: string,
+    inputByName: Map<string, TFile>,
+  ): Promise<string | undefined> {
+    let entries: fs.Dirent[];
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      const relativeDir = path.relative(this.submissionDir, dir) || '.';
+      this.log.debug({ dir, err }, 'walkDir: unable to inspect depth-capped directory');
+      this.recordArtifactTruncation('unreadable', relativeDir);
+      return undefined;
+    }
+
+    const visibleEntries = entries.filter(entry => entry.name !== PTC_HISTORY_FILENAME);
+    if (visibleEntries.length === 0) {
+      return path.join(path.relative(this.submissionDir, dir), DIRKEEP);
+    }
+
+    let sawVisibleNonHiddenEntry = false;
+    for (const entry of visibleEntries) {
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = path.relative(this.submissionDir, fullPath);
+      const kind = await this.classifyDirent(entry, fullPath, relativePath);
+      if (kind === 'skip') {
+        /* Ordinary walking counts symlinks/special entries as non-empty even
+         * though it does not surface them, so the depth probe must not invent
+         * a parent .dirkeep for that shape. */
+        sawVisibleNonHiddenEntry = true;
+        continue;
+      }
+      if (kind === 'file') {
+        sawVisibleNonHiddenEntry = true;
+        if (entry.name === DIRKEEP || isSupportedOutputFilename(entry.name)) return relativePath;
+        continue;
+      }
+      if (kind === 'dir') {
+        if (isHiddenDirectory(entry.name) && !inputsLiveUnder(inputByName, relativePath)) continue;
+        sawVisibleNonHiddenEntry = true;
+        const nested = await this.findDepthTruncatedArtifact(fullPath, inputByName);
+        if (nested) return nested;
+      }
+    }
+    return sawVisibleNonHiddenEntry
+      ? undefined
+      : path.join(path.relative(this.submissionDir, dir), DIRKEEP);
   }
 
   /**
@@ -2179,7 +2247,8 @@ export class Job {
   ): Promise<'collected' | 'empty' | 'skipped'> {
     const relativeDir = path.relative(this.submissionDir, dir) || '.';
     if (depth >= config.max_nesting_depth) {
-      this.recordArtifactTruncation('depth', relativeDir);
+      const skippedPath = await this.findDepthTruncatedArtifact(dir, inputByName);
+      if (skippedPath) this.recordArtifactTruncation('depth', skippedPath);
       return 'skipped';
     }
     let entries: fs.Dirent[];
@@ -2206,7 +2275,6 @@ export class Job {
      * separate npm packages so we can't import directly; the filename literal
      * is asserted-equal in `service/scripts/test-ptc-sentinel.ts` to catch
      * accidental drift in CI. */
-    const PTC_HISTORY_FILENAME = '_ptc_history.json';
     const isPtcReserved = (name: string): boolean => name === PTC_HISTORY_FILENAME;
 
     const nonDirkeepCount = entries.reduce(
@@ -2249,7 +2317,7 @@ export class Job {
         const res = await this.walkSubdirectory(relativePath, fullPath, depth, inputByName);
         if (res.collected) hasCollectedChild = true;
         if (res.truncated) truncated = true;
-        if (this.artifactTruncation?.reasons.max_files) break;
+        if (this.isOutputCapFull() && this.artifactTruncation?.reasons.max_files) break;
         continue;
       }
 
