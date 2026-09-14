@@ -6,6 +6,7 @@ import {
   CLIENT_DISCONNECT_REASON,
   JobCancellationRegistry,
   jobCancellationInternals,
+  removeJobIfWaiting,
   requestJobCancellation,
   waitForJobWithCancellation,
 } from './job-cancellation';
@@ -13,8 +14,13 @@ import {
 class FakeSubscriber extends EventEmitter {
   subscribed?: string;
   closed = false;
+  subscribeFailures = 0;
 
   async subscribe(channel: string): Promise<number> {
+    if (this.subscribeFailures > 0) {
+      this.subscribeFailures -= 1;
+      throw new Error('subscriber unavailable');
+    }
     this.subscribed = channel;
     return 1;
   }
@@ -22,6 +28,10 @@ class FakeSubscriber extends EventEmitter {
   async quit(): Promise<'OK'> {
     this.closed = true;
     return 'OK';
+  }
+
+  disconnect(): void {
+    this.closed = true;
   }
 }
 
@@ -45,11 +55,13 @@ class FakeTransaction {
 
 class FakeRedis {
   readonly subscriber = new FakeSubscriber();
+  duplicateCalls = 0;
   readonly existing = new Set<string>();
   readonly deleted: string[] = [];
   readonly transactions: FakeTransaction[] = [];
 
   duplicate(): FakeSubscriber {
+    this.duplicateCalls += 1;
     return this.subscriber;
   }
 
@@ -77,6 +89,35 @@ class FakeRedis {
 function redis(fake: FakeRedis): IORedis {
   return fake as unknown as IORedis;
 }
+
+test('idle registries allocate no subscriber connection', async () => {
+  const fake = new FakeRedis();
+  const registry = new JobCancellationRegistry(redis(fake));
+
+  await registry.close();
+
+  expect(fake.duplicateCalls).toBe(0);
+});
+
+test('failed subscription startup removes handlers before a bounded retry', async () => {
+  const fake = new FakeRedis();
+  fake.subscriber.subscribeFailures = 1;
+  const registry = new JobCancellationRegistry(redis(fake));
+  const first = new AbortController();
+
+  await expect(
+    registry.register({ queueName: 'other', jobId: 'job-failed-start' }, first),
+  ).rejects.toThrow('subscriber unavailable');
+  expect(fake.subscriber.listenerCount('message')).toBe(0);
+  expect(fake.subscriber.listenerCount('ready')).toBe(0);
+  expect(fake.subscriber.listenerCount('error')).toBe(0);
+
+  const second = new AbortController();
+  await registry.register({ queueName: 'other', jobId: 'job-retry' }, second);
+  expect(fake.duplicateCalls).toBe(2);
+  expect(fake.subscriber.listenerCount('message')).toBe(1);
+  await registry.close();
+});
 
 test('registry catches durable cancellation before subscriber registration', async () => {
   const fake = new FakeRedis();
@@ -152,6 +193,7 @@ test('disconnect frees a waiting job and rejects promptly', async () => {
     id: 'job-4',
     queueName: 'other',
     waitUntilFinished: () => never,
+    getState: async () => 'waiting',
     remove: async () => {
       removed = true;
     },
@@ -176,4 +218,35 @@ test('disconnect frees a waiting job and rejects promptly', async () => {
     'EX',
     120,
   ]);
+});
+
+test('queued removal never removes an active job', async () => {
+  let removed = false;
+  const job = {
+    getState: async () => 'active' as const,
+    remove: async () => {
+      removed = true;
+    },
+  };
+
+  expect(await removeJobIfWaiting(job)).toBe(false);
+  expect(removed).toBe(false);
+});
+
+test('queued removal frees waiting capacity and tolerates an activation race', async () => {
+  let removals = 0;
+  expect(await removeJobIfWaiting({
+    getState: async () => 'waiting',
+    remove: async () => {
+      removals += 1;
+    },
+  })).toBe(true);
+  expect(await removeJobIfWaiting({
+    getState: async () => 'waiting',
+    remove: async () => {
+      removals += 1;
+      throw new Error('job is active');
+    },
+  })).toBe(false);
+  expect(removals).toBe(2);
 });

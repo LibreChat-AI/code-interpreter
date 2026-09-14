@@ -80,6 +80,24 @@ test('cancellation after attachment returns the exact queue target', async () =>
   });
 });
 
+test('overlapping requests from the same owner cannot share cancellation state', async () => {
+  const requestId = 'request_duplicate_owner_1';
+  const owner = 'owner-a';
+  expect(await reserveProgrammaticCancellation({
+    redis,
+    requestId,
+    owner,
+    ttlSeconds: 60,
+  })).toBe('active');
+
+  expect(await reserveProgrammaticCancellation({
+    redis,
+    requestId,
+    owner,
+    ttlSeconds: 60,
+  })).toBe('duplicate');
+});
+
 test('a different principal cannot reserve, attach, cancel, or release a request', async () => {
   const requestId = 'request_owned_cancel_123';
   await reserveProgrammaticCancellation({

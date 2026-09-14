@@ -10,10 +10,12 @@ import {
   pyQueueEvents,
   connection,
   getExecutionQueueBinding,
+  getExistingExecutionJob,
 } from '../queue';
 import {
-  CLIENT_DISCONNECT_REASON,
   JOB_CANCELLED_MESSAGE,
+  programmaticCancellationError,
+  removeJobIfWaiting,
   requestJobCancellation,
   waitForJobWithCancellation,
 } from '../job-cancellation';
@@ -53,6 +55,7 @@ import { Jobs } from '../enum';
 import { env, jobCompletionWaitTimeoutMs } from '../config';
 import { resolveQueuedSandboxBackend } from '../execution-profile';
 import { publicExecutionFailure } from '../utils';
+import { observeRequestDisconnect } from '../request-disconnect';
 import {
   normalizeEgressGatewayUrl,
   normalizeProgrammaticTimeoutMs,
@@ -124,6 +127,16 @@ const JOB_COMPLETION_WAIT_TIMEOUT_MS = jobCompletionWaitTimeoutMs(
 );
 const PROGRAMMATIC_CANCELLATION_TTL_SECONDS =
   Math.ceil(JOB_COMPLETION_WAIT_TIMEOUT_MS / 1000) + 60;
+
+interface ReplayRequestCancellation {
+  signal: AbortSignal;
+  isDisconnected(): boolean;
+  request?: {
+    requestId: string;
+    owner: string;
+    cancelledBeforeStart: boolean;
+  };
+}
 
 const router = Router();
 
@@ -342,6 +355,7 @@ async function runReplayIteration(
   signal?: AbortSignal,
   cancellation?: { requestId: string; owner: string },
 ): Promise<t.ExecuteResult> {
+  if (signal?.aborted) throw programmaticCancellationError();
   const history = await loadToolHistory(state.execution_id);
   const rawPayload = buildReplayPayload(req, state, history);
   const sessionKey = state.sessionKey ?? state.userId;
@@ -388,6 +402,7 @@ async function runReplayIteration(
     state.executionProfile ?? env.EXECUTION_PROFILE,
     state.executionProfileSource ?? env.EXECUTION_PROFILE_SOURCE,
   );
+  if (signal?.aborted) throw programmaticCancellationError();
     const job = await queue.add(
         Jobs.execute,
         {
@@ -425,6 +440,7 @@ async function runReplayIteration(
 
   if (cancellation != null) {
     const target = { queueName: job.queueName, jobId: String(job.id) };
+    let cancellationPublished = false;
     try {
       const attachment = await attachProgrammaticCancellationTarget({
         redis: connection,
@@ -442,13 +458,18 @@ async function runReplayIteration(
           target,
           PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
         );
+        cancellationPublished = true;
+        await removeJobIfWaiting(job).catch(() => false);
+        throw programmaticCancellationError();
       }
     } catch (error) {
-      await requestJobCancellation(
-        connection,
-        target,
-        PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
-      ).catch(() => undefined);
+      if (!cancellationPublished) {
+        await requestJobCancellation(
+          connection,
+          target,
+          PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+        ).catch(() => undefined);
+      }
       throw error;
     }
   }
@@ -482,6 +503,7 @@ async function handleReplayInitial(
     bridgeWorkerId?: string;
     workspaceId?: string;
   },
+  cancellation: ReplayRequestCancellation,
 ): Promise<void> {
   const { apiKeyId, userId, bridgeWorkerId, workspaceId } = params;
     const { code, tools, user_id, files } =
@@ -600,6 +622,19 @@ async function handleReplayInitial(
     throw error;
   }
 
+  if (
+    cancellation.signal.aborted ||
+    cancellation.request?.cancelledBeforeStart === true
+  ) {
+    if (!cancellation.isDisconnected()) {
+      res.status(200).json({
+        status: 'error',
+        error: 'Programmatic execution request cancelled',
+      });
+    }
+    return;
+  }
+
   const session_id = nanoid();
   const execution_id = nanoid();
   const authContext = req.codeApiAuthContext;
@@ -679,7 +714,7 @@ async function handleReplayInitial(
     timeout,
   });
 
-  await runAndRespond(req, res, state, apiKeyId, userId);
+  await runAndRespond(req, res, state, apiKeyId, userId, cancellation);
 }
 
 async function handleReplayContinuation(
@@ -691,6 +726,7 @@ async function handleReplayContinuation(
     decoded: { execution_id: string };
     tool_results: NonNullable<t.ProgrammaticRequestBody['tool_results']>;
   },
+  cancellation: ReplayRequestCancellation,
 ): Promise<void> {
   const { apiKeyId, userId, decoded, tool_results } = params;
 
@@ -747,6 +783,20 @@ async function handleReplayContinuation(
 
     if (!state) {
       res.status(404).json({ error: 'Execution not found or expired' });
+      return;
+    }
+    if (
+      cancellation.signal.aborted ||
+      cancellation.request?.cancelledBeforeStart === true
+    ) {
+      await cleanupExecution(state.execution_id, 'replay');
+      if (!cancellation.isDisconnected()) {
+        res.status(200).json({
+          status: 'error',
+          error: 'Programmatic execution request cancelled',
+          session_id: state.session_id,
+        });
+      }
       return;
     }
     /** Compute the delta against already-persisted history first so the
@@ -902,7 +952,14 @@ async function handleReplayContinuation(
       });
     }
 
-    await runAndRespond(req, res, state, apiKeyId, userId);
+    await runAndRespond(
+      req,
+      res,
+      state,
+      apiKeyId,
+      userId,
+      cancellation,
+    );
   } finally {
     await releaseExecutionLock(decoded.execution_id, lockToken);
   }
@@ -914,42 +971,8 @@ async function runAndRespond(
   state: ExecutionState,
   apiKeyId: string,
   userId: string,
+  cancellation: ReplayRequestCancellation,
 ): Promise<void> {
-  const rawRequestId = req.header(CODEAPI_PROGRAMMATIC_REQUEST_HEADER);
-  const requestId = normalizeProgrammaticRequestId(rawRequestId);
-  const cancellationOwner =
-    requestId != null ? programmaticCancellationOwner(req, userId) : undefined;
-  if (requestId != null && cancellationOwner != null) {
-    const reservation = await reserveProgrammaticCancellation({
-      redis: connection,
-      requestId,
-      owner: cancellationOwner,
-      ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
-    });
-    if (reservation === 'forbidden') {
-      res.status(409).json({ error: 'Programmatic request ID is already in use' });
-      return;
-    }
-  }
-  const disconnectController = new AbortController();
-  const disconnect = (): void => {
-    if (!res.writableFinished) {
-      disconnectController.abort(CLIENT_DISCONNECT_REASON);
-      disposeDisconnectListeners();
-    }
-  };
-  const disposeDisconnectListeners = (): void => {
-    req.removeListener('aborted', disconnect);
-    req.removeListener('close', disconnect);
-    res.removeListener('close', disconnect);
-    res.removeListener('finish', disposeDisconnectListeners);
-  };
-  req.once('aborted', disconnect);
-  req.once('close', disconnect);
-  res.once('close', disconnect);
-  res.once('finish', disposeDisconnectListeners);
-  const isDisconnected = (): boolean => disconnectController.signal.aborted;
-
   let result: t.ExecuteResult;
   try {
     result = await runReplayIteration(
@@ -957,10 +980,8 @@ async function runAndRespond(
       state,
       apiKeyId,
       userId,
-      disconnectController.signal,
-      requestId != null && cancellationOwner != null
-        ? { requestId, owner: cancellationOwner }
-        : undefined,
+      cancellation.signal,
+      cancellation.request,
     );
   } catch (err) {
     const cancelled =
@@ -972,7 +993,7 @@ async function runAndRespond(
       err,
     });
     await cleanupExecution(state.execution_id, 'replay');
-    if (!isDisconnected()) {
+    if (!cancellation.isDisconnected()) {
       const publicFailure = publicExecutionFailure(err);
             const message =
                 publicFailure?.body.message ?? (err as Error).message;
@@ -983,22 +1004,9 @@ async function runAndRespond(
       });
     }
     return;
-  } finally {
-    if (requestId != null && cancellationOwner != null) {
-      await releaseProgrammaticCancellation({
-        redis: connection,
-        requestId,
-        owner: cancellationOwner,
-      }).catch(error => {
-        logger.warn('Failed to release programmatic cancellation request', {
-          requestId,
-          error: (error as Error).message,
-        });
-      });
-    }
   }
 
-  if (isDisconnected()) {
+  if (cancellation.isDisconnected()) {
     logger.info('Client disconnected during replay; cleaning up', {
       execution_id: state.execution_id,
     });
@@ -1108,7 +1116,7 @@ async function runAndRespond(
             await cleanupExecution(state.execution_id, 'replay').catch(
                 () => {},
             );
-      if (!isDisconnected()) {
+      if (!cancellation.isDisconnected()) {
         if (err instanceof ExecutionStateTooLargeError) {
           /** A continuation that pushes `emittedCallIds` past the
            * `MAX_EXECUTION_STATE_BYTES` cap is a client-input sizing
@@ -1213,6 +1221,20 @@ router.post(
           cancellation.target,
           PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
         );
+        try {
+          const queuedJob = await getExistingExecutionJob(
+            cancellation.target.queueName,
+            cancellation.target.jobId,
+          );
+          if (queuedJob != null) await removeJobIfWaiting(queuedJob);
+        } catch (error) {
+            logger.warn('Failed to remove cancelled waiting execution', {
+              requestId,
+              queueName: cancellation.target?.queueName,
+              jobId: cancellation.target?.jobId,
+              error: (error as Error).message,
+            });
+        }
       }
       res.status(202).json({ status: 'cancellation_requested' });
     } catch (error) {
@@ -1245,7 +1267,8 @@ router.post(
             req.body as t.ProgrammaticRequestBody;
   const rawBody = req.body as Record<string, unknown>;
   const rawRequestId = req.header(CODEAPI_PROGRAMMATIC_REQUEST_HEADER);
-  if (rawRequestId != null && normalizeProgrammaticRequestId(rawRequestId) == null) {
+  const requestId = normalizeProgrammaticRequestId(rawRequestId);
+  if (rawRequestId != null && requestId == null) {
     return res.status(400).json({ error: 'Invalid programmatic request ID' });
   }
   const requestedLanguage: unknown = rawBody.language ?? rawBody.lang;
@@ -1304,7 +1327,51 @@ router.post(
     });
   }
 
+  const disconnectObserver = observeRequestDisconnect(req, res);
+
+  const cancellation: ReplayRequestCancellation = {
+    signal: disconnectObserver.signal,
+    isDisconnected: disconnectObserver.isDisconnected,
+  };
+  let reservedCancellation: { requestId: string; owner: string } | undefined;
+
   try {
+    if (requestId != null) {
+      const owner = programmaticCancellationOwner(req, userId);
+      let reservation: Awaited<ReturnType<typeof reserveProgrammaticCancellation>>;
+      try {
+        reservation = await reserveProgrammaticCancellation({
+          redis: connection,
+          requestId,
+          owner,
+          ttlSeconds: PROGRAMMATIC_CANCELLATION_TTL_SECONDS,
+        });
+      } catch (error) {
+        logger.error('Failed to reserve programmatic cancellation request', {
+          requestId,
+          error: (error as Error).message,
+        });
+        if (!cancellation.isDisconnected()) {
+          return res.status(503).json({ error: 'Cancellation service unavailable' });
+        }
+        return;
+      }
+      if (reservation === 'forbidden' || reservation === 'duplicate') {
+        if (!cancellation.isDisconnected()) {
+          return res.status(409).json({
+            error: 'Programmatic request ID is already in use',
+          });
+        }
+        return;
+      }
+      reservedCancellation = { requestId, owner };
+      cancellation.request = {
+        requestId,
+        owner,
+        cancelledBeforeStart: reservation === 'cancelled',
+      };
+    }
+
     /** For continuations, peek at the stored execution to route by the
      * mode it was started in rather than the current process default.
      * Without this, a replay-mode execution resumed via an instance
@@ -1337,7 +1404,7 @@ router.post(
           userId,
           decoded,
           tool_results,
-        });
+        }, cancellation);
       }
       return await handleBlocking(req, res, { apiKeyId, userId });
     }
@@ -1356,7 +1423,7 @@ router.post(
         userId,
         bridgeWorkerId,
         workspaceId,
-      });
+      }, cancellation);
     }
     if (workspaceId != null) {
       return res.status(400).json({
@@ -1374,6 +1441,20 @@ router.post(
       return res.status(500).json({ error: 'Internal server error' });
     }
     return;
+  } finally {
+    disconnectObserver.dispose();
+    if (reservedCancellation != null) {
+      await releaseProgrammaticCancellation({
+        redis: connection,
+        requestId: reservedCancellation.requestId,
+        owner: reservedCancellation.owner,
+      }).catch(error => {
+        logger.warn('Failed to release programmatic cancellation request', {
+          requestId: reservedCancellation?.requestId,
+          error: (error as Error).message,
+        });
+      });
+    }
   }
     },
 );

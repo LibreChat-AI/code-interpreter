@@ -48,9 +48,11 @@ local owner = ARGV[1]
 local ttl = tonumber(ARGV[2])
 local existing = redis.call('HGET', key, 'owner')
 if existing and existing ~= owner then return -1 end
+if redis.call('HGET', key, 'reserved') == '1' then return -2 end
 if not existing then
   redis.call('HSET', key, 'owner', owner, 'cancelled', '0')
 end
+redis.call('HSET', key, 'reserved', '1')
 redis.call('EXPIRE', key, ttl)
 return tonumber(redis.call('HGET', key, 'cancelled') or '0')
 `;
@@ -94,7 +96,7 @@ export async function reserveProgrammaticCancellation(args: {
   requestId: string;
   owner: string;
   ttlSeconds: number;
-}): Promise<'active' | 'cancelled' | 'forbidden'> {
+}): Promise<'active' | 'cancelled' | 'duplicate' | 'forbidden'> {
   const result = Number(await args.redis.eval(
     RESERVE_SCRIPT,
     1,
@@ -102,7 +104,8 @@ export async function reserveProgrammaticCancellation(args: {
     args.owner,
     Math.max(1, args.ttlSeconds),
   ));
-  if (result < 0) return 'forbidden';
+  if (result === -1) return 'forbidden';
+  if (result === -2) return 'duplicate';
   return result === 1 ? 'cancelled' : 'active';
 }
 

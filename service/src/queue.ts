@@ -1,6 +1,7 @@
 // src/queue.ts
 import IORedis from 'ioredis';
 import { Queue, QueueEvents } from 'bullmq';
+import type { Job } from 'bullmq';
 import { setMaxListeners } from 'events';
 import type { CommonRedisOptions } from 'ioredis';
 import type * as tls from 'tls';
@@ -110,6 +111,19 @@ export function getExecutionQueueBinding(
     backend,
   );
   return { ...getQueueResources(name), language };
+}
+
+/**
+ * Resolve a job only from this deployment's already-open queue set. Every
+ * homogeneous API replica opens both execution queues at startup, so this
+ * supports cross-replica cancellation without allocating attacker-shaped
+ * QueueEvents connections for arbitrary names recovered from Redis.
+ */
+export async function getExistingExecutionJob(
+  queueName: string,
+  jobId: string,
+): Promise<Job<t.JobData, t.JobResult, Jobs.execute> | undefined> {
+  return queueResources.get(queueName)?.queue.getJob(jobId);
 }
 
 const { queue: pyQueue, events: pyQueueEvents } = getQueueResources(queueNames.python);

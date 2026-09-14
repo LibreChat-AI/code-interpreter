@@ -47,22 +47,38 @@ function parseTarget(raw: string): JobTarget | undefined {
  * this path, so ordinary queue traffic pays no extra Redis round trips.
  */
 export class JobCancellationRegistry {
-  private readonly subscriber: IORedis;
+  private subscriber?: IORedis;
   private readonly controllers = new Map<
     string,
     { target: JobTarget; controller: AbortController }
   >();
   private startPromise?: Promise<void>;
+  private closed = false;
 
-  constructor(private readonly commands: IORedis) {
-    this.subscriber = commands.duplicate();
-    this.subscriber.on('error', () => {
+  constructor(private readonly commands: IORedis) {}
+
+  private readonly onSubscriberError = (): void => {
       // ioredis reconnects using the shared policy. The listener prevents a
       // transient subscriber outage from becoming an uncaught process error.
-    });
-    this.subscriber.on('ready', () => {
-      void this.reconcile().catch(() => undefined);
-    });
+  };
+
+  private readonly onSubscriberReady = (): void => {
+    void this.reconcile().catch(() => undefined);
+  };
+
+  private readonly onSubscriberMessage = (channel: string, raw: string): void => {
+    if (channel !== JOB_CANCELLATION_CHANNEL) return;
+    const target = parseTarget(raw);
+    if (target == null) return;
+    this.controllers
+      .get(targetKey(target))
+      ?.controller.abort(CLIENT_DISCONNECT_REASON);
+  };
+
+  private detachSubscriber(subscriber: IORedis): void {
+    subscriber.removeListener('error', this.onSubscriberError);
+    subscriber.removeListener('ready', this.onSubscriberReady);
+    subscriber.removeListener('message', this.onSubscriberMessage);
   }
 
   private async reconcile(): Promise<void> {
@@ -79,23 +95,30 @@ export class JobCancellationRegistry {
   }
 
   private start(): Promise<void> {
+    if (this.closed) {
+      return Promise.reject(new Error('Job cancellation registry is closed'));
+    }
     if (this.startPromise != null) return this.startPromise;
-    const starting = (async () => {
-      this.subscriber.on('message', (channel, raw) => {
-        if (channel !== JOB_CANCELLATION_CHANNEL) return;
-        const target = parseTarget(raw);
-        if (target == null) return;
-        this.controllers
-          .get(targetKey(target))
-          ?.controller.abort(CLIENT_DISCONNECT_REASON);
-      });
-      await this.subscriber.subscribe(JOB_CANCELLATION_CHANNEL);
+    const starting = (async (): Promise<void> => {
+      const subscriber = this.commands.duplicate();
+      this.subscriber = subscriber;
+      subscriber.on('error', this.onSubscriberError);
+      subscriber.on('ready', this.onSubscriberReady);
+      subscriber.on('message', this.onSubscriberMessage);
+      try {
+        await subscriber.subscribe(JOB_CANCELLATION_CHANNEL);
+      } catch (error) {
+        this.detachSubscriber(subscriber);
+        if (this.subscriber === subscriber) this.subscriber = undefined;
+        subscriber.disconnect(false);
+        throw error;
+      }
     })();
-    this.startPromise = starting.catch(error => {
-      this.startPromise = undefined;
-      throw error;
+    this.startPromise = starting;
+    void starting.catch(() => {
+      if (this.startPromise === starting) this.startPromise = undefined;
     });
-    return this.startPromise;
+    return starting;
   }
 
   async register(target: JobTarget, controller: AbortController): Promise<void> {
@@ -117,9 +140,15 @@ export class JobCancellationRegistry {
   }
 
   async close(): Promise<void> {
-    if (this.startPromise == null) return;
+    this.closed = true;
     this.controllers.clear();
-    await this.subscriber.quit();
+    await this.startPromise?.catch(() => undefined);
+    const subscriber = this.subscriber;
+    this.subscriber = undefined;
+    this.startPromise = undefined;
+    if (subscriber == null) return;
+    this.detachSubscriber(subscriber);
+    await subscriber.quit();
   }
 }
 
@@ -140,7 +169,29 @@ export async function requestJobCancellation(
   if (failure != null) throw failure;
 }
 
-function abortError(): Error {
+const REMOVABLE_JOB_STATES = new Set([
+  'waiting',
+  'delayed',
+  'prioritized',
+  'waiting-children',
+]);
+
+/** Frees queued capacity without ever removing an active or settled job. */
+export async function removeJobIfWaiting(
+  job: Pick<Job, 'getState' | 'remove'>,
+): Promise<boolean> {
+  if (!REMOVABLE_JOB_STATES.has(await job.getState())) return false;
+  try {
+    await job.remove();
+    return true;
+  } catch {
+    // A worker may have activated the job between getState() and remove().
+    // The durable marker remains authoritative for that race.
+    return false;
+  }
+}
+
+export function programmaticCancellationError(): Error {
   return new DOMException('Programmatic execution request disconnected', 'AbortError');
 }
 
@@ -168,9 +219,9 @@ export async function waitForJobWithCancellation<T>(args: {
           // Removing a waiting job immediately frees queue capacity. An active
           // job cannot be removed; its worker observes the durable marker or
           // pub/sub event and aborts the sandbox transport instead.
-          await job.remove().catch(() => undefined);
+          await removeJobIfWaiting(job).catch(() => false);
         })
-        .then(() => reject(abortError()), reject);
+        .then(() => reject(programmaticCancellationError()), reject);
     };
     removeAbortListener = (): void => signal.removeEventListener('abort', cancel);
     signal.addEventListener('abort', cancel, { once: true });
