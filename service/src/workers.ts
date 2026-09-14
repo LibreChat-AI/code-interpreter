@@ -41,7 +41,7 @@ import {
   JOB_CANCELLED_MESSAGE,
   jobResultCommitFailure,
   commitJobResult,
-  readCommittedJobResult,
+  claimJobExecution,
   jobCancellationRetentionSeconds,
   throwIfJobAborted,
 } from './job-cancellation';
@@ -126,11 +126,15 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
     if (cancellationTarget != null) {
       await jobCancellationRegistry.register(cancellationTarget, controller);
       cancellationRegistered = true;
-      const committed = await readCommittedJobResult<t.ExecuteResult>(
+      const claim = await claimJobExecution<t.ExecuteResult>(
         connection,
         cancellationTarget,
+        jobCancellationRetentionSeconds(
+          env.JOB_TIMEOUT,
+          job.data.cancellationTtlSeconds,
+        ),
       );
-      if (committed != null) return committed.result;
+      if (claim.status === 'completed') return claim.result;
     }
     if (controller.signal.aborted) {
       throw new Error(`Job timed out after ${env.JOB_TIMEOUT}ms`);
@@ -236,7 +240,9 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
           ),
           deadlineAtMs,
         );
-        if (!committed) throw new Error(JOB_CANCELLED_MESSAGE);
+        if (committed === 'cancelled') throw new Error(JOB_CANCELLED_MESSAGE);
+        if (committed === 'already_completed')
+          throw new Error('Duplicate mutation handoff; quarantining workspace');
         resultToCommit = mapped;
         resultCommittedAtHandoff = true;
       }
@@ -428,8 +434,12 @@ async function processJobInner(job: t.ExecuteJob): Promise<t.ExecuteResult> {
           ),
           deadlineAtMs,
         );
-        if (!committed) {
+        if (committed === 'cancelled') {
           lateCommitFailure = new Error(JOB_CANCELLED_MESSAGE);
+        } else if (committed === 'already_completed') {
+          lateCommitFailure = new Error(
+            'Duplicate result handoff; refusing replacement',
+          );
         }
       } catch (error) {
         lateCommitFailure =

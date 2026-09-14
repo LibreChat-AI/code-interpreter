@@ -10,6 +10,7 @@ import {
   fenceJobCancellation,
   waitForJobWithCancellation,
   jobCancellationRetentionSeconds,
+  claimJobExecution,
 } from './job-cancellation';
 
 let redis: Awaited<ReturnType<typeof startTestRedis>>;
@@ -21,8 +22,8 @@ afterEach(async () => {
 });
 const target = { queueName: 'other', jobId: 'commit-race' };
 
-for (const stopWins of [false, true])
-  test(`native mutation handoff commits or quarantines before root release (stopWins=${stopWins})`, async () => {
+for (const outcome of ['commit', 'stop', 'duplicate'])
+  test(`native mutation handoff commits or quarantines before root release (${outcome})`, async () => {
     const store = new RedisBridgeStore(redis);
     const workerId = 'handoff-worker';
     const incarnationId = 'incarnation-handoff-01';
@@ -59,16 +60,23 @@ for (const stopWins of [false, true])
     const completion = store.dispatch({
       ...dispatchArgs,
       finalize: async settlement => {
-        if (stopWins) await requestJobCancellation(redis, target, 60);
+        if (outcome === 'stop') await requestJobCancellation(redis, target, 60);
+        if (outcome === 'duplicate')
+          await commitJobResult(
+            redis,
+            target,
+            { stdout: 'first mutation' },
+            60,
+          );
         if (
-          !(await commitJobResult(
+          (await commitJobResult(
             redis,
             target,
             { stdout: 'mutation settled' },
             60,
-          ))
+          )) !== 'committed'
         )
-          throw new Error('cancelled before handoff');
+          throw new Error('handoff did not win');
         // This represents Stop during post-handoff egress cleanup. It must no
         // longer turn the applied mutation into an acknowledged cancellation.
         expect(await requestJobCancellation(redis, target, 60)).toBe(false);
@@ -91,8 +99,8 @@ for (const stopWins of [false, true])
         files: [],
       },
     });
-    if (stopWins) {
-      await expect(completion).rejects.toThrow('cancelled before handoff');
+    if (outcome !== 'commit') {
+      await expect(completion).rejects.toThrow('handoff did not win');
       await expect(store.dispatch(dispatchArgs)).rejects.toMatchObject({
         code: 'WORKSPACE_QUARANTINED',
       });
@@ -105,6 +113,67 @@ for (const stopWins of [false, true])
       });
     }
   });
+
+test('concurrent stalled-job redelivery claims at most one sandbox execution', async () => {
+  let executions = 0;
+  const attempt = async () => {
+    const claim = await claimJobExecution(redis, target, 60);
+    if (claim.status === 'claimed') executions += 1;
+    return claim;
+  };
+  const results = await Promise.allSettled([attempt(), attempt()]);
+  expect(executions).toBe(1);
+  expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(
+    1,
+  );
+  expect(results.filter(result => result.status === 'rejected')).toHaveLength(
+    1,
+  );
+  await expect(attempt()).rejects.toThrow('already claimed');
+  expect(executions).toBe(1);
+  await commitJobResult(redis, target, { stdout: 'first result' }, 60);
+  expect(await attempt()).toEqual({
+    status: 'completed',
+    result: { stdout: 'first result' },
+  });
+  expect(executions).toBe(1);
+  expect(
+    await commitJobResult(redis, target, { stdout: 'different result' }, 60),
+  ).toBe('already_completed');
+  expect(await readCommittedJobResult(redis, target)).toEqual({
+    result: { stdout: 'first result' },
+  });
+});
+
+test('a lost execution-claim reply never authorizes a second attempt', async () => {
+  const lostReply = {
+    eval: async (...args: Parameters<typeof redis.eval>) => {
+      await redis.eval(...args);
+      throw new Error('claim reply lost');
+    },
+  } as unknown as typeof redis;
+  await expect(claimJobExecution(lostReply, target, 60)).rejects.toThrow(
+    'claim reply lost',
+  );
+  await expect(claimJobExecution(redis, target, 60)).rejects.toThrow(
+    'already claimed',
+  );
+});
+
+test('cancel-before-claim and missing completion payload fail closed', async () => {
+  await requestJobCancellation(redis, target, 60);
+  await expect(claimJobExecution(redis, target, 60)).rejects.toThrow(
+    'cancelled',
+  );
+  const completedTarget = { ...target, jobId: 'missing-payload-claim' };
+  await commitJobResult(redis, completedTarget, { stdout: 'done' }, 60);
+  await redis.del(
+    `${jobCancellationInternals.cancellationKey(completedTarget)}:result`,
+  );
+  await expect(claimJobExecution(redis, completedTarget, 60)).rejects.toThrow(
+    'refusing re-execution',
+  );
+});
 
 for (const corrupt of [false, true])
   test(`invalid committed result fails immediately without Redis retries (corrupt=${corrupt})`, async () => {
@@ -228,14 +297,14 @@ test('disconnect returns a known completed result without waiting for a lost que
 test('durable cancellation wins even before its subscriber notification arrives', async () => {
   expect(await requestJobCancellation(redis, target, 60)).toBe(true);
   expect(await commitJobResult(redis, target, { stdout: 'late' }, 60)).toBe(
-    false,
+    'cancelled',
   );
   expect(await readCommittedJobResult(redis, target)).toBeUndefined();
 });
 
 test('committed results reject late Stop and survive a lost BullMQ completion reply', async () => {
   const result = { stdout: 'one mutation', files: [] };
-  expect(await commitJobResult(redis, target, result, 60)).toBe(true);
+  expect(await commitJobResult(redis, target, result, 60)).toBe('committed');
   expect(await requestJobCancellation(redis, target, 60)).toBe(false);
   expect(await readCommittedJobResult(redis, target)).toEqual({ result });
   expect(
@@ -256,7 +325,7 @@ test('concurrent cancellation and completion have exactly one winner', async () 
     requestJobCancellation(redis, target, 60),
     commitJobResult(redis, target, { stdout: 'result' }, 60),
   ]);
-  expect(Number(cancelled) + Number(committed)).toBe(1);
+  expect(Number(cancelled) + Number(committed === 'committed')).toBe(1);
 });
 
 test('a missing committed result fails closed instead of re-executing', async () => {
@@ -322,7 +391,7 @@ test('a timely durable commit remains successful when only its acknowledgement i
       60,
       Date.now() + 100,
     ),
-  ).toBe(true);
+  ).toBe('committed');
   expect(await readCommittedJobResult(redis, target)).toEqual({
     result: { stdout: 'committed' },
   });

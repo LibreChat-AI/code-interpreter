@@ -353,7 +353,7 @@ export async function commitJobResult<T>(
   result: T,
   ttlSeconds: number,
   deadlineAtMs = Number.MAX_SAFE_INTEGER,
-): Promise<boolean> {
+): Promise<'committed' | 'cancelled' | 'already_completed'> {
   const serialized = JSON.stringify({ result });
   if (Buffer.byteLength(serialized) > 16 * 1024 * 1024) {
     throw new Error('Programmatic completion exceeds the 16 MiB result limit');
@@ -362,6 +362,8 @@ export async function commitJobResult<T>(
     `
     local state = redis.call('GET', KEYS[1])
     if state == '1' then return 0 end
+    if state == 'completed' then return 2 end
+    if state then return -2 end
     if not state then
       local now = redis.call('TIME')
       if tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000) >= tonumber(ARGV[3]) then
@@ -383,7 +385,50 @@ export async function commitJobResult<T>(
   );
   if (decision === -1)
     throw new Error('Job result commitment exceeded its deadline');
-  return decision === 1;
+  if (decision === 1) return 'committed';
+  if (decision === 0) return 'cancelled';
+  if (decision === 2) return 'already_completed';
+  throw new Error('Invalid durable result commitment');
+}
+
+/** BullMQ lock loss can redeliver a job while its first processor still runs.
+ * Claim once before any sandbox work, retaining the claim through the job's
+ * recovery horizon. An ambiguous/stalled attempt is never permission to rerun.
+ * Completion lookup and claim are atomic, so there is no read-then-start gap. */
+export async function claimJobExecution<T>(
+  commands: IORedis,
+  target: JobTarget,
+  ttlSeconds: number,
+): Promise<{ status: 'claimed' } | { status: 'completed'; result: T }> {
+  const key = cancellationKey(target);
+  const decision = await commands.eval(
+    `
+    local state = redis.call('GET', KEYS[1])
+    if state == 'completed' then return {0, redis.call('GET', KEYS[2])} end
+    if state == '1' then return {-1} end
+    if state then return {-3} end
+    if redis.call('SET', KEYS[3], '1', 'NX', 'EX', ARGV[1]) then return {1} end
+    return {-2}
+  `,
+    3,
+    key,
+    `${key}:result`,
+    `${key}:execution`,
+    Math.max(1, ttlSeconds),
+  );
+  if (!Array.isArray(decision)) throw new Error('Invalid execution claim');
+  if (decision[0] === 1) return { status: 'claimed' };
+  if (decision[0] === 0)
+    return {
+      status: 'completed',
+      result: decodeCommittedResult<T>(decision[1]).result,
+    };
+  if (decision[0] === -1) throw new Error(JOB_CANCELLED_MESSAGE);
+  if (decision[0] === -2)
+    throw new Error(
+      'Programmatic job already claimed; refusing duplicate execution',
+    );
+  throw new Error('Invalid durable execution claim');
 }
 
 export async function readCommittedJobResult<T>(
