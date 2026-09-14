@@ -194,6 +194,8 @@ jobs:
           node-version: 24.16.0
       - run: npm ci
       - run: npm run build
+      - name: Native environment containment tests
+        run: node --test dist/environment.test.js
       - name: Native ACL and credential lifecycle tests
         run: node --test dist/macos-storage.test.js dist/private-storage.test.js dist/storage.test.js dist/github.test.js
 

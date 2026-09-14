@@ -355,6 +355,18 @@ export async function assertEnvironmentDefinitionsOutsideRoots(
         }
         return result;
     };
+    // The entry's parent, not its symlink target, determines who can replace it.
+    // Compare ancestor identities so casing and directory aliases cannot make a
+    // workspace-controlled entry look external on case-insensitive filesystems.
+    const controlsEntry = async (component: string, rootIdentity: string): Promise<boolean> => {
+        let parent = await realpath(dirname(component));
+        while (true) {
+            if ((await identity(parent)) === rootIdentity) return true;
+            const next = dirname(parent);
+            if (next === parent) return false;
+            parent = next;
+        }
+    };
     for (const environment of environments) {
         for (const root of roots) {
             const rootIdentity = await identity(root.root);
@@ -363,11 +375,10 @@ export async function assertEnvironmentDefinitionsOutsideRoots(
                 for (const component of environment.rootPaths ?? []) {
                     const path = relative(root.root, component);
                     const sameRoot = (await identity(component)) === rootIdentity;
-                    const descendant = path !== '' && !isAbsolute(path) &&
-                        path !== '..' && !path.startsWith(`..${sep}`);
                     // A trusted external alias may select its own root, but a
                     // link beneath that root is still writable by the workspace.
-                    if (sameRoot && !descendant && root.id === environment.definition.name)
+                    if (sameRoot && root.id === environment.definition.name &&
+                        !(await controlsEntry(component, rootIdentity)))
                         continue;
                     if (
                         sameRoot ||
