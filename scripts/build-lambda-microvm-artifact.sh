@@ -100,6 +100,7 @@ do_build() {
   echo ">> buildx arm64 ${MICROVM_IMAGE_TARGET} (${LOCAL_TAG})"
   docker buildx build \
     --platform linux/arm64 \
+    --provenance=false \
     --target "$MICROVM_IMAGE_TARGET" \
     -f api/Dockerfile \
     "${tags[@]}" \
