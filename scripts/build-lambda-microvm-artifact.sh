@@ -114,11 +114,31 @@ do_push() {
   echo ">> pushing $ECR_URI:$PUBLISHED_TAG"
   aws ecr get-login-password --region "${AWS_REGION:?AWS_REGION required}" \
     | docker login --username AWS --password-stdin "${ECR_URI%%/*}"
-  # `build` is intentionally usable without AWS/ECR configuration. Tag here as
-  # well so a later, separately invoked `push` stage still has the remote tag.
-  docker image tag "$LOCAL_TAG" "$ECR_URI:$PUBLISHED_TAG"
-  docker push "$ECR_URI:$PUBLISHED_TAG" | tee "$OUT_DIR/push.log"
-  IMAGE_DIGEST="$(sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' "$OUT_DIR/push.log" | tail -n 1)"
+  # Lambda MicroVM rejects OCI manifests. ECR can transcode the staging image
+  # to Docker schema v2, which keeps push compatible across Docker versions.
+  local staging_tag="${PUBLISHED_TAG}-oci"
+  local repository_name="${ECR_URI#*/}"
+  local docker_manifest
+  docker image tag "$LOCAL_TAG" "$ECR_URI:$staging_tag"
+  docker push "$ECR_URI:$staging_tag" | tee "$OUT_DIR/push.log"
+  docker_manifest="$(aws ecr batch-get-image \
+    --repository-name "$repository_name" \
+    --image-ids "imageTag=$staging_tag" \
+    --accepted-media-types application/vnd.docker.distribution.manifest.v2+json \
+    --region "$AWS_REGION" \
+    --query 'images[0].imageManifest' \
+    --output text)"
+  [ -n "$docker_manifest" ] && [ "$docker_manifest" != "None" ] || {
+    echo "Could not resolve a Docker schema v2 manifest for $ECR_URI:$staging_tag." >&2
+    exit 1
+  }
+  IMAGE_DIGEST="$(aws ecr put-image \
+    --repository-name "$repository_name" \
+    --image-tag "$PUBLISHED_TAG" \
+    --image-manifest "$docker_manifest" \
+    --region "$AWS_REGION" \
+    --query 'image.imageId.imageDigest' \
+    --output text)"
   [ -n "$IMAGE_DIGEST" ] || {
     echo "Could not determine the pushed ECR digest; refusing to render a mutable artifact." >&2
     exit 1

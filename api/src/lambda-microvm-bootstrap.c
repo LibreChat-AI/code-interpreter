@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -47,6 +48,10 @@ int main(void) {
     if (!start) continue;
 
     close(listener);
+    unsetenv("AWS_LAMBDA_MICROVM_IMAGE_ARN");
+    unsetenv("AWS_LAMBDA_MICROVM_IMAGE_NAME");
+    unsetenv("AWS_LAMBDA_MICROVM_IMAGE_VERSION");
+    unsetenv("AWS_REGION");
     char *const argv[] = {"/sandbox_api/entrypoint.sh", NULL};
     execv(argv[0], argv);
     perror("CodeAPI runner startup");
