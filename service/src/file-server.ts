@@ -11,6 +11,7 @@ import { sendFileDownload } from './file-download';
 import path from 'path';
 import IORedis from 'ioredis';
 import express from 'express';
+import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { Client } from 'minio';
 import { nanoid } from 'nanoid';
 import { PassThrough } from 'stream';
@@ -40,8 +41,6 @@ app.use(httpMetricsMiddleware);
 
 const bucketName = process.env.MINIO_BUCKET ?? 'test-bucket';
 
-type IamProviderModule = { IamAwsProvider?: new (opts: object) => unknown; default?: new (opts: object) => unknown };
-
 async function createMinioClient(): Promise<Client> {
   const irsaExplicit = process.env.MINIO_USE_IRSA?.toLowerCase() === 'true';
   const irsaEnvVars = Boolean(process.env.AWS_WEB_IDENTITY_TOKEN_FILE) && Boolean(process.env.AWS_ROLE_ARN);
@@ -55,42 +54,27 @@ async function createMinioClient(): Promise<Client> {
   };
 
   if (useIrsa) {
-    logger.info('Using IRSA (IamAwsProvider) for S3 authentication', {
+    logger.info('Using the AWS credential chain for S3 authentication', {
       tokenFile: process.env.AWS_WEB_IDENTITY_TOKEN_FILE,
       roleArn: process.env.AWS_ROLE_ARN,
       region: baseConfig.region,
     });
-
-    /** IamAwsProvider exists in minio 8.0.6+ but isn't exported from main module
-     * Try multiple import paths for compatibility with different runtimes (bun, ts-node, node)
-     */
-    let IamAwsProviderClass: new (opts: object) => unknown;
-    try {
-      const mod = await import('minio/dist/main/IamAwsProvider.js') as IamProviderModule;
-      IamAwsProviderClass = (mod.IamAwsProvider ?? mod.default)!;
-    } catch (primaryError) {
-      try {
-        // Fallback for bun: resolve path using require if available (CJS context)
-        let resolvePath = 'node_modules/minio/';
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          resolvePath = require.resolve('minio').replace(/dist\/.*$/, '');
-        } catch {
-          // require.resolve not available (ESM context), use default path
-        }
-        const mod = await import(`${resolvePath}dist/main/IamAwsProvider.js`) as IamProviderModule;
-        IamAwsProviderClass = (mod.IamAwsProvider ?? mod.default)!;
-      } catch (fallbackError) {
-        logger.error('Failed to load IamAwsProvider', { primaryError, fallbackError });
-        throw new Error('Could not load IamAwsProvider for IRSA authentication. Ensure minio >= 8.0.6 is installed.');
-      }
-    }
-
-    const credentialsProvider = new IamAwsProviderClass({});
+    const awsCredentials = defaultProvider();
+    const minioPath = require.resolve('minio').replace(/minio\.js$/, 'IamAwsProvider.js');
+    const { default: IamAwsProvider } = await import(minioPath);
+    const credentialsProvider = new IamAwsProvider({});
+    credentialsProvider.getCredentials = async () => {
+      const credentials = await awsCredentials();
+      return {
+        getAccessKey: () => credentials.accessKeyId,
+        getSecretKey: () => credentials.secretAccessKey,
+        getSessionToken: () => credentials.sessionToken,
+      } as Awaited<ReturnType<typeof credentialsProvider.getCredentials>>;
+    };
 
     return new Client({
       ...baseConfig,
-      credentialsProvider: credentialsProvider as ClientOptions['credentialsProvider'],
+      credentialsProvider,
     });
   }
 

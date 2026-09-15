@@ -30,9 +30,11 @@ RUN make -j$(nproc)
 
 COPY api/src/spec-guard.c /tmp/spec-guard.c
 COPY docker/rootfs-setup.c /tmp/rootfs-setup.c
+COPY api/src/lambda-microvm-bootstrap.c /tmp/lambda-microvm-bootstrap.c
 RUN gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
     && gcc -O2 -static -o /usr/local/bin/sandbox-rootfs-setup /tmp/rootfs-setup.c \
-    && chmod 0111 /usr/local/bin/spec-guard /usr/local/bin/sandbox-rootfs-setup
+    && gcc -O2 -static -o /usr/local/bin/lambda-microvm-bootstrap /tmp/lambda-microvm-bootstrap.c \
+    && chmod 0111 /usr/local/bin/spec-guard /usr/local/bin/sandbox-rootfs-setup /usr/local/bin/lambda-microvm-bootstrap
 
 # ============================================================================
 # Stage 1b: Build language runtime packages (only consumed by sandbox-runner-baked)
@@ -110,6 +112,7 @@ RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/sbin/nsjail
 COPY --from=nsjail-builder /usr/local/bin/spec-guard /usr/local/bin/spec-guard
+COPY --from=nsjail-builder /usr/local/bin/lambda-microvm-bootstrap /usr/local/bin/lambda-microvm-bootstrap
 RUN chmod +x /usr/sbin/nsjail
 
 # The tool-call socket proxy must run under Node, not Bun. Bun's node:http
@@ -171,7 +174,7 @@ ENV PORT=8080 \
     SANDBOX_SESSION_WORKSPACE_ENABLED=true
 
 EXPOSE 8080/tcp
-ENTRYPOINT ["/sandbox_api/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/lambda-microvm-bootstrap"]
 
 # Local direct-NsJail runtime used by @librechat/code's Docker supervisor.
 # Runtime packages are mounted read-only at /pkgs, matching docker-compose.mac.

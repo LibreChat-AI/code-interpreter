@@ -1644,7 +1644,11 @@ export class LambdaMicrovmSandboxBackend implements SandboxBackend {
   private async assertHealthy(base: string, token: string, ctx: SandboxExecuteContext): Promise<void> {
     try {
       const response = await axios.get(`${base}/api/v2/health`, {
-        headers: { 'X-aws-proxy-auth': token, ...microvmPortHeaders(this.config.port) },
+        headers: {
+          'X-aws-proxy-auth': token,
+          'X-CodeAPI-Runner-Start': '1',
+          ...microvmPortHeaders(this.config.port),
+        },
         timeout: this.config.healthTimeoutMs,
         signal: ctx.signal,
       });

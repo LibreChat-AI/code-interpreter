@@ -379,6 +379,7 @@ export class HostedAppMicrovmRuntime {
         const response = await this.deps.fetch(`${endpoint}/api/v2/health`, {
           headers: {
             [token.headerName]: token.token,
+            'X-CodeAPI-Runner-Start': '1',
             ...microvmPortHeaders(this.config.controlPort),
           },
           signal: AbortSignal.any([
