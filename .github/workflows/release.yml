@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release, e.g. v2.0.0 or v2.1.0-rc1. Must match helm/codeapi/Chart.yaml appVersion.'
+        description: 'Repository version to release, e.g. v1.0.0 or v1.1.0-rc1.'
         required: true
         type: string
       draft:
@@ -82,14 +82,9 @@ jobs:
           esac
 
           if [[ ! "$VERSION" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[0-9]+)?$ ]]; then
-            echo "::error::Release tags must be v<major>.<minor>.<patch> or v<major>.<minor>.<patch>-rcN, for example v2.0.0 or v2.1.0-rc1 (got '$VERSION')"
+            echo "::error::Release tags must be v<major>.<minor>.<patch> or v<major>.<minor>.<patch>-rcN, for example v1.0.0 or v1.1.0-rc1 (got '$VERSION')"
             exit 1
           fi
-
-          # v2.1.0-rc1 -> 2.1.0. Release candidates carry the version they are
-          # candidates for, so they compare against the same appVersion.
-          BASE_VERSION="${VERSION%%-rc*}"
-          BASE_VERSION="${BASE_VERSION#v}"
 
           read_chart_field() {
             grep -m1 "^$1:" helm/codeapi/Chart.yaml \
@@ -97,14 +92,6 @@ jobs:
           }
           APP_VERSION="$(read_chart_field appVersion)"
           CHART_VERSION="$(read_chart_field version)"
-
-          # The tag is the app version. Requiring the bump to have landed on
-          # main first keeps a deployed chart from reporting a version that no
-          # release ever carried.
-          if [ "$APP_VERSION" != "$BASE_VERSION" ]; then
-            echo "::error::Tag $VERSION does not match helm/codeapi/Chart.yaml appVersion ($APP_VERSION). Land the appVersion bump on main before releasing."
-            exit 1
-          fi
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ] \
              && git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
@@ -143,7 +130,6 @@ jobs:
 
           {
             echo "version=$VERSION"
-            echo "base_version=$BASE_VERSION"
             echo "app_version=$APP_VERSION"
             echo "chart_version=$CHART_VERSION"
             echo "prerelease=$PRERELEASE"
