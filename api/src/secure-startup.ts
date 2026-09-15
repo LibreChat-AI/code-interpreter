@@ -1,6 +1,13 @@
 import { config } from './config';
 import { workspaceIsolationConfigErrors } from './workspace-isolation';
 
+const ALLOWED_LAMBDA_MICROVM_AWS_ENV = new Set([
+  'AWS_LAMBDA_MICROVM_IMAGE_ARN',
+  'AWS_LAMBDA_MICROVM_IMAGE_NAME',
+  'AWS_LAMBDA_MICROVM_IMAGE_VERSION',
+  'AWS_REGION',
+]);
+
 export class SandboxSecureStartupError extends Error {
   constructor(message: string) {
     super(message);
@@ -57,7 +64,7 @@ function forbiddenEnvNames(): string[] {
     if (name === 'CODEAPI_HARDENED_SANDBOX_MODE') continue;
     if (name.startsWith('CODEAPI_')) forbidden.push(name);
     if (name.startsWith('REDIS_')) forbidden.push(name);
-    if (name.startsWith('AWS_')) forbidden.push(name);
+    if (name.startsWith('AWS_') && !ALLOWED_LAMBDA_MICROVM_AWS_ENV.has(name)) forbidden.push(name);
     if (name.startsWith('S3_')) forbidden.push(name);
     if (name.startsWith('MINIO_')) forbidden.push(name);
     if (/(SECRET|TOKEN|PASSWORD|PRIVATE_KEY)/.test(name)) forbidden.push(name);
