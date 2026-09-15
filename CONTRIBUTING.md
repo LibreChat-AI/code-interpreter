@@ -25,10 +25,10 @@ Practical consequences:
 ## Releases
 
 Tagged releases are cut from `main` as `vMAJOR.MINOR.PATCH` (with `-rcN` for
-release candidates), and each one carries the packaged Helm chart. The version
-comes from `helm/codeapi/Chart.yaml`'s `appVersion`, so a version bump lands on
-`main` through the pull request flow above before it can be released. See
-[docs/RELEASING.md](docs/RELEASING.md) for the full process.
+release candidates), and each one carries the packaged Helm chart. Repository,
+API, service, and chart versions advance independently; component version bumps
+land on `main` through the pull request flow above before they are included in a
+release. See [docs/RELEASING.md](docs/RELEASING.md) for the full process.
 
 ## Development
 

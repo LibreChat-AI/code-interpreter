@@ -6,31 +6,32 @@ tags are cut.
 ## Versioning
 
 A release is named `vMAJOR.MINOR.PATCH`, optionally with a `-rcN` suffix for a
-release candidate — `v2.0.0`, `v2.1.0-rc1`. That version is the **app
-version**: `helm/codeapi/Chart.yaml`'s `appVersion` is its source of truth, and
-the release workflow refuses any tag that disagrees with it. A release
-candidate carries the version it is a candidate for, so `v2.1.0-rc1` also
-requires `appVersion: "2.1.0"`.
+release candidate — `v1.0.0`, `v1.1.0-rc1`. This is the public repository's
+release sequence and is independent from the versions of the components it
+contains. The first public release is therefore `v1.0.0` even though the API,
+service, and Helm chart already have their own version histories.
 
-Two other version numbers are deliberately independent:
+Component versions are deliberately independent:
 
+- `helm/codeapi/Chart.yaml`'s `appVersion` identifies the API version deployed
+  by the chart.
 - `helm/codeapi/Chart.yaml`'s `version` is the **chart** version. Bump it when
   the chart's templates or values change, not when the app changes. It names
   the packaged chart attached to the release (`codeapi-<chart version>.tgz`).
 - `service/package.json`'s `version` tracks the Lambda service package alone.
 
-By convention `api/package.json`'s `version` is kept in step with `appVersion`,
-so the API package and the tag agree. Nothing enforces it.
+By convention `api/package.json`'s `version` is kept in step with `appVersion`.
+Nothing enforces it.
 
 ## Cutting a release
 
-1. Land the `appVersion` bump on `main` first. `main` takes no direct pushes
-   (see [CONTRIBUTING.md](../CONTRIBUTING.md)), so it arrives through a sync
-   pull request from the internal monorepo or a community pull request. Bump
-   the chart `version` too if the chart changed.
+1. Land every intended component version bump on `main` first. `main` takes no
+   direct pushes (see [CONTRIBUTING.md](../CONTRIBUTING.md)), so changes arrive
+   through a sync pull request from the internal monorepo or a community pull
+   request. Bump the chart `version` only if the chart changed.
 2. Run the **Release** workflow from the Actions tab against `main`, entering
-   the version (`v2.1.0`). Tick *draft* to review the generated notes before
-   they go public.
+   the next repository version (`v1.1.0`). Tick *draft* to review the generated
+   notes before they go public.
 
 The workflow validates the version, packages the Helm chart, then creates the
 annotated tag and publishes the release. Packaging runs before tagging so a
@@ -42,8 +43,8 @@ onward:
 
 ```bash
 git checkout main && git pull
-git tag -a v2.1.0 -m v2.1.0
-git push origin v2.1.0
+git tag -a v1.1.0 -m v1.1.0
+git push origin v1.1.0
 ```
 
 ## What the release contains
@@ -64,7 +65,7 @@ repository, so re-cutting an older patch cannot drag it backwards.
 Delete the release and its tag, then re-run the workflow:
 
 ```bash
-gh release delete v2.1.0 --cleanup-tag --yes
+gh release delete v1.1.0 --cleanup-tag --yes
 ```
 
 Republishing the same version is only safe while nobody has deployed it. Once
