@@ -11,17 +11,39 @@ import {
     sep,
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import type {
     SpawnOptionsWithoutStdio,
     ChildProcessWithoutNullStreams,
 } from 'node:child_process';
-import koffi from 'koffi';
 import type { WorkspaceRootIdentity } from './root-identity.js';
 
-const lib = ['darwin', 'linux'].includes(process.platform)
-    ? koffi.load(null)
-    : undefined;
-const nativeOpenAt = lib?.func(
+type NativeCall = (...args: (string | number | Buffer)[]) => number;
+interface NativeLibrary {
+    func(signature: string): NativeCall;
+}
+interface NativeRuntime {
+    load(path: null): NativeLibrary;
+    errno(): number;
+    os: { errno: Record<string, number> };
+}
+let nativeRuntime: NativeRuntime | undefined;
+let library: NativeLibrary | undefined;
+function runtime(): NativeRuntime {
+    // Code API imports workspace contracts without installing native worker
+    // dependencies. Load the POSIX implementation only for selected roots.
+    return (nativeRuntime ??= createRequire(import.meta.url)('koffi') as NativeRuntime);
+}
+function bind(signature: string): NativeCall | undefined {
+    if (!['darwin', 'linux'].includes(process.platform)) return undefined;
+    let call: NativeCall | undefined;
+    return (...args) => {
+        library ??= runtime().load(null);
+        call ??= library.func(signature);
+        return call(...args);
+    };
+}
+const nativeOpenAt = bind(
     'int openat(int dirfd, const char *path, int flags, ...)',
 );
 const O_CLOEXEC = process.platform === 'darwin' ? 0x1000000 : 0x80000;
@@ -29,24 +51,22 @@ const openAt = nativeOpenAt
     ? (fd: number, path: string, flags: number, mode: number): number =>
           nativeOpenAt(fd, path, flags | O_CLOEXEC, 'unsigned int', mode)
     : undefined;
-const renameAt = lib?.func(
+const renameAt = bind(
     'int renameat(int fromfd, const char *from, int tofd, const char *to)',
 );
-const linkAt = lib?.func(
+const linkAt = bind(
     'int linkat(int fromfd, const char *from, int tofd, const char *to, int flags)',
 );
-const unlinkAt = lib?.func(
-    'int unlinkat(int dirfd, const char *path, int flags)',
-);
+const unlinkAt = bind('int unlinkat(int dirfd, const char *path, int flags)');
 const getPath =
     process.platform === 'darwin'
-        ? lib!.func('int fcntl(int fd, int command, ...)')
+        ? bind('int fcntl(int fd, int command, ...)')
         : undefined;
 
 function nativeError(): NodeJS.ErrnoException {
-    const errno = koffi.errno();
+    const errno = runtime().errno();
     const code =
-        Object.entries(koffi.os.errno).find(
+        Object.entries(runtime().os.errno).find(
             ([, value]) => value === errno,
         )?.[0] ?? 'EIO';
     return Object.assign(
@@ -144,6 +164,7 @@ export class WorkspaceRootAccess {
             ),
         );
         try {
+            this.assertDirectoryAncestor(fd);
             this.canonical(fd);
             return fd;
         } catch (error) {
@@ -159,6 +180,46 @@ export class WorkspaceRootAccess {
         );
     }
 
+    /** Paths are presentation, not proof of ancestry: a renamed root can make
+     * an outside symlink target temporarily occupy its old textual prefix. */
+    private assertDirectoryAncestor(fd: number): void {
+        const root = fstatSync(this.handle.fd, { bigint: true });
+        let current = fd;
+        try {
+            for (let depth = 0; depth <= 128; depth++) {
+                const identity = fstatSync(current, { bigint: true });
+                if (identity.dev === root.dev && identity.ino === root.ino)
+                    return;
+                const parent = checked(
+                    openAt!(
+                        current,
+                        '..',
+                        constants.O_RDONLY |
+                            constants.O_DIRECTORY |
+                            constants.O_NOFOLLOW,
+                        0,
+                    ),
+                );
+                if (current !== fd) closeSync(current);
+                current = parent;
+                const ancestor = fstatSync(parent, { bigint: true });
+                if (
+                    ancestor.dev === identity.dev &&
+                    ancestor.ino === identity.ino
+                )
+                    break;
+            }
+            throw Object.assign(
+                new Error(
+                    'Directory is outside the held workspace or exceeds its ancestry limit',
+                ),
+                { code: 'EACCES' },
+            );
+        } finally {
+            if (current !== fd) closeSync(current);
+        }
+    }
+
     private parent(path: string): { fd: number; name: string } {
         const local = offset(this.path, path);
         const fd = checked(
@@ -170,6 +231,7 @@ export class WorkspaceRootAccess {
             ),
         );
         try {
+            this.assertDirectoryAncestor(fd);
             this.canonical(fd);
             return { fd, name: basename(local) };
         } catch (error) {
@@ -219,7 +281,7 @@ export class WorkspaceRootAccess {
                     ? 0x200000 /* O_PATH */ |
                       (follow ? 0 : constants.O_NOFOLLOW)
                     : 0x8000 /* O_EVTONLY */ |
-                      (follow ? 0 : 0x200000) /* O_SYMLINK */;
+                      (follow ? 0 : 0x200000); /* O_SYMLINK */
             fd = checked(openAt!(parent.fd, parent.name, flags, 0));
             return fstatSync(fd);
         } finally {

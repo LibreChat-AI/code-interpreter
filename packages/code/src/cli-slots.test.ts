@@ -120,8 +120,7 @@ test('CLI preserves distinct case-sensitive roots on a non-Linux platform', asyn
     [
       '--input-type=module',
       '-e',
-      // Load native code for the real host before simulating only CLI platform policy.
-      `await import('koffi'); Object.defineProperty(process, 'platform', {value:'darwin'}); process.argv=[process.execPath,...${JSON.stringify(argv)}]; await import(${JSON.stringify(new URL('./cli.js', import.meta.url).href)});`,
+      `Object.defineProperty(process, 'platform', {value:'darwin'}); process.argv=[process.execPath,...${JSON.stringify(argv)}]; await import(${JSON.stringify(new URL('./cli.js', import.meta.url).href)});`,
     ],
     {
       encoding: 'utf8',

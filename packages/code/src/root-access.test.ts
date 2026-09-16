@@ -19,6 +19,56 @@ import {
 import { LocalWorkspaceTools } from './workspace.js';
 import type { WorkspaceToolRequest } from './protocol.js';
 
+test('held roots allow internal directory links and reject external ancestors', async t => {
+    const directory = await fs.realpath(
+        await fs.mkdtemp(join(tmpdir(), 'root-links-')),
+    );
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const root = join(directory, 'root');
+    await fs.mkdir(join(root, 'nested'), { recursive: true });
+    await fs.mkdir(join(directory, 'outside'));
+    await fs.writeFile(join(root, 'nested', 'value'), 'inside');
+    await fs.symlink('nested', join(root, 'inside'));
+    await fs.symlink('../outside', join(root, 'outside'));
+    const identity = await fs.stat(root, { bigint: true });
+    const originalOpen = WorkspaceRootAccess.open;
+    let held: WorkspaceRootAccess | undefined;
+    t.mock.method(
+        WorkspaceRootAccess,
+        'open',
+        async (...args: Parameters<typeof originalOpen>) => {
+            held = await originalOpen(...args);
+            return held;
+        },
+    );
+    await withWorkspaceRoot(
+        root,
+        { path: root, dev: String(identity.dev), ino: String(identity.ino) },
+        async () => {
+            assert.equal(
+                (await lstat(join(root, 'inside'))).isSymbolicLink(),
+                true,
+            );
+            const reader = await open(join(root, 'inside', 'value'), 'r');
+            try {
+                assert.equal(await reader.readFile('utf8'), 'inside');
+            } finally {
+                await reader.close();
+            }
+            await assert.rejects(
+                open(
+                    join(root, 'outside', 'escape'),
+                    constants.O_CREAT | constants.O_WRONLY,
+                    0o600,
+                ),
+                { code: 'EACCES' },
+            );
+        },
+    );
+    assert.equal(held?.handle.fd, -1);
+    assert.deepEqual(await fs.readdir(join(directory, 'outside')), []);
+});
+
 test('held root file operations cannot be redirected by replacing its pathname', async () => {
     const directory = await fs.realpath(
         await fs.mkdtemp(join(tmpdir(), 'root-access-')),
