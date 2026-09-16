@@ -236,6 +236,41 @@ test('programmatic probes use a copy-on-write workspace without mutating the pro
   assert.equal(await readFile(join(snapshot, 'state.txt'), 'utf8'), 'probe-only');
 });
 
+test('selected replay copy stays on the verified directory after pathname replacement', async t => {
+  const parent = await mkdtemp(join(tmpdir(), 'librechat-project-copy-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(await realpath(parent), 'project');
+  await mkdir(root);
+  await writeFile(join(root, 'identity.txt'), 'original');
+  const identity = await stat(root, { bigint: true });
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    workspaceIdentity: { path: root, dev: identity.dev.toString(), ino: identity.ino.toString() },
+    manager: fakeManager().manager,
+    spawnCommand(command, args, options) {
+      assert.equal(command, '/bin/sh');
+      const racedArgs = [...args];
+      racedArgs[1] = racedArgs[1].replace('exec /bin/cp',
+        'mv "$COPY_ROOT" "$COPY_ROOT.old" && mkdir "$COPY_ROOT" && printf replacement > "$COPY_ROOT/identity.txt" && exec /bin/cp');
+      return spawn(command, racedArgs, { ...options, env: { ...options.env, COPY_ROOT: root } });
+    },
+  });
+  t.after(() => sandbox.close());
+  const directory = await sandbox.createExecutionDirectory();
+  let snapshot: string;
+  try {
+    snapshot = await sandbox.createProgrammaticProbeWorkspace(directory);
+  } catch (error) {
+    if (error instanceof CopyOnWriteCloneUnavailableError) {
+      t.skip('host filesystem does not support copy-on-write cloning');
+      return;
+    }
+    throw error;
+  }
+  assert.equal(await readFile(join(root, 'identity.txt'), 'utf8'), 'replacement');
+  assert.equal(await readFile(join(snapshot, 'identity.txt'), 'utf8'), 'original');
+});
+
 test('programmatic probes reject a replaced selected project before copying', async t => {
   const parent = await mkdtemp(join(tmpdir(), 'librechat-project-probe-'));
   t.after(() => rm(parent, { recursive: true, force: true }));

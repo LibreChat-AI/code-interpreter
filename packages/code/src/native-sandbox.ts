@@ -617,8 +617,19 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         this.platform === 'darwin'
           ? ['-cR', root, destination]
           : ['--archive', '--reflink=always', root, destination];
+      const identity = this.options.workspaceIdentity;
+      // The shell pins its working directory before validation. Both the
+      // verifier and exec'd cp inherit that same directory, even if renamed.
+      const copyCommand = identity ? '/bin/sh' : '/bin/cp';
+      const copyArgs = identity ? [
+        '-c',
+        '"$1" -e \'const s=require("node:fs").statSync(".",{bigint:true});if(!s.isDirectory()||s.dev.toString()!==process.argv[1]||s.ino.toString()!==process.argv[2])process.exit(1)\' "$2" "$3" && shift 3 && exec /bin/cp "$@"',
+        'copy-selected-project', process.execPath, identity.dev, identity.ino,
+        ...args.slice(0, -2), '.', destination,
+      ] : args;
       await new Promise<void>((resolveCopy, rejectCopy) => {
-        const child = this.spawnCommand('/bin/cp', args, {
+        const child = this.spawnCommand(copyCommand, copyArgs, {
+          ...(identity ? { cwd: root } : {}),
           env: {
             PATH: this.environment.PATH,
             LANG: this.environment.LANG,
