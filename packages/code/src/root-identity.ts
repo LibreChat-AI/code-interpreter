@@ -2,8 +2,8 @@ import { lstat, realpath } from 'node:fs/promises';
 
 export interface WorkspaceRootIdentity {
     path: string;
-    dev: number;
-    ino: number;
+    dev: string;
+    ino: string;
 }
 
 /** Revalidation of a trusted snapshot, never a fresh grant to a replacement. */
@@ -13,12 +13,12 @@ export async function matchesWorkspaceRoot(
 ): Promise<boolean> {
     if (root !== identity.path) return false;
     try {
-        const current = await lstat(root);
+        const current = await lstat(root, { bigint: true });
         return (
             current.isDirectory() &&
             !current.isSymbolicLink() &&
-            current.dev === identity.dev &&
-            current.ino === identity.ino &&
+            current.dev.toString() === identity.dev &&
+            current.ino.toString() === identity.ino &&
             (await realpath(root)) === identity.path
         );
     } catch {

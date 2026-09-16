@@ -23,7 +23,7 @@ export async function loadProjectRoots(
         if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))
             throw new Error('Project paths must stay inside --project-root');
         const canonical = await realpath(path);
-        const directoryIdentity = await lstat(path);
+        const directoryIdentity = await lstat(path, { bigint: true });
         if (canonical !== path || !directoryIdentity.isDirectory())
             throw new Error(
                 'Selected projects must be directories without symlink traversal'
@@ -60,8 +60,8 @@ export async function loadProjectRoots(
         const portablePath = rel.split(sep).join('/') || '.';
         const identity = {
             path: canonical,
-            dev: directoryIdentity.dev,
-            ino: directoryIdentity.ino,
+            dev: directoryIdentity.dev.toString(),
+            ino: directoryIdentity.ino.toString(),
         };
         if (!(await matchesWorkspaceRoot(canonical, identity)))
             throw new Error('Selected project changed during admission');
