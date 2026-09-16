@@ -51,6 +51,42 @@ chosen non-overlapping project directories with `--workspace` or `--environment`
 Do not also register their parent directory. Treat the inventory as a snapshot;
 normal workspace admission must validate any directory selected from it.
 
+## Register selected projects
+
+After pairing, use paths from `projects --root` to register individual checkouts:
+
+```bash
+librechat-code run --project-root /srv/projects \
+  --project web --project services/api \
+  --allow-workspace-writes --allow-workspace-commands
+```
+
+Only the explicitly listed checkouts become execution roots. The discovery
+directory is not registered, and adding a new sibling repository does not grant
+access to it. In LibreChat, select the project in the existing workspace picker;
+the conversation stores that selection for subsequent tools and approval resumes.
+An agent's default workspace and the user's recent selection work as before.
+
+Project IDs are derived from the canonical discovery directory and relative
+project path, not the branch or selection order. Keep both paths unchanged across
+restarts to retain chat bindings. Moving a checkout changes its ID. These are
+registration IDs, not the root-local IDs printed by the inventory command.
+
+Up to 32 selected projects are supported. Each must be a standalone Git checkout;
+linked worktrees, symlink traversal, overlapping roots, and duplicate selections
+are rejected. Existing native sandbox, command/write permissions, lease-slot and
+quarantine rules still apply. This mode cannot be combined with `--environment`,
+`--worker-dir`, `--workspace`, default-workspace, or workspace ID/name settings.
+Existing registrations are not migrated automatically; use a new conversation
+when switching registration mode. Non-Git directories still use the existing
+workspace flags. Named environment setup/actions still use `--environment`.
+
+This reuses the existing workspace protocol and does not enable programmatic
+tool calling in LibreChat. PTC must separately preserve the selected workspace
+through initial execution, plain-code fallback, and replay before its gate can
+be enabled. No worker restart or deployment is performed by this command's
+installation alone; update your worker service arguments explicitly.
+
 ## Pair
 
 Hardened deployments use a one-time code instead of copying a long-lived
