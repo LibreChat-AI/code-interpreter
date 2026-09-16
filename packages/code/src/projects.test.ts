@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+    chmod,
+    mkdtemp,
+    mkdir,
+    rm,
+    symlink,
+    writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -55,7 +62,7 @@ test('discovers real sibling repositories with stable IDs and bounded metadata',
     );
     assert.equal(before.projects[0].remote, 'github.com/example/app');
     assert.equal(before.projects[0].branch, 'dev');
-    assert.match(before.projects[0].head!, /^[a-f0-9]{40}$/);
+    assert.match(before.projects[0].head!, /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/);
     assert.equal(before.projects[1].head, null);
     assert.ok(!JSON.stringify(before).includes('secret'));
     await exec('git', ['-C', a, 'checkout', '-b', 'next']);
@@ -110,6 +117,59 @@ test('oversized Git metadata is incomplete rather than silently reported absent'
     assert.equal(inventory.projects[0].remote, null);
 });
 
+test('a valid branch beyond the metadata bound reports incomplete', async t => {
+    const root = await fixture(t);
+    const directory = await repo(root, 'app');
+    const branch = ['a'.repeat(100), 'b'.repeat(100), 'c'.repeat(100)].join(
+        '/'
+    );
+    await exec('git', [
+        '-C',
+        directory,
+        'symbolic-ref',
+        'HEAD',
+        `refs/heads/${branch}`,
+    ]);
+    const inventory = await discoverProjects({ root });
+    assert.equal(inventory.incomplete, true);
+    assert.equal(inventory.projects[0].branch, null);
+});
+
+test('unreadable Git markers report incomplete', async t => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) {
+        t.skip('requires POSIX permissions under an unprivileged account');
+        return;
+    }
+    const root = await fixture(t);
+    const directory = await repo(root, 'app');
+    await chmod(directory, 0o400);
+    try {
+        assert.equal(
+            (await discoverProjects({ root: directory })).incomplete,
+            true
+        );
+    } finally {
+        await chmod(directory, 0o700);
+    }
+});
+
+test('root resolution consumes the processing budget and pre-abort wins', async t => {
+    const root = await fixture(t);
+    let ticks = 0;
+    t.mock.method(Date, 'now', () => (ticks++ === 0 ? 0 : 20_000));
+    const inventory = await discoverProjects({ root });
+    assert.equal(inventory.truncated, true);
+    assert.deepEqual(inventory.projects, []);
+    const reason = new Error('cancelled before filesystem access');
+    await assert.rejects(
+        discoverProjects({
+            root: join(root, 'missing'),
+            signal: AbortSignal.abort(reason),
+        }),
+        error => error === reason
+    );
+});
+
 test('project, entry and depth ceilings report partial discovery', async t => {
     const root = await fixture(t);
     await repo(root, 'a');
@@ -155,6 +215,14 @@ test('root checkout uses dot and detached HEAD has no branch', async t => {
 });
 
 test('repository identity retains host and drops credentials, query and fragments', () => {
+    assert.equal(
+        projectRemote('ssh://git@example.com:2222/org/repo.git'),
+        'example.com:2222/org/repo'
+    );
+    assert.equal(
+        projectRemote('https://example.com:8443/org/repo.git'),
+        'example.com:8443/org/repo'
+    );
     assert.equal(
         projectRemote('git@github.com:org/repo.git'),
         'github.com/org/repo'

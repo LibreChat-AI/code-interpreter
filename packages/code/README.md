@@ -33,7 +33,10 @@ IDs are local to the supplied discovery root.
 
 Discovery runs only when requested. Its default limits are three directory
 levels, 10,000 entries, 256 projects, and a ten-second processing budget with
-bounded Git subprocess output and timeouts. It skips hidden directories,
+bounded Git subprocess output and timeouts.
+The time budget starts before resolving the root and is checked between native
+filesystem operations; it cannot interrupt a kernel call stalled on a filesystem.
+Use a responsive local filesystem. Discovery skips hidden directories,
 dependencies, symlinks, and children of an identified repository. Linked
 worktrees and submodules using a `.git` file are skipped and set `incomplete`:
 their shared Git metadata needs separate admission before independent execution.

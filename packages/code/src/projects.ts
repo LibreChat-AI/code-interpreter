@@ -43,12 +43,12 @@ export function projectRemote(value: string): string | null {
             const url = new URL(value);
             if (!['https:', 'http:', 'ssh:', 'git:'].includes(url.protocol))
                 return null;
-            host = url.hostname;
+            host = url.host;
             path = url.pathname.replace(/^\//, '');
         }
         path = path.replace(/\.git$/, '');
         if (
-            !/^[A-Za-z0-9.-]+$/.test(host) ||
+            !/^[A-Za-z0-9.-]+(?::[0-9]+)?$/.test(host) ||
             !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(path)
         )
             return null;
@@ -79,9 +79,6 @@ export async function discoverProjects(
     const maxProjects = limit(options.maxProjects, 256, 256);
     const maxEntries = limit(options.maxEntries, 10_000, 100_000);
     const timeoutMs = limit(options.timeoutMs, 10_000, 60_000);
-    const root = await realpath(options.root);
-    if (!(await lstat(root)).isDirectory())
-        throw new Error('Project root must be a directory');
     const deadline = Date.now() + timeoutMs;
     const result: ProjectInventory = {
         projects: [],
@@ -89,13 +86,20 @@ export async function discoverProjects(
         incomplete: false,
     };
     let entries = 0;
-    const queue = [{ path: root, depth: 0 }];
     const expired = (): boolean => {
         options.signal?.throwIfAborted();
         if (Date.now() < deadline) return false;
         result.truncated = true;
         return true;
     };
+    options.signal?.throwIfAborted();
+    const root = await realpath(options.root);
+    if (expired()) return result;
+    const rootStat = await lstat(root);
+    if (expired()) return result;
+    if (!rootStat.isDirectory())
+        throw new Error('Project root must be a directory');
+    const queue = [{ path: root, depth: 0 }];
     const git = async (
         path: string,
         args: string[],
@@ -157,7 +161,15 @@ export async function discoverProjects(
                 continue;
             }
             const marker = await lstat(resolve(current.path, '.git')).catch(
-                () => undefined
+                error => {
+                    if (
+                        !(error instanceof Error) ||
+                        !('code' in error) ||
+                        error.code !== 'ENOENT'
+                    )
+                        throw error;
+                    return undefined;
+                }
             );
             if (marker) {
                 // Linked worktrees and submodules need separate shared-gitdir admission.
@@ -202,6 +214,21 @@ export async function discoverProjects(
                     branch ? [128] : []
                 );
                 const path = rel.split(sep).join('/') || '.';
+                const validBranch =
+                    branch &&
+                    branch.length <= 256 &&
+                    !/[\x00-\x1f\x7f]/.test(branch)
+                        ? branch
+                        : null;
+                const validHead =
+                    head && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(head)
+                        ? head
+                        : null;
+                if (
+                    (branch !== null && validBranch === null) ||
+                    (head !== null && validHead === null)
+                )
+                    result.incomplete = true;
                 result.projects.push({
                     id: `project-${createHash('sha256')
                         .update(path)
@@ -209,16 +236,8 @@ export async function discoverProjects(
                         .slice(0, 32)}`,
                     path,
                     remote: remote ? projectRemote(remote) : null,
-                    branch:
-                        branch &&
-                        branch.length <= 256 &&
-                        !/[\x00-\x1f\x7f]/.test(branch)
-                            ? branch
-                            : null,
-                    head:
-                        head && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(head)
-                            ? head
-                            : null,
+                    branch: validBranch,
+                    head: validHead,
                 });
                 continue;
             }
