@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import RedisMock from 'ioredis-mock';
 import type Redis from 'ioredis';
 import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
@@ -169,4 +169,24 @@ test('execution expires independently of an unused queue allowance', async () =>
   expect(assignment).toBeDefined();
   expect(Date.parse(assignment!.expiresAt) - Date.now()).toBeLessThanOrEqual(150);
   await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+});
+
+test('expiry after generation allocation but before enqueue is definitely not started', async () => {
+  await register();
+  const now = Date.now;
+  const incr = redis.incr.bind(redis);
+  let expired = false;
+  const clock = spyOn(Date, 'now').mockImplementation(() => now() + (expired ? 10_000 : 0));
+  const generation = spyOn(redis, 'incr').mockImplementation(async (key) => {
+    const value = await incr(key);
+    expired = true;
+    return value;
+  });
+  try {
+    await expect(dispatch('not-enqueued')).rejects.toMatchObject({ code: 'WORKSPACE_QUEUE_TIMEOUT' });
+  } finally {
+    clock.mockRestore();
+    generation.mockRestore();
+  }
+  expect(await store.lease(workerId, incarnationId, 20)).toBeUndefined();
 });

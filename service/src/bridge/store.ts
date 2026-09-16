@@ -839,6 +839,7 @@ export class RedisBridgeStore {
     );
     const lockIncarnationId = registration.incarnationId;
     let assignment: StoredAssignment | undefined;
+    let enqueueAttempted = false;
     let workspaceLeaseSlot: number | undefined;
     const selectedWorkspaceId =
       args.workspaceRequest?.workspaceId ?? args.workspaceId;
@@ -1025,12 +1026,14 @@ export class RedisBridgeStore {
         this.assertDispatchActive(args.signal, args.deadlineAtMs);
         assignment.incarnationId = registration.incarnationId;
         queued = await this.dispatchCommand(
-          () =>
-            this.enqueueForActiveIncarnation(
+          () => {
+            enqueueAttempted = true;
+            return this.enqueueForActiveIncarnation(
               assignment!,
               ttlSeconds,
               readyToken,
-            ),
+            );
+          },
           args,
           'Bridge assignment enqueue',
         );
@@ -1132,10 +1135,9 @@ export class RedisBridgeStore {
         throw error;
       }
     } catch (error) {
-      // Before an assignment exists, no enqueue or worker execution is possible.
-      // Once enqueue starts, a timeout is ambiguous and must retain its old code.
+      // Once enqueue starts, even a lost Redis response may hide execution.
       if (
-        admission != null && assignment == null && !args.signal.aborted &&
+        admission != null && !enqueueAttempted && !args.signal.aborted &&
         error instanceof BridgeStoreError && error.code === 'ASSIGNMENT_EXPIRED'
       ) {
         throw new BridgeStoreError(
