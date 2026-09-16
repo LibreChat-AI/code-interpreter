@@ -66,4 +66,3 @@ export async function createMinioClient(): Promise<Client> {
     sessionToken: process.env.MINIO_SESSION_TOKEN,
   });
 }
-
