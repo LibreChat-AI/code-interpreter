@@ -14,9 +14,13 @@ fi
 
 mkdir -p /sys/fs/cgroup/init
 echo "[sandbox] Draining root cgroup ($(wc -w < /sys/fs/cgroup/cgroup.procs 2>/dev/null || echo '?') procs) into init/..."
-_root_procs=$(cat /sys/fs/cgroup/cgroup.procs 2>/dev/null || true)
-for _pid in $_root_procs; do
-    echo "$_pid" > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true
+for _attempt in $(seq 1 10); do
+    _root_procs=$(cat /sys/fs/cgroup/cgroup.procs 2>/dev/null || true)
+    [ -z "$_root_procs" ] && break
+    for _pid in $_root_procs; do
+        echo "$_pid" > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true
+    done
+    sleep 0.1
 done
 _remaining=$(wc -w < /sys/fs/cgroup/cgroup.procs 2>/dev/null || echo "?")
 echo "[sandbox] Root cgroup procs after drain: $_remaining"

@@ -68,7 +68,24 @@ if [ "$KVM_ENABLED" = "true" ]; then
     echo "Sandbox launcher started with PID $SANDBOX_PID"
 else
     # --- Direct path (no KVM) ---
-    /usr/local/bin/start-direct-sandbox.sh &
+    env \
+        -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
+        -u AWS_EXECUTION_ENV \
+        -u AWS_REGION \
+        -u CODEAPI_AUTH_PROVIDER \
+        -u CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY \
+        -u CODEAPI_EXECUTION_PROFILE \
+        -u CODEAPI_INTERNAL_SERVICE_TOKEN \
+        -u CODEAPI_RUNTIME_SESSION_MODE \
+        -u CODEAPI_SANDBOX_BACKEND \
+        -u FILE_SERVER_URL \
+        -u REDIS_HOST \
+        -u REDIS_PASSWORD \
+        -u REDIS_PORT \
+        -u REDIS_TLS \
+        -u REDIS_USE_ALTERNATIVE_DNS_LOOKUP \
+        -u TOOL_CALL_SERVER_URL \
+        /usr/local/bin/start-direct-sandbox.sh &
     SANDBOX_PID=$!
     echo "Sandbox started (direct) with PID $SANDBOX_PID"
 fi
@@ -99,18 +116,18 @@ cd /worker
 
 export SANDBOX_ENDPOINT="${SANDBOX_ENDPOINT:-http://localhost:2000/api/v2}"
 
-bun run .build/worker-server.js &
+node .build/worker-server.js &
 WORKER_PID=$!
 echo "Worker started with PID $WORKER_PID"
 
 echo "Waiting for worker to be ready..."
-for i in $(seq 1 30); do
+for i in $(seq 1 120); do
     if curl -s http://localhost:${WORKER_HEALTH_PORT:-3113}/health > /dev/null 2>&1; then
         echo "Worker is ready!"
         break
     fi
-    if [ $i -eq 30 ]; then
-        echo "ERROR: Worker failed to start within 30 seconds"
+    if [ $i -eq 120 ]; then
+        echo "ERROR: Worker failed to start within 120 seconds"
         exit 1
     fi
     sleep 1

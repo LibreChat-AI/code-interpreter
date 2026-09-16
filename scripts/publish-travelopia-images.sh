@@ -8,6 +8,7 @@ set -euo pipefail
 ECR_REPOSITORY="${ECR_REPOSITORY:-librechat/codeapi}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short=7 HEAD)}"
 DOCKER_BIN="${DOCKER_BIN:-/usr/local/bin/docker}"
+export DOCKER_BUILDKIT=1
 ACCOUNT="$(aws sts get-caller-identity --profile "$AWS_PROFILE" --query Account --output text)"
 
 if [[ "$ACCOUNT" != "$EXPECTED_AWS_ACCOUNT" ]]; then
@@ -15,9 +16,11 @@ if [[ "$ACCOUNT" != "$EXPECTED_AWS_ACCOUNT" ]]; then
   exit 1
 fi
 
+DOCKER_PLUGIN_DIR="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
 DOCKER_CONFIG="$(mktemp -d)"
 export DOCKER_CONFIG
 trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+ln -s "$DOCKER_PLUGIN_DIR" "$DOCKER_CONFIG/cli-plugins"
 
 if ! aws ecr describe-repositories \
   --profile "$AWS_PROFILE" \
@@ -43,6 +46,7 @@ build() {
   local component="$1"
   local dockerfile="$2"
   local target="$3"
+  shift 3
   local tag="$IMAGE_TAG-$component"
 
   if aws ecr describe-images \
@@ -59,6 +63,7 @@ build() {
     --file "$dockerfile" \
     --target "$target" \
     --tag "$REPOSITORY_URI:$tag" \
+    "$@" \
     .
   "$DOCKER_BIN" push "$REPOSITORY_URI:$tag"
 }
@@ -68,10 +73,13 @@ build worker service/Dockerfile worker
 build file-server service/Dockerfile production
 build tool-call-server service/Dockerfile.tool-call-server production
 build egress-gateway service/Dockerfile egress-gateway
+build worker-sandbox docker/Dockerfile.worker-sandbox worker-sandbox-true
+build worker-sandbox-direct docker/Dockerfile.worker-sandbox-direct direct \
+  --build-arg "BASE_IMAGE=$REPOSITORY_URI:$IMAGE_TAG-worker-sandbox"
 
 aws ecr describe-images \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION" \
   --repository-name "$ECR_REPOSITORY" \
-  --query "imageDetails[?starts_with(imageTags[0], '$IMAGE_TAG-')].{tags:imageTags,digest:imageDigest}" \
+  --query "imageDetails[?imageTags && starts_with(imageTags[0], '$IMAGE_TAG-')].{tags:imageTags,digest:imageDigest}" \
   --output table

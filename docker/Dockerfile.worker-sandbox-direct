@@ -1,0 +1,8 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS direct
+
+RUN dnf install -y --setopt=install_weak_deps=False e2fsprogs \
+    && dnf clean all \
+    && mkdir -p /sandbox-rootfs \
+    && debugfs -R 'rdump / /sandbox-rootfs' /sandbox-rootfs.img >/dev/null 2>&1 \
+    && rm /sandbox-rootfs.img
