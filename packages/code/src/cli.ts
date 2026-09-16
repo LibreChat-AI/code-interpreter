@@ -684,11 +684,13 @@ async function run(
       }),
     ]),
   );
-  let workspaceTools: WorkspaceToolExecutor | undefined = workerDirectory
+  const localWorkspaceTools = workerDirectory
     ? await LocalWorkspaceTools.create({
         workspaces: roots,
+        repositoryInstructions: args.includes('--repository-instructions'),
       })
     : undefined;
+  let workspaceTools: WorkspaceToolExecutor | undefined = localWorkspaceTools;
   if (allowWorkspaceCommands && !canonicalWorkerDirectory) {
     throw new Error('Workspace commands require a registered directory');
   }
@@ -1030,6 +1032,7 @@ async function run(
   }
   try {
     const worker = new BridgeWorker({
+      instructionDescriptors: () => localWorkspaceTools?.instructionDescriptors() ?? Promise.resolve(undefined),
       codeApiUrl,
       token: configuredToken,
       identity: workerIdentity,
