@@ -236,6 +236,33 @@ test('programmatic probes use a copy-on-write workspace without mutating the pro
   assert.equal(await readFile(join(snapshot, 'state.txt'), 'utf8'), 'probe-only');
 });
 
+test('programmatic probes reject a replaced selected project before copying', async t => {
+  const parent = await mkdtemp(join(tmpdir(), 'librechat-project-probe-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(await realpath(parent), 'project');
+  await mkdir(root);
+  const identity = await stat(root, { bigint: true });
+  let copies = 0;
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    workspaceIdentity: { path: root, dev: identity.dev.toString(), ino: identity.ino.toString() },
+    manager: fakeManager().manager,
+    spawnCommand() {
+      copies++;
+      throw new Error('must not copy a replaced project');
+    },
+  });
+  t.after(() => sandbox.close());
+  const executionDirectory = await sandbox.createExecutionDirectory();
+  await rename(root, join(parent, 'original'));
+  await mkdir(root);
+  await assert.rejects(
+    sandbox.createProgrammaticProbeWorkspace(executionDirectory),
+    /Selected project changed before probe staging/,
+  );
+  assert.equal(copies, 0);
+});
+
 test('programmatic probes do not hide clone implementation failures as unsupported filesystems', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));

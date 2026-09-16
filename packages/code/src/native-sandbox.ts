@@ -580,6 +580,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     signal?: AbortSignal,
   ): Promise<string> {
     await this.initialize();
+    if (this.options.workspaceIdentity && !await matchesWorkspaceRoot(this.options.workspaceRoot, this.options.workspaceIdentity)) {
+      throw new WorkspaceToolError('Selected project changed before probe staging', 'REGISTRATION_INVALID');
+    }
     const scratchDirectory = this.scratchDirectory;
     const root = this.canonicalRoot;
     let parent: string;
