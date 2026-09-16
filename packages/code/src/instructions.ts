@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { open, lstat, realpath, stat } from 'node:fs/promises';
+import { open, lstat, realpath, stat } from './root-access.js';
 import { createHash } from 'node:crypto';
 import { resolve, relative, isAbsolute, sep } from 'node:path';
 

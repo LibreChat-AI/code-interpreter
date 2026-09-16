@@ -81,11 +81,19 @@ Existing registrations are not migrated automatically; use a new conversation
 when switching registration mode. Non-Git directories still use the existing
 workspace flags. Named environment setup/actions still use `--environment`.
 
-This reuses the existing workspace protocol and does not enable programmatic
-tool calling in LibreChat. PTC must separately preserve the selected workspace
-through initial execution, plain-code fallback, and replay before its gate can
-be enabled. No worker restart or deployment is performed by this command's
-installation alone; update your worker service arguments explicitly.
+Selected projects require macOS or Linux (including WSL2). Each request opens
+and verifies the admitted directory, then retains that descriptor through file
+access, repository-instruction loading, command startup, and replay copying.
+Renaming a project cannot redirect an in-flight request to a replacement checkout;
+subsequent requests reject the changed identity. Restart with an explicitly
+selected replacement to admit it. Descriptors close when requests settle, and
+independent workspaces do not share a current directory or global execution lock.
+
+This reuses the existing workspace protocol. Programmatic tool calling requires
+a LibreChat version that preserves the selected workspace across initial
+execution and replay, plus the worker's normal programmatic prerequisites.
+Installation alone does not restart workers or change registration; update your
+worker service arguments explicitly.
 
 ## Pair
 
