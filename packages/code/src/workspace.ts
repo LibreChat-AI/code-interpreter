@@ -47,6 +47,7 @@ import type {
 } from './protocol.js';
 
 export { isWorkspaceToolRequest, isWorkspaceToolResult };
+import { readRepositoryInstructions } from './instructions.js';
 export type {
   WorkspaceReadFileRequest,
   WorkspaceReadFileResult,
@@ -78,6 +79,7 @@ export interface LocalWorkspaceConfig {
 
 export interface LocalWorkspaceToolsOptions {
   workspaces: LocalWorkspaceConfig[];
+  repositoryInstructions?: boolean;
 }
 
 export interface WorkspaceToolExecutor {
@@ -1433,6 +1435,16 @@ async function withinListDeadline<T>(
 export class LocalWorkspaceTools implements WorkspaceToolExecutor {
   readonly capabilities: BridgeWorkspaceToolCapabilities;
   readonly mutationFailuresAreAtomic = true as const;
+  private repositoryInstructions = false;
+
+  async instructionDescriptors() {
+    if (!this.repositoryInstructions) return undefined;
+    const entries = await Promise.all([...this.roots].map(async ([id, { root }]) => {
+      const snapshot = await readRepositoryInstructions(root);
+      return [id, snapshot ? [snapshot.descriptor] : []] as const;
+    }));
+    return new Map(entries);
+  }
 
   private constructor(
     private readonly roots: ReadonlyMap<string, WorkspaceRoot>,
@@ -1514,7 +1526,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
         writable: workspace.writable === true,
       });
     }
-    return new LocalWorkspaceTools(
+    const tools = new LocalWorkspaceTools(
       roots,
       operations,
       workspaces,
@@ -1523,6 +1535,8 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       capabilities.editFileFeatures,
       capabilities.listFileFeatures,
     );
+    tools.repositoryInstructions = options.repositoryInstructions === true;
+    return tools;
   }
 
   async execute(
@@ -1588,6 +1602,15 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       );
     }
 
+    if (request.instructionSha256 !== undefined) {
+      const snapshot = this.repositoryInstructions ? await readRepositoryInstructions(root) : undefined;
+      if (!snapshot || snapshot.descriptor.path !== request.path || snapshot.descriptor.sha256 !== request.instructionSha256) {
+        throw new WorkspaceToolError('Repository instructions changed or are unavailable', 'INVALID_PATH');
+      }
+      return { protocolVersion: BRIDGE_PROTOCOL_VERSION, operation: 'read_file', workspaceId: request.workspaceId,
+        path: request.path, content: snapshot.content, startLine: 1, endLine: snapshot.content.split('\n').length,
+        truncated: snapshot.descriptor.truncated };
+    }
     const startLine = request.startLine ?? 1;
     const maxLines = request.maxLines ?? 200;
     if (

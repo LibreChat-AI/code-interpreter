@@ -23,6 +23,7 @@ import type {
   BridgeWorkerRegistrationResponse,
   BridgeWorkspaceToolOperation,
   BridgeWorkspaceProgrammaticRequest,
+  RepositoryInstructionDescriptor,
 } from './protocol.js';
 import type { RuntimeLease, RuntimeSupervisor } from './runtime.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
@@ -37,6 +38,7 @@ export interface BridgeWorkerOptions {
   runtimeSupervisor?: RuntimeSupervisor;
   capabilities: BridgeWorkerCapabilities;
   workspaceTools?: WorkspaceToolExecutor;
+  instructionDescriptors?: () => Promise<ReadonlyMap<string, readonly RepositoryInstructionDescriptor[]> | undefined>;
   workspaceProgrammatic?: {
     /**
      * True when a WorkspaceToolError without mutation uncertainty proves the
@@ -396,6 +398,7 @@ export class BridgeWorker {
   private readonly compatibleCapabilities: BridgeWorkerCapabilities;
   private registrationCapabilities: BridgeWorkerCapabilities;
   private activeCapabilities: BridgeWorkerCapabilities;
+  private instructionMetadataSupported = true;
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
   private maintenanceOnly = false;
@@ -597,6 +600,8 @@ export class BridgeWorker {
     const registrationStartedAtMs = Date.now();
     let registration: BridgeWorkerRegistrationResponse;
     try {
+      const instructions = this.instructionMetadataSupported ? await this.options.instructionDescriptors?.() : undefined;
+      let includeInstructions = this.instructionMetadataSupported;
       const register = (capabilities: BridgeWorkerCapabilities) =>
         this.request<BridgeWorkerRegistrationResponse>(
           `${this.codeApiUrl}/bridge/workers/register`,
@@ -609,12 +614,29 @@ export class BridgeWorker {
                   ...capabilities,
                   requiresReadyConfirmation: true,
                 }
-              : capabilities,
+              : includeInstructions && instructions && capabilities.workspaceTools ? {
+                  ...capabilities,
+                  workspaceTools: { ...capabilities.workspaceTools,
+                    workspaces: capabilities.workspaceTools.workspaces.map(workspace => ({ ...workspace,
+                      ...((workspace.operations ?? capabilities.workspaceTools!.operations).includes('read_file')
+                        ? { instructions: [...(instructions.get(workspace.id) ?? [])] } : {}),
+                    })),
+                  },
+                } : capabilities,
           },
           registrationController.signal,
         );
       try {
-        registration = await register(this.registrationCapabilities);
+        try {
+          registration = await register(this.registrationCapabilities);
+        } catch (error) {
+          if (!(instructions && error instanceof BridgeProtocolError && error.status === 400)) {
+            throw error;
+          }
+          includeInstructions = false;
+          this.instructionMetadataSupported = false;
+          registration = await register(this.registrationCapabilities);
+        }
       } catch (error) {
         if (
           !(error instanceof BridgeProtocolError) ||

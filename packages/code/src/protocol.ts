@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const BRIDGE_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const BRIDGE_SANDBOX_PROFILE_MAX_LENGTH = 128;
@@ -275,6 +277,7 @@ export type WorkspaceProgrammaticLanguage = 'bash';
 export interface BridgeWorkspaceDescriptor {
   id: string;
   name?: string;
+  instructions?: RepositoryInstructionDescriptor[];
   /** Optional per-workspace restriction. Omitted by protocol-v1 readers. */
   operations?: BridgeWorkspaceToolOperation[];
     environment?: {
@@ -308,6 +311,27 @@ export interface WorkspaceReadFileRequest {
   path: string;
   startLine?: number;
   maxLines?: number;
+  /** Requests an exact bounded instruction snapshot, not a line-oriented file read. */
+  instructionSha256?: string;
+}
+
+export const REPOSITORY_INSTRUCTION_MAX_BYTES = 32 * 1024;
+export interface RepositoryInstructionDescriptor {
+  path: 'AGENTS.md' | 'CLAUDE.md';
+  /** Bytes in the bounded UTF-8 snapshot, whose digest is sha256. */
+  bytes: number;
+  sha256: string;
+  truncated: boolean;
+}
+
+export function isRepositoryInstructionDescriptor(value: unknown): value is RepositoryInstructionDescriptor {
+  if (value == null || typeof value !== 'object') return false;
+  const descriptor = value as Record<string, unknown>;
+  return Object.keys(descriptor).every(key => ['path', 'bytes', 'sha256', 'truncated'].includes(key)) &&
+    (descriptor.path === 'AGENTS.md' || descriptor.path === 'CLAUDE.md') &&
+    Number.isSafeInteger(descriptor.bytes) && Number(descriptor.bytes) >= 0 && Number(descriptor.bytes) <= REPOSITORY_INSTRUCTION_MAX_BYTES &&
+    typeof descriptor.sha256 === 'string' && /^[a-f0-9]{64}$/.test(descriptor.sha256) &&
+    typeof descriptor.truncated === 'boolean';
 }
 
 export interface WorkspaceReadFileResult {
@@ -510,6 +534,7 @@ export type WorkspaceToolResult =
   | WorkspaceExecuteCommandResult;
 
 const WORKSPACE_READ_REQUEST_KEYS = new Set([
+  'instructionSha256',
   'protocolVersion',
   'operation',
   'workspaceId',
@@ -1139,6 +1164,12 @@ export function isWorkspaceToolRequest(
     return false;
   }
   if (request.operation === 'read_file') {
+    if (request.instructionSha256 !== undefined) {
+      return hasOnlyKeys(request, WORKSPACE_READ_REQUEST_KEYS) &&
+        typeof request.instructionSha256 === 'string' && /^[a-f0-9]{64}$/.test(request.instructionSha256) &&
+        (request.path === 'AGENTS.md' || request.path === 'CLAUDE.md') &&
+        request.startLine === undefined && request.maxLines === undefined;
+    }
     return (
       hasOnlyKeys(request, WORKSPACE_READ_REQUEST_KEYS) &&
       isSafePortableRelativePath(request.path) &&
@@ -1282,6 +1313,13 @@ export function isWorkspaceToolResult(
   }
 
   if (request.operation === 'read_file') {
+    if (request.instructionSha256 !== undefined) {
+      return hasOnlyKeys(result, WORKSPACE_READ_RESULT_KEYS) && result.path === request.path &&
+        typeof result.content === 'string' && new TextEncoder().encode(result.content).byteLength <= REPOSITORY_INSTRUCTION_MAX_BYTES &&
+        createHash('sha256').update(result.content).digest('hex') === request.instructionSha256 &&
+        result.startLine === 1 && result.endLine === result.content.split('\n').length &&
+        result.nextStartLine === undefined;
+    }
     const startLine = request.startLine ?? 1;
     const maxLines = request.maxLines ?? 200;
         const content =
@@ -1574,11 +1612,13 @@ export function isValidBridgeWorkspaceToolCapabilities(
                     key !== 'id' &&
                     key !== 'name' &&
                     key !== 'operations' &&
+                    key !== 'instructions' &&
                     key !== 'environment',
       ) ||
       typeof descriptor.id !== 'string' ||
       !isValidBridgeWorkerId(descriptor.id) ||
       workspaceIds.has(descriptor.id) ||
+      (descriptor.instructions !== undefined && (!Array.isArray(descriptor.instructions) || descriptor.instructions.length > 1 || !descriptor.instructions.every(isRepositoryInstructionDescriptor))) ||
             (descriptor.environment !== undefined &&
                 !isValidCodeEnvironmentDescriptor(descriptor.environment)) ||
       (descriptor.name !== undefined &&
