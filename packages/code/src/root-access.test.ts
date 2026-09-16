@@ -19,6 +19,59 @@ import {
 import { LocalWorkspaceTools } from './workspace.js';
 import type { WorkspaceToolRequest } from './protocol.js';
 
+test('search-only directories support known files and command cwd without enumeration', async t => {
+    if (process.getuid?.() === 0)
+        return t.skip(
+            'requires an unprivileged user to verify search permissions',
+        );
+    const root = await fs.realpath(
+        await fs.mkdtemp(join(tmpdir(), 'root-search-')),
+    );
+    const nested = join(root, 'nested');
+    await fs.mkdir(nested);
+    await fs.writeFile(join(nested, 'known'), 'known-value');
+    const identity = await fs.stat(root, { bigint: true });
+    t.after(async () => {
+        await fs.chmod(root, 0o700);
+        await fs.chmod(nested, 0o700);
+        await fs.rm(root, { recursive: true, force: true });
+    });
+    await fs.chmod(root, 0o111);
+    await fs.chmod(nested, 0o111);
+    await assert.rejects(fs.readdir(nested), { code: 'EACCES' });
+    await withWorkspaceRoot(
+        root,
+        { path: root, dev: String(identity.dev), ino: String(identity.ino) },
+        async () => {
+            const reader = await open(join(nested, 'known'), 'r');
+            try {
+                assert.equal(await reader.readFile('utf8'), 'known-value');
+            } finally {
+                await reader.close();
+            }
+            assert.equal((await stat(nested)).isDirectory(), true);
+            assert.equal(await realpath(nested), nested);
+            await new Promise<void>((accept, reject) => {
+                const child = spawn('/bin/cat', ['known'], { cwd: nested });
+                let output = '';
+                child.stdout!.on('data', chunk => {
+                    output += chunk.toString();
+                });
+                child.once('error', reject);
+                child.once('close', code => {
+                    try {
+                        assert.equal(code, 0);
+                        assert.equal(output, 'known-value');
+                        accept();
+                    } catch (error) {
+                        reject(error);
+                    }
+                });
+            });
+        },
+    );
+});
+
 test('held roots allow internal directory links and reject external ancestors', async t => {
     const directory = await fs.realpath(
         await fs.mkdtemp(join(tmpdir(), 'root-links-')),

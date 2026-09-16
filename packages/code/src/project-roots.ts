@@ -1,14 +1,93 @@
 import { createHash } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
-import { discoverProjects } from './projects.js';
+import {
+    lstat as rootedLstat,
+    spawn,
+    withWorkspaceRoot,
+} from './root-access.js';
 import { matchesWorkspaceRoot } from './root-identity.js';
 import type { LocalWorkspaceConfig } from './workspace.js';
+
+/** Validate the selected checkout itself, never rediscover it via its pathname. */
+async function validateCheckout(root: string): Promise<void> {
+    const marker = await rootedLstat(resolve(root, '.git')).catch(
+        () => undefined,
+    );
+    if (!marker?.isDirectory() || marker.isSymbolicLink())
+        throw new Error(
+            'Select a standalone Git checkout, not a parent directory or linked worktree',
+        );
+    const common = await rootedLstat(resolve(root, '.git', 'commondir')).catch(
+        error => {
+            if (
+                !(error instanceof Error) ||
+                !('code' in error) ||
+                error.code !== 'ENOENT'
+            )
+                throw error;
+            return undefined;
+        },
+    );
+    if (common)
+        throw new Error(
+            'Selected projects must not share a Git common directory',
+        );
+    await new Promise<void>((accept, reject) => {
+        const child = spawn(
+            'git',
+            [
+                '--no-optional-locks',
+                '--git-dir=.git',
+                '--work-tree=.',
+                '-c',
+                'core.fsmonitor=false',
+                'rev-parse',
+                '--is-inside-work-tree',
+            ],
+            {
+                cwd: root,
+                env: {
+                    PATH: process.env.PATH,
+                    GIT_CONFIG_NOSYSTEM: '1',
+                    GIT_CONFIG_GLOBAL: '/dev/null',
+                    GIT_TERMINAL_PROMPT: '0',
+                    LC_ALL: 'C',
+                },
+            },
+        );
+        let output = '';
+        let exceeded = false;
+        const timer = setTimeout(() => {
+            exceeded = true;
+            child.kill('SIGKILL');
+        }, 1500);
+        child.stdout.on('data', (chunk: Buffer) => {
+            if (output.length + chunk.length > 4096) {
+                exceeded = true;
+                child.kill('SIGKILL');
+            } else output += chunk.toString();
+        });
+        child.stderr.resume();
+        child.stdin.end();
+        child.once('error', reject);
+        child.once('close', code => {
+            clearTimeout(timer);
+            if (!exceeded && code === 0 && output.trim() === 'true') accept();
+            else
+                reject(
+                    new Error(
+                        'Select a standalone Git checkout, not a parent directory or linked worktree',
+                    ),
+                );
+        });
+    });
+}
 
 /** Explicit operator selections, not an automatically expanding execution grant. */
 export async function loadProjectRoots(
     directory: string,
-    selections: string[]
+    selections: string[],
 ): Promise<LocalWorkspaceConfig[]> {
     if (!selections.length || selections.length > 32)
         throw new Error('Choose between 1 and 32 projects');
@@ -26,43 +105,20 @@ export async function loadProjectRoots(
         const directoryIdentity = await lstat(path, { bigint: true });
         if (canonical !== path || !directoryIdentity.isDirectory())
             throw new Error(
-                'Selected projects must be directories without symlink traversal'
+                'Selected projects must be directories without symlink traversal',
             );
         if (paths.has(canonical))
             throw new Error('Duplicate project selection');
         paths.add(canonical);
-        const commonDirectory = await lstat(
-            resolve(canonical, '.git', 'commondir')
-        ).catch(error => {
-            if (
-                !(error instanceof Error) ||
-                !('code' in error) ||
-                (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
-            )
-                throw error;
-            return undefined;
-        });
-        if (commonDirectory)
-            throw new Error(
-                'Selected projects must not share a Git common directory'
-            );
-        const inventory = await discoverProjects({
-            root: canonical,
-            maxProjects: 1,
-        });
-        if (
-            inventory.truncated ||
-            !inventory.projects.some(project => project.path === '.')
-        )
-            throw new Error(
-                'Select a standalone Git checkout, not a parent directory or linked worktree'
-            );
         const portablePath = rel.split(sep).join('/') || '.';
         const identity = {
             path: canonical,
             dev: directoryIdentity.dev.toString(),
             ino: directoryIdentity.ino.toString(),
         };
+        await withWorkspaceRoot(canonical, identity, () =>
+            validateCheckout(canonical),
+        );
         if (!(await matchesWorkspaceRoot(canonical, identity)))
             throw new Error('Selected project changed during admission');
         projects.push({
@@ -73,7 +129,7 @@ export async function loadProjectRoots(
                 .slice(0, 32)}`,
             name: (portablePath === '.' ? basename(root) : portablePath).slice(
                 0,
-                64
+                64,
             ),
             root: canonical,
         });
@@ -82,7 +138,7 @@ export async function loadProjectRoots(
 }
 
 export function projectRootArguments(
-    args: string[]
+    args: string[],
 ): { root: string; projects: string[] } | undefined {
     let root: string | undefined;
     const projects: string[] = [];
@@ -105,7 +161,7 @@ export function projectRootArguments(
     if (root === undefined && !projects.length) return undefined;
     if (root === undefined || !projects.length)
         throw new Error(
-            '--project-root requires at least one --project relative/path'
+            '--project-root requires at least one --project relative/path',
         );
     return { root, projects };
 }

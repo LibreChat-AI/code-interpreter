@@ -32,7 +32,9 @@ let library: NativeLibrary | undefined;
 function runtime(): NativeRuntime {
     // Code API imports workspace contracts without installing native worker
     // dependencies. Load the POSIX implementation only for selected roots.
-    return (nativeRuntime ??= createRequire(import.meta.url)('koffi') as NativeRuntime);
+    return (nativeRuntime ??= createRequire(import.meta.url)(
+        'koffi',
+    ) as NativeRuntime);
 }
 function bind(signature: string): NativeCall | undefined {
     if (!['darwin', 'linux'].includes(process.platform)) return undefined;
@@ -47,6 +49,12 @@ const nativeOpenAt = bind(
     'int openat(int dirfd, const char *path, int flags, ...)',
 );
 const O_CLOEXEC = process.platform === 'darwin' ? 0x1000000 : 0x80000;
+// Anchors need search, not directory enumeration permission.
+const DIRECTORY_ACCESS =
+    constants.O_DIRECTORY |
+    (process.platform === 'darwin'
+        ? 0x40000000 /* O_SEARCH */
+        : 0x200000) /* O_PATH */;
 const openAt = nativeOpenAt
     ? (fd: number, path: string, flags: number, mode: number): number =>
           nativeOpenAt(fd, path, flags | O_CLOEXEC, 'unsigned int', mode)
@@ -121,12 +129,7 @@ export class WorkspaceRootAccess {
                 'Selected project root access is unavailable',
             );
         const handle = await fs
-            .open(
-                path,
-                constants.O_RDONLY |
-                    constants.O_DIRECTORY |
-                    constants.O_NOFOLLOW,
-            )
+            .open(path, DIRECTORY_ACCESS | constants.O_NOFOLLOW)
             .catch(() => {
                 throw new WorkspaceRootAccessError(
                     'Selected project changed after admission',
@@ -159,7 +162,7 @@ export class WorkspaceRootAccess {
             openAt!(
                 this.handle.fd,
                 offset(this.path, path),
-                constants.O_RDONLY | constants.O_DIRECTORY,
+                DIRECTORY_ACCESS,
                 0,
             ),
         );
@@ -194,9 +197,7 @@ export class WorkspaceRootAccess {
                     openAt!(
                         current,
                         '..',
-                        constants.O_RDONLY |
-                            constants.O_DIRECTORY |
-                            constants.O_NOFOLLOW,
+                        DIRECTORY_ACCESS | constants.O_NOFOLLOW,
                         0,
                     ),
                 );
@@ -223,12 +224,7 @@ export class WorkspaceRootAccess {
     private parent(path: string): { fd: number; name: string } {
         const local = offset(this.path, path);
         const fd = checked(
-            openAt!(
-                this.handle.fd,
-                dirname(local),
-                constants.O_RDONLY | constants.O_DIRECTORY,
-                0,
-            ),
+            openAt!(this.handle.fd, dirname(local), DIRECTORY_ACCESS, 0),
         );
         try {
             this.assertDirectoryAncestor(fd);
@@ -282,7 +278,7 @@ export class WorkspaceRootAccess {
                       (follow ? 0 : constants.O_NOFOLLOW)
                     : 0x8000 /* O_EVTONLY */ |
                       (follow ? 0 : 0x200000); /* O_SYMLINK */
-            fd = checked(openAt!(parent.fd, parent.name, flags, 0));
+            fd = this.metadataDescriptor(parent.fd, parent.name, flags);
             return fstatSync(fd);
         } finally {
             if (fd !== undefined) closeSync(fd);
@@ -290,17 +286,40 @@ export class WorkspaceRootAccess {
         }
     }
 
+    private metadataDescriptor(
+        parent: number,
+        name: string,
+        flags: number,
+    ): number {
+        if (process.platform === 'darwin') {
+            // O_EVTONLY still requests read permission on a directory. Search-only
+            // descriptors preserve known-path metadata/cwd access without enumeration.
+            const directory = openAt!(
+                parent,
+                name,
+                DIRECTORY_ACCESS |
+                    (flags & 0x200000 /* O_SYMLINK */
+                        ? constants.O_NOFOLLOW
+                        : 0),
+                0,
+            );
+            if (directory >= 0) return directory;
+            const error = nativeError();
+            if (error.code !== 'ENOTDIR' && error.code !== 'ELOOP') throw error;
+        }
+        return checked(openAt!(parent, name, flags, 0));
+    }
+
     realpath(path: string): string {
         const parent = this.parent(path);
         let fd: number | undefined;
         try {
-            fd = checked(
-                openAt!(
-                    parent.fd,
-                    parent.name,
-                    constants.O_RDONLY | constants.O_NONBLOCK,
-                    0,
-                ),
+            fd = this.metadataDescriptor(
+                parent.fd,
+                parent.name,
+                process.platform === 'linux'
+                    ? 0x200000 /* O_PATH */
+                    : 0x8000 /* O_EVTONLY */,
             );
             return this.canonical(fd);
         } finally {
