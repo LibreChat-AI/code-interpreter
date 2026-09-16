@@ -29,6 +29,21 @@ export async function loadProjectRoots(
         if (paths.has(canonical))
             throw new Error('Duplicate project selection');
         paths.add(canonical);
+        const commonDirectory = await lstat(
+            resolve(canonical, '.git', 'commondir')
+        ).catch(error => {
+            if (
+                !(error instanceof Error) ||
+                !('code' in error) ||
+                (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+            )
+                throw error;
+            return undefined;
+        });
+        if (commonDirectory)
+            throw new Error(
+                'Selected projects must not share a Git common directory'
+            );
         const inventory = await discoverProjects({
             root: canonical,
             maxProjects: 1,

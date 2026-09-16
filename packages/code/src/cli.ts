@@ -488,11 +488,11 @@ async function run(
       'LIBRECHAT_CODE_COMMAND_SANDBOX must be native-srt or runtime',
     );
   }
-    if (
-        (environments.length || projectRoots.length) &&
-        commandSandboxMode !== 'native-srt'
-    ) {
-        throw new Error('Environment definitions and project selections require native-srt');
+    if (environments.length && commandSandboxMode !== 'native-srt') {
+        throw new Error('Environment definitions require native-srt');
+    }
+    if (projectRoots.length && commandSandboxMode !== 'native-srt') {
+        throw new Error('Project selections require native-srt');
     }
     if (
         environments.some(environment => environment.definition.setup) &&

@@ -236,6 +236,18 @@ test('project CLI arguments require explicit bounded selections', () => {
     }
 });
 
+test('rejects a directory-form git marker redirecting to shared metadata', async t => {
+    const root = await fixture(t);
+    await writeFile(
+        join(root, 'app/.git/commondir'),
+        '../../nested/api/.git\n'
+    );
+    await assert.rejects(
+        loadProjectRoots(root, ['app']),
+        /Git common directory/
+    );
+});
+
 test('CLI rejects mixed registration and overlapping selected projects before connecting', async t => {
     const root = await fixture(t);
     await exec('git', ['init', '--initial-branch=dev', root]);
