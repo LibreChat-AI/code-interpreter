@@ -150,11 +150,14 @@ export async function discoverProjects(
         const current = queue[index];
         try {
             // Revalidate queued directories; never traverse a replaced symlink.
-            if ((await lstat(current.path)).isSymbolicLink()) {
+            const currentStat = await lstat(current.path);
+            if (expired()) break;
+            if (currentStat.isSymbolicLink()) {
                 result.incomplete = true;
                 continue;
             }
             const canonical = await realpath(current.path);
+            if (expired()) break;
             const rel = relative(root, canonical);
             if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
                 result.incomplete = true;
@@ -171,6 +174,7 @@ export async function discoverProjects(
                     return undefined;
                 }
             );
+            if (expired()) break;
             if (marker) {
                 // Linked worktrees and submodules need separate shared-gitdir admission.
                 if (!marker.isDirectory() || marker.isSymbolicLink()) {
@@ -185,10 +189,12 @@ export async function discoverProjects(
                     'rev-parse',
                     '--show-toplevel',
                 ]);
-                if (
-                    !top ||
-                    (await realpath(top).catch(() => null)) !== canonical
-                ) {
+                if (expired()) break;
+                const canonicalTop = top
+                    ? await realpath(top).catch(() => null)
+                    : null;
+                if (expired()) break;
+                if (!top || canonicalTop !== canonical) {
                     result.incomplete = true;
                     continue;
                 }
@@ -248,6 +254,16 @@ export async function discoverProjects(
                 continue;
             }
             const directory = await opendir(current.path);
+            // Close a newly opened handle even when cancellation won during open.
+            try {
+                if (expired()) {
+                    await directory.close();
+                    break;
+                }
+            } catch (error) {
+                await directory.close();
+                throw error;
+            }
             for await (const entry of directory) {
                 if (expired() || ++entries > maxEntries) {
                     result.truncated = true;

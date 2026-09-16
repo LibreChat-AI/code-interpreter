@@ -203,6 +203,51 @@ test('empty directory completion checks a late deadline and cancellation', async
     }
 });
 
+test('late filesystem boundaries stop before starting the next operation', async t => {
+    const root = await fixture(t);
+    for (const boundary of [3, 4, 5]) {
+        for (const abort of [false, true]) {
+            let calls = 0;
+            let clock = 0;
+            const controller = new AbortController();
+            const now = t.mock.method(Date, 'now', () => clock);
+            const mocks = ['lstat', 'realpath', 'opendir'].map(name => {
+                const original = fs[name as 'lstat'];
+                return t.mock.method(
+                    fs,
+                    name as 'lstat',
+                    async (...args: Parameters<typeof fs.lstat>) => {
+                        calls++;
+                        try {
+                            return await original(...args);
+                        } finally {
+                            if (calls === boundary) {
+                                clock = 20_000;
+                                if (abort) controller.abort();
+                            }
+                        }
+                    }
+                );
+            });
+            syncBuiltinESMExports();
+            try {
+                const discovery = discoverProjects({
+                    root,
+                    signal: controller.signal,
+                });
+                if (abort)
+                    await assert.rejects(discovery, { name: 'AbortError' });
+                else assert.equal((await discovery).truncated, true);
+                assert.equal(calls, boundary);
+            } finally {
+                for (const mock of mocks) mock.mock.restore();
+                now.mock.restore();
+                syncBuiltinESMExports();
+            }
+        }
+    }
+});
+
 test('unsupported configured origins are distinguishable from missing origins', async t => {
     const root = await fixture(t);
     const directory = await repo(root, 'app');
