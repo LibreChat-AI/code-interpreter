@@ -113,6 +113,18 @@ describe('hardened sandbox-runner startup config', () => {
     expect(() => validateHardenedSandboxStartup()).toThrow('REDIS_HOST');
   });
 
+  test('allows Lambda MicroVM image metadata while rejecting AWS credentials', () => {
+    setValidHardenedConfig();
+    process.env.AWS_LAMBDA_MICROVM_IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:codeapi';
+    process.env.AWS_LAMBDA_MICROVM_IMAGE_NAME = 'codeapi';
+    process.env.AWS_LAMBDA_MICROVM_IMAGE_VERSION = '3';
+    process.env.AWS_REGION = 'us-east-1';
+    expect(() => validateHardenedSandboxStartup()).not.toThrow();
+
+    process.env.AWS_ACCESS_KEY_ID = 'access-key';
+    expect(() => validateHardenedSandboxStartup()).toThrow('AWS_ACCESS_KEY_ID');
+  });
+
   test('rejects missing manifest verifier and wrong forwarding target', () => {
     setValidHardenedConfig();
     config.egress_gateway_url = '';

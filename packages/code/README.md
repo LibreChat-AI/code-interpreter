@@ -3,6 +3,9 @@
 Provider-neutral protocol and worker CLI for attaching a stateful, sandboxed
 code environment to LibreChat Code API.
 
+For a complete machine setup and operations guide, see the
+[self-hosted worker runbook](../../docs/remote-bridge/worker-runbook.md).
+
 The CLI owns the runtime-supervisor seam. Native workspace commands use
 Anthropic's open-source Sandbox Runtime (SRT) on the worker machine. The
 bundled endpoint adapter can also connect to an already-running loopback Code
@@ -10,6 +13,43 @@ Interpreter sandbox, while the optional Docker adapter provides a stronger
 container/NsJail profile. The worker connects outbound to Code API,
 long-polls for assignments, sends them to the local runtime, and returns fenced
 results. The VM does not need an inbound public port.
+
+## Inspect local projects
+
+Before registering a directory containing several checkouts, inspect its Git
+projects on the worker machine:
+
+```bash
+librechat-code projects --root /srv/projects
+```
+
+The command prints JSON with `projects`, `truncated`, and `incomplete`. Each
+project contains a path relative to the requested directory, a path-derived ID,
+and the current origin, branch, and HEAD. Origins are normalized to
+`host[:port]/namespace/repository`, including nested namespaces; URL credentials,
+query strings, and fragments are omitted. An unsupported configured origin is
+redacted to null and marks the inventory incomplete.
+A detached HEAD has a null branch; an unborn branch has a null HEAD. IDs stay
+stable when branches change, but moving or renaming a directory changes its ID.
+IDs are local to the supplied discovery root.
+
+Discovery runs only when requested. Its default limits are three directory
+levels, 10,000 entries, 256 projects, and a ten-second processing budget with
+bounded Git subprocess output and timeouts.
+The time budget starts before resolving the root and is checked between native
+filesystem operations; it cannot interrupt a kernel call stalled on a filesystem.
+Use a responsive local filesystem. Discovery skips hidden directories,
+dependencies, symlinks, and children of an identified repository. Linked
+worktrees and submodules using a `.git` file are skipped and set `incomplete`:
+their shared Git metadata needs separate admission before independent execution.
+An empty project list does not prevent registering a non-Git directory.
+
+This is a local inventory command. It does not clone, register roots, pair a
+worker, change the sandbox, or automatically select a conversation workspace.
+For the existing picker and independent lease slots, explicitly register the
+chosen non-overlapping project directories with `--workspace` or `--environment`.
+Do not also register their parent directory. Treat the inventory as a snapshot;
+normal workspace admission must validate any directory selected from it.
 
 ## Pair
 

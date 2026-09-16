@@ -2,7 +2,11 @@
 # file is inert inside the monorepo — GitHub only runs workflows from the repo
 # root — and becomes a root workflow in the published repo.
 #
-# Two entry points feed one job:
+# Three entry points feed one job:
+#
+#   * successful CI on main — automatically releases deployable changes. The
+#     next repository version follows Conventional Commit intent; changes that
+#     only touch docs, workflows, or tests do not cut a release.
 #
 #   * workflow_dispatch — pick a version in the Actions UI. The chart is
 #     packaged before the tag is created, so a packaging failure aborts while
@@ -18,10 +22,13 @@
 name: Release
 
 on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release, e.g. v2.0.0 or v2.1.0-rc1. Must match helm/codeapi/Chart.yaml appVersion.'
+        description: 'Repository version to release, e.g. v1.0.0 or v1.1.0-rc1.'
         required: true
         type: string
       draft:
@@ -36,12 +43,20 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.event.inputs.version || github.ref_name }}
+  # Automatic runs serialize against one another. If main advances before an
+  # older run starts, version resolution skips the stale SHA and the newest
+  # successful run releases the full range instead.
+  group: release-${{ github.event_name == 'workflow_run' && 'main' || github.event.inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   release:
     name: Tag and publish
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -50,19 +65,60 @@ jobs:
           # Full history and tags: resolving whether this release is the newest
           # stable one compares it against every other tag in the repository.
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
 
       - name: Resolve and validate version
         id: version
         env:
           EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
           INPUT_DRAFT: ${{ github.event.inputs.draft }}
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          SKIP=false
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
+              echo "::error::Checked out SHA does not match the successful CI run"
+              exit 1
+            fi
+
+            git fetch --no-tags origin main:refs/remotes/origin/main
+            if [ "$(git rev-parse refs/remotes/origin/main)" != "$HEAD_SHA" ]; then
+              echo "main advanced after this CI run; the newer successful run will release the combined changes"
+              SKIP=true
+            fi
+
+            # A rerun after tag creation but before release publication resumes
+            # the missing release rather than incrementing the version again.
+            EXACT_TAG="$({ git tag --points-at HEAD || true; } | grep -E '^v[0-9]+[.][0-9]+[.][0-9]+$' | sort -V | tail -n 1)"
+            if [ "$SKIP" = "false" ] && [ -n "$EXACT_TAG" ]; then
+              if gh release view "$EXACT_TAG" >/dev/null 2>&1; then
+                echo "$EXACT_TAG already publishes this commit; nothing to do"
+                SKIP=true
+              else
+                VERSION="$EXACT_TAG"
+              fi
+            elif [ "$SKIP" = "false" ]; then
+              PREVIOUS_TAG="$(git tag --merged HEAD \
+                | grep -E '^v[0-9]+[.][0-9]+[.][0-9]+$' \
+                | sort -V \
+                | tail -n 1)"
+              if [ -z "$PREVIOUS_TAG" ]; then
+                echo "::error::Automatic releases require an existing stable vMAJOR.MINOR.PATCH tag"
+                exit 1
+              fi
+              VERSION="$(.github/scripts/next-release-version.sh "$PREVIOUS_TAG" "$PREVIOUS_TAG..HEAD")"
+              if [ -z "$VERSION" ]; then
+                echo "Only documentation, workflow, or test files changed since $PREVIOUS_TAG; no release needed"
+                SKIP=true
+              fi
+            fi
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             # Releases describe what shipped to main. Dispatching from a topic
             # branch would tag a commit that is not on the release line.
             if [ "$REF_TYPE" != "branch" ] || [ "$REF_NAME" != "main" ]; then
@@ -74,6 +130,11 @@ jobs:
             VERSION="$REF_NAME"
           fi
 
+          if [ "$SKIP" = "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # A bare "2.0.0" typed into the dispatch box is accepted; everything
           # downstream works with the v-prefixed form the tag actually uses.
           case "$VERSION" in
@@ -82,14 +143,15 @@ jobs:
           esac
 
           if [[ ! "$VERSION" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[0-9]+)?$ ]]; then
-            echo "::error::Release tags must be v<major>.<minor>.<patch> or v<major>.<minor>.<patch>-rcN, for example v2.0.0 or v2.1.0-rc1 (got '$VERSION')"
+            echo "::error::Release tags must be v<major>.<minor>.<patch> or v<major>.<minor>.<patch>-rcN, for example v1.0.0 or v1.1.0-rc1 (got '$VERSION')"
             exit 1
           fi
 
-          # v2.1.0-rc1 -> 2.1.0. Release candidates carry the version they are
-          # candidates for, so they compare against the same appVersion.
-          BASE_VERSION="${VERSION%%-rc*}"
-          BASE_VERSION="${BASE_VERSION#v}"
+          if [ "$EVENT_NAME" = "workflow_run" ] \
+             && git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::Calculated tag $VERSION already exists on a different commit"
+            exit 1
+          fi
 
           read_chart_field() {
             grep -m1 "^$1:" helm/codeapi/Chart.yaml \
@@ -97,14 +159,6 @@ jobs:
           }
           APP_VERSION="$(read_chart_field appVersion)"
           CHART_VERSION="$(read_chart_field version)"
-
-          # The tag is the app version. Requiring the bump to have landed on
-          # main first keeps a deployed chart from reporting a version that no
-          # release ever carried.
-          if [ "$APP_VERSION" != "$BASE_VERSION" ]; then
-            echo "::error::Tag $VERSION does not match helm/codeapi/Chart.yaml appVersion ($APP_VERSION). Land the appVersion bump on main before releasing."
-            exit 1
-          fi
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ] \
              && git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
@@ -142,8 +196,8 @@ jobs:
           fi
 
           {
+            echo "skip=false"
             echo "version=$VERSION"
-            echo "base_version=$BASE_VERSION"
             echo "app_version=$APP_VERSION"
             echo "chart_version=$CHART_VERSION"
             echo "prerelease=$PRERELEASE"
@@ -157,6 +211,7 @@ jobs:
       # ci.yml depend on it.
       - name: Package Helm chart
         id: chart
+        if: steps.version.outputs.skip != 'true'
         run: |
           set -euo pipefail
 
@@ -183,17 +238,20 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create tag
-        if: github.event_name == 'workflow_dispatch'
+        if: steps.version.outputs.skip != 'true' && github.event_name != 'push'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git tag -a "$VERSION" -m "$VERSION"
-          git push origin "refs/tags/$VERSION"
+          if ! git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            git tag -a "$VERSION" -m "$VERSION"
+            git push origin "refs/tags/$VERSION"
+          fi
 
       - name: Publish release
+        if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
