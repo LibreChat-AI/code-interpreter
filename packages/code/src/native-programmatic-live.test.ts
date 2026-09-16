@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,17 +8,20 @@ import type { AddressInfo } from 'node:net';
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { resolveNativeSrtCommandPolicy } from './native-policy.js';
 
-test('real SRT prevents speculative network effects under trusted-vm', {
+for (const selected of [false, true]) {
+test(`real SRT prevents speculative network effects under trusted-vm${selected ? ' for a selected project' : ''}`, {
   skip: process.env.LIBRECHAT_CODE_LIVE_SRT_TESTS !== '1',
   timeout: 30_000,
 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'native-ptc-effects-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'native-ptc-effects-')));
+  const identity = await stat(root, { bigint: true });
   let effects = 0;
   const server = createServer((_req, res) => { effects += 1; res.end('ok'); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
   const executor = new NativeProcessWorkspaceCommandSandbox({
     workspaceRoot: root,
+    ...(selected ? { workspaceIdentity: { path: root, dev: String(identity.dev), ino: String(identity.ino) } } : {}),
     commandPolicy: resolveNativeSrtCommandPolicy('trusted-vm'),
     programmaticFileUpstream: `http://127.0.0.1:${port}`,
   });
@@ -39,3 +42,4 @@ test('real SRT prevents speculative network effects under trusted-vm', {
     }
   }
 });
+}
