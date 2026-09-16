@@ -3,6 +3,10 @@
 Remote Code Bridge makes an operator-owned VM a stateful Code API execution
 environment without exposing that VM to inbound internet traffic.
 
+For an end-to-end host setup, including pairing, named environments, systemd,
+launchd, GitHub App credentials, upgrades, verification, and recovery, see the
+[self-hosted worker runbook](./worker-runbook.md).
+
 ```text
 LibreChat -> Code API -> Redis assignment
                          ^             |
@@ -200,6 +204,7 @@ Expose the Code API deployment as an environment under the Agents endpoint:
 endpoints:
     agents:
         statefulCodeSessions:
+            allowedEnvironments: [user, agent-user, conversation]
             environments:
                 - id: my-vm
                   name: My VM
