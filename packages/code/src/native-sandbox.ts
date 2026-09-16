@@ -13,6 +13,8 @@ import {
 import { constants as fsConstants } from 'node:fs';
 import { access, mkdtemp, open, realpath, rm, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
+import { matchesWorkspaceRoot } from './root-identity.js';
+import type { WorkspaceRootIdentity } from './root-identity.js';
 
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 
@@ -157,6 +159,7 @@ type SpawnCommand = (
 ) => ChildProcessWithoutNullStreams;
 
 export interface NativeSrtWorkspaceCommandSandboxOptions {
+  workspaceIdentity?: WorkspaceRootIdentity;
   workspaceRoot: string;
   commandPolicy?: NativeSrtCommandPolicy;
   /** Trusted worker files that must never become workspace-readable or writable. */
@@ -343,6 +346,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       );
     }
     const root = await realpath(this.options.workspaceRoot);
+    if (this.options.workspaceIdentity && !await matchesWorkspaceRoot(root, this.options.workspaceIdentity)) {
+      throw new WorkspaceToolError('Selected project changed before sandbox admission', 'REGISTRATION_INVALID');
+    }
     if (!(await stat(root)).isDirectory()) {
       throw new WorkspaceToolError(
         'Native sandbox workspace is unavailable',
@@ -800,6 +806,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         sandboxScratchDirectory?: string,
         workspaceRoot?: string,
   ): Promise<WorkspaceExecuteCommandResult> {
+    if (this.options.workspaceIdentity && !await matchesWorkspaceRoot(this.options.workspaceRoot, this.options.workspaceIdentity)) {
+      throw new WorkspaceToolError('Selected project changed after sandbox admission', 'REGISTRATION_INVALID');
+    }
     if (
       !isWorkspaceToolRequest(request) ||
       request.operation !== 'execute_command'

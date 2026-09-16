@@ -336,6 +336,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
     child.on('disconnect', lost);
     const {
       workspaceRoot,
+      workspaceIdentity,
       commandPolicy,
       protectedPaths,
       allowedDomains,
@@ -348,6 +349,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
       {
         options: {
           workspaceRoot,
+          workspaceIdentity,
           commandPolicy,
           protectedPaths,
           allowedDomains,

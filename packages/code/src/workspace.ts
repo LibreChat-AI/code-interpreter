@@ -5,6 +5,8 @@ import { link, lstat, open, realpath, rename, stat, unlink } from 'node:fs/promi
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
+import { matchesWorkspaceRoot } from './root-identity.js';
+import type { WorkspaceRootIdentity } from './root-identity.js';
 
 import {
   BRIDGE_PROTOCOL_VERSION,
@@ -66,6 +68,7 @@ export type {
 };
 
 export interface LocalWorkspaceConfig {
+  identity?: WorkspaceRootIdentity;
   id: string;
   name?: string;
   root: string;
@@ -334,6 +337,7 @@ async function readConfinedFile(
 }
 
 interface WorkspaceRoot {
+  identity?: WorkspaceRootIdentity;
   root: string;
   writable: boolean;
 }
@@ -1496,6 +1500,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       let canonicalRoot: string;
       try {
         canonicalRoot = await realpath(workspace.root);
+        if (workspace.identity && !await matchesWorkspaceRoot(canonicalRoot, workspace.identity)) throw new Error();
         if (!(await stat(canonicalRoot)).isDirectory()) throw new Error();
       } catch {
         throw new WorkspaceToolError(
@@ -1504,6 +1509,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
         );
       }
       roots.set(workspace.id, {
+        identity: workspace.identity,
         root: canonicalRoot,
         writable: workspace.writable === true,
       });
@@ -1540,6 +1546,9 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       throw new WorkspaceToolError('Unknown workspace', 'INVALID_REQUEST');
     }
     const { root } = workspace;
+    if (workspace.identity && !await matchesWorkspaceRoot(root, workspace.identity)) {
+      throw new WorkspaceToolError('Selected project changed after admission', 'REGISTRATION_INVALID');
+    }
 
     if (
       request.operation === 'write_file' ||

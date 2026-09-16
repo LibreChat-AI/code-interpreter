@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { discoverProjects } from './projects.js';
+import { matchesWorkspaceRoot } from './root-identity.js';
 import type { LocalWorkspaceConfig } from './workspace.js';
 
 /** Explicit operator selections, not an automatically expanding execution grant. */
@@ -22,7 +23,8 @@ export async function loadProjectRoots(
         if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))
             throw new Error('Project paths must stay inside --project-root');
         const canonical = await realpath(path);
-        if (canonical !== path || !(await lstat(path)).isDirectory())
+        const directoryIdentity = await lstat(path);
+        if (canonical !== path || !directoryIdentity.isDirectory())
             throw new Error(
                 'Selected projects must be directories without symlink traversal'
             );
@@ -56,7 +58,15 @@ export async function loadProjectRoots(
                 'Select a standalone Git checkout, not a parent directory or linked worktree'
             );
         const portablePath = rel.split(sep).join('/') || '.';
+        const identity = {
+            path: canonical,
+            dev: directoryIdentity.dev,
+            ino: directoryIdentity.ino,
+        };
+        if (!(await matchesWorkspaceRoot(canonical, identity)))
+            throw new Error('Selected project changed during admission');
         projects.push({
+            identity,
             id: `project-${createHash('sha256')
                 .update(`${root}\0${portablePath}`)
                 .digest('hex')

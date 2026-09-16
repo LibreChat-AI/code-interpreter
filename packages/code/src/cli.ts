@@ -601,6 +601,7 @@ async function run(
         {
           id: workspaceId,
           root: canonicalWorkerDirectory,
+          identity: projectRoots[0]?.identity,
           writable: allowWorkspaceWrites,
           name:
                       projectRoots[0]?.name ??
@@ -910,6 +911,7 @@ async function run(
         });
   const nativeOptions: NativeProcessSandboxOptions = {
     workspaceRoot: canonicalWorkerDirectory!,
+    workspaceIdentity: roots[0]?.identity,
     commandPolicy,
     protectedPaths: [
       identityPath,
@@ -949,7 +951,7 @@ async function run(
             new Map(
                           roots.map(root => [
                 root.id,
-                { ...nativeOptions, workspaceRoot: root.root },
+                { ...nativeOptions, workspaceRoot: root.root, workspaceIdentity: root.identity },
               ]),
             ),
             workspaceLeaseSlots,

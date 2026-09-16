@@ -6,6 +6,7 @@ import {
     mkdtemp,
     mkdir,
     readFile,
+    rename,
     rm,
     symlink,
     writeFile,
@@ -18,6 +19,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { loadProjectRoots, projectRootArguments } from './project-roots.js';
 import { LocalWorkspaceTools } from './workspace.js';
+import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import type { BridgeWorkerCapabilities } from './protocol.js';
 
 const exec = promisify(execFile);
@@ -246,6 +248,43 @@ test('rejects a directory-form git marker redirecting to shared metadata', async
         loadProjectRoots(root, ['app']),
         /Git common directory/
     );
+});
+
+test('replacement after selection cannot become a file or native execution root', async t => {
+    const root = await fixture(t);
+    const outside = await fixture(t);
+    const [selected] = await loadProjectRoots(root, ['app']);
+    const tools = await LocalWorkspaceTools.create({
+        workspaces: [{ ...selected, writable: true }],
+    });
+    await rename(selected.root, `${selected.root}-previous`);
+    await symlink(join(outside, 'app'), selected.root, 'dir');
+    await assert.rejects(
+        LocalWorkspaceTools.create({ workspaces: [selected] }),
+        /Invalid workspace registration/
+    );
+    await assert.rejects(
+        tools.execute({
+            protocolVersion: 1,
+            operation: 'write_file',
+            workspaceId: selected.id,
+            path: 'escaped.txt',
+            content: 'blocked',
+        }),
+        /changed after admission/
+    );
+    const executor = new NativeProcessWorkspaceCommandSandbox({
+        workspaceRoot: selected.root,
+        workspaceIdentity: selected.identity,
+    });
+    try {
+        await assert.rejects(executor.prepare());
+    } finally {
+        await executor.close().catch(() => undefined);
+    }
+    await assert.rejects(readFile(join(outside, 'app/escaped.txt')), {
+        code: 'ENOENT',
+    });
 });
 
 test('CLI rejects mixed registration and overlapping selected projects before connecting', async t => {
