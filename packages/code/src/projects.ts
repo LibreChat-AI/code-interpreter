@@ -49,7 +49,7 @@ export function projectRemote(value: string): string | null {
         path = path.replace(/\.git$/, '');
         if (
             !/^[A-Za-z0-9.-]+(?::[0-9]+)?$/.test(host) ||
-            !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(path)
+            !/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/.test(path)
         )
             return null;
         if (path.split('/').some(part => part === '.' || part === '..'))
@@ -214,6 +214,7 @@ export async function discoverProjects(
                     branch ? [128] : []
                 );
                 const path = rel.split(sep).join('/') || '.';
+                const normalizedRemote = remote ? projectRemote(remote) : null;
                 const validBranch =
                     branch &&
                     branch.length <= 256 &&
@@ -225,6 +226,7 @@ export async function discoverProjects(
                         ? head
                         : null;
                 if (
+                    (remote !== null && normalizedRemote === null) ||
                     (branch !== null && validBranch === null) ||
                     (head !== null && validHead === null)
                 )
@@ -235,7 +237,7 @@ export async function discoverProjects(
                         .digest('hex')
                         .slice(0, 32)}`,
                     path,
-                    remote: remote ? projectRemote(remote) : null,
+                    remote: normalizedRemote,
                     branch: validBranch,
                     head: validHead,
                 });
@@ -272,5 +274,6 @@ export async function discoverProjects(
     result.projects.sort((a, b) =>
         a.path < b.path ? -1 : a.path > b.path ? 1 : 0
     );
+    expired();
     return result;
 }

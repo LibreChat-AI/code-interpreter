@@ -9,6 +9,8 @@ import {
     writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -170,6 +172,52 @@ test('root resolution consumes the processing budget and pre-abort wins', async 
     );
 });
 
+test('empty directory completion checks a late deadline and cancellation', async t => {
+    const root = await fixture(t);
+    const original = fs.opendir;
+    let clock = 0;
+    let cancel: AbortController | undefined;
+    t.mock.method(Date, 'now', () => clock);
+    const openMock = t.mock.method(
+        fs,
+        'opendir',
+        async (path: Parameters<typeof fs.opendir>[0]) => {
+            const directory = await original(path);
+            clock = 20_000;
+            cancel?.abort();
+            return directory;
+        }
+    );
+    syncBuiltinESMExports();
+    try {
+        assert.equal((await discoverProjects({ root })).truncated, true);
+        clock = 0;
+        cancel = new AbortController();
+        await assert.rejects(
+            discoverProjects({ root, signal: cancel.signal }),
+            { name: 'AbortError' }
+        );
+    } finally {
+        openMock.mock.restore();
+        syncBuiltinESMExports();
+    }
+});
+
+test('unsupported configured origins are distinguishable from missing origins', async t => {
+    const root = await fixture(t);
+    const directory = await repo(root, 'app');
+    await exec('git', [
+        '-C',
+        directory,
+        'config',
+        'remote.origin.url',
+        '/private/local/repo',
+    ]);
+    const inventory = await discoverProjects({ root });
+    assert.equal(inventory.incomplete, true);
+    assert.equal(inventory.projects[0].remote, null);
+});
+
 test('project, entry and depth ceilings report partial discovery', async t => {
     const root = await fixture(t);
     await repo(root, 'a');
@@ -237,7 +285,14 @@ test('repository identity retains host and drops credentials, query and fragment
     );
     assert.equal(projectRemote('/home/user/private'), null);
     assert.equal(projectRemote('file:///home/user/private'), null);
-    assert.equal(projectRemote('https://example.com/org/repo/extra'), null);
+    assert.equal(
+        projectRemote('https://example.com/group/subgroup/repo.git'),
+        'example.com/group/subgroup/repo'
+    );
+    assert.equal(
+        projectRemote('git@example.com:group/subgroup/repo.git'),
+        'example.com/group/subgroup/repo'
+    );
 });
 
 test('CLI inventories a real checkout without pairing or starting a worker', async t => {

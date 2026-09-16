@@ -26,7 +26,9 @@ librechat-code projects --root /srv/projects
 The command prints JSON with `projects`, `truncated`, and `incomplete`. Each
 project contains a path relative to the requested directory, a path-derived ID,
 and the current origin, branch, and HEAD. Origins are normalized to
-`host/owner/repository`; URL credentials, query strings, and fragments are omitted.
+`host[:port]/namespace/repository`, including nested namespaces; URL credentials,
+query strings, and fragments are omitted. An unsupported configured origin is
+redacted to null and marks the inventory incomplete.
 A detached HEAD has a null branch; an unborn branch has a null HEAD. IDs stay
 stable when branches change, but moving or renaming a directory changes its ID.
 IDs are local to the supplied discovery root.
