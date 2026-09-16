@@ -145,6 +145,13 @@ jobs:
       - name: Install Redis for ledger integration tests
         run: sudo apt-get update && sudo apt-get install -y redis-server
 
+      - name: Verify fleet admission with isolated Redis
+        run: |
+          redis_socket="$RUNNER_TEMP/byom-admission.sock"
+          redis-server --port 0 --unixsocket "$redis_socket" --save '' --appendonly no --daemonize yes
+          trap 'redis-cli -s "$redis_socket" shutdown nosave' EXIT
+          BRIDGE_TEST_REDIS_URL="$redis_socket" bun test src/bridge/fleet.test.ts
+
       - name: Build service
         run: bun run build
 

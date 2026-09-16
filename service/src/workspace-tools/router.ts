@@ -36,6 +36,7 @@ function asyncRoute(handler: (req: AuthenticatedRequest, res: Response) => Promi
 }
 
 export function bridgeStoreStatus(error: BridgeStoreError): number {
+  if (error.code === 'WORKSPACE_QUEUE_TIMEOUT') return 503;
   if (error.code === 'WORKER_QUEUE_FULL') return 429;
   if (error.code === 'WORKER_UNAUTHORIZED') return 403;
   if (error.code === 'ASSIGNMENT_INVALID') return 400;
@@ -172,6 +173,7 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
       } catch (error) {
         if (error instanceof BridgeStoreError) {
           outcome.errorCode = error.code;
+          if (error.code === 'WORKSPACE_QUEUE_TIMEOUT') res.setHeader('Retry-After', '1');
           res.status(bridgeStoreStatus(error)).json({
             error: error.message,
             code: error.code,

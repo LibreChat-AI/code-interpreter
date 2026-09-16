@@ -692,6 +692,19 @@ librechat-code run \
   --allow-workspace-commands
 ```
 
+Slots are per machine, not a fleet-wide execution limit. A busy machine does not
+consume another machine's slots. Requests for the same root remain serialized,
+including commands started through background tools. Independent checkouts can
+use different slots; selecting subdirectories beneath one registered parent root
+does not create separate scheduling boundaries. Linked Git worktrees share Git
+metadata and are not supported by selected-project registration.
+
+Admission waits at most 30 seconds. A `WORKSPACE_QUEUE_TIMEOUT` response (HTTP
+503, `Retry-After: 1`) means the operation was not assigned or started; wait for
+capacity before submitting it again. This is distinct from `ASSIGNMENT_EXPIRED`
+or a transport timeout after dispatch, where execution may have occurred and
+mutations must not be blindly retried. No automatic retry is added by this policy.
+
 Keep the existing URL, pairing/identity, and network policy configuration.
 The primary root keeps its configured workspace ID (default `primary`). Repeat
 `--workspace id=path` to add named roots, up to the protocol's 32-root limit.

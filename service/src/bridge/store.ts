@@ -47,6 +47,7 @@ export class BridgeStoreError extends Error {
       | 'WORKER_UNAUTHORIZED'
       | 'WORKER_BUSY'
       | 'WORKER_QUEUE_FULL'
+      | 'WORKSPACE_QUEUE_TIMEOUT'
       | 'ASSIGNMENT_EXPIRED'
       | 'ASSIGNMENT_FENCED'
       | 'ASSIGNMENT_NOT_FOUND'
@@ -1130,6 +1131,19 @@ export class RedisBridgeStore {
         }
         throw error;
       }
+    } catch (error) {
+      // Before an assignment exists, no enqueue or worker execution is possible.
+      // Once enqueue starts, a timeout is ambiguous and must retain its old code.
+      if (
+        admission != null && assignment == null && !args.signal.aborted &&
+        error instanceof BridgeStoreError && error.code === 'ASSIGNMENT_EXPIRED'
+      ) {
+        throw new BridgeStoreError(
+          'WORKSPACE_QUEUE_TIMEOUT',
+          'Workspace capacity was unavailable before the queue deadline. The operation was not started. Wait for active work to finish or select an independent workspace on a machine with available capacity.',
+        );
+      }
+      throw error;
     } finally {
       if (admission != null) {
         // Expiry remains the fallback if Redis is unavailable during cancellation.

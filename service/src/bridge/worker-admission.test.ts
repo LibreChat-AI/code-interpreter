@@ -114,7 +114,7 @@ test('an expired queued call never reaches the worker and does not strand later 
   const assignment = await store.lease(workerId, incarnationId, 1000);
   await expect(
     dispatch('expired', new AbortController(), 25, 1000),
-  ).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  ).rejects.toMatchObject({ code: 'WORKSPACE_QUEUE_TIMEOUT' });
   const third = dispatch('third');
   await settle(assignment);
   await first;

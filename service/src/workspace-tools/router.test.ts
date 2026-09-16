@@ -320,6 +320,7 @@ test.each([
   ['ASSIGNMENT_EXPIRED', 504],
   ['WORKER_OFFLINE', 503],
   ['WORKER_BUSY', 503],
+  ['WORKSPACE_QUEUE_TIMEOUT', 503],
   ['WORKER_MISMATCH', 409],
 ] as const)('logs store rejection %s with actual HTTP %i', async (errorCode, expectedStatus) => {
   const app = express();
@@ -360,6 +361,7 @@ test.each([
     }),
   });
   expect(response.status).toBe(expectedStatus);
+  expect(response.headers.get('retry-after')).toBe(errorCode === 'WORKSPACE_QUEUE_TIMEOUT' ? '1' : null);
   await response.text();
   expect(logSpy).toHaveBeenCalledTimes(1);
   expect(logSpy).toHaveBeenCalledWith(
