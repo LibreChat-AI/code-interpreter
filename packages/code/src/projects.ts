@@ -98,7 +98,8 @@ export async function discoverProjects(
     };
     const git = async (
         path: string,
-        args: string[]
+        args: string[],
+        expectedExitCodes: number[] = []
     ): Promise<string | null> => {
         if (expired()) return null;
         try {
@@ -129,8 +130,14 @@ export async function discoverProjects(
                 }
             );
             return stdout.trim();
-        } catch {
+        } catch (error) {
             options.signal?.throwIfAborted();
+            const expected =
+                error instanceof Error &&
+                'code' in error &&
+                typeof error.code === 'number' &&
+                expectedExitCodes.includes(error.code);
+            if (!expected) result.incomplete = true;
             return null;
         }
     };
@@ -173,24 +180,27 @@ export async function discoverProjects(
                     result.incomplete = true;
                     continue;
                 }
-                const remote = await git(current.path, [
-                    'config',
-                    '--local',
-                    '--no-includes',
-                    '--get',
-                    'remote.origin.url',
-                ]);
-                const branch = await git(current.path, [
-                    'symbolic-ref',
-                    '--quiet',
-                    '--short',
-                    'HEAD',
-                ]);
-                const head = await git(current.path, [
-                    'rev-parse',
-                    '--verify',
-                    'HEAD',
-                ]);
+                const remote = await git(
+                    current.path,
+                    [
+                        'config',
+                        '--local',
+                        '--no-includes',
+                        '--get',
+                        'remote.origin.url',
+                    ],
+                    [1]
+                );
+                const branch = await git(
+                    current.path,
+                    ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+                    [1]
+                );
+                const head = await git(
+                    current.path,
+                    ['rev-parse', '--verify', 'HEAD'],
+                    branch ? [128] : []
+                );
                 const path = rel.split(sep).join('/') || '.';
                 result.projects.push({
                     id: `project-${createHash('sha256')

@@ -95,6 +95,21 @@ test('linked worktrees are reported incomplete until shared git metadata is admi
     assert.deepEqual(inventory.projects, []);
 });
 
+test('oversized Git metadata is incomplete rather than silently reported absent', async t => {
+    const root = await fixture(t);
+    const directory = await repo(root, 'app');
+    await exec('git', [
+        '-C',
+        directory,
+        'config',
+        'remote.origin.url',
+        'x'.repeat(10_000),
+    ]);
+    const inventory = await discoverProjects({ root });
+    assert.equal(inventory.incomplete, true);
+    assert.equal(inventory.projects[0].remote, null);
+});
+
 test('project, entry and depth ceilings report partial discovery', async t => {
     const root = await fixture(t);
     await repo(root, 'a');
