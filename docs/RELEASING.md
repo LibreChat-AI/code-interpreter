@@ -23,7 +23,28 @@ Component versions are deliberately independent:
 By convention `api/package.json`'s `version` is kept in step with `appVersion`.
 Nothing enforces it.
 
-## Cutting a release
+## Automatic releases
+
+After the full **CI** workflow succeeds for the current tip of `main`, the
+release workflow examines everything since the last stable repository tag. It
+cuts a release when that range changes deployable files and skips ranges that
+only change documentation, GitHub workflows, or tests. If several merges land
+while CI is running, the newest successful run releases them together.
+
+The next version follows Conventional Commit intent across the unreleased
+range:
+
+- a `BREAKING CHANGE:` footer or `type!:` subject bumps the major version;
+- a `feat:` subject bumps the minor version;
+- every other deployable change bumps the patch version.
+
+This makes the safe fallback a patch release even when a merge title does not
+follow the convention. The workflow packages the Helm chart before creating
+the tag, so a packaging failure leaves the version available for a retry. A
+rerun also resumes publication if the tag was created before a later step
+failed.
+
+## Manual releases
 
 1. Land every intended component version bump on `main` first. `main` takes no
    direct pushes (see [CONTRIBUTING.md](../CONTRIBUTING.md)), so changes arrive
@@ -33,10 +54,10 @@ Nothing enforces it.
    the next repository version (`v1.1.0`). Tick *draft* to review the generated
    notes before they go public.
 
-The workflow validates the version, packages the Helm chart, then creates the
-annotated tag and publishes the release. Packaging runs before tagging so a
-failure — a rate-limited subchart pull, most likely — leaves the version
-unused and the run safe to retry.
+Use this path when intentionally overriding the automatically selected version,
+cutting a release candidate, or recovering while automatic releases are
+disabled. The workflow validates the version, packages the Helm chart, then
+creates the annotated tag and publishes the release.
 
 A tag pushed by hand works as well, and takes the same path from validation
 onward:
