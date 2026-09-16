@@ -24,6 +24,7 @@ name: Release
 on:
   workflow_run:
     workflows: ['CI']
+    branches: [main]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -87,8 +88,12 @@ jobs:
               exit 1
             fi
 
-            git fetch --no-tags origin main:refs/remotes/origin/main
-            if [ "$(git rev-parse refs/remotes/origin/main)" != "$HEAD_SHA" ]; then
+            REMOTE_MAIN_SHA="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+            if [ -z "$REMOTE_MAIN_SHA" ]; then
+              echo "::error::Could not resolve the current main branch tip"
+              exit 1
+            fi
+            if [ "$REMOTE_MAIN_SHA" != "$HEAD_SHA" ]; then
               echo "main advanced after this CI run; the newer successful run will release the combined changes"
               SKIP=true
             fi
