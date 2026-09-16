@@ -3,6 +3,9 @@
 Provider-neutral protocol and worker CLI for attaching a stateful, sandboxed
 code environment to LibreChat Code API.
 
+For a complete machine setup and operations guide, see the
+[self-hosted worker runbook](../../docs/remote-bridge/worker-runbook.md).
+
 The CLI owns the runtime-supervisor seam. Native workspace commands use
 Anthropic's open-source Sandbox Runtime (SRT) on the worker machine. The
 bundled endpoint adapter can also connect to an already-running loopback Code
