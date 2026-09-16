@@ -281,7 +281,7 @@ for (const failure of [
       ).rejects.toMatchObject({
         code:
           failure === 'delivery-outage'
-            ? 'ASSIGNMENT_EXPIRED'
+            ? 'WORKSPACE_QUEUE_TIMEOUT'
             : 'WORKSPACE_QUARANTINED',
       });
       await expect(
