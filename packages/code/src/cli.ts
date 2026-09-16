@@ -5,6 +5,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { basename, resolve, relative, isAbsolute, sep } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
+import { discoverProjects } from './projects.js';
 import {
     loadCodeEnvironment,
     assertEnvironmentDefinitionsOutsideRoots,
@@ -1237,6 +1238,16 @@ async function clearMutationQuarantine(args: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (args[0] === 'projects') {
+    const root = option(args, '--root');
+    if (!root || args.slice(1).some((arg, index, rest) =>
+        arg !== '--root' && rest[index - 1] !== '--root' && !arg.startsWith('--root='))) {
+      throw new Error('Usage: librechat-code projects --root <directory>');
+    }
+    const inventory = await discoverProjects({ root });
+    process.stdout.write(`${JSON.stringify(inventory, null, 2)}\n`);
+    return;
+  }
   if (args[0] === 'relay') {
     await relay();
     return;

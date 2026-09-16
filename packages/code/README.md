@@ -14,6 +14,38 @@ container/NsJail profile. The worker connects outbound to Code API,
 long-polls for assignments, sends them to the local runtime, and returns fenced
 results. The VM does not need an inbound public port.
 
+## Inspect local projects
+
+Before registering a directory containing several checkouts, inspect its Git
+projects on the worker machine:
+
+```bash
+librechat-code projects --root /srv/projects
+```
+
+The command prints JSON with `projects`, `truncated`, and `incomplete`. Each
+project contains a path relative to the requested directory, a path-derived ID,
+and the current origin, branch, and HEAD. Origins are normalized to
+`host/owner/repository`; URL credentials, query strings, and fragments are omitted.
+A detached HEAD has a null branch; an unborn branch has a null HEAD. IDs stay
+stable when branches change, but moving or renaming a directory changes its ID.
+IDs are local to the supplied discovery root.
+
+Discovery runs only when requested. Its default limits are three directory
+levels, 10,000 entries, 256 projects, and a ten-second processing budget with
+bounded Git subprocess output and timeouts. It skips hidden directories,
+dependencies, symlinks, and children of an identified repository. Linked
+worktrees and submodules using a `.git` file are skipped and set `incomplete`:
+their shared Git metadata needs separate admission before independent execution.
+An empty project list does not prevent registering a non-Git directory.
+
+This is a local inventory command. It does not clone, register roots, pair a
+worker, change the sandbox, or automatically select a conversation workspace.
+For the existing picker and independent lease slots, explicitly register the
+chosen non-overlapping project directories with `--workspace` or `--environment`.
+Do not also register their parent directory. Treat the inventory as a snapshot;
+normal workspace admission must validate any directory selected from it.
+
 ## Pair
 
 Hardened deployments use a one-time code instead of copying a long-lived
