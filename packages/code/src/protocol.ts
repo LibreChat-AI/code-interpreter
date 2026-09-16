@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const BRIDGE_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const BRIDGE_SANDBOX_PROFILE_MAX_LENGTH = 128;
@@ -1314,6 +1316,7 @@ export function isWorkspaceToolResult(
     if (request.instructionSha256 !== undefined) {
       return hasOnlyKeys(result, WORKSPACE_READ_RESULT_KEYS) && result.path === request.path &&
         typeof result.content === 'string' && new TextEncoder().encode(result.content).byteLength <= REPOSITORY_INSTRUCTION_MAX_BYTES &&
+        createHash('sha256').update(result.content).digest('hex') === request.instructionSha256 &&
         result.startLine === 1 && result.endLine === result.content.split('\n').length &&
         result.nextStartLine === undefined;
     }
