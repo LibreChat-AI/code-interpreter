@@ -509,9 +509,6 @@ async function handleReplayInitial(
         req.body as t.ProgrammaticRequestBody;
   let timeout: number;
   try {
-        if (workspaceId != null && Array.isArray(files) && files.length > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_INPUT_FILES) {
-          throw new Error(`Selected-workspace execution allows at most ${BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_INPUT_FILES} input files; main and replay history occupy two reserved slots`);
-        }
         timeout = workspaceId != null
           ? normalizeSelectedWorkspaceProgrammaticTimeoutMs(
               (req.body as t.ProgrammaticRequestBody).timeout,
@@ -599,6 +596,13 @@ async function handleReplayInitial(
     if (sendFileRefAuthorizationError(error, res, req)) return;
     logger.error('Error authorizing replay file refs:', error);
     res.status(500).json({ error: 'Internal server error' });
+    return;
+  }
+
+  if (workspaceId != null && authorizedFiles.length > BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_INPUT_FILES) {
+    res.status(400).json({
+      error: `Selected-workspace execution allows at most ${BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_INPUT_FILES} input files; main and replay history occupy two reserved slots`,
+    });
     return;
   }
 
