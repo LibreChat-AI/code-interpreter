@@ -46,6 +46,9 @@ jobs:
       - name: Release versioning
         run: tests/release-versioning.sh
 
+      - name: Release version resolution
+        run: tests/release-version-resolution.sh
+
       - name: Validate sandbox Dockerfiles
         run: |
           docker buildx build --check -f api/Dockerfile .
