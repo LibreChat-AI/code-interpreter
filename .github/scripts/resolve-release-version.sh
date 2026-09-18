@@ -47,9 +47,10 @@ newest_stable_tag() {
   git tag "$@" | select_stable_tags | sort -V | tail -n 1
 }
 
-# The commit a tag resolves to, empty when the tag does not exist.
+# The commit a tag resolves to. The caller first verifies that the ref exists,
+# so a failure here means the tag ultimately names a non-commit object.
 tag_commit() {
-  git rev-parse -q --verify "refs/tags/$1^{commit}" || true
+  git rev-parse -q --verify "refs/tags/$1^{commit}"
 }
 
 SKIP=false
@@ -127,10 +128,15 @@ fi
 if [ "$EVENT_NAME" = "workflow_run" ]; then
   # A tag already pointing at this commit is the resumed release above, and the
   # publish steps tolerate it. Only a tag on some other commit is a collision.
-  EXISTING_TAG_COMMIT="$(tag_commit "$VERSION")"
-  if [ -n "$EXISTING_TAG_COMMIT" ] && [ "$EXISTING_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
-    echo "::error::Calculated tag $VERSION already exists on a different commit"
-    exit 1
+  if git show-ref --verify --quiet "refs/tags/$VERSION"; then
+    if ! EXISTING_TAG_COMMIT="$(tag_commit "$VERSION")"; then
+      echo "::error::Calculated tag $VERSION already exists but does not point to a commit"
+      exit 1
+    fi
+    if [ "$EXISTING_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+      echo "::error::Calculated tag $VERSION already exists on a different commit"
+      exit 1
+    fi
   fi
 fi
 

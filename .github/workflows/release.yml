@@ -61,6 +61,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # `workflow_run` can be rerun for a commit older than this resolver. Save
+      # the helper from the revision that supplied this workflow before the
+      # release checkout replaces the working tree with that historical SHA.
+      - name: Checkout release workflow
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 1
+          ref: ${{ github.workflow_sha }}
+
+      - name: Preserve release resolver
+        if: github.event_name == 'workflow_run'
+        run: install -m 755 .github/scripts/resolve-release-version.sh "$RUNNER_TEMP/resolve-release-version.sh"
+
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           # Full history and tags: resolving whether this release is the newest
@@ -78,11 +92,12 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
           GH_TOKEN: ${{ github.token }}
+          RESOLVER_PATH: ${{ github.event_name == 'workflow_run' && format('{0}/resolve-release-version.sh', runner.temp) || '.github/scripts/resolve-release-version.sh' }}
         # The resolution itself lives in a script so that every path through it
         # — automatic release, resumed release, dispatch, pushed tag, and the
         # runs that must skip or fail — is covered by
         # tests/release-version-resolution.sh in CI.
-        run: .github/scripts/resolve-release-version.sh
+        run: "$RESOLVER_PATH"
 
       # helm is preinstalled on ubuntu-latest, the same way the chart tests in
       # ci.yml depend on it.

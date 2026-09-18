@@ -8,6 +8,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The resolver is deliberately kept outside each throwaway checkout. That
+# mirrors release.yml preserving the workflow revision in RUNNER_TEMP before a
+# workflow_run checks out the possibly historical release commit.
 RESOLVER="$ROOT/.github/scripts/resolve-release-version.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -187,6 +190,16 @@ publish_main
 resolve EVENT_NAME=workflow_run HEAD_SHA="$(head_sha)"
 expect_status 1
 expect_log 'already exists on a different commit'
+
+new_case 'a calculated tag held by a non-commit object is a collision'
+git_repo tag v1.2.3
+blob="$(printf 'not a commit\n' | git_repo hash-object -w --stdin)"
+git_repo update-ref refs/tags/v1.2.4 "$blob"
+commit api/runtime.ts repaired 'fix: repair execution'
+publish_main
+resolve EVENT_NAME=workflow_run HEAD_SHA="$(head_sha)"
+expect_status 1
+expect_log 'already exists but does not point to a commit'
 
 new_case 'a stale CI run defers to the newer tip'
 git_repo tag v1.2.3
