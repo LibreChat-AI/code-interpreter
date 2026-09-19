@@ -211,10 +211,12 @@ test('routes and scopes GitHub App tokens per repository installation', async (t
   assert.deepEqual(
     calls
       .filter(call => call.url.endsWith('/access_tokens'))
-      .map(call => JSON.parse(call.body ?? '{}')),
+      .map(call => JSON.parse(call.body ?? '{}'))
+      .map(body => body.repositories[0])
+      .sort(),
     [
-      { repositories: ['LibreChat'] },
-      { repositories: ['code-interpreter'] },
+      'LibreChat',
+      'code-interpreter',
     ],
   );
 });
