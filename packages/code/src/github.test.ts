@@ -9,7 +9,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -25,6 +25,7 @@ import {
   gitHubMaskedCredentialVariables,
   GITHUB_CREDENTIAL_ENV_NAME,
   gitHubCredentialEnvironment,
+  gitHubRepositoryForAdmittedDirectory,
   gitHubRepositoryForDirectory,
   normalizeGitHubHost,
   wrapGitHubCredentialCommand,
@@ -393,6 +394,102 @@ test('discovers the GitHub repository from a command working directory', async (
   assert.equal(
     await gitHubRepositoryForDirectory(directory, 'github.example.test'),
     undefined,
+  );
+  execFileSync('git', [
+    '-C',
+    directory,
+    'remote',
+    'set-url',
+    'origin',
+    'https://github.example.test:8443/acme/project.git',
+  ]);
+  assert.equal(
+    await gitHubRepositoryForDirectory(directory, 'github.example.test'),
+    'acme/project',
+  );
+});
+
+test('keeps repository authorization bound to the admitted workspace root', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'librechat-code-github-binding-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const nested = join(directory, 'packages', 'app');
+  await mkdir(nested, { recursive: true });
+  execFileSync('git', ['init', directory]);
+  execFileSync('git', [
+    '-C',
+    directory,
+    'remote',
+    'add',
+    'origin',
+    'git@github.com:acme/allowed.git',
+  ]);
+  const admitted = new Map([
+    [directory, await gitHubRepositoryForDirectory(directory)],
+  ]);
+  execFileSync('git', [
+    '-C',
+    directory,
+    'remote',
+    'set-url',
+    'origin',
+    'git@github.com:acme/not-authorized.git',
+  ]);
+  assert.equal(
+    gitHubRepositoryForAdmittedDirectory(nested, admitted),
+    'acme/allowed',
+  );
+  assert.equal(
+    gitHubRepositoryForAdmittedDirectory(dirname(directory), admitted),
+    undefined,
+  );
+});
+
+test('uses the configured GHES host for the App bot no-reply identity', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'librechat-code-ghes-identity-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const privateKeyPath = join(directory, 'app.pem');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await writeFile(
+    privateKeyPath,
+    privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    { mode: 0o600 },
+  );
+  const provider = new GitHubAppCredentialProvider({
+    appId: '123',
+    installationId: '456',
+    privateKeyPath,
+    host: 'github.example.test',
+    now: () => new Date('2030-01-01T00:00:00Z'),
+    fetch: (async (input) => {
+      const url = String(input);
+      if (url.endsWith('/app')) return Response.json({ slug: 'lia' });
+      if (url.endsWith('/users/lia%5Bbot%5D')) {
+        return Response.json({ id: 1234, login: 'lia[bot]', type: 'Bot' });
+      }
+      if (url.endsWith('/app/installations/456/access_tokens')) {
+        return Response.json({
+          token: 'ghs_enterprise_abcdefghijklmnopqrstuvwxyz',
+          expires_at: '2030-01-01T01:00:00Z',
+        });
+      }
+      return Response.json({}, { status: 404 });
+    }) as typeof fetch,
+  });
+  await provider.validate();
+  const credential = await provider.getCredential();
+  assert.deepEqual(credential.actor, {
+    name: 'lia[bot]',
+    email: '1234+lia[bot]@users.noreply.github.example.test',
+  });
+  const wrapped = wrapGitHubCredentialCommand(
+    'git commit -m test',
+    'github.example.test',
+    'linux',
+    gitHubCommandCredentialEnvironment(credential, 'github.example.test'),
+  );
+  assert.match(
+    wrapped,
+    /user\.email=1234\+lia\[bot\]@users\.noreply\.github\.example\.test/,
   );
 });
 

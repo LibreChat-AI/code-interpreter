@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, sign } from 'node:crypto';
 import { open } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { projectRemote } from './projects.js';
 import { assertPrivateStorageAcl, assertPrivateStorageAncestors, assertPrivateStorageSupported } from './private-storage.js';
@@ -126,12 +126,32 @@ export async function gitHubRepositoryForDirectory(
   const normalized = projectRemote(remote);
   if (!normalized) return undefined;
   const separator = normalized.indexOf('/');
-  if (normalized.slice(0, separator) !== normalizeGitHubHost(host)) {
+  const remoteHost = normalized
+    .slice(0, separator)
+    .replace(/:[1-9][0-9]*$/, '');
+  if (remoteHost !== normalizeGitHubHost(host)) {
     return undefined;
   }
   const repository = normalized.slice(separator + 1);
   repositoryName(repository);
   return repository;
+}
+
+/** Return the startup-bound repository for the admitted root containing cwd. */
+export function gitHubRepositoryForAdmittedDirectory(
+  cwd: string,
+  repositories: ReadonlyMap<string, string | undefined>,
+): string | undefined {
+  for (const [root, repository] of repositories) {
+    const path = relative(root, cwd);
+    if (
+      path === '' ||
+      (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+    ) {
+      return repository;
+    }
+  }
+  return undefined;
 }
 
 function base64UrlJson(value: unknown): string {
@@ -200,6 +220,7 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
   private actor?: GitHubCredential['actor'];
   private actorInFlight?: Promise<NonNullable<GitHubCredential['actor']>>;
   private readonly apiUrl: string;
+  private readonly host: string;
 
   constructor(private readonly options: GitHubAppCredentialProviderOptions) {
     if ((options.platform ?? process.platform) === 'win32') {
@@ -230,6 +251,7 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     if (host != null && host !== apiHost) {
       throw new Error('LIBRECHAT_CODE_GITHUB_HOST must match the GitHub App API hostname');
     }
+    this.host = host ?? apiHost;
     this.apiUrl = apiUrl.href.replace(/\/+$/, '');
   }
 
@@ -307,7 +329,7 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
         }
         return {
           name: login,
-          email: `${user.id}+${login}@users.noreply.github.com`,
+          email: `${user.id}+${login}@users.noreply.${this.host}`,
         };
       })();
       this.actorInFlight = pending;
@@ -586,11 +608,13 @@ export function wrapGitHubCredentialCommand(
   const hasCredential = Boolean(environment[GITHUB_CREDENTIAL_ENV_NAME]);
   const actorName = environment[GITHUB_AUTHOR_NAME_ENV_NAME];
   const actorEmail = environment[GITHUB_AUTHOR_EMAIL_ENV_NAME];
+  const noReplyHost = `users.noreply.${normalizeGitHubHost(host)}`
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const hasActor =
     /^[A-Za-z0-9_.-]+\[bot\]$/.test(actorName ?? '') &&
-    /^[1-9][0-9]+\+[A-Za-z0-9_.-]+\[bot\]@users\.noreply\.github\.com$/.test(
-      actorEmail ?? '',
-    );
+    new RegExp(
+      `^[1-9][0-9]+\\+[A-Za-z0-9_.-]+\\[bot\\]@${noReplyHost}$`,
+    ).test(actorEmail ?? '');
   if (platform === 'win32') {
     return [
       'set "GIT_CONFIG_GLOBAL=NUL"',

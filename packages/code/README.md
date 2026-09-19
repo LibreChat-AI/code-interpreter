@@ -289,10 +289,12 @@ librechat-code run --worker-dir /path/to/project --allow-workspace-commands
 
 The private key must be an owner-only regular file outside the workspace. It is
 read only by the trusted worker, which mints and refreshes short-lived
-installation tokens. The worker resolves the App installation from each
-command's Git repository, so one worker can use simultaneous installations on
-personal accounts and organizations without being restarted or reconfigured.
-Tokens are scoped and cached per repository. For compatibility with deployments
+installation tokens. At startup, the worker binds each explicitly admitted
+workspace root to its Git repository. Commands in those independent roots can
+use simultaneous installations on personal accounts and organizations without
+being restarted or reconfigured, while a command cannot gain access by changing
+its workspace's remote URL. Tokens are scoped and cached per repository. For
+compatibility with deployments
 that intentionally bind a worker to one installation, set the optional legacy
 `LIBRECHAT_CODE_GITHUB_INSTALLATION_ID` fallback.
 

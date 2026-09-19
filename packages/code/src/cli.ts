@@ -46,6 +46,7 @@ import type { LocalWorkspaceConfig } from './workspace.js';
 import {
   GITHUB_ALLOWED_DOMAINS,
   GitHubAppCredentialProvider,
+  gitHubRepositoryForAdmittedDirectory,
   gitHubRepositoryForDirectory,
   gitHubCommandCredentialEnvironment,
   gitHubMaskedCredentialVariables,
@@ -718,6 +719,19 @@ async function run(
       }),
     ]),
   );
+  // Bind credentials to immutable, explicitly admitted roots. The repository
+  // remote is operator input at startup, never an authorization input that a
+  // sandboxed command may change for its next invocation.
+  const admittedGitHubRepositories = github.provider && github.repositoryRouting
+    ? new Map(
+        await Promise.all(
+          roots.map(async root => [
+            root.root,
+            await gitHubRepositoryForDirectory(root.root, github.host),
+          ] as const),
+        ),
+      )
+    : undefined;
   const localWorkspaceTools = workerDirectory
     ? await LocalWorkspaceTools.create({
         workspaces: roots,
@@ -935,11 +949,10 @@ async function run(
               github.host,
             ),
             async resolve(signal?: AbortSignal, cwd?: string) {
-              const repository = cwd
-                ? await gitHubRepositoryForDirectory(
+              const repository = cwd && admittedGitHubRepositories
+                ? gitHubRepositoryForAdmittedDirectory(
                     cwd,
-                    github.host,
-                    signal,
+                    admittedGitHubRepositories,
                   )
                 : undefined;
               if (!repository && github.repositoryRouting) {
