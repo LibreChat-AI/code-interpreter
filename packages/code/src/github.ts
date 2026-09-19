@@ -51,6 +51,7 @@ export interface GitHubAppCredentialProviderOptions {
 }
 
 const execFileAsync = promisify(execFile);
+const GITHUB_SHARED_REQUEST_TIMEOUT_MS = 30_000;
 
 async function waitForShared<T>(
   promise: Promise<T>,
@@ -264,7 +265,10 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     if (this.actor) return this.actor;
     if (!this.actorInFlight) {
       const pending = (async () => {
-        const appResponse = await this.request('/app', jwt);
+        const sharedSignal = AbortSignal.timeout(
+          GITHUB_SHARED_REQUEST_TIMEOUT_MS,
+        );
+        const appResponse = await this.request('/app', jwt, sharedSignal);
         if (!appResponse.ok) {
           throw new Error(
             `GitHub App identity request failed with status ${appResponse.status}`,
@@ -281,6 +285,7 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
         const userResponse = await this.request(
           `/users/${encodeURIComponent(login)}`,
           jwt,
+          sharedSignal,
         );
         if (!userResponse.ok) {
           throw new Error(
@@ -381,6 +386,9 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     const existing = this.inFlight.get(key);
     if (existing) return waitForShared(existing, signal);
     const pending = (async () => {
+      const sharedSignal = AbortSignal.timeout(
+        GITHUB_SHARED_REQUEST_TIMEOUT_MS,
+      );
       const jwt = await this.appJwt(now);
       const scopedRepository = repository
         ? repositoryName(repository).name
@@ -388,11 +396,12 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       const installationId = await this.resolveInstallationId(
         repository ?? '',
         jwt,
+        sharedSignal,
       );
       let response = await this.request(
         `/app/installations/${installationId}/access_tokens`,
         jwt,
-        undefined,
+        sharedSignal,
         {
           method: 'POST',
           headers: {
@@ -408,11 +417,12 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
         const refreshedInstallationId = await this.resolveInstallationId(
           repository!,
           jwt,
+          sharedSignal,
         );
         response = await this.request(
           `/app/installations/${refreshedInstallationId}/access_tokens`,
           jwt,
-          undefined,
+          sharedSignal,
           {
             method: 'POST',
             headers: {
