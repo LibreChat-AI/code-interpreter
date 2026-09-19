@@ -725,11 +725,14 @@ librechat-code run \
 `LIBRECHAT_CODE_CONVERSATION_WORKTREE_MAX` are the environment equivalents.
 The storage root must be owner-controlled, must not overlap a registered
 workspace, and every registered source must be a Git repository. The worker
-creates a deterministic branch and linked worktree for the opaque conversation
-identity supplied by LibreChat. Host paths remain private. The configured count
-is a hard per-machine quota, creation is serialized against Git metadata, and
-operations for one conversation remain serialized while different
-conversations may occupy different lease slots.
+creates a deterministic branch in an isolated local checkout for the opaque
+conversation identity supplied by LibreChat. Each checkout owns its writable
+Git metadata and shares only the operator-admitted source object store, which
+the sandbox mounts read-only. Host paths remain private. The configured count
+is a hard per-machine quota, provisioning is serialized, and operations for one
+conversation remain serialized while different conversations may occupy
+different lease slots. An interrupted checkout has no completion marker and is
+discarded and rebuilt before it can be admitted after restart.
 
 GitHub App routing is inherited from the operator-admitted source repository;
 commands cannot select a different installation by rewriting a worktree remote.
