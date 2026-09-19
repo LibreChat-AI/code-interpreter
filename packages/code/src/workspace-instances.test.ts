@@ -9,6 +9,7 @@ import test from 'node:test';
 import { GitWorktreeWorkspaceTools } from './workspace-instances.js';
 import { LocalWorkspaceTools } from './workspace.js';
 import { GitWorktreeManager } from './worktrees.js';
+import { readRepositoryInstructions } from './instructions.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,7 +18,8 @@ async function repository(): Promise<{ parent: string; root: string }> {
   const root = join(parent, 'source');
   await execFileAsync('git', ['init', root]);
   await writeFile(join(root, 'README.md'), 'source\n');
-  await execFileAsync('git', ['-C', root, 'add', 'README.md']);
+  await writeFile(join(root, 'AGENTS.md'), 'follow repository rules\n');
+  await execFileAsync('git', ['-C', root, 'add', 'README.md', 'AGENTS.md']);
   await execFileAsync('git', [
     '-C',
     root,
@@ -46,7 +48,9 @@ test('routes each conversation to its own writable Git worktree', async (t) => {
   const tools = new GitWorktreeWorkspaceTools({
     delegate,
     manager,
-    sources: new Map([['primary', { writable: true }]]),
+    sources: new Map([
+      ['primary', { repositoryInstructions: true, writable: true }],
+    ]),
   });
   const firstId = 'a'.repeat(64);
   const secondId = 'b'.repeat(64);
@@ -95,6 +99,19 @@ test('routes each conversation to its own writable Git worktree', async (t) => {
   assert.equal(result.workspaceId, 'primary');
   assert.equal(result.operation, 'read_file');
   assert.equal(result.content, 'first');
+
+  const instructions = await readRepositoryInstructions(first.root);
+  assert.ok(instructions);
+  const instructionResult = await tools.execute({
+    protocolVersion: 1,
+    operation: 'read_file',
+    workspaceId: 'primary',
+    workspaceInstanceId: firstId,
+    path: instructions.descriptor.path,
+    instructionSha256: instructions.descriptor.sha256,
+  });
+  assert.equal(instructionResult.operation, 'read_file');
+  assert.equal(instructionResult.content, 'follow repository rules\n');
 });
 
 test('leaves legacy requests on the selected source workspace', async (t) => {
@@ -110,7 +127,9 @@ test('leaves legacy requests on the selected source workspace', async (t) => {
       root: join(fixture.parent, 'instances'),
       sources: new Map([['primary', { root: fixture.root }]]),
     }),
-    sources: new Map([['primary', { writable: false }]]),
+    sources: new Map([
+      ['primary', { repositoryInstructions: false, writable: false }],
+    ]),
   });
 
   const result = await tools.execute({

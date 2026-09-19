@@ -590,17 +590,17 @@ test('trusted-vm permits unmatched egress and local development sockets', async 
   ]);
 });
 
-test('linked worktrees admit only their operator-selected Git metadata', async t => {
+test('isolated checkouts can read but cannot write their shared Git objects', async t => {
   const parent = await mkdtemp(join(tmpdir(), 'librechat-code-worktree-'));
   const root = join(parent, 'worktree');
-  const gitCommonDirectory = join(parent, 'source.git');
+  const gitSharedObjectDirectory = join(parent, 'source.git', 'objects');
   await mkdir(root);
-  await mkdir(gitCommonDirectory);
+  await mkdir(gitSharedObjectDirectory, { recursive: true });
   t.after(() => rm(parent, { recursive: true, force: true }));
   const fake = fakeManager();
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
     workspaceRoot: root,
-    gitCommonDirectory,
+    gitSharedObjectDirectory,
     manager: fake.manager,
   });
   t.after(() => sandbox.close());
@@ -608,14 +608,15 @@ test('linked worktrees admit only their operator-selected Git metadata', async t
   await sandbox.prepare();
 
   assert.ok(
-    fake.config?.filesystem.allowRead.includes(
-      await realpath(gitCommonDirectory),
+    fake.config?.filesystem.allowRead?.includes(
+      await realpath(gitSharedObjectDirectory),
     ),
   );
-  assert.ok(
-    fake.config?.filesystem.allowWrite.includes(
-      await realpath(gitCommonDirectory),
+  assert.equal(
+    fake.config?.filesystem.allowWrite?.includes(
+      await realpath(gitSharedObjectDirectory),
     ),
+    false,
   );
 });
 

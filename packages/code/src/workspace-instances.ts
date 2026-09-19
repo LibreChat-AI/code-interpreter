@@ -16,6 +16,7 @@ import type { WorkspaceToolExecutor } from './workspace.js';
 
 interface WorkspaceInstanceSource {
   command?: NativeProcessSandboxOptions;
+  repositoryInstructions: boolean;
   writable: boolean;
 }
 
@@ -65,7 +66,7 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     signal?: AbortSignal,
   ): Promise<{
     executor: LocalWorkspaceTools;
-    gitCommonDirectory: string;
+    gitSharedObjectDirectory: string;
     identity: WorkspaceRootIdentity;
     internalId: string;
     root: string;
@@ -88,6 +89,7 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     let executor = this.executors.get(key);
     if (!executor) {
       executor = LocalWorkspaceTools.create({
+        repositoryInstructions: source.repositoryInstructions,
         workspaces: [
           {
             id: internalId,
@@ -101,7 +103,7 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     }
     return {
       executor: await executor,
-      gitCommonDirectory: instance.gitCommonDirectory,
+      gitSharedObjectDirectory: instance.gitSharedObjectDirectory,
       identity: instance.identity,
       internalId,
       root: instance.root,
@@ -135,7 +137,7 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
       }
       this.options.commandPool.registerRoot(resolved.internalId, {
         ...source.command,
-        gitCommonDirectory: resolved.gitCommonDirectory,
+        gitSharedObjectDirectory: resolved.gitSharedObjectDirectory,
         workspaceIdentity: resolved.identity,
         workspaceRoot: resolved.root,
       });
@@ -182,7 +184,7 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     const resolved = await this.executor(workspaceId, instanceId, signal);
     this.options.commandPool.registerRoot(resolved.internalId, {
       ...source.command,
-      gitCommonDirectory: resolved.gitCommonDirectory,
+      gitSharedObjectDirectory: resolved.gitSharedObjectDirectory,
       workspaceIdentity: resolved.identity,
       workspaceRoot: resolved.root,
     });

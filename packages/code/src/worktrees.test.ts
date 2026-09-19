@@ -66,6 +66,16 @@ test('creates and reuses an isolated worktree for one conversation identity', as
   ]);
   assert.deepEqual(concurrent, first);
   assert.notEqual(first.root, fixture.root);
+  assert.equal(first.gitSharedObjectDirectory.startsWith(fixture.root), true);
+  const instanceCommon = await realpath(
+    await git(
+      first.root,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    ),
+  );
+  assert.equal(instanceCommon.startsWith(first.root), true);
   assert.equal(
     await readFile(join(first.root, 'README.md'), 'utf8'),
     'source\n',
@@ -83,6 +93,32 @@ test('creates and reuses an isolated worktree for one conversation identity', as
     sources: new Map([['primary', { root: fixture.root }]]),
   });
   assert.equal((await restarted.resolve('primary', id)).root, first.root);
+});
+
+test('replaces an incomplete checkout before admitting it after restart', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const storage = join(fixture.parent, 'instances');
+  const id = 'c'.repeat(64);
+  const manager = new GitWorktreeManager({
+    maxCount: 4,
+    root: storage,
+    sources: new Map([['primary', { root: fixture.root }]]),
+  });
+  const first = await manager.resolve('primary', id);
+  await writeFile(join(first.root, 'README.md'), 'partial mutation\n');
+  await rm(`${first.root}.complete`);
+
+  const restarted = new GitWorktreeManager({
+    maxCount: 4,
+    root: storage,
+    sources: new Map([['primary', { root: fixture.root }]]),
+  });
+  const recovered = await restarted.resolve('primary', id);
+  assert.equal(
+    await readFile(join(recovered.root, 'README.md'), 'utf8'),
+    'source\n',
+  );
 });
 
 test('keeps conversations and source repositories isolated', async (t) => {

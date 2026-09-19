@@ -1079,6 +1079,7 @@ async function run(
               workspaceIdentity: root.identity,
               workspaceRoot: root.root,
             },
+            repositoryInstructions: args.includes('--repository-instructions'),
             writable: root.writable ?? false,
           },
         ]),

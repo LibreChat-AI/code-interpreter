@@ -162,8 +162,8 @@ type SpawnCommand = (
 export interface NativeSrtWorkspaceCommandSandboxOptions {
   workspaceIdentity?: WorkspaceRootIdentity;
   workspaceRoot: string;
-  /** Git's operator-admitted shared metadata for a linked worktree. */
-  gitCommonDirectory?: string;
+  /** Git's operator-admitted object store, shared read-only by an isolated clone. */
+  gitSharedObjectDirectory?: string;
   commandPolicy?: NativeSrtCommandPolicy;
   /** Trusted worker files that must never become workspace-readable or writable. */
   protectedPaths?: string[];
@@ -377,12 +377,12 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     const protectedPaths = await Promise.all(
       (this.options.protectedPaths ?? []).map(canonicalPath),
     );
-    const gitCommonDirectory = this.options.gitCommonDirectory
-      ? await realpath(this.options.gitCommonDirectory)
+    const gitSharedObjectDirectory = this.options.gitSharedObjectDirectory
+      ? await realpath(this.options.gitSharedObjectDirectory)
       : undefined;
     if (
-      gitCommonDirectory != null &&
-      protectedPaths.some((path) => isWithin(gitCommonDirectory, path))
+      gitSharedObjectDirectory != null &&
+      protectedPaths.some((path) => isWithin(gitSharedObjectDirectory, path))
     ) {
       throw new WorkspaceToolError(
         'Git metadata cannot contain worker control files',
@@ -473,14 +473,13 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         ],
         allowRead: [
           root,
-          ...(gitCommonDirectory ? [gitCommonDirectory] : []),
+          ...(gitSharedObjectDirectory ? [gitSharedObjectDirectory] : []),
                     ...(canonicalScratchDirectory
                         ? [canonicalScratchDirectory]
                         : []),
         ],
         allowWrite: [
           root,
-          ...(gitCommonDirectory ? [gitCommonDirectory] : []),
                     ...(canonicalScratchDirectory
                         ? [canonicalScratchDirectory]
                         : []),
