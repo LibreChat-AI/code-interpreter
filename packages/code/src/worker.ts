@@ -1378,13 +1378,16 @@ export class BridgeWorker {
     }
   }
 
-  private async workspaceGuard(
+  private workspaceGuard(
     assignment: BridgeAssignment,
-  ): Promise<WorkspaceMutationQuarantine | undefined> {
+  ):
+    | WorkspaceMutationQuarantine
+    | Promise<WorkspaceMutationQuarantine>
+    | undefined {
     const workspaceId = this.assignmentBaseWorkspaceId(assignment);
     const instanceId = this.assignmentWorkspaceInstanceId(assignment);
     if (workspaceId != null && instanceId != null) {
-      return await this.options.workspaceQuarantineResolver?.(
+      return this.options.workspaceQuarantineResolver?.(
         workspaceId,
         instanceId,
       );
@@ -1446,7 +1449,11 @@ export class BridgeWorker {
     assignment: BridgeAssignment,
     signal?: AbortSignal,
   ): Promise<void> {
-    const guard = await this.workspaceGuard(assignment);
+    const unresolvedGuard = this.workspaceGuard(assignment);
+    const guard =
+      unresolvedGuard instanceof Promise
+        ? await unresolvedGuard
+        : unresolvedGuard;
     if (signal?.aborted === true) {
       throw signal.reason instanceof Error
         ? signal.reason
@@ -2181,10 +2188,14 @@ export class BridgeWorker {
   ): Promise<BridgeWorkspaceQuarantinedError> {
     if (runtimeSessionId == null) {
       try {
-        const guard =
+        const unresolvedGuard =
           assignment == null
             ? this.options.workspaceMutationQuarantine
-            : await this.workspaceGuard(assignment);
+            : this.workspaceGuard(assignment);
+        const guard =
+          unresolvedGuard instanceof Promise
+            ? await unresolvedGuard
+            : unresolvedGuard;
         await guard?.quarantine(message, cause, assignment?.assignmentId);
         return new BridgeWorkspaceQuarantinedError(message, cause);
       } catch (error) {
