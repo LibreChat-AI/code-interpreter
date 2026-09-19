@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -233,6 +237,59 @@ test('CLI validates GitHub App credentials before worker registration', () => {
   assert.doesNotMatch(result.stderr, /fetch failed/);
 });
 
+test('CLI accepts repository-routed GitHub App authentication without a fixed installation', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'cli-github-routing-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const privateKeyPath = join(directory, 'app.pem');
+  const preload = join(directory, 'fetch.mjs');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await writeFile(
+    privateKeyPath,
+    privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    { mode: 0o600 },
+  );
+  await writeFile(
+    preload,
+    `
+      globalThis.fetch = async (input) => {
+        const url = String(input);
+        if (url.endsWith('/app')) return Response.json({ slug: 'lia-by-librechat' });
+        if (url.endsWith('/users/lia-by-librechat%5Bbot%5D')) {
+          return Response.json({ id: 328778573, login: 'lia-by-librechat[bot]', type: 'Bot' });
+        }
+        throw new Error('test stopped after GitHub App validation');
+      };
+    `,
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      preload,
+      fileURLToPath(new URL('./cli.js', import.meta.url)),
+    ],
+    {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_WORKER_DIR: directory,
+        LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS: 'true',
+        LIBRECHAT_CODE_GITHUB_TOKEN: undefined,
+        LIBRECHAT_CODE_GITHUB_APP_ID: '123',
+        LIBRECHAT_CODE_GITHUB_INSTALLATION_ID: undefined,
+        LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE: privateKeyPath,
+      },
+    },
+  );
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(result.stderr, /GitHub App authentication requires/);
+  assert.doesNotMatch(result.stderr, /installation ID/i);
+});
+
 test('CLI requires a runtime image for Docker supervision', () => {
   const result = spawnSync(
     process.execPath,
@@ -449,6 +506,6 @@ test('CLI host-only enterprise configuration sends App JWTs to GHES, never GitHu
     },
   });
   assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /GITHUB_REQUEST:https:\/\/github\.example\.test\/api\/v3\/app\/installations\/456\/access_tokens/);
+  assert.match(result.stderr, /GITHUB_REQUEST:https:\/\/github\.example\.test\/api\/v3\/app/);
   assert.doesNotMatch(result.stderr, /GITHUB_REQUEST:https:\/\/api\.github\.com/);
 });

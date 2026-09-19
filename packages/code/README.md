@@ -283,14 +283,24 @@ repositories the agent may access:
 
 ```bash
 LIBRECHAT_CODE_GITHUB_APP_ID=12345 \
-LIBRECHAT_CODE_GITHUB_INSTALLATION_ID=67890 \
 LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE=/secure/librechat-agent.pem \
 librechat-code run --worker-dir /path/to/project --allow-workspace-commands
 ```
 
 The private key must be an owner-only regular file outside the workspace. It is
 read only by the trusted worker, which mints and refreshes short-lived
-installation tokens. A personal access token is supported as a fallback with
+installation tokens. At startup, the worker binds each explicitly admitted
+workspace root to its Git repository. Commands in those independent roots can
+use simultaneous installations on personal accounts and organizations without
+being restarted or reconfigured, while a command cannot gain access by changing
+its workspace's remote URL. Tokens are scoped and cached per repository. For
+compatibility with deployments
+that intentionally bind a worker to one installation, set the optional legacy
+`LIBRECHAT_CODE_GITHUB_INSTALLATION_ID` fallback.
+
+App-authenticated commits use the GitHub App bot's canonical no-reply identity,
+so GitHub links them to the bot profile and avatar. A personal access token is
+supported as a fallback with
 `LIBRECHAT_CODE_GITHUB_TOKEN`, but the GitHub App is the safer default because
 its repository access and permissions can be narrowly installed and revoked.
 Native Windows credential storage is unavailable until native DACL removal and

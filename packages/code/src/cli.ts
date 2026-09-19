@@ -46,6 +46,8 @@ import type { LocalWorkspaceConfig } from './workspace.js';
 import {
   GITHUB_ALLOWED_DOMAINS,
   GitHubAppCredentialProvider,
+  gitHubRepositoryForAdmittedDirectory,
+  gitHubRepositoryForDirectory,
   gitHubCommandCredentialEnvironment,
   gitHubMaskedCredentialVariables,
   StaticGitHubCredentialProvider,
@@ -149,6 +151,7 @@ function githubCredentials(): {
   host: string;
   privateKeyPath?: string;
   mode?: 'app' | 'token';
+  repositoryRouting?: boolean;
   policyIdentity: string;
 } {
   const token = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_TOKEN);
@@ -161,9 +164,9 @@ function githubCredentials(): {
   );
   const appValues = [appId, installationId, privateKeyPath];
   const hasApp = appValues.some(Boolean);
-  if (hasApp && !appValues.every(Boolean)) {
+  if (hasApp && (!appId || !privateKeyPath)) {
     throw new Error(
-      'GitHub App authentication requires LIBRECHAT_CODE_GITHUB_APP_ID, LIBRECHAT_CODE_GITHUB_INSTALLATION_ID, and LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE',
+      'GitHub App authentication requires LIBRECHAT_CODE_GITHUB_APP_ID and LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE; LIBRECHAT_CODE_GITHUB_INSTALLATION_ID is an optional legacy fallback',
     );
   }
   if (hasApp && token) {
@@ -203,6 +206,7 @@ function githubCredentials(): {
     return {
       host,
       mode: 'app',
+      repositoryRouting: !installationId,
       policyIdentity: gitHubAuthenticationPolicyIdentity({
         mode: 'app',
         host,
@@ -212,7 +216,7 @@ function githubCredentials(): {
       privateKeyPath,
       provider: new GitHubAppCredentialProvider({
         appId: appId!,
-        installationId: installationId!,
+        installationId,
         privateKeyPath: privateKeyPath!,
         host,
         apiUrl,
@@ -715,6 +719,19 @@ async function run(
       }),
     ]),
   );
+  // Bind credentials to immutable, explicitly admitted roots. The repository
+  // remote is operator input at startup, never an authorization input that a
+  // sandboxed command may change for its next invocation.
+  const admittedGitHubRepositories = github.provider && github.repositoryRouting
+    ? new Map(
+        await Promise.all(
+          roots.map(async root => [
+            root.root,
+            await gitHubRepositoryForDirectory(root.root, github.host),
+          ] as const),
+        ),
+      )
+    : undefined;
   const localWorkspaceTools = workerDirectory
     ? await LocalWorkspaceTools.create({
         workspaces: roots,
@@ -928,18 +945,34 @@ async function run(
     ...(github.provider
       ? {
           maskedEnvironment: {
-            variables: gitHubMaskedCredentialVariables(github.host),
-            async resolve(signal?: AbortSignal) {
+            variables: gitHubMaskedCredentialVariables(
+              github.host,
+            ),
+            async resolve(signal?: AbortSignal, cwd?: string) {
+              const repository = cwd && admittedGitHubRepositories
+                ? gitHubRepositoryForAdmittedDirectory(
+                    cwd,
+                    admittedGitHubRepositories,
+                  )
+                : undefined;
+              if (!repository && github.repositoryRouting) {
+                return {};
+              }
               return gitHubCommandCredentialEnvironment(
-                await github.provider!.getCredential(signal),
+                await github.provider!.getCredential(signal, repository),
                 github.host,
               );
             },
-            wrapCommand(command: string, platform: NodeJS.Platform) {
+            wrapCommand(
+              command: string,
+              platform: NodeJS.Platform,
+              environment: Readonly<Record<string, string>>,
+            ) {
               return wrapGitHubCredentialCommand(
                 command,
                 github.host,
                 platform,
+                environment,
               );
             },
           },
@@ -1022,7 +1055,10 @@ async function run(
     );
   }
   try {
-    await github.provider?.getCredential(controller.signal);
+    await github.provider?.validate?.(controller.signal);
+    if (github.provider && !github.provider.validate) {
+      await github.provider.getCredential(controller.signal);
+    }
     await nativeCommandSandbox?.prepare();
         for (const environment of option(args, '--reset-workspace-quarantine') == null ? environments : []) {
             const setup = environment.definition.setup;

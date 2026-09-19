@@ -1031,6 +1031,51 @@ test('masks a host credential for only its injection host and restores the paren
   });
 });
 
+test('keeps trusted public command context out of credential masking', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    allowedDomains: ['github.com'],
+    maskedEnvironment: {
+      variables: [
+        {
+          name: 'LIBRECHAT_CODE_TEST_CREDENTIAL',
+          injectHosts: ['github.com'],
+        },
+      ],
+      async resolve() {
+        return {
+          LIBRECHAT_CODE_TEST_CREDENTIAL: 'real-secret',
+          LIBRECHAT_CODE_TEST_PUBLIC_IDENTITY: 'lia[bot]',
+        };
+      },
+      wrapCommand(command, _platform, environment) {
+        assert.equal(
+          environment.LIBRECHAT_CODE_TEST_PUBLIC_IDENTITY,
+          'lia[bot]',
+        );
+        return `export LIBRECHAT_CODE_TEST_PUBLIC_IDENTITY="${environment.LIBRECHAT_CODE_TEST_PUBLIC_IDENTITY}"; ${command}`;
+      },
+    },
+    manager: fake.manager,
+  });
+
+  const result = await sandbox.execute({
+    ...request,
+    command:
+      'printf "%s|%s" "$LIBRECHAT_CODE_TEST_CREDENTIAL" "$LIBRECHAT_CODE_TEST_PUBLIC_IDENTITY"',
+  });
+
+  assert.equal(result.stdout, 'Authorization: Bearer srt-sentinel|lia[bot]');
+  assert.ok(
+    !fake.config?.credentials?.envVars?.some(
+      variable => variable.name === 'LIBRECHAT_CODE_TEST_PUBLIC_IDENTITY',
+    ),
+  );
+});
+
 test('serializes credential handoff across concurrent sandbox instances', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));
