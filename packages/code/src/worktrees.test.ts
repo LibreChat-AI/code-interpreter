@@ -14,11 +14,175 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { GitWorktreeManager } from './worktrees.js';
 import { captureWorkspaceRootIdentity } from './root-identity.js';
 
 const execFileAsync = promisify(execFile);
+
+test('cached checkouts revalidate their admitted source without deleting user work', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const manager = new GitWorktreeManager({
+    maxCount: 1,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([['primary', await source(fixture.root)]]),
+  });
+  const id = 'f'.repeat(64);
+  const instance = await manager.resolve('primary', id);
+  await writeFile(join(instance.root, 'pending.txt'), 'user work');
+  await rename(fixture.root, `${fixture.root}.original`);
+  await mkdir(fixture.root);
+  await assert.rejects(
+    manager.resolve('primary', id),
+    /source changed after admission/
+  );
+  assert.equal(
+    await readFile(join(instance.root, 'pending.txt'), 'utf8'),
+    'user work'
+  );
+});
+
+test('preserves a failed setup checkout until executor cleanup is confirmed', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const options = {
+    maxCount: 1,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([['primary', await source(fixture.root)]]),
+    prepareInstance: async () => {
+      throw new Error('setup failed');
+    },
+    discardInstance: async () => {
+      throw new Error('child cleanup unconfirmed');
+    },
+  };
+  const manager = new GitWorktreeManager(options);
+  const id = 'a'.repeat(64);
+  await assert.rejects(manager.resolve('primary', id), /cleanup unconfirmed/);
+  const root = await manager.plannedRoot('primary', id);
+  assert.equal(await readFile(join(root, 'README.md'), 'utf8'), 'source\n');
+  await assert.rejects(
+    new GitWorktreeManager(options).resolve('primary', id),
+    /operator recovery required/
+  );
+  await assert.rejects(
+    new GitWorktreeManager(options).resolve('primary', 'b'.repeat(64)),
+    /capacity is exhausted/
+  );
+  assert.equal(await readFile(join(root, 'README.md'), 'utf8'), 'source\n');
+});
+
+test('cancellation waits for setup cleanup before releasing provisioning ownership', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  let started!: () => void;
+  const setupStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let cleanupFinished = false;
+  let setupRoot = '';
+  const manager = new GitWorktreeManager({
+    maxCount: 1,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([['primary', await source(fixture.root)]]),
+    prepareInstance: async (instance, signal) => {
+      setupRoot = instance.root;
+      started();
+      try {
+        await delay(60_000, undefined, { signal });
+        await writeFile(join(instance.root, 'LATE'), 'should never happen');
+      } finally {
+        await delay(20);
+        cleanupFinished = true;
+      }
+    },
+  });
+  const controller = new AbortController();
+  const pending = manager.resolve('primary', 'a'.repeat(64), controller.signal);
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  await setupStarted;
+  controller.abort();
+  await rejected;
+  assert.equal(cleanupFinished, true);
+  await assert.rejects(stat(setupRoot), { code: 'ENOENT' });
+  await assert.rejects(stat(`${setupRoot}.complete`), { code: 'ENOENT' });
+});
+
+test('cancels lock wait without provisioning while another caller continues', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  let started!: () => void;
+  const setupStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  t.after(release);
+  let setups = 0;
+  const options = {
+    maxCount: 2,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([['primary', await source(fixture.root)]]),
+    prepareInstance: async () => {
+      setups++;
+      started();
+      await released;
+    },
+  };
+  const active = new GitWorktreeManager(options).resolve(
+    'primary',
+    'a'.repeat(64)
+  );
+  await setupStarted;
+  const controller = new AbortController();
+  const manager = new GitWorktreeManager(options);
+  const waiting = manager.resolve('primary', 'b'.repeat(64), controller.signal);
+  const rejected = assert.rejects(waiting, { name: 'AbortError' });
+  await delay(75);
+  controller.abort();
+  await rejected;
+  assert.equal(setups, 1);
+  release();
+  await active;
+  await assert.rejects(
+    stat(await manager.plannedRoot('primary', 'b'.repeat(64))),
+    { code: 'ENOENT' }
+  );
+});
+
+test('recovery preserves unknown directories and malformed completion records', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const options = {
+    maxCount: 4,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([['primary', await source(fixture.root)]]),
+  };
+  const manager = new GitWorktreeManager(options);
+  const first = await manager.resolve('primary', 'a'.repeat(64));
+  const unrelated = join(options.root, 'operator-backups', 'important');
+  await mkdir(unrelated, { recursive: true });
+  await writeFile(join(unrelated, 'notes'), 'keep');
+  await manager.resolve('primary', 'b'.repeat(64));
+  assert.equal(await readFile(join(unrelated, 'notes'), 'utf8'), 'keep');
+  await writeFile(`${first.root}.complete`, '{"version":0}');
+  await assert.rejects(
+    new GitWorktreeManager(options).resolve('primary', 'a'.repeat(64)),
+    /completion record is invalid/
+  );
+  await assert.rejects(
+    new GitWorktreeManager(options).resolve('primary', 'c'.repeat(64)),
+    /completion record is invalid/
+  );
+  assert.equal(
+    await readFile(join(first.root, 'README.md'), 'utf8'),
+    'source\n'
+  );
+});
 
 async function git(root: string, ...args: string[]): Promise<string> {
   const result = await execFileAsync('git', ['-C', root, ...args], {
@@ -48,7 +212,7 @@ async function repository(): Promise<{ parent: string; root: string }> {
     'user.email=test@example.com',
     'commit',
     '-m',
-    'initial',
+    'initial'
   );
   return { parent, root: await realpath(root) };
 }
@@ -79,19 +243,19 @@ test('creates and reuses an isolated worktree for one conversation identity', as
       first.root,
       'rev-parse',
       '--path-format=absolute',
-      '--git-common-dir',
-    ),
+      '--git-common-dir'
+    )
   );
   assert.equal(instanceCommon.startsWith(first.root), true);
   assert.equal(
     await readFile(join(first.root, 'README.md'), 'utf8'),
-    'source\n',
+    'source\n'
   );
 
   await writeFile(join(first.root, 'README.md'), 'conversation\n');
   assert.equal(
     await readFile(join(fixture.root, 'README.md'), 'utf8'),
-    'source\n',
+    'source\n'
   );
 
   const restarted = new GitWorktreeManager({
@@ -124,7 +288,7 @@ test('replaces an incomplete checkout before admitting it after restart', async 
   const recovered = await restarted.resolve('primary', id);
   assert.equal(
     await readFile(join(recovered.root, 'README.md'), 'utf8'),
-    'source\n',
+    'source\n'
   );
 });
 
@@ -166,7 +330,7 @@ test('keeps a conversation checkout independent of source object pruning', async
     'user.email=test@example.com',
     'commit',
     '-m',
-    'second',
+    'second'
   );
   const manager = new GitWorktreeManager({
     maxCount: 1,
@@ -183,23 +347,25 @@ test('keeps a conversation checkout independent of source object pruning', async
   assert.equal(await git(instance.root, 'rev-parse', 'HEAD'), retainedHead);
   assert.equal(
     await readFile(join(instance.root, 'SECOND.md'), 'utf8'),
-    'second\n',
+    'second\n'
   );
   await assert.rejects(
     readFile(join(instance.gitSharedObjectDirectory, 'info', 'alternates')),
-    { code: 'ENOENT' },
+    { code: 'ENOENT' }
   );
 });
 
 test('dissociates a checkout from inherited source alternates', async (t) => {
   const upstream = await repository();
-  const sharedParent = await mkdtemp(join(tmpdir(), 'librechat-shared-source-'));
+  const sharedParent = await mkdtemp(
+    join(tmpdir(), 'librechat-shared-source-')
+  );
   const sharedRoot = join(sharedParent, 'source');
   t.after(() =>
     Promise.all([
       rm(upstream.parent, { recursive: true, force: true }),
       rm(sharedParent, { recursive: true, force: true }),
-    ]),
+    ])
   );
   await execFileAsync('git', ['clone', '--shared', upstream.root, sharedRoot]);
   const manager = new GitWorktreeManager({
@@ -212,11 +378,11 @@ test('dissociates a checkout from inherited source alternates', async (t) => {
 
   assert.equal(
     await git(instance.root, 'rev-parse', 'HEAD^{commit}'),
-    await git(instance.root, 'rev-parse', 'HEAD'),
+    await git(instance.root, 'rev-parse', 'HEAD')
   );
   await assert.rejects(
     readFile(join(instance.gitSharedObjectDirectory, 'info', 'alternates')),
-    { code: 'ENOENT' },
+    { code: 'ENOENT' }
   );
 });
 
@@ -234,7 +400,7 @@ test('provisions an orphan branch for a repository with an unborn HEAD', async (
   const instance = await manager.resolve('primary', '0'.repeat(64));
   assert.match(
     await git(instance.root, 'branch', '--show-current'),
-    /^librechat\/conversation-/,
+    /^librechat\/conversation-/
   );
   await assert.rejects(git(instance.root, 'rev-parse', '--verify', 'HEAD'));
 });
@@ -254,7 +420,7 @@ test('rejects replacement of the admitted worktree storage root', async (t) => {
 
   await assert.rejects(
     manager.resolve('primary', '1'.repeat(64)),
-    /storage changed after admission/,
+    /storage changed after admission/
   );
 });
 
@@ -265,7 +431,7 @@ test('keeps conversations and source repositories isolated', async (t) => {
     Promise.all([
       rm(first.parent, { recursive: true, force: true }),
       rm(second.parent, { recursive: true, force: true }),
-    ]),
+    ])
   );
   const storage = await mkdtemp(join(tmpdir(), 'librechat-worktree-storage-'));
   t.after(() => rm(storage, { recursive: true, force: true }));
@@ -287,7 +453,7 @@ test('keeps conversations and source repositories isolated', async (t) => {
       secondConversation.root,
       otherRepository.root,
     ]).size,
-    3,
+    3
   );
 });
 
@@ -310,7 +476,7 @@ test('rejects invalid identities, overlapping storage and exhausted capacity', a
           ],
         ]),
       }),
-    /clone timeout/,
+    /clone timeout/
   );
   const overlapping = new GitWorktreeManager({
     maxCount: 1,
@@ -319,7 +485,7 @@ test('rejects invalid identities, overlapping storage and exhausted capacity', a
   });
   await assert.rejects(
     overlapping.resolve('primary', 'a'.repeat(64)),
-    /must not overlap/,
+    /must not overlap/
   );
 
   const manager = new GitWorktreeManager({
@@ -332,7 +498,7 @@ test('rejects invalid identities, overlapping storage and exhausted capacity', a
   assert.equal((await stat(first.root)).isDirectory(), true);
   await assert.rejects(
     manager.resolve('primary', 'b'.repeat(64)),
-    /capacity is exhausted/,
+    /capacity is exhausted/
   );
 });
 
@@ -348,11 +514,21 @@ test('serializes provisioning across manager instances sharing storage', async (
     new GitWorktreeManager(options).resolve('primary', 'a'.repeat(64)),
     new GitWorktreeManager(options).resolve('primary', 'b'.repeat(64)),
   ]);
-  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
-  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+  assert.equal(
+    results.filter((result) => result.status === 'fulfilled').length,
+    1
+  );
+  assert.equal(
+    results.filter((result) => result.status === 'rejected').length,
+    1
+  );
   assert.match(
-    (results.find((result) => result.status === 'rejected') as PromiseRejectedResult).reason.message,
-    /capacity is exhausted/,
+    (
+      results.find(
+        (result) => result.status === 'rejected'
+      ) as PromiseRejectedResult
+    ).reason.message,
+    /capacity is exhausted/
   );
 });
 
@@ -373,14 +549,17 @@ test('prepares a new checkout before publishing its completion marker', async (t
   const id = 'c'.repeat(64);
   await assert.rejects(
     new GitWorktreeManager(options).resolve('primary', id),
-    /setup failed/,
+    /setup failed/
   );
   const instance = await new GitWorktreeManager(options).resolve('primary', id);
-  assert.equal(await readFile(join(instance.root, 'prepared'), 'utf8'), 'yes\n');
+  assert.equal(
+    await readFile(join(instance.root, 'prepared'), 'utf8'),
+    'yes\n'
+  );
   assert.equal(attempts, 2);
 });
 
-test('rebuilds a completed checkout when its admitted source changes', async (t) => {
+test('preserves a completed checkout when its admitted source changes', async (t) => {
   const first = await repository();
   const second = await repository();
   t.after(() => rm(first.parent, { recursive: true, force: true }));
@@ -395,21 +574,32 @@ test('rebuilds a completed checkout when its admitted source changes', async (t)
     'user.email=test@example.com',
     'commit',
     '-m',
-    'replacement',
+    'replacement'
   );
   const storage = join(first.parent, 'instances');
   const id = 'e'.repeat(64);
-  await new GitWorktreeManager({
+  const original = await new GitWorktreeManager({
     maxCount: 1,
     root: storage,
     sources: new Map([['primary', await source(first.root)]]),
   }).resolve('primary', id);
-  const replacement = await new GitWorktreeManager({
-    maxCount: 1,
-    root: storage,
-    sources: new Map([['primary', await source(second.root)]]),
-  }).resolve('primary', id);
-  assert.equal(await readFile(join(replacement.root, 'README.md'), 'utf8'), 'replacement\n');
+  await writeFile(join(original.root, 'UNCOMMITTED.md'), 'user work\n');
+  await assert.rejects(
+    new GitWorktreeManager({
+      maxCount: 1,
+      root: storage,
+      sources: new Map([['primary', await source(second.root)]]),
+    }).resolve('primary', id),
+    /source identity changed/
+  );
+  assert.equal(
+    await readFile(join(original.root, 'UNCOMMITTED.md'), 'utf8'),
+    'user work\n'
+  );
+  assert.equal(
+    await readFile(join(original.root, 'README.md'), 'utf8'),
+    'source\n'
+  );
 });
 
 test('rejects a source whose admitted filesystem identity changed', async (t) => {
@@ -436,6 +626,6 @@ test('rejects a source whose admitted filesystem identity changed', async (t) =>
 
   await assert.rejects(
     manager.resolve('primary', 'd'.repeat(64)),
-    /source changed after admission/,
+    /source changed after admission/
   );
 });

@@ -1100,7 +1100,10 @@ async function run(
                   );
                 }
               },
-              discardInstance: (instance) => {
+              discardInstance: async (instance) => {
+                await nativeCommandSandbox.unregisterRoot(
+                  internalWorkspaceId(instance.sourceWorkspaceId, instance.id),
+                );
                 admittedGitHubRepositories?.delete(instance.root);
               },
             }

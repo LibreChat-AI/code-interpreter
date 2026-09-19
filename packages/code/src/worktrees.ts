@@ -21,8 +21,7 @@ import { withProcessLock } from './process-lock.js';
 
 const execFileAsync = promisify(execFile);
 const WORKTREE_INSTANCE_PATTERN = /^[a-f0-9]{64}$/;
-const COMPLETION_TEMP_PATTERN =
-  /^[a-f0-9]{64}\.complete\.[a-f0-9-]+\.tmp$/;
+const COMPLETION_TEMP_PATTERN = /^[a-f0-9]{64}\.complete\.[a-f0-9-]+\.tmp$/;
 const GIT_TIMEOUT_MS = 30_000;
 const DEFAULT_CLONE_TIMEOUT_MS = 5 * 60_000;
 
@@ -46,7 +45,7 @@ export interface GitWorktreeManagerOptions {
   sources: ReadonlyMap<string, GitWorktreeSource>;
   prepareInstance?: (
     instance: GitWorktreeInstance,
-    signal?: AbortSignal,
+    signal?: AbortSignal
   ) => Promise<void>;
   discardInstance?: (instance: GitWorktreeInstance) => Promise<void> | void;
 }
@@ -77,9 +76,9 @@ async function git(
   root: string,
   args: string[],
   signal?: AbortSignal,
-  timeout = GIT_TIMEOUT_MS,
+  timeout = GIT_TIMEOUT_MS
 ): Promise<string> {
-  const result = await execFileAsync(
+  const execution = execFileAsync(
     'git',
     ['--no-optional-locks', '-C', root, ...args],
     {
@@ -88,23 +87,42 @@ async function git(
       maxBuffer: 16 * 1024,
       signal,
       timeout,
-    },
+    }
   );
-  return result.stdout.trim();
+  const closed = new Promise<void>((resolve) =>
+    execution.child.once('close', () => resolve())
+  );
+  try {
+    return (await execution).stdout.trim();
+  } finally {
+    // execFile's AbortError callback can run before its child exits. Retain the
+    // provisioning lock and directory until the writer is actually gone.
+    const killTimer = setTimeout(() => execution.child.kill('SIGKILL'), 1000);
+    killTimer.unref();
+    try {
+      await closed;
+    } finally {
+      clearTimeout(killTimer);
+    }
+  }
 }
 
-async function sourceRemote(root: string): Promise<string | undefined> {
+async function sourceRemote(
+  root: string,
+  signal?: AbortSignal
+): Promise<string | undefined> {
   try {
-    const remote = await git(root, ['remote', 'get-url', 'origin']);
+    const remote = await git(root, ['remote', 'get-url', 'origin'], signal);
     return remote || undefined;
   } catch {
+    signal?.throwIfAborted();
     return undefined;
   }
 }
 
 async function hasCommittedHead(
   root: string,
-  signal?: AbortSignal,
+  signal?: AbortSignal
 ): Promise<boolean> {
   try {
     await git(root, ['rev-parse', '--verify', 'HEAD'], signal);
@@ -132,24 +150,22 @@ async function directoryIdentity(path: string): Promise<WorkspaceRootIdentity> {
 
 async function commonDirectory(
   root: string,
-  signal?: AbortSignal,
+  signal?: AbortSignal
 ): Promise<string> {
   const path = await git(
     root,
     ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-    signal,
+    signal
   );
   return await realpath(path);
 }
 
 export class GitWorktreeManager {
-  private readonly inFlight = new Map<string, Promise<GitWorktreeInstance>>();
   private readonly instances = new Map<string, GitWorktreeInstance>();
   private canonicalRoot?: Promise<{
     identity: WorkspaceRootIdentity;
     path: string;
   }>;
-  private provisioning: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: GitWorktreeManagerOptions) {
     if (
@@ -159,7 +175,7 @@ export class GitWorktreeManager {
       options.sources.size === 0
     ) {
       throw new Error(
-        'Conversation worktree capacity must be between 1 and 1024',
+        'Conversation worktree capacity must be between 1 and 1024'
       );
     }
     if (
@@ -169,7 +185,7 @@ export class GitWorktreeManager {
         options.cloneTimeoutMs > 30 * 60_000)
     ) {
       throw new Error(
-        'Conversation worktree clone timeout must be between 30000 and 1800000 milliseconds',
+        'Conversation worktree clone timeout must be between 30000 and 1800000 milliseconds'
       );
     }
   }
@@ -191,14 +207,14 @@ export class GitWorktreeManager {
         (process.platform !== 'win32' && (metadata.mode & 0o022) !== 0)
       ) {
         throw new Error(
-          'Conversation worktree root must not be group or world writable',
+          'Conversation worktree root must not be group or world writable'
         );
       }
       for (const source of this.options.sources.values()) {
         const sourceRoot = await realpath(source.root);
         if (isInside(sourceRoot, root) || isInside(root, sourceRoot)) {
           throw new Error(
-            'Conversation worktree storage must not overlap a source workspace',
+            'Conversation worktree storage must not overlap a source workspace'
           );
         }
       }
@@ -228,7 +244,7 @@ export class GitWorktreeManager {
 
   private async instancePath(
     sourceWorkspaceId: string,
-    instanceId: string,
+    instanceId: string
   ): Promise<string> {
     const sourceDirectory = createHash('sha256')
       .update(sourceWorkspaceId)
@@ -239,11 +255,11 @@ export class GitWorktreeManager {
 
   async plannedRoot(
     sourceWorkspaceId: string,
-    instanceId: string,
+    instanceId: string
   ): Promise<string> {
     if (!WORKTREE_INSTANCE_PATTERN.test(instanceId)) {
       throw new Error(
-        'Conversation worktree identity must be a SHA-256 digest',
+        'Conversation worktree identity must be a SHA-256 digest'
       );
     }
     if (!this.options.sources.has(sourceWorkspaceId)) {
@@ -258,15 +274,13 @@ export class GitWorktreeManager {
       [...this.options.sources].map(async ([_workspaceId, source]) => {
         const sourceRoot = await this.admittedSourceRoot(source);
         await commonDirectory(sourceRoot);
-      }),
+      })
     );
   }
 
   private async admittedSourceRoot(source: GitWorktreeSource): Promise<string> {
     const sourceRoot = await realpath(source.root);
-    if (
-      !(await matchesWorkspaceRoot(sourceRoot, source.identity))
-    ) {
+    if (!(await matchesWorkspaceRoot(sourceRoot, source.identity))) {
       throw new Error('Conversation worktree source changed after admission');
     }
     return sourceRoot;
@@ -278,7 +292,11 @@ export class GitWorktreeManager {
     let count = 0;
     for (const sourceDirectory of sourceDirectories) {
       if (sourceDirectory.name.startsWith(PROVISIONING_LOCK)) continue;
-      if (!sourceDirectory.isDirectory() || sourceDirectory.isSymbolicLink())
+      if (
+        !/^[a-f0-9]{24}$/.test(sourceDirectory.name) ||
+        !sourceDirectory.isDirectory() ||
+        sourceDirectory.isSymbolicLink()
+      )
         continue;
       const entries = await readdir(join(root, sourceDirectory.name), {
         withFileTypes: true,
@@ -290,7 +308,12 @@ export class GitWorktreeManager {
           });
           continue;
         }
-        if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+        if (
+          !WORKTREE_INSTANCE_PATTERN.test(entry.name) ||
+          !entry.isDirectory() ||
+          entry.isSymbolicLink()
+        )
+          continue;
         const path = join(root, sourceDirectory.name, entry.name);
         if (await this.hasCompletionMarker(path)) {
           count += 1;
@@ -303,8 +326,15 @@ export class GitWorktreeManager {
     return count;
   }
 
-  private async withProvisioningLock<T>(operation: () => Promise<T>): Promise<T> {
-    return await withProcessLock(join(await this.root(), PROVISIONING_LOCK), operation);
+  private async withProvisioningLock<T>(
+    operation: () => Promise<T>,
+    signal?: AbortSignal
+  ): Promise<T> {
+    return await withProcessLock(
+      join(await this.root(), PROVISIONING_LOCK),
+      operation,
+      signal
+    );
   }
 
   private completionMarker(path: string): string {
@@ -313,27 +343,47 @@ export class GitWorktreeManager {
 
   private async hasCompletionMarker(
     path: string,
-    source?: WorkspaceRootIdentity,
+    source?: WorkspaceRootIdentity
   ): Promise<boolean> {
     try {
       const record = JSON.parse(
-        await readFile(this.completionMarker(path), 'utf8'),
+        await readFile(this.completionMarker(path), 'utf8')
       ) as {
         version?: unknown;
         source?: Partial<WorkspaceRootIdentity>;
+        provisioningFailed?: boolean;
       };
-      return (
+      const valid =
         record.version === 1 &&
         typeof record.source?.path === 'string' &&
         typeof record.source.dev === 'string' &&
-        typeof record.source.ino === 'string' &&
-        (source == null ||
-          (record.source.path === source.path &&
-            record.source.dev === source.dev &&
-            record.source.ino === source.ino))
-      );
+        typeof record.source.ino === 'string';
+      if (!valid)
+        throw new Error(
+          'Conversation worktree completion record is invalid; existing checkout preserved'
+        );
+      if (
+        source != null &&
+        (record.source!.path !== source.path ||
+          record.source!.dev !== source.dev ||
+          record.source!.ino !== source.ino)
+      ) {
+        throw new Error(
+          'Conversation worktree source identity changed; existing checkout preserved'
+        );
+      }
+      if (source != null && record.provisioningFailed) {
+        throw new Error(
+          'Conversation worktree setup cleanup is unconfirmed; operator recovery required'
+        );
+      }
+      return true;
     } catch (error) {
-      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'ENOENT'
+      ) {
         return false;
       }
       throw error;
@@ -343,14 +393,19 @@ export class GitWorktreeManager {
   private async writeCompletionMarker(
     path: string,
     source: WorkspaceRootIdentity,
+    provisioningFailed = false
   ): Promise<void> {
     const marker = this.completionMarker(path);
     const temporary = `${marker}.${randomUUID()}.tmp`;
     try {
       await writeFile(
         temporary,
-        `${JSON.stringify({ version: 1, source })}\n`,
-        { mode: 0o600, flag: 'wx' },
+        `${JSON.stringify({
+          version: 1,
+          source,
+          ...(provisioningFailed ? { provisioningFailed: true } : {}),
+        })}\n`,
+        { mode: 0o600, flag: 'wx' }
       );
       await rename(temporary, marker);
     } finally {
@@ -362,12 +417,12 @@ export class GitWorktreeManager {
     sourceWorkspaceId: string,
     instanceId: string,
     path: string,
-    signal?: AbortSignal,
+    signal?: AbortSignal
   ): Promise<GitWorktreeInstance> {
     const canonicalPath = await realpath(path);
     if (canonicalPath !== path || !isInside(await this.root(), canonicalPath)) {
       throw new Error(
-        'Conversation worktree escaped its configured storage root',
+        'Conversation worktree escaped its configured storage root'
       );
     }
     const instanceCommon = await commonDirectory(canonicalPath, signal);
@@ -380,7 +435,9 @@ export class GitWorktreeManager {
     }
     try {
       await lstat(join(instanceObjects, 'info', 'alternates'));
-      throw new Error('Conversation worktree must not use external Git objects');
+      throw new Error(
+        'Conversation worktree must not use external Git objects'
+      );
     } catch (error) {
       if (
         !(error instanceof Error) ||
@@ -404,7 +461,7 @@ export class GitWorktreeManager {
     instanceId: string,
     path: string,
     source: WorkspaceRootIdentity,
-    signal?: AbortSignal,
+    signal?: AbortSignal
   ): Promise<GitWorktreeInstance> {
     if (!(await this.hasCompletionMarker(path, source))) {
       const error = new Error('Conversation worktree is incomplete');
@@ -415,18 +472,18 @@ export class GitWorktreeManager {
       sourceWorkspaceId,
       instanceId,
       path,
-      signal,
+      signal
     );
   }
 
   private async createLocked(
     sourceWorkspaceId: string,
     instanceId: string,
-    signal?: AbortSignal,
+    signal?: AbortSignal
   ): Promise<GitWorktreeInstance> {
     if (!WORKTREE_INSTANCE_PATTERN.test(instanceId)) {
       throw new Error(
-        'Conversation worktree identity must be a SHA-256 digest',
+        'Conversation worktree identity must be a SHA-256 digest'
       );
     }
     const source = this.options.sources.get(sourceWorkspaceId);
@@ -439,7 +496,7 @@ export class GitWorktreeManager {
         instanceId,
         path,
         source.identity,
-        signal,
+        signal
       );
     } catch (error) {
       if (!(error instanceof Error) || !('code' in error)) {
@@ -459,7 +516,7 @@ export class GitWorktreeManager {
     const branch = this.branch(sourceWorkspaceId, instanceId);
     let instance: GitWorktreeInstance | undefined;
     try {
-      const remote = await sourceRemote(sourceRoot);
+      const remote = await sourceRemote(sourceRoot, signal);
       await git(
         resolve(path, '..'),
         [
@@ -472,7 +529,7 @@ export class GitWorktreeManager {
           path,
         ],
         signal,
-        this.options.cloneTimeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS,
+        this.options.cloneTimeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS
       );
       const sourceHasHead = await hasCommittedHead(path, signal);
       if (remote) {
@@ -485,19 +542,26 @@ export class GitWorktreeManager {
         sourceHasHead
           ? ['checkout', '--force', '-b', branch, 'HEAD']
           : ['checkout', '--orphan', branch],
-        signal,
+        signal
       );
       instance = await this.validateRepository(
         sourceWorkspaceId,
         instanceId,
         path,
-        signal,
+        signal
       );
       await this.options.prepareInstance?.(instance, signal);
+      signal?.throwIfAborted();
+      await this.admittedSourceRoot(source);
       await this.writeCompletionMarker(path, source.identity);
       return instance;
     } catch (error) {
-      if (instance) await this.options.discardInstance?.(instance);
+      if (instance) {
+        // Reserve this checkout until executor cleanup is confirmed. A restart
+        // must not sweep a root whose setup process may still be alive.
+        await this.writeCompletionMarker(path, source.identity, true);
+        await this.options.discardInstance?.(instance);
+      }
       await rm(path, { recursive: true, force: true });
       await rm(this.completionMarker(path), { force: true });
       throw error;
@@ -507,63 +571,37 @@ export class GitWorktreeManager {
   private async create(
     sourceWorkspaceId: string,
     instanceId: string,
-    signal?: AbortSignal,
+    signal?: AbortSignal
   ): Promise<GitWorktreeInstance> {
-    return await this.withProvisioningLock(() =>
-      this.createLocked(sourceWorkspaceId, instanceId, signal),
+    return await this.withProvisioningLock(
+      () => this.createLocked(sourceWorkspaceId, instanceId, signal),
+      signal
     );
   }
 
   async resolve(
     sourceWorkspaceId: string,
     instanceId: string,
-    signal?: AbortSignal,
+    signal?: AbortSignal
   ): Promise<GitWorktreeInstance> {
     signal?.throwIfAborted();
     const key = this.key(sourceWorkspaceId, instanceId);
     const cached = this.instances.get(key);
     if (cached) {
       await this.root();
+      await this.admittedSourceRoot(
+        this.options.sources.get(sourceWorkspaceId)!
+      );
       if (!(await matchesWorkspaceRoot(cached.root, cached.identity))) {
         this.instances.delete(key);
         throw new Error('Conversation worktree changed after admission');
       }
       return cached;
     }
-    let pending = this.inFlight.get(key);
-    if (!pending) {
-      pending = this.provisioning.then(() =>
-        this.create(sourceWorkspaceId, instanceId),
-      );
-      this.provisioning = pending.catch(() => undefined);
-      this.inFlight.set(key, pending);
-      void pending
-        .finally(() => {
-          if (this.inFlight.get(key) === pending) this.inFlight.delete(key);
-        })
-        .catch(() => undefined);
-    }
-    const instance =
-      signal == null
-        ? await pending
-        : await Promise.race([
-            pending,
-            new Promise<never>((_resolve, reject) => {
-              const abort = (): void =>
-                reject(
-                  signal.reason instanceof Error
-                    ? signal.reason
-                    : new DOMException('aborted', 'AbortError'),
-                );
-              signal.addEventListener('abort', abort, {
-                once: true,
-              });
-              if (signal.aborted) abort();
-              void pending
-                .finally(() => signal.removeEventListener('abort', abort))
-                .catch(() => undefined);
-            }),
-          ]);
+    // The same kernel lock coordinates callers and processes. Keep cancellation
+    // attached through setup and cleanup; never release a lease while detached
+    // provisioning is still mutating the checkout.
+    const instance = await this.create(sourceWorkspaceId, instanceId, signal);
     this.instances.set(key, instance);
     return instance;
   }

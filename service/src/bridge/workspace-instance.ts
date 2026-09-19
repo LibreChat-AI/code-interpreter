@@ -7,11 +7,11 @@ export function principalWorkspaceInstanceId(args: {
   principalId: string;
 }): string {
   return createHash('sha256')
-    .update('codeapi-workspace-instance-v1\0')
-    .update(args.tenantId)
-    .update('\0')
-    .update(args.principalId)
-    .update('\0')
-    .update(args.instanceId)
+    .update(JSON.stringify([
+      'codeapi-workspace-instance-v1',
+      args.tenantId,
+      args.principalId,
+      args.instanceId,
+    ]))
     .digest('hex');
 }

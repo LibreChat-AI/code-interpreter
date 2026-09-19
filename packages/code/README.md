@@ -737,6 +737,14 @@ conversation remain serialized while different conversations may occupy
 different lease slots. An interrupted checkout has no completion marker and is
 discarded and rebuilt before it can be admitted after restart.
 
+Cancellation also covers waiting for the provisioning lock, cloning, and setup.
+The worker waits for setup cleanup before releasing the assignment. If cleanup
+cannot be confirmed, the checkout stays reserved and fails closed on restart.
+A completed checkout with a changed source identity or invalid completion record
+is preserved for operator recovery, including any uncommitted work. After stopping
+the worker and confirming no executor still uses the checkout, an operator can
+archive the affected checkout and its adjacent `.complete` record before retrying.
+
 GitHub App routing is inherited from the operator-admitted source repository;
 commands cannot select a different installation by rewriting a worktree remote.
 Legacy requests without a conversation identity continue to use the selected
