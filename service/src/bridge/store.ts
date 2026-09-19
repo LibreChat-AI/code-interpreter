@@ -15,8 +15,9 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
-  isWorkspaceToolRequest,
-  isWorkspaceToolResult,
+    isWorkspaceToolRequest,
+    isWorkspaceToolResult,
+    workspaceIsolationKey,
 } from '../../../packages/code/src/protocol';
 import type { BridgeWorkerBinding } from './pairing';
 import { BridgeAdmissionQueue } from './admission';
@@ -124,6 +125,12 @@ function supportsWorkspaceTool(
   if (!supportsOperation) {
     return supportsOperation;
   }
+  if (
+    request.workspaceInstanceId !== undefined &&
+    workspace.workspaceInstances?.includes('git_worktree') !== true
+  ) {
+    return false;
+  }
   if (request.operation === 'list_files' && request.afterPath !== undefined) {
     return capabilities?.listFileFeatures?.includes('after_path') === true;
   }
@@ -156,6 +163,7 @@ function supportsWorkspaceProgrammatic(
   registration: RegisteredBridgeWorker,
   workspaceId: string,
   language: string,
+  workspaceInstanceId?: string,
 ): boolean {
   const capabilities = registration.capabilities.workspaceTools;
   const workspace = capabilities?.workspaces.find(
@@ -163,6 +171,8 @@ function supportsWorkspaceProgrammatic(
   );
   return (
     workspace != null &&
+    (workspaceInstanceId === undefined ||
+      workspace.workspaceInstances?.includes('git_worktree') === true) &&
     capabilities?.operations.includes('execute_command') === true &&
     (workspace.operations == null ||
       workspace.operations.includes('execute_command')) &&
@@ -170,6 +180,25 @@ function supportsWorkspaceProgrammatic(
       language as 'bash',
     ) === true
   );
+}
+
+function workspaceInstanceId(body: t.PayloadBody): string | undefined {
+  if (
+    typeof body === 'object' &&
+    body != null &&
+    'workspace_instance_id' in body &&
+    typeof body.workspace_instance_id === 'string'
+  ) {
+    return body.workspace_instance_id;
+  }
+  return undefined;
+}
+
+export function workspaceAdmissionId(
+  workspaceId: string,
+  instanceId?: string,
+): string {
+  return workspaceIsolationKey(workspaceId, instanceId);
 }
 
 function workerKey(workerId: string): string {
@@ -807,6 +836,7 @@ export class RedisBridgeStore {
         registration,
         args.workspaceId,
         args.body.language,
+        workspaceInstanceId(args.body),
       )
     ) {
       throw new BridgeStoreError(
@@ -843,6 +873,15 @@ export class RedisBridgeStore {
     let workspaceLeaseSlot: number | undefined;
     const selectedWorkspaceId =
       args.workspaceRequest?.workspaceId ?? args.workspaceId;
+    const selectedWorkspaceInstanceId =
+      args.workspaceRequest?.workspaceInstanceId ?? workspaceInstanceId(args.body);
+    const selectedWorkspaceAdmissionId =
+      selectedWorkspaceId == null
+        ? undefined
+        : workspaceAdmissionId(
+            selectedWorkspaceId,
+            selectedWorkspaceInstanceId,
+          );
     const workspaceSlots =
       selectedWorkspaceId != null &&
       (registration.capabilities.workspaceLeaseSlots ?? 1) > 1
@@ -864,7 +903,7 @@ export class RedisBridgeStore {
               args.deadlineAtMs,
               workspaceSlots == null
                 ? undefined
-                : selectedWorkspaceId,
+                : selectedWorkspaceAdmissionId,
             ),
           args,
           'Bridge admission enqueue',
@@ -899,7 +938,7 @@ export class RedisBridgeStore {
                 workerId: args.workerId,
                 incarnationId: lockIncarnationId,
                 assignmentId,
-                workspaceId: selectedWorkspaceId!,
+                workspaceId: selectedWorkspaceAdmissionId!,
                 capacity: registration.capabilities.workspaceLeaseSlots!,
                 expiresAtMs: Date.now() + ttlSeconds * 1000,
               }),
@@ -961,6 +1000,7 @@ export class RedisBridgeStore {
               current.registration,
               args.workspaceId,
               args.body.language,
+              workspaceInstanceId(args.body),
             ))
         ) {
           throw new BridgeStoreError(
@@ -986,14 +1026,14 @@ export class RedisBridgeStore {
         generation,
         leaseToken,
         leaseTokenHash: tokenHash(leaseToken),
-        ...(selectedWorkspaceId == null ? {} : {
-          workspaceFence: `native-workspace:${selectedWorkspaceId}`,
+        ...(selectedWorkspaceAdmissionId == null ? {} : {
+          workspaceFence: `native-workspace:${selectedWorkspaceAdmissionId}`,
         }),
         ...(workspaceLeaseSlot === undefined
           ? {}
           : {
               workspaceLeaseSlot,
-              workspaceFence: `native-workspace:${selectedWorkspaceId!}`,
+              workspaceFence: `native-workspace:${selectedWorkspaceAdmissionId!}`,
             }),
         ...(registration.identityId != null
           ? { workerIdentityId: registration.identityId }
@@ -1082,6 +1122,7 @@ export class RedisBridgeStore {
             replacement.registration,
             args.workspaceId,
             args.body.language,
+            workspaceInstanceId(args.body),
           )
         ) {
           throw new BridgeStoreError(

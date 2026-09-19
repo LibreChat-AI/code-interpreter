@@ -134,6 +134,7 @@ test('executor bootstrap excludes bridge credentials and Node injection variable
   const sandbox = new NativeProcessWorkspaceCommandSandbox(
     {
       workspaceRoot: '/workspace',
+      gitSharedObjectDirectory: '/source/.git/objects',
       environment: {
         PATH: '/bin',
         NODE_OPTIONS: 'secret',
@@ -146,6 +147,10 @@ test('executor bootstrap excludes bridge credentials and Node injection variable
   assert.deepEqual(fake.options?.execArgv, []);
   assert.deepEqual(fake.options?.env, { PATH: '/bin' });
   assert.equal(JSON.stringify(fake.messages).includes('secret'), false);
+  assert.equal(
+    fake.messages[0].options.gitSharedObjectDirectory,
+    '/source/.git/objects',
+  );
   await sandbox.close();
 });
 

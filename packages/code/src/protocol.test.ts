@@ -10,6 +10,7 @@ import {
   isValidBridgeWorkerId,
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
+  workspaceIsolationKey,
 } from './protocol.js';
 import type {
   WorkspaceEditFileRequest,
@@ -87,6 +88,19 @@ test('bridgeWorkerPath encodes worker-controlled path segments', () => {
   assert.equal(
     bridgeWorkerPath('vm/example worker'),
     '/bridge/workers/vm%2Fexample%20worker',
+  );
+});
+
+test('workspace isolation keys keep roots and instances in disjoint namespaces', () => {
+  const instanceId = 'a'.repeat(64);
+  assert.notEqual(
+    workspaceIsolationKey(`foo:git-worktree:${instanceId}`),
+    workspaceIsolationKey('foo', instanceId),
+  );
+  assert.equal(workspaceIsolationKey('foo'), 'foo');
+  assert.notEqual(
+    workspaceIsolationKey('foo'),
+    workspaceIsolationKey('workspace:foo'),
   );
 });
 
@@ -262,6 +276,20 @@ test('workspace file listing accepts only bounded portable requests and results'
     afterPath: 'src/app.ts',
   };
   assert.equal(isWorkspaceToolRequest(request), true);
+  assert.equal(
+    isWorkspaceToolRequest({
+      ...request,
+      workspaceInstanceId: 'a'.repeat(64),
+    }),
+    true,
+  );
+  assert.equal(
+    isWorkspaceToolRequest({
+      ...request,
+      workspaceInstanceId: 'conversation-1',
+    }),
+    false,
+  );
   assert.equal(
     isWorkspaceToolRequest({ ...request, path: '../outside' }),
     false,
@@ -596,7 +624,11 @@ test('workspace capabilities allow per-workspace operation restrictions', () => 
       operations: ['read_file', 'write_file'],
       workspaces: [
         { id: 'readonly', operations: ['read_file'] },
-        { id: 'writable', operations: ['read_file', 'write_file'] },
+        {
+          id: 'writable',
+          operations: ['read_file', 'write_file'],
+          workspaceInstances: ['git_worktree'],
+        },
       ],
     },
   };
@@ -660,6 +692,7 @@ test('workspace programmatic requests accept only stable input cache identities'
       max_output_files: 50,
       max_output_file_bytes: 10_000_000,
       session_id: 'session-1',
+      workspace_instance_id: 'a'.repeat(64),
       files: [
         { name: 'main.sh', content: 'echo ready' },
         {
@@ -672,6 +705,13 @@ test('workspace programmatic requests accept only stable input cache identities'
     },
   };
   assert.equal(isBridgeWorkspaceProgrammaticRequest(request), true);
+  assert.equal(
+    isBridgeWorkspaceProgrammaticRequest({
+      ...request,
+      body: { ...request.body, workspace_instance_id: '../escape' },
+    }),
+    false,
+  );
   assert.equal(
     isBridgeWorkspaceProgrammaticRequest({
       ...request,

@@ -706,8 +706,42 @@ Slots are per machine, not a fleet-wide execution limit. A busy machine does not
 consume another machine's slots. Requests for the same root remain serialized,
 including commands started through background tools. Independent checkouts can
 use different slots; selecting subdirectories beneath one registered parent root
-does not create separate scheduling boundaries. Linked Git worktrees share Git
-metadata and are not supported by selected-project registration.
+does not create separate scheduling boundaries.
+
+To bind each conversation to an isolated checkout of the selected Git
+repository, configure worker-owned conversation worktrees:
+
+```sh
+librechat-code run \
+  --worker-dir /projects/LibreChat \
+  --workspace-lease-slots 4 \
+  --conversation-worktree-root /var/lib/librechat-code/worktrees \
+  --conversation-worktree-max 64 \
+  --conversation-worktree-clone-timeout-ms 300000 \
+  --allow-workspace-writes \
+  --allow-workspace-commands
+```
+
+`LIBRECHAT_CODE_CONVERSATION_WORKTREE_ROOT` and
+`LIBRECHAT_CODE_CONVERSATION_WORKTREE_MAX` are the environment equivalents;
+`LIBRECHAT_CODE_CONVERSATION_WORKTREE_CLONE_TIMEOUT_MS` controls the bounded
+clone budget (five minutes by default, from 30 seconds through 30 minutes).
+The storage root must be owner-controlled, must not overlap a registered
+workspace, and every registered source must be a Git repository. The worker
+creates a deterministic branch in an isolated local checkout for the opaque
+conversation identity supplied by LibreChat. Each checkout owns its writable
+Git metadata and object storage, without alternates or hardlinks to the source.
+Host paths remain private. The configured count
+is a hard per-machine quota, provisioning is serialized, and operations for one
+conversation remain serialized while different conversations may occupy
+different lease slots. An interrupted checkout has no completion marker and is
+discarded and rebuilt before it can be admitted after restart.
+
+GitHub App routing is inherited from the operator-admitted source repository;
+commands cannot select a different installation by rewriting a worktree remote.
+Legacy requests without a conversation identity continue to use the selected
+source root. Older Code API deployments do not negotiate the capability, so the
+worker omits it until every request path understands the isolation boundary.
 
 Admission waits at most 30 seconds. A `WORKSPACE_QUEUE_TIMEOUT` response (HTTP
 503, `Retry-After: 1`) means the operation was not assigned or started; wait for

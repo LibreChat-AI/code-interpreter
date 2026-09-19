@@ -6,6 +6,22 @@ export interface WorkspaceRootIdentity {
     ino: string;
 }
 
+/** Capture the inode-bound identity of a canonical workspace grant. */
+export async function captureWorkspaceRootIdentity(
+    root: string,
+): Promise<WorkspaceRootIdentity> {
+    const canonical = await realpath(root);
+    const current = await lstat(canonical, { bigint: true });
+    if (!current.isDirectory() || current.isSymbolicLink()) {
+        throw new Error('Workspace root must be a real directory');
+    }
+    return {
+        path: canonical,
+        dev: current.dev.toString(),
+        ino: current.ino.toString(),
+    };
+}
+
 /** Revalidation of a trusted snapshot, never a fresh grant to a replacement. */
 export async function matchesWorkspaceRoot(
     root: string,

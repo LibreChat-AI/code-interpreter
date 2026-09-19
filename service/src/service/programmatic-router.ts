@@ -44,6 +44,7 @@ import {
     SessionKeyResolutionError,
 } from '../session-key';
 import { getCredentialId, getPrincipalOrReject } from '../auth/principal';
+import { principalWorkspaceInstanceId } from '../bridge/workspace-instance';
 import { getExecutionIdentity } from '../execution-identity';
 import { PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION } from '../runtime-session/job-policy';
 import {
@@ -81,6 +82,7 @@ import {
     authorizeRequestedFiles,
 } from './file-authorization';
 import {
+  bindReplayWorkspaceInstance,
   buildReplayExecutionState,
   resolveReplayStateSandboxBackend,
 } from './programmatic-state';
@@ -335,7 +337,7 @@ function buildReplayPayload(
   state: ExecutionState,
   history: Record<string, HistoryEntry>,
 ): t.PayloadBody {
-  return createProgrammaticPayload({
+  const payload = createProgrammaticPayload({
     req,
     session_id: state.session_id,
     execution_id: state.execution_id,
@@ -347,6 +349,7 @@ function buildReplayPayload(
     filesOverride: state.files,
     language: state.language ?? 'python',
   });
+  return bindReplayWorkspaceInstance(payload, state);
 }
 
 async function runReplayIteration(
@@ -501,10 +504,17 @@ async function handleReplayInitial(
     userId: string;
     bridgeWorkerId?: string;
     workspaceId?: string;
+    workspaceInstanceId?: string;
   },
   cancellation: ReplayRequestCancellation,
 ): Promise<void> {
-  const { apiKeyId, userId, bridgeWorkerId, workspaceId } = params;
+  const {
+    apiKeyId,
+    userId,
+    bridgeWorkerId,
+    workspaceId,
+    workspaceInstanceId,
+  } = params;
     const { code, tools, user_id, files } =
         req.body as t.ProgrammaticRequestBody;
   let timeout: number;
@@ -660,6 +670,7 @@ async function handleReplayInitial(
     language,
     bridgeWorkerId,
     workspaceId,
+    workspaceInstanceId,
     executionProfile: env.EXECUTION_PROFILE,
     executionProfileSource: env.EXECUTION_PROFILE_SOURCE,
     sandboxBackend: resolveReplayStateSandboxBackend({
@@ -1279,6 +1290,7 @@ router.post(
   const requestedLanguage: unknown = rawBody.language ?? rawBody.lang;
   let bridgeWorkerId: string | undefined;
   let workspaceId: string | undefined;
+  let workspaceInstanceId: string | undefined;
   if (continuation_token == null || continuation_token === '') {
     try {
       const bridgeSelection = resolveBridgeWorkerSelection({
@@ -1311,6 +1323,23 @@ router.post(
                             .json({ error: 'Invalid code workspace ID' });
         }
         workspaceId = requestedWorkspaceId;
+      }
+      const requestedWorkspaceInstanceId = rawBody.workspace_instance_id;
+      if (requestedWorkspaceInstanceId !== undefined) {
+        if (
+          workspaceId == null ||
+          typeof requestedWorkspaceInstanceId !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(requestedWorkspaceInstanceId)
+        ) {
+          return res.status(400).json({
+            error: 'Invalid code workspace instance ID',
+          });
+        }
+        workspaceInstanceId = principalWorkspaceInstanceId({
+          instanceId: requestedWorkspaceInstanceId,
+          tenantId: principal.tenantId,
+          principalId: principal.userId,
+        });
       }
     } catch (error) {
       if (error instanceof BridgeWorkerSelectionError) {
@@ -1428,6 +1457,7 @@ router.post(
         userId,
         bridgeWorkerId,
         workspaceId,
+        workspaceInstanceId,
       }, cancellation);
     }
     if (workspaceId != null) {

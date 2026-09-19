@@ -115,6 +115,38 @@ test('CLI supports native SRT by default and validates explicit runtime mode', a
   assert.match(noWorkspace.stderr, /require.*registered directory/i);
 });
 
+test('CLI requires concurrent native slots for conversation worktrees', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-conversation-'));
+  const workspaceRoot = join(root, 'workspace');
+  const worktreeRoot = join(root, 'worktrees');
+  await mkdir(workspaceRoot);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const result = spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL('./cli.js', import.meta.url)),
+      'run',
+      '--worker-dir',
+      workspaceRoot,
+      '--allow-workspace-writes',
+      '--allow-workspace-commands',
+      '--conversation-worktree-root',
+      worktreeRoot,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+      },
+    },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /at least two workspace lease slots/i);
+});
+
 test('CLI advertises explicitly enabled writes without exposing the workspace root', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-cli-'));
   const workspaceRoot = join(root, '   ');
