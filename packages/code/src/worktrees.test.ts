@@ -380,6 +380,38 @@ test('prepares a new checkout before publishing its completion marker', async (t
   assert.equal(attempts, 2);
 });
 
+test('rebuilds a completed checkout when its admitted source changes', async (t) => {
+  const first = await repository();
+  const second = await repository();
+  t.after(() => rm(first.parent, { recursive: true, force: true }));
+  t.after(() => rm(second.parent, { recursive: true, force: true }));
+  await writeFile(join(second.root, 'README.md'), 'replacement\n');
+  await git(second.root, 'add', 'README.md');
+  await git(
+    second.root,
+    '-c',
+    'user.name=Test',
+    '-c',
+    'user.email=test@example.com',
+    'commit',
+    '-m',
+    'replacement',
+  );
+  const storage = join(first.parent, 'instances');
+  const id = 'e'.repeat(64);
+  await new GitWorktreeManager({
+    maxCount: 1,
+    root: storage,
+    sources: new Map([['primary', await source(first.root)]]),
+  }).resolve('primary', id);
+  const replacement = await new GitWorktreeManager({
+    maxCount: 1,
+    root: storage,
+    sources: new Map([['primary', await source(second.root)]]),
+  }).resolve('primary', id);
+  assert.equal(await readFile(join(replacement.root, 'README.md'), 'utf8'), 'replacement\n');
+});
+
 test('rejects a source whose admitted filesystem identity changed', async (t) => {
   const fixture = await repository();
   t.after(() => rm(fixture.parent, { recursive: true, force: true }));

@@ -17,6 +17,7 @@ import { promisify } from 'node:util';
 import { matchesWorkspaceRoot } from './root-identity.js';
 import type { WorkspaceRootIdentity } from './root-identity.js';
 import { assertPrivateStorageAncestors } from './private-storage.js';
+import { withProcessLock } from './process-lock.js';
 
 const execFileAsync = promisify(execFile);
 const WORKTREE_INSTANCE_PATTERN = /^[a-f0-9]{64}$/;
@@ -51,10 +52,6 @@ export interface GitWorktreeManagerOptions {
 }
 
 const PROVISIONING_LOCK = '.provision.lock';
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function isInside(parent: string, candidate: string): boolean {
   const path = relative(parent, candidate);
@@ -307,67 +304,34 @@ export class GitWorktreeManager {
   }
 
   private async withProvisioningLock<T>(operation: () => Promise<T>): Promise<T> {
-    const root = await this.root();
-    const lock = join(root, PROVISIONING_LOCK);
-    const owner = randomUUID();
-    for (;;) {
-      try {
-        await writeFile(
-          lock,
-          JSON.stringify({ owner, pid: process.pid }),
-          { mode: 0o600, flag: 'wx' },
-        );
-        break;
-      } catch (error) {
-        if (!(error instanceof Error) || !('code' in error) || error.code !== 'EEXIST') {
-          throw error;
-        }
-        const record = await readFile(lock, 'utf8')
-          .then((value) => JSON.parse(value) as { owner?: unknown; pid?: unknown })
-          .catch(() => undefined);
-        let ownerIsAlive = true;
-        if (record && Number.isSafeInteger(record.pid) && (record.pid as number) > 0) {
-          try {
-            process.kill(record.pid as number, 0);
-          } catch (ownerError) {
-            ownerIsAlive =
-              !(ownerError instanceof Error) ||
-              !('code' in ownerError) ||
-              ownerError.code !== 'ESRCH';
-          }
-        }
-        if (!ownerIsAlive) {
-          const stale = `${lock}.stale-${randomUUID()}`;
-          try {
-            await rename(lock, stale);
-            await rm(stale, { force: true });
-          } catch (renameError) {
-            if (!(renameError instanceof Error) || !('code' in renameError) || renameError.code !== 'ENOENT') {
-              throw renameError;
-            }
-          }
-          continue;
-        }
-        await delay(50);
-      }
-    }
-    try {
-      return await operation();
-    } finally {
-      const currentOwner = await readFile(lock, 'utf8')
-        .then((value) => (JSON.parse(value) as { owner?: unknown }).owner)
-        .catch(() => undefined);
-      if (currentOwner === owner) await rm(lock, { force: true });
-    }
+    return await withProcessLock(join(await this.root(), PROVISIONING_LOCK), operation);
   }
 
   private completionMarker(path: string): string {
     return `${path}.complete`;
   }
 
-  private async hasCompletionMarker(path: string): Promise<boolean> {
+  private async hasCompletionMarker(
+    path: string,
+    source?: WorkspaceRootIdentity,
+  ): Promise<boolean> {
     try {
-      return (await readFile(this.completionMarker(path), 'utf8')).trim() === '1';
+      const record = JSON.parse(
+        await readFile(this.completionMarker(path), 'utf8'),
+      ) as {
+        version?: unknown;
+        source?: Partial<WorkspaceRootIdentity>;
+      };
+      return (
+        record.version === 1 &&
+        typeof record.source?.path === 'string' &&
+        typeof record.source.dev === 'string' &&
+        typeof record.source.ino === 'string' &&
+        (source == null ||
+          (record.source.path === source.path &&
+            record.source.dev === source.dev &&
+            record.source.ino === source.ino))
+      );
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
         return false;
@@ -376,11 +340,18 @@ export class GitWorktreeManager {
     }
   }
 
-  private async writeCompletionMarker(path: string): Promise<void> {
+  private async writeCompletionMarker(
+    path: string,
+    source: WorkspaceRootIdentity,
+  ): Promise<void> {
     const marker = this.completionMarker(path);
     const temporary = `${marker}.${randomUUID()}.tmp`;
     try {
-      await writeFile(temporary, '1\n', { mode: 0o600, flag: 'wx' });
+      await writeFile(
+        temporary,
+        `${JSON.stringify({ version: 1, source })}\n`,
+        { mode: 0o600, flag: 'wx' },
+      );
       await rename(temporary, marker);
     } finally {
       await rm(temporary, { force: true });
@@ -432,9 +403,10 @@ export class GitWorktreeManager {
     sourceWorkspaceId: string,
     instanceId: string,
     path: string,
+    source: WorkspaceRootIdentity,
     signal?: AbortSignal,
   ): Promise<GitWorktreeInstance> {
-    if (!(await this.hasCompletionMarker(path))) {
+    if (!(await this.hasCompletionMarker(path, source))) {
       const error = new Error('Conversation worktree is incomplete');
       Object.assign(error, { code: 'EINCOMPLETE' });
       throw error;
@@ -466,6 +438,7 @@ export class GitWorktreeManager {
         sourceWorkspaceId,
         instanceId,
         path,
+        source.identity,
         signal,
       );
     } catch (error) {
@@ -521,7 +494,7 @@ export class GitWorktreeManager {
         signal,
       );
       await this.options.prepareInstance?.(instance, signal);
-      await this.writeCompletionMarker(path);
+      await this.writeCompletionMarker(path, source.identity);
       return instance;
     } catch (error) {
       if (instance) await this.options.discardInstance?.(instance);
