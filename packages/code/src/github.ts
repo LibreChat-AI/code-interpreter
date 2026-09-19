@@ -217,6 +217,8 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
   private readonly cached = new Map<string, GitHubCredential>();
   private readonly inFlight = new Map<string, Promise<GitHubCredential>>();
   private readonly installationIds = new Map<string, string>();
+  private appLogin?: string;
+  private appLoginInFlight?: Promise<string>;
   private actor?: GitHubCredential['actor'];
   private actorInFlight?: Promise<NonNullable<GitHubCredential['actor']>>;
   private readonly apiUrl: string;
@@ -280,12 +282,12 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     });
   }
 
-  private async resolveActor(
+  private async resolveAppLogin(
     jwt: string,
     signal?: AbortSignal,
-  ): Promise<NonNullable<GitHubCredential['actor']>> {
-    if (this.actor) return this.actor;
-    if (!this.actorInFlight) {
+  ): Promise<string> {
+    if (this.appLogin) return this.appLogin;
+    if (!this.appLoginInFlight) {
       const pending = (async () => {
         const sharedSignal = AbortSignal.timeout(
           GITHUB_SHARED_REQUEST_TIMEOUT_MS,
@@ -303,10 +305,41 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
         ) {
           throw new Error('GitHub App identity response is invalid');
         }
-        const login = `${app.slug}[bot]`;
+        return `${app.slug}[bot]`;
+      })();
+      this.appLoginInFlight = pending;
+      void pending.then(
+        login => {
+          this.appLogin = login;
+          if (this.appLoginInFlight === pending) {
+            this.appLoginInFlight = undefined;
+          }
+        },
+        () => {
+          if (this.appLoginInFlight === pending) {
+            this.appLoginInFlight = undefined;
+          }
+        },
+      );
+    }
+    return waitForShared(this.appLoginInFlight, signal);
+  }
+
+  private async resolveActor(
+    jwt: string,
+    installationToken: string,
+    signal?: AbortSignal,
+  ): Promise<NonNullable<GitHubCredential['actor']>> {
+    if (this.actor) return this.actor;
+    if (!this.actorInFlight) {
+      const pending = (async () => {
+        const sharedSignal = AbortSignal.timeout(
+          GITHUB_SHARED_REQUEST_TIMEOUT_MS,
+        );
+        const login = await this.resolveAppLogin(jwt, sharedSignal);
         const userResponse = await this.request(
           `/users/${encodeURIComponent(login)}`,
-          jwt,
+          installationToken,
           sharedSignal,
         );
         if (!userResponse.ok) {
@@ -349,7 +382,7 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
   async validate(signal?: AbortSignal): Promise<void> {
     const now = (this.options.now ?? (() => new Date()))();
     const jwt = await this.appJwt(now);
-    await this.resolveActor(jwt, signal);
+    await this.resolveAppLogin(jwt, signal);
     if (this.options.installationId) {
       await this.getCredential(signal);
     }
@@ -477,10 +510,15 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       ) {
         throw new Error('GitHub App token expiry is invalid');
       }
+      const actor = await this.resolveActor(
+        jwt,
+        body.token,
+        sharedSignal,
+      );
       const credential = {
         value: body.token,
         expiresAt,
-        ...(this.actor ? { actor: this.actor } : {}),
+        actor,
       };
       this.cached.set(key, credential);
       return credential;
