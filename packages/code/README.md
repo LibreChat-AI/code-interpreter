@@ -734,8 +734,10 @@ Git metadata and object storage, without alternates or hardlinks to the source.
 Host paths remain private. The configured count
 is a hard per-machine quota, provisioning is serialized, and operations for one
 conversation remain serialized while different conversations may occupy
-different lease slots. An interrupted checkout has no completion marker and is
-discarded and rebuilt before it can be admitted after restart.
+different lease slots. Recognizable abandoned checkouts without a lifecycle
+record are discarded before admission. New provisioning reserves its record
+before starting Git or setup; a worker crash leaves that checkout reserved for
+operator recovery because child processes might still be running.
 
 Cancellation also covers waiting for the provisioning lock, cloning, and setup.
 The worker waits for setup cleanup before releasing the assignment. If cleanup

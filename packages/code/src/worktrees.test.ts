@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import {
   mkdir,
   mkdtemp,
@@ -20,6 +21,68 @@ import { GitWorktreeManager } from './worktrees.js';
 import { captureWorkspaceRootIdentity } from './root-identity.js';
 
 const execFileAsync = promisify(execFile);
+
+test(
+  'restart preserves a checkout reserved by a crashed provisioning process',
+  { timeout: 10_000 },
+  async (t) => {
+    const fixture = await repository();
+    const admitted = await source(fixture.root);
+    const storage = join(fixture.parent, 'instances');
+    const id = '9'.repeat(64);
+    const child = spawn(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `
+    import { GitWorktreeManager } from ${JSON.stringify(
+      new URL('./worktrees.js', import.meta.url).href
+    )};
+    const manager = new GitWorktreeManager({
+      maxCount: 1, root: ${JSON.stringify(storage)},
+      sources: new Map([['primary', ${JSON.stringify(admitted)}]]),
+      prepareInstance: async () => {
+        process.stdout.write('setup-started');
+        await new Promise(() => { setInterval(() => {}, 1000); });
+      },
+    });
+    await manager.resolve('primary', ${JSON.stringify(id)});
+  `,
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+    const closed = once(child, 'close');
+    t.after(async () => {
+      child.kill('SIGKILL');
+      await closed;
+      await rm(fixture.parent, { recursive: true, force: true });
+    });
+    await once(child.stdout!, 'data');
+    child.kill('SIGKILL');
+    await closed;
+    const restarted = new GitWorktreeManager({
+      maxCount: 1,
+      root: storage,
+      sources: new Map([['primary', admitted]]),
+    });
+    await assert.rejects(
+      restarted.resolve('primary', id),
+      /operator recovery required/
+    );
+    await assert.rejects(
+      restarted.resolve('primary', '8'.repeat(64)),
+      /capacity is exhausted/
+    );
+    assert.equal(
+      await readFile(
+        join(await restarted.plannedRoot('primary', id), 'README.md'),
+        'utf8'
+      ),
+      'source\n'
+    );
+  }
+);
 
 test('cached checkouts revalidate their admitted source without deleting user work', async (t) => {
   const fixture = await repository();
@@ -88,6 +151,10 @@ test('cancellation waits for setup cleanup before releasing provisioning ownersh
     root: join(fixture.parent, 'instances'),
     sources: new Map([['primary', await source(fixture.root)]]),
     prepareInstance: async (instance, signal) => {
+      const reservation = JSON.parse(
+        await readFile(`${instance.root}.complete`, 'utf8')
+      );
+      assert.equal(reservation.provisioningFailed, true);
       setupRoot = instance.root;
       started();
       try {

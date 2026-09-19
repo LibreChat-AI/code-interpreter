@@ -517,6 +517,10 @@ export class GitWorktreeManager {
     let instance: GitWorktreeInstance | undefined;
     try {
       const remote = await sourceRemote(sourceRoot, signal);
+      // Reserve before launching any writer. A worker crash may leave a Git
+      // child or setup executor alive after the parent's kernel lock releases.
+      // Recovery must not sweep or reuse that uncertain directory.
+      await this.writeCompletionMarker(path, source.identity, true);
       await git(
         resolve(path, '..'),
         [
@@ -557,9 +561,7 @@ export class GitWorktreeManager {
       return instance;
     } catch (error) {
       if (instance) {
-        // Reserve this checkout until executor cleanup is confirmed. A restart
-        // must not sweep a root whose setup process may still be alive.
-        await this.writeCompletionMarker(path, source.identity, true);
+        // The reservation remains until executor cleanup is confirmed.
         await this.options.discardInstance?.(instance);
       }
       await rm(path, { recursive: true, force: true });
