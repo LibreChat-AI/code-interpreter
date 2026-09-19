@@ -180,3 +180,31 @@ test('rejects invalid identities, overlapping storage and exhausted capacity', a
     /capacity is exhausted/,
   );
 });
+
+test('rejects a source whose admitted filesystem identity changed', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const metadata = await stat(fixture.root, { bigint: true });
+  const manager = new GitWorktreeManager({
+    maxCount: 1,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([
+      [
+        'primary',
+        {
+          root: fixture.root,
+          identity: {
+            path: fixture.root,
+            dev: metadata.dev.toString(),
+            ino: (metadata.ino + 1n).toString(),
+          },
+        },
+      ],
+    ]),
+  });
+
+  await assert.rejects(
+    manager.resolve('primary', 'd'.repeat(64)),
+    /source changed after admission/,
+  );
+});

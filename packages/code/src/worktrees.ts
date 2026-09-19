@@ -14,6 +14,7 @@ import {
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 
+import { matchesWorkspaceRoot } from './root-identity.js';
 import type { WorkspaceRootIdentity } from './root-identity.js';
 
 const execFileAsync = promisify(execFile);
@@ -201,10 +202,22 @@ export class GitWorktreeManager {
   async prepare(): Promise<void> {
     await this.root();
     await Promise.all(
-      [...this.options.sources].map(([workspaceId, source]) =>
-        this.sourceObjectDirectory(workspaceId, source.root),
-      ),
+      [...this.options.sources].map(async ([workspaceId, source]) => {
+        const sourceRoot = await this.admittedSourceRoot(source);
+        await this.sourceObjectDirectory(workspaceId, sourceRoot);
+      }),
     );
+  }
+
+  private async admittedSourceRoot(source: GitWorktreeSource): Promise<string> {
+    const sourceRoot = await realpath(source.root);
+    if (
+      source.identity &&
+      !(await matchesWorkspaceRoot(sourceRoot, source.identity))
+    ) {
+      throw new Error('Conversation worktree source changed after admission');
+    }
+    return sourceRoot;
   }
 
   private async countInstances(): Promise<number> {
@@ -341,7 +354,7 @@ export class GitWorktreeManager {
     }
     const source = this.options.sources.get(sourceWorkspaceId);
     if (!source) throw new Error('Conversation worktree source is unavailable');
-    const sourceRoot = await realpath(source.root);
+    const sourceRoot = await this.admittedSourceRoot(source);
     const path = await this.instancePath(sourceWorkspaceId, instanceId);
     try {
       return await this.validateExisting(
