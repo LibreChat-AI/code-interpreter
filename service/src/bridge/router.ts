@@ -7,6 +7,7 @@ import type { BridgePrincipalType, BridgeWorkerBinding } from './pairing';
 import type { CodeBridgeAssignment, CodeBridgeSettlement } from './store';
 
 import {
+  BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
   BRIDGE_PROTOCOL_VERSION,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
@@ -36,6 +37,7 @@ export interface BridgeRouterOptions {
   adminToken: string;
   configuredWorkerId?: string;
   allowDynamicWorkers?: boolean;
+  maxCommandTimeoutMs?: number;
 }
 
 function sameToken(left: string, right: string): boolean {
@@ -132,6 +134,16 @@ function isSettlement(value: unknown): value is CodeBridgeSettlement {
 export function createBridgeRouter(options: BridgeRouterOptions): Router {
   const router = Router();
   if (options.enabled === false) return router;
+  if (
+    options.maxCommandTimeoutMs !== undefined &&
+    (!Number.isSafeInteger(options.maxCommandTimeoutMs) || options.maxCommandTimeoutMs < 1)
+  ) {
+    throw new RangeError('Workspace command timeout must be a positive safe integer');
+  }
+  const maxCommandTimeoutMs =
+    options.maxCommandTimeoutMs == null
+      ? undefined
+      : Math.min(options.maxCommandTimeoutMs, BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS);
 
   const configuredWorker = (workerId: string): boolean =>
     options.allowDynamicWorkers === true ||
@@ -324,10 +336,13 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         return;
       }
       const status = await options.store.workerStatus(workerId);
+      const supportsCommands =
+        status.capabilities?.workspaceTools?.operations.includes('execute_command') === true;
       res.json({
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         workerId,
         ...status,
+        ...(supportsCommands && maxCommandTimeoutMs != null ? { maxCommandTimeoutMs } : {}),
       });
     }),
   );
