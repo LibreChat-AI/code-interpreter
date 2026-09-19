@@ -45,7 +45,10 @@ function publicResult(
 export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
   readonly mutationFailuresAreAtomic?: true;
   readonly capabilities: WorkspaceToolExecutor['capabilities'];
-  private readonly executors = new Map<string, Promise<LocalWorkspaceTools>>();
+  private readonly executors = new Map<
+    string,
+    { identity: WorkspaceRootIdentity; value: Promise<LocalWorkspaceTools> }
+  >();
 
   constructor(private readonly options: GitWorktreeWorkspaceToolsOptions) {
     this.mutationFailuresAreAtomic = options.delegate.mutationFailuresAreAtomic;
@@ -106,23 +109,31 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     this.options.onResolve?.(workspaceId, instance.root);
     const internalId = internalWorkspaceId(workspaceId, instanceId);
     const key = `${workspaceId}\0${instanceId}`;
-    let executor = this.executors.get(key);
-    if (!executor) {
-      executor = LocalWorkspaceTools.create({
-        repositoryInstructions: source.repositoryInstructions,
-        workspaces: [
-          {
-            id: internalId,
-            identity: instance.identity,
-            root: instance.root,
-            writable: source.writable,
-          },
-        ],
-      });
-      this.executors.set(key, executor);
+    let cached = this.executors.get(key);
+    if (
+      cached == null ||
+      cached.identity.dev !== instance.identity.dev ||
+      cached.identity.ino !== instance.identity.ino ||
+      cached.identity.path !== instance.identity.path
+    ) {
+      cached = {
+        identity: instance.identity,
+        value: LocalWorkspaceTools.create({
+          repositoryInstructions: source.repositoryInstructions,
+          workspaces: [
+            {
+              id: internalId,
+              identity: instance.identity,
+              root: instance.root,
+              writable: source.writable,
+            },
+          ],
+        }),
+      };
+      this.executors.set(key, cached);
     }
     return {
-      executor: await executor,
+      executor: await cached.value,
       gitSharedObjectDirectory: instance.gitSharedObjectDirectory,
       identity: instance.identity,
       internalId,
@@ -163,7 +174,7 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
           'COMMAND_DISABLED',
         );
       }
-      this.options.commandPool.registerRoot(resolved.internalId, {
+      await this.options.commandPool.registerRoot(resolved.internalId, {
         ...source.command,
         gitSharedObjectDirectory: resolved.gitSharedObjectDirectory,
         workspaceIdentity: resolved.identity,
@@ -210,7 +221,7 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
       );
     }
     const resolved = await this.executor(workspaceId, instanceId, signal);
-    this.options.commandPool.registerRoot(resolved.internalId, {
+    await this.options.commandPool.registerRoot(resolved.internalId, {
       ...source.command,
       gitSharedObjectDirectory: resolved.gitSharedObjectDirectory,
       workspaceIdentity: resolved.identity,

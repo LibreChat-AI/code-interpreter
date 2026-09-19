@@ -139,6 +139,8 @@ test('does not count an incomplete checkout against capacity after restart', asy
   });
   const abandoned = await manager.resolve('primary', 'c'.repeat(64));
   await rm(`${abandoned.root}.complete`);
+  const staleMarker = `${abandoned.root}.complete.1.tmp`;
+  await writeFile(staleMarker, '1\n');
 
   const restarted = new GitWorktreeManager({
     maxCount: 1,
@@ -148,6 +150,7 @@ test('does not count an incomplete checkout against capacity after restart', asy
   const replacement = await restarted.resolve('primary', 'd'.repeat(64));
   assert.equal((await stat(replacement.root)).isDirectory(), true);
   await assert.rejects(stat(abandoned.root), { code: 'ENOENT' });
+  await assert.rejects(stat(staleMarker), { code: 'ENOENT' });
 });
 
 test('keeps a conversation checkout independent of source object pruning', async (t) => {

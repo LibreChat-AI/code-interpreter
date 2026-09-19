@@ -118,6 +118,8 @@ export interface ExecutionState {
   bridgeWorkerId?: string;
   /** Selected workspace retained and bound across every replay iteration. */
   workspaceId?: string;
+  /** Selected conversation checkout retained across every replay iteration. */
+  workspaceInstanceId?: string;
   /** Original queue/backend target retained across replay continuations. */
   sandboxBackend?: SandboxBackendName;
   /** Original producer profile retained so continuations use the same queue. */

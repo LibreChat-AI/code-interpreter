@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   lstat,
   mkdir,
@@ -20,6 +20,8 @@ import { assertPrivateStorageAncestors } from './private-storage.js';
 
 const execFileAsync = promisify(execFile);
 const WORKTREE_INSTANCE_PATTERN = /^[a-f0-9]{64}$/;
+const COMPLETION_TEMP_PATTERN =
+  /^[a-f0-9]{64}\.complete\.[a-f0-9-]+\.tmp$/;
 const GIT_TIMEOUT_MS = 30_000;
 const DEFAULT_CLONE_TIMEOUT_MS = 5 * 60_000;
 
@@ -273,6 +275,12 @@ export class GitWorktreeManager {
         withFileTypes: true,
       });
       for (const entry of entries) {
+        if (entry.isFile() && COMPLETION_TEMP_PATTERN.test(entry.name)) {
+          await rm(join(root, sourceDirectory.name, entry.name), {
+            force: true,
+          });
+          continue;
+        }
         if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
         const path = join(root, sourceDirectory.name, entry.name);
         if (await this.hasCompletionMarker(path)) {
@@ -303,9 +311,13 @@ export class GitWorktreeManager {
 
   private async writeCompletionMarker(path: string): Promise<void> {
     const marker = this.completionMarker(path);
-    const temporary = `${marker}.${process.pid}.tmp`;
-    await writeFile(temporary, '1\n', { mode: 0o600, flag: 'wx' });
-    await rename(temporary, marker);
+    const temporary = `${marker}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, '1\n', { mode: 0o600, flag: 'wx' });
+      await rename(temporary, marker);
+    } finally {
+      await rm(temporary, { force: true });
+    }
   }
 
   private async validateRepository(
@@ -407,7 +419,6 @@ export class GitWorktreeManager {
     const branch = this.branch(sourceWorkspaceId, instanceId);
     try {
       const remote = await sourceRemote(sourceRoot);
-      const sourceHasHead = await hasCommittedHead(sourceRoot, signal);
       await git(
         resolve(path, '..'),
         [
@@ -422,6 +433,7 @@ export class GitWorktreeManager {
         signal,
         this.options.cloneTimeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS,
       );
+      const sourceHasHead = await hasCommittedHead(path, signal);
       if (remote) {
         await git(path, ['remote', 'set-url', 'origin', remote], signal);
       } else {

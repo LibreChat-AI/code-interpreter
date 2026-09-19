@@ -61,18 +61,64 @@ test('native pool admits worker-owned roots after startup', async () => {
       },
     }),
   );
-  pool.registerRoot('conversation', {
+  await pool.registerRoot('conversation', {
     workspaceRoot: '/fixture/conversation',
   });
   await pool.execute(request('conversation'));
   assert.deepEqual(created, ['/fixture/conversation']);
-  assert.throws(
-    () =>
+  await assert.rejects(
+    async () =>
       pool.registerRoot('conversation', {
         workspaceRoot: '/fixture/replaced',
       }),
     { code: 'REGISTRATION_INVALID' },
   );
+  await pool.close();
+});
+
+test('native pool retires a cached executor when a root inode changes', async () => {
+  let created = 0;
+  let closed = 0;
+  const pool = new NativeWorkspaceCommandPool(
+    new Map([['primary', { workspaceRoot: '/fixture/primary' }]]),
+    2,
+    () => {
+      created++;
+      return {
+        async prepare() {},
+        async close() {
+          closed++;
+        },
+        async execute(req) {
+          return {
+            protocolVersion: 1,
+            operation: 'execute_command',
+            workspaceId: req.workspaceId,
+            stdout: '',
+            stderr: '',
+            exitCode: 0,
+            truncated: false,
+            timedOut: false,
+          };
+        },
+      };
+    },
+  );
+  const options = (ino: string) => ({
+    workspaceRoot: '/fixture/conversation',
+    workspaceIdentity: {
+      path: '/fixture/conversation',
+      dev: '1',
+      ino,
+    },
+  });
+  await pool.registerRoot('conversation', options('1'));
+  await pool.execute(request('conversation'));
+  await pool.registerRoot('conversation', options('2'));
+  await pool.execute(request('conversation'));
+
+  assert.equal(created, 2);
+  assert.equal(closed, 1);
   await pool.close();
 });
 

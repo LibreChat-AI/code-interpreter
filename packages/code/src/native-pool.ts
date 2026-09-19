@@ -47,19 +47,46 @@ export class NativeWorkspaceCommandPool {
 
   private readonly roots: Map<string, NativeProcessSandboxOptions>;
 
-  /** Add a worker-owned isolated root without exposing its host path. */
-  registerRoot(id: string, options: NativeProcessSandboxOptions): void {
-    const existing = this.roots.get(id);
-    if (existing) {
+  /** Add or safely replace a worker-owned isolated root. */
+  async registerRoot(
+    id: string,
+    options: NativeProcessSandboxOptions,
+  ): Promise<void> {
+    const pending = this.allocation.then(async () => {
+      const existing = this.roots.get(id);
+      if (!existing) {
+        this.roots.set(id, options);
+        return;
+      }
       if (existing.workspaceRoot !== options.workspaceRoot) {
         throw new WorkspaceToolError(
           'Native workspace identity changed',
           'REGISTRATION_INVALID',
         );
       }
-      return;
-    }
-    this.roots.set(id, options);
+      if (
+        existing.workspaceIdentity?.dev === options.workspaceIdentity?.dev &&
+        existing.workspaceIdentity?.ino === options.workspaceIdentity?.ino &&
+        existing.workspaceIdentity?.path === options.workspaceIdentity?.path &&
+        existing.gitSharedObjectDirectory === options.gitSharedObjectDirectory
+      ) {
+        return;
+      }
+      const entry = this.entries.get(id);
+      if (entry?.busy) {
+        throw new WorkspaceToolError(
+          'Native workspace changed during execution',
+          'REGISTRATION_INVALID',
+        );
+      }
+      if (entry) {
+        await entry.sandbox.close();
+        this.entries.delete(id);
+      }
+      this.roots.set(id, options);
+    });
+    this.allocation = pending.catch(() => undefined);
+    await pending;
   }
 
   private allocate(root: string): Promise<Entry> {

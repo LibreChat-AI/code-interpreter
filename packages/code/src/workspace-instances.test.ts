@@ -163,6 +163,44 @@ test('reports provisioning rejection as an atomic workspace error', async (t) =>
   );
 });
 
+test('rebuilds dependent file executors after checkout replacement', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const manager = new GitWorktreeManager({
+    maxCount: 1,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([['primary', await source(fixture.root)]]),
+  });
+  const delegate = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root: fixture.root, writable: true }],
+  });
+  const tools = new GitWorktreeWorkspaceTools({
+    delegate,
+    manager,
+    sources: new Map([
+      ['primary', { repositoryInstructions: false, writable: true }],
+    ]),
+  });
+  const instanceId = 'c'.repeat(64);
+  const request = {
+    protocolVersion: 1 as const,
+    operation: 'read_file' as const,
+    workspaceId: 'primary',
+    workspaceInstanceId: instanceId,
+    path: 'README.md',
+  };
+  await tools.execute(request);
+  const initial = await manager.resolve('primary', instanceId);
+  await rm(initial.root, { recursive: true, force: true });
+
+  await assert.rejects(tools.execute(request), {
+    code: 'WRITE_UNAVAILABLE',
+  });
+  const recovered = await tools.execute(request);
+  assert.equal(recovered.operation, 'read_file');
+  assert.equal(recovered.content, 'source');
+});
+
 test('leaves legacy requests on the selected source workspace', async (t) => {
   const fixture = await repository();
   t.after(() => rm(fixture.parent, { recursive: true, force: true }));
