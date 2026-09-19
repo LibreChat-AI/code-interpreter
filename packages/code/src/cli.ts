@@ -616,6 +616,20 @@ async function run(
   if (conversationWorktreeMax > 1024) {
     throw new Error('Conversation worktree capacity cannot exceed 1024');
   }
+  const conversationWorktreeCloneTimeoutMs = positiveInteger(
+    'LIBRECHAT_CODE_CONVERSATION_WORKTREE_CLONE_TIMEOUT_MS',
+    option(args, '--conversation-worktree-clone-timeout-ms') ??
+      process.env.LIBRECHAT_CODE_CONVERSATION_WORKTREE_CLONE_TIMEOUT_MS,
+    5 * 60_000,
+  );
+  if (
+    conversationWorktreeCloneTimeoutMs < 30_000 ||
+    conversationWorktreeCloneTimeoutMs > 30 * 60_000
+  ) {
+    throw new Error(
+      'Conversation worktree clone timeout must be between 30000 and 1800000 milliseconds',
+    );
+  }
   const roots: LocalWorkspaceConfig[] = canonicalWorkerDirectory
     ? [
         {
@@ -1045,6 +1059,7 @@ async function run(
   }
   const conversationWorktrees = conversationWorktreeRoot
     ? new GitWorktreeManager({
+        cloneTimeoutMs: conversationWorktreeCloneTimeoutMs,
         maxCount: conversationWorktreeMax,
         root: conversationWorktreeRoot,
         sources: new Map(

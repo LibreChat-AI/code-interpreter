@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import {
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
   writeFile,
@@ -186,6 +188,73 @@ test('keeps a conversation checkout independent of source object pruning', async
   );
 });
 
+test('dissociates a checkout from inherited source alternates', async (t) => {
+  const upstream = await repository();
+  const sharedParent = await mkdtemp(join(tmpdir(), 'librechat-shared-source-'));
+  const sharedRoot = join(sharedParent, 'source');
+  t.after(() =>
+    Promise.all([
+      rm(upstream.parent, { recursive: true, force: true }),
+      rm(sharedParent, { recursive: true, force: true }),
+    ]),
+  );
+  await execFileAsync('git', ['clone', '--shared', upstream.root, sharedRoot]);
+  const manager = new GitWorktreeManager({
+    maxCount: 1,
+    root: join(sharedParent, 'instances'),
+    sources: new Map([['primary', await source(await realpath(sharedRoot))]]),
+  });
+  const instance = await manager.resolve('primary', 'f'.repeat(64));
+  await rm(upstream.root, { recursive: true, force: true });
+
+  assert.equal(
+    await git(instance.root, 'rev-parse', 'HEAD^{commit}'),
+    await git(instance.root, 'rev-parse', 'HEAD'),
+  );
+  await assert.rejects(
+    readFile(join(instance.gitSharedObjectDirectory, 'info', 'alternates')),
+    { code: 'ENOENT' },
+  );
+});
+
+test('provisions an orphan branch for a repository with an unborn HEAD', async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), 'librechat-empty-source-'));
+  const root = join(parent, 'source');
+  await execFileAsync('git', ['init', root]);
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const manager = new GitWorktreeManager({
+    maxCount: 1,
+    root: join(parent, 'instances'),
+    sources: new Map([['primary', await source(await realpath(root))]]),
+  });
+
+  const instance = await manager.resolve('primary', '0'.repeat(64));
+  assert.match(
+    await git(instance.root, 'branch', '--show-current'),
+    /^librechat\/conversation-/,
+  );
+  await assert.rejects(git(instance.root, 'rev-parse', '--verify', 'HEAD'));
+});
+
+test('rejects replacement of the admitted worktree storage root', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const storage = join(fixture.parent, 'instances');
+  const manager = new GitWorktreeManager({
+    maxCount: 1,
+    root: storage,
+    sources: new Map([['primary', await source(fixture.root)]]),
+  });
+  await manager.resolve('primary', '1'.repeat(64));
+  await rename(storage, `${storage}.original`);
+  await mkdir(storage, { mode: 0o700 });
+
+  await assert.rejects(
+    manager.resolve('primary', '1'.repeat(64)),
+    /storage changed after admission/,
+  );
+});
+
 test('keeps conversations and source repositories isolated', async (t) => {
   const first = await repository();
   const second = await repository();
@@ -222,6 +291,24 @@ test('keeps conversations and source repositories isolated', async (t) => {
 test('rejects invalid identities, overlapping storage and exhausted capacity', async (t) => {
   const fixture = await repository();
   t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  assert.throws(
+    () =>
+      new GitWorktreeManager({
+        cloneTimeoutMs: 29_999,
+        maxCount: 1,
+        root: join(fixture.parent, 'instances'),
+        sources: new Map([
+          [
+            'primary',
+            {
+              root: fixture.root,
+              identity: { path: fixture.root, dev: '1', ino: '1' },
+            },
+          ],
+        ]),
+      }),
+    /clone timeout/,
+  );
   const overlapping = new GitWorktreeManager({
     maxCount: 1,
     root: join(fixture.root, 'instances'),

@@ -16,10 +16,12 @@ import { promisify } from 'node:util';
 
 import { matchesWorkspaceRoot } from './root-identity.js';
 import type { WorkspaceRootIdentity } from './root-identity.js';
+import { assertPrivateStorageAncestors } from './private-storage.js';
 
 const execFileAsync = promisify(execFile);
 const WORKTREE_INSTANCE_PATTERN = /^[a-f0-9]{64}$/;
 const GIT_TIMEOUT_MS = 30_000;
+const DEFAULT_CLONE_TIMEOUT_MS = 5 * 60_000;
 
 export interface GitWorktreeSource {
   identity: WorkspaceRootIdentity;
@@ -35,6 +37,7 @@ export interface GitWorktreeInstance {
 }
 
 export interface GitWorktreeManagerOptions {
+  cloneTimeoutMs?: number;
   maxCount: number;
   root: string;
   sources: ReadonlyMap<string, GitWorktreeSource>;
@@ -64,6 +67,7 @@ async function git(
   root: string,
   args: string[],
   signal?: AbortSignal,
+  timeout = GIT_TIMEOUT_MS,
 ): Promise<string> {
   const result = await execFileAsync(
     'git',
@@ -73,7 +77,7 @@ async function git(
       env: gitEnvironment(),
       maxBuffer: 16 * 1024,
       signal,
-      timeout: GIT_TIMEOUT_MS,
+      timeout,
     },
   );
   return result.stdout.trim();
@@ -85,6 +89,22 @@ async function sourceRemote(root: string): Promise<string | undefined> {
     return remote || undefined;
   } catch {
     return undefined;
+  }
+}
+
+async function hasCommittedHead(
+  root: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    await git(root, ['rev-parse', '--verify', 'HEAD'], signal);
+    return true;
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof Error && 'code' in error && error.code === 128) {
+      return false;
+    }
+    throw error;
   }
 }
 
@@ -115,7 +135,10 @@ async function commonDirectory(
 export class GitWorktreeManager {
   private readonly inFlight = new Map<string, Promise<GitWorktreeInstance>>();
   private readonly instances = new Map<string, GitWorktreeInstance>();
-  private canonicalRoot?: Promise<string>;
+  private canonicalRoot?: Promise<{
+    identity: WorkspaceRootIdentity;
+    path: string;
+  }>;
   private provisioning: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: GitWorktreeManagerOptions) {
@@ -129,15 +152,29 @@ export class GitWorktreeManager {
         'Conversation worktree capacity must be between 1 and 1024',
       );
     }
+    if (
+      options.cloneTimeoutMs !== undefined &&
+      (!Number.isSafeInteger(options.cloneTimeoutMs) ||
+        options.cloneTimeoutMs < GIT_TIMEOUT_MS ||
+        options.cloneTimeoutMs > 30 * 60_000)
+    ) {
+      throw new Error(
+        'Conversation worktree clone timeout must be between 30000 and 1800000 milliseconds',
+      );
+    }
   }
 
   private async root(): Promise<string> {
     this.canonicalRoot ??= (async () => {
-      await mkdir(resolve(this.options.root), {
+      const configuredRoot = resolve(this.options.root);
+      await assertPrivateStorageAncestors(configuredRoot, true);
+      await mkdir(configuredRoot, {
         mode: 0o700,
         recursive: true,
       });
+      await assertPrivateStorageAncestors(configuredRoot);
       const root = await realpath(this.options.root);
+      await assertPrivateStorageAncestors(root);
       const metadata = await stat(root);
       if (
         !metadata.isDirectory() ||
@@ -155,9 +192,16 @@ export class GitWorktreeManager {
           );
         }
       }
-      return root;
+      return {
+        identity: await directoryIdentity(root),
+        path: root,
+      };
     })();
-    return await this.canonicalRoot;
+    const root = await this.canonicalRoot;
+    if (!(await matchesWorkspaceRoot(root.path, root.identity))) {
+      throw new Error('Conversation worktree storage changed after admission');
+    }
+    return root.path;
   }
 
   private key(sourceWorkspaceId: string, instanceId: string): string {
@@ -284,6 +328,18 @@ export class GitWorktreeManager {
     if (!isInside(canonicalPath, instanceObjects)) {
       throw new Error('Conversation worktree does not own its Git objects');
     }
+    try {
+      await lstat(join(instanceObjects, 'info', 'alternates'));
+      throw new Error('Conversation worktree must not use external Git objects');
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !('code' in error) ||
+        error.code !== 'ENOENT'
+      ) {
+        throw error;
+      }
+    }
     return {
       gitSharedObjectDirectory: instanceObjects,
       id: instanceId,
@@ -351,10 +407,12 @@ export class GitWorktreeManager {
     const branch = this.branch(sourceWorkspaceId, instanceId);
     try {
       const remote = await sourceRemote(sourceRoot);
+      const sourceHasHead = await hasCommittedHead(sourceRoot, signal);
       await git(
         resolve(path, '..'),
         [
           'clone',
+          '--no-local',
           '--no-hardlinks',
           '--no-checkout',
           '--no-tags',
@@ -362,13 +420,20 @@ export class GitWorktreeManager {
           path,
         ],
         signal,
+        this.options.cloneTimeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS,
       );
       if (remote) {
         await git(path, ['remote', 'set-url', 'origin', remote], signal);
       } else {
         await git(path, ['remote', 'remove', 'origin'], signal);
       }
-      await git(path, ['checkout', '--force', '-b', branch, 'HEAD'], signal);
+      await git(
+        path,
+        sourceHasHead
+          ? ['checkout', '--force', '-b', branch, 'HEAD']
+          : ['checkout', '--orphan', branch],
+        signal,
+      );
       const instance = await this.validateRepository(
         sourceWorkspaceId,
         instanceId,
@@ -392,7 +457,14 @@ export class GitWorktreeManager {
     signal?.throwIfAborted();
     const key = this.key(sourceWorkspaceId, instanceId);
     const cached = this.instances.get(key);
-    if (cached) return cached;
+    if (cached) {
+      await this.root();
+      if (!(await matchesWorkspaceRoot(cached.root, cached.identity))) {
+        this.instances.delete(key);
+        throw new Error('Conversation worktree changed after admission');
+      }
+      return cached;
+    }
     let pending = this.inFlight.get(key);
     if (!pending) {
       pending = this.provisioning.then(() =>

@@ -717,18 +717,21 @@ librechat-code run \
   --workspace-lease-slots 4 \
   --conversation-worktree-root /var/lib/librechat-code/worktrees \
   --conversation-worktree-max 64 \
+  --conversation-worktree-clone-timeout-ms 300000 \
   --allow-workspace-writes \
   --allow-workspace-commands
 ```
 
 `LIBRECHAT_CODE_CONVERSATION_WORKTREE_ROOT` and
-`LIBRECHAT_CODE_CONVERSATION_WORKTREE_MAX` are the environment equivalents.
+`LIBRECHAT_CODE_CONVERSATION_WORKTREE_MAX` are the environment equivalents;
+`LIBRECHAT_CODE_CONVERSATION_WORKTREE_CLONE_TIMEOUT_MS` controls the bounded
+clone budget (five minutes by default, from 30 seconds through 30 minutes).
 The storage root must be owner-controlled, must not overlap a registered
 workspace, and every registered source must be a Git repository. The worker
 creates a deterministic branch in an isolated local checkout for the opaque
 conversation identity supplied by LibreChat. Each checkout owns its writable
-Git metadata and shares only the operator-admitted source object store, which
-the sandbox mounts read-only. Host paths remain private. The configured count
+Git metadata and object storage, without alternates or hardlinks to the source.
+Host paths remain private. The configured count
 is a hard per-machine quota, provisioning is serialized, and operations for one
 conversation remain serialized while different conversations may occupy
 different lease slots. An interrupted checkout has no completion marker and is
