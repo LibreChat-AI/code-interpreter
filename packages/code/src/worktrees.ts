@@ -9,7 +9,6 @@ import {
   rename,
   rm,
   stat,
-  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -48,11 +47,10 @@ export interface GitWorktreeManagerOptions {
     instance: GitWorktreeInstance,
     signal?: AbortSignal,
   ) => Promise<void>;
+  discardInstance?: (instance: GitWorktreeInstance) => Promise<void> | void;
 }
 
 const PROVISIONING_LOCK = '.provision.lock';
-const PROVISIONING_LOCK_STALE_MS = 60_000;
-const PROVISIONING_LOCK_HEARTBEAT_MS = 10_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -314,19 +312,35 @@ export class GitWorktreeManager {
     const owner = randomUUID();
     for (;;) {
       try {
-        await mkdir(lock, { mode: 0o700 });
-        await writeFile(join(lock, 'owner'), owner, { mode: 0o600, flag: 'wx' });
+        await writeFile(
+          lock,
+          JSON.stringify({ owner, pid: process.pid }),
+          { mode: 0o600, flag: 'wx' },
+        );
         break;
       } catch (error) {
         if (!(error instanceof Error) || !('code' in error) || error.code !== 'EEXIST') {
           throw error;
         }
-        const metadata = await stat(lock).catch(() => undefined);
-        if (metadata && Date.now() - metadata.mtimeMs > PROVISIONING_LOCK_STALE_MS) {
+        const record = await readFile(lock, 'utf8')
+          .then((value) => JSON.parse(value) as { owner?: unknown; pid?: unknown })
+          .catch(() => undefined);
+        let ownerIsAlive = true;
+        if (record && Number.isSafeInteger(record.pid) && (record.pid as number) > 0) {
+          try {
+            process.kill(record.pid as number, 0);
+          } catch (ownerError) {
+            ownerIsAlive =
+              !(ownerError instanceof Error) ||
+              !('code' in ownerError) ||
+              ownerError.code !== 'ESRCH';
+          }
+        }
+        if (!ownerIsAlive) {
           const stale = `${lock}.stale-${randomUUID()}`;
           try {
             await rename(lock, stale);
-            await rm(stale, { recursive: true, force: true });
+            await rm(stale, { force: true });
           } catch (renameError) {
             if (!(renameError instanceof Error) || !('code' in renameError) || renameError.code !== 'ENOENT') {
               throw renameError;
@@ -337,20 +351,13 @@ export class GitWorktreeManager {
         await delay(50);
       }
     }
-    const heartbeat = setInterval(() => {
-      void (async () => {
-        if ((await readFile(join(lock, 'owner'), 'utf8').catch(() => undefined)) !== owner) return;
-        const now = new Date();
-        await utimes(lock, now, now);
-      })().catch(() => undefined);
-    }, PROVISIONING_LOCK_HEARTBEAT_MS);
-    heartbeat.unref();
     try {
       return await operation();
     } finally {
-      clearInterval(heartbeat);
-      const currentOwner = await readFile(join(lock, 'owner'), 'utf8').catch(() => undefined);
-      if (currentOwner === owner) await rm(lock, { recursive: true, force: true });
+      const currentOwner = await readFile(lock, 'utf8')
+        .then((value) => (JSON.parse(value) as { owner?: unknown }).owner)
+        .catch(() => undefined);
+      if (currentOwner === owner) await rm(lock, { force: true });
     }
   }
 
@@ -477,6 +484,7 @@ export class GitWorktreeManager {
     }
     await mkdir(resolve(path, '..'), { mode: 0o700, recursive: true });
     const branch = this.branch(sourceWorkspaceId, instanceId);
+    let instance: GitWorktreeInstance | undefined;
     try {
       const remote = await sourceRemote(sourceRoot);
       await git(
@@ -506,7 +514,7 @@ export class GitWorktreeManager {
           : ['checkout', '--orphan', branch],
         signal,
       );
-      const instance = await this.validateRepository(
+      instance = await this.validateRepository(
         sourceWorkspaceId,
         instanceId,
         path,
@@ -516,6 +524,7 @@ export class GitWorktreeManager {
       await this.writeCompletionMarker(path);
       return instance;
     } catch (error) {
+      if (instance) await this.options.discardInstance?.(instance);
       await rm(path, { recursive: true, force: true });
       await rm(this.completionMarker(path), { force: true });
       throw error;

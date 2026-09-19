@@ -1070,6 +1070,12 @@ async function run(
                     environment.definition.name === instance.sourceWorkspaceId,
                 )?.definition.setup;
                 if (!setup) return;
+                if (admittedGitHubRepositories) {
+                  admittedGitHubRepositories.set(
+                    instance.root,
+                    repositoriesByWorkspace?.get(instance.sourceWorkspaceId),
+                  );
+                }
                 const id = internalWorkspaceId(instance.sourceWorkspaceId, instance.id);
                 await nativeCommandSandbox.registerRoot(id, {
                   ...nativeOptions,
@@ -1093,6 +1099,9 @@ async function run(
                     `Environment ${instance.sourceWorkspaceId} setup failed for its conversation worktree`,
                   );
                 }
+              },
+              discardInstance: (instance) => {
+                admittedGitHubRepositories?.delete(instance.root);
               },
             }
           : {}),
