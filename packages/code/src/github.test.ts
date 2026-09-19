@@ -104,23 +104,30 @@ test('mints and caches a short-lived GitHub App installation token', async (t) =
     { mode: 0o600 },
   );
   await chmod(privateKeyPath, 0o600);
-  let calls = 0;
+  const calls: Array<{ url: string; authorization: string | null }> = [];
   const request = async (
-    _input: string | URL | Request,
+    input: string | URL | Request,
     init?: RequestInit,
   ) => {
-    calls += 1;
-    assert.match(
-      String(new Headers(init?.headers).get('authorization')),
-      /^Bearer eyJ/,
-    );
-    return new Response(
-      JSON.stringify({
+    const url = String(input);
+    const authorization = new Headers(init?.headers).get('authorization');
+    calls.push({ url, authorization });
+    if (url.endsWith('/app')) {
+      assert.match(String(authorization), /^Bearer eyJ/);
+      return Response.json({ slug: 'lia' });
+    }
+    if (url.endsWith('/app/installations/456/access_tokens')) {
+      assert.match(String(authorization), /^Bearer eyJ/);
+      return Response.json({
         token: 'ghs_abcdefghijklmnopqrstuvwxyz',
         expires_at: '2030-01-01T01:00:00Z',
-      }),
-      { status: 201 },
-    );
+      }, { status: 201 });
+    }
+    if (url.endsWith('/users/lia%5Bbot%5D')) {
+      assert.equal(authorization, 'Bearer ghs_abcdefghijklmnopqrstuvwxyz');
+      return Response.json({ id: 1234, login: 'lia[bot]', type: 'Bot' });
+    }
+    return Response.json({}, { status: 404 });
   };
   const provider = new GitHubAppCredentialProvider({
     appId: '123',
@@ -138,7 +145,15 @@ test('mints and caches a short-lived GitHub App installation token', async (t) =
     (await provider.getCredential()).value,
     'ghs_abcdefghijklmnopqrstuvwxyz',
   );
-  assert.equal(calls, 1);
+  assert.equal(calls.filter(call => call.url.endsWith('/app')).length, 1);
+  assert.equal(
+    calls.filter(call => call.url.endsWith('/access_tokens')).length,
+    1,
+  );
+  assert.equal(
+    calls.filter(call => call.url.endsWith('/users/lia%5Bbot%5D')).length,
+    1,
+  );
 });
 
 test('routes and scopes GitHub App tokens per repository installation', async (t) => {
@@ -767,16 +782,26 @@ test('App JWT requests use the resolved public or enterprise endpoint', async (t
       now: () => new Date('2030-01-01T00:00:00Z'),
       fetch: async (input, init) => {
         calls++;
-        assert.equal(String(input), `${expected}/app/installations/456/access_tokens`);
-        assert.equal(init?.method, 'POST');
+        const url = String(input);
         assert.equal(init?.redirect, 'error');
-        assert.match(new Headers(init?.headers).get('authorization')!, /^Bearer eyJ/);
-        return new Response(JSON.stringify({ token: 'ghs_abcdefghijklmnopqrstuvwxyz', expires_at: '2030-01-01T01:00:00Z' }), { status: 201 });
+        const authorization = new Headers(init?.headers).get('authorization');
+        if (url === `${expected}/app`) {
+          assert.match(authorization!, /^Bearer eyJ/);
+          return Response.json({ slug: 'lia' });
+        }
+        if (url === `${expected}/app/installations/456/access_tokens`) {
+          assert.equal(init?.method, 'POST');
+          assert.match(authorization!, /^Bearer eyJ/);
+          return new Response(JSON.stringify({ token: 'ghs_abcdefghijklmnopqrstuvwxyz', expires_at: '2030-01-01T01:00:00Z' }), { status: 201 });
+        }
+        assert.equal(url, `${expected}/users/lia%5Bbot%5D`);
+        assert.equal(authorization, 'Bearer ghs_abcdefghijklmnopqrstuvwxyz');
+        return Response.json({ id: 1234, login: 'lia[bot]', type: 'Bot' });
       },
     });
     await provider.getCredential();
     await provider.getCredential();
-    assert.equal(calls, 1);
+    assert.equal(calls, 3);
   }
 });
 
