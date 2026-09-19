@@ -1,10 +1,15 @@
 import { constants } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, sign } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { promisify } from 'node:util';
+import { projectRemote } from './projects.js';
 import { assertPrivateStorageAcl, assertPrivateStorageAncestors, assertPrivateStorageSupported } from './private-storage.js';
 
 export const GITHUB_CREDENTIAL_ENV_NAME = 'LIBRECHAT_CODE_GITHUB_AUTHORIZATION';
+export const GITHUB_AUTHOR_NAME_ENV_NAME = 'LIBRECHAT_CODE_GITHUB_AUTHOR_NAME';
+export const GITHUB_AUTHOR_EMAIL_ENV_NAME = 'LIBRECHAT_CODE_GITHUB_AUTHOR_EMAIL';
 export const GITHUB_ALLOWED_DOMAINS = [
   'github.com',
   '*.github.com',
@@ -18,15 +23,24 @@ export const GITHUB_ALLOWED_DOMAINS = [
 export interface GitHubCredential {
   value: string;
   expiresAt?: Date;
+  actor?: {
+    name: string;
+    email: string;
+  };
 }
 
 export interface GitHubCredentialProvider {
-  getCredential(signal?: AbortSignal): Promise<GitHubCredential>;
+  getCredential(
+    signal?: AbortSignal,
+    repository?: string,
+  ): Promise<GitHubCredential>;
+  validate?(signal?: AbortSignal): Promise<void>;
 }
 
 export interface GitHubAppCredentialProviderOptions {
   appId: string;
-  installationId: string;
+  /** Legacy fixed installation. Omit to resolve the installation per repository. */
+  installationId?: string;
   privateKeyPath: string;
   apiUrl?: string;
   /** Git HTTPS hostname; non-public hosts default to the GHES /api/v3 base. */
@@ -34,6 +48,68 @@ export interface GitHubAppCredentialProviderOptions {
   fetch?: typeof globalThis.fetch;
   now?: () => Date;
   platform?: NodeJS.Platform;
+}
+
+const execFileAsync = promisify(execFile);
+
+function repositoryName(value: string): { owner: string; name: string } {
+  const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(value);
+  if (!match) throw new Error('GitHub repository must be owner/name');
+  return { owner: match[1], name: match[2] };
+}
+
+/** Resolve only the repository containing the admitted command cwd. */
+export async function gitHubRepositoryForDirectory(
+  cwd: string,
+  host = 'github.com',
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  let remote: string;
+  try {
+    const result = await execFileAsync(
+      'git',
+      [
+        '--no-optional-locks',
+        '-C',
+        cwd,
+        '-c',
+        'core.fsmonitor=false',
+        'config',
+        '--local',
+        '--no-includes',
+        '--get',
+        'remote.origin.url',
+      ],
+      {
+        env: {
+          PATH: process.env.PATH,
+          SYSTEMROOT: process.env.SYSTEMROOT,
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: '/dev/null',
+          GIT_TERMINAL_PROMPT: '0',
+          GIT_OPTIONAL_LOCKS: '0',
+          LC_ALL: 'C',
+        },
+        encoding: 'utf8',
+        maxBuffer: 4096,
+        timeout: 1500,
+        signal,
+      },
+    );
+    remote = result.stdout.trim();
+  } catch {
+    signal?.throwIfAborted();
+    return undefined;
+  }
+  const normalized = projectRemote(remote);
+  if (!normalized) return undefined;
+  const separator = normalized.indexOf('/');
+  if (normalized.slice(0, separator) !== normalizeGitHubHost(host)) {
+    return undefined;
+  }
+  const repository = normalized.slice(separator + 1);
+  repositoryName(repository);
+  return repository;
 }
 
 function base64UrlJson(value: unknown): string {
@@ -96,7 +172,11 @@ function createAppJwt(appId: string, privateKey: string, now: Date): string {
 }
 
 export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
-  private cached?: GitHubCredential;
+  private readonly cached = new Map<string, GitHubCredential>();
+  private readonly inFlight = new Map<string, Promise<GitHubCredential>>();
+  private readonly installationIds = new Map<string, string>();
+  private actor?: GitHubCredential['actor'];
+  private actorInFlight?: Promise<NonNullable<GitHubCredential['actor']>>;
   private readonly apiUrl: string;
 
   constructor(private readonly options: GitHubAppCredentialProviderOptions) {
@@ -106,10 +186,12 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       );
     }
     assertPositiveIdentifier('GitHub App ID', options.appId);
-    assertPositiveIdentifier(
-      'GitHub App installation ID',
-      options.installationId,
-    );
+    if (options.installationId != null) {
+      assertPositiveIdentifier(
+        'GitHub App installation ID',
+        options.installationId,
+      );
+    }
     const host = options.host == null ? undefined : normalizeGitHubHost(options.host);
     const apiUrl = new URL(options.apiUrl ?? (
       host != null && host !== 'github.com'
@@ -129,55 +211,205 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     this.apiUrl = apiUrl.href.replace(/\/+$/, '');
   }
 
-  async getCredential(signal?: AbortSignal): Promise<GitHubCredential> {
-    const now = (this.options.now ?? (() => new Date()))();
-    if (
-      this.cached?.expiresAt != null &&
-      this.cached.expiresAt.getTime() - now.getTime() > 5 * 60_000
-    ) {
-      return this.cached;
-    }
+  private async appJwt(now: Date): Promise<string> {
     const privateKey = await readPrivateKey(this.options.privateKeyPath);
-    const jwt = createAppJwt(this.options.appId, privateKey, now);
+    return createAppJwt(this.options.appId, privateKey, now);
+  }
+
+  private async request(
+    path: string,
+    jwt: string,
+    signal?: AbortSignal,
+    init?: RequestInit,
+  ): Promise<Response> {
     const request = this.options.fetch ?? globalThis.fetch;
-    const response = await request(
-      `${this.apiUrl}/app/installations/${this.options.installationId}/access_tokens`,
-      {
-        method: 'POST',
-        redirect: 'error',
-        headers: {
-          Accept: 'application/vnd.github+json',
-          Authorization: `Bearer ${jwt}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-        signal,
+    return request(`${this.apiUrl}${path}`, {
+      redirect: 'error',
+      ...init,
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${jwt}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...init?.headers,
       },
+      signal,
+    });
+  }
+
+  private async resolveActor(
+    jwt: string,
+    signal?: AbortSignal,
+  ): Promise<NonNullable<GitHubCredential['actor']>> {
+    if (this.actor) return this.actor;
+    this.actorInFlight ??= (async () => {
+      const appResponse = await this.request('/app', jwt, signal);
+      if (!appResponse.ok) {
+        throw new Error(
+          `GitHub App identity request failed with status ${appResponse.status}`,
+        );
+      }
+      const app = (await appResponse.json()) as { slug?: unknown };
+      if (
+        typeof app.slug !== 'string' ||
+        !/^[A-Za-z0-9-]+$/.test(app.slug)
+      ) {
+        throw new Error('GitHub App identity response is invalid');
+      }
+      const login = `${app.slug}[bot]`;
+      const userResponse = await this.request(
+        `/users/${encodeURIComponent(login)}`,
+        jwt,
+        signal,
+      );
+      if (!userResponse.ok) {
+        throw new Error(
+          `GitHub App bot identity request failed with status ${userResponse.status}`,
+        );
+      }
+      const user = (await userResponse.json()) as {
+        id?: unknown;
+        login?: unknown;
+        type?: unknown;
+      };
+      if (
+        !Number.isSafeInteger(user.id) ||
+        Number(user.id) <= 0 ||
+        user.login !== login ||
+        user.type !== 'Bot'
+      ) {
+        throw new Error('GitHub App bot identity response is invalid');
+      }
+      return {
+        name: login,
+        email: `${user.id}+${login}@users.noreply.github.com`,
+      };
+    })();
+    try {
+      this.actor = await this.actorInFlight;
+      return this.actor;
+    } finally {
+      this.actorInFlight = undefined;
+    }
+  }
+
+  async validate(signal?: AbortSignal): Promise<void> {
+    const now = (this.options.now ?? (() => new Date()))();
+    const jwt = await this.appJwt(now);
+    await this.resolveActor(jwt, signal);
+  }
+
+  private async resolveInstallationId(
+    repository: string,
+    jwt: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (this.options.installationId) return this.options.installationId;
+    const cached = this.installationIds.get(repository);
+    if (cached) return cached;
+    const { owner, name } = repositoryName(repository);
+    const response = await this.request(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/installation`,
+      jwt,
+      signal,
     );
     if (!response.ok) {
       throw new Error(
-        `GitHub App token request failed with status ${response.status}`,
+        response.status === 404
+          ? `GitHub App is not installed for ${repository}`
+          : `GitHub App installation lookup failed with status ${response.status}`,
       );
     }
-    const body = (await response.json()) as {
-      token?: unknown;
-      expires_at?: unknown;
-    };
-    if (
-      typeof body.token !== 'string' ||
-      body.token.length < 20 ||
-      typeof body.expires_at !== 'string'
-    ) {
-      throw new Error('GitHub App token response is invalid');
+    const body = (await response.json()) as { id?: unknown };
+    if (!Number.isSafeInteger(body.id) || Number(body.id) <= 0) {
+      throw new Error('GitHub App installation response is invalid');
     }
-    const expiresAt = new Date(body.expires_at);
-    if (
-      !Number.isFinite(expiresAt.getTime()) ||
-      expiresAt.getTime() <= now.getTime()
-    ) {
-      throw new Error('GitHub App token expiry is invalid');
+    const installationId = String(body.id);
+    this.installationIds.set(repository, installationId);
+    return installationId;
+  }
+
+  async getCredential(
+    signal?: AbortSignal,
+    repository?: string,
+  ): Promise<GitHubCredential> {
+    if (!this.options.installationId && !repository) {
+      throw new Error(
+        'GitHub App authentication requires a GitHub repository for this command',
+      );
     }
-    this.cached = { value: body.token, expiresAt };
-    return this.cached;
+    if (repository) repositoryName(repository);
+    const now = (this.options.now ?? (() => new Date()))();
+    const key = this.options.installationId ?? repository!;
+    const cached = this.cached.get(key);
+    if (
+      cached?.expiresAt != null &&
+      cached.expiresAt.getTime() - now.getTime() > 5 * 60_000
+    ) {
+      return cached;
+    }
+    const existing = this.inFlight.get(key);
+    if (existing) return existing;
+    const pending = (async () => {
+      const jwt = await this.appJwt(now);
+      const scopedRepository = repository
+        ? repositoryName(repository).name
+        : undefined;
+      const installationId = await this.resolveInstallationId(
+        repository ?? '',
+        jwt,
+        signal,
+      );
+      const response = await this.request(
+        `/app/installations/${installationId}/access_tokens`,
+        jwt,
+        signal,
+        {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        ...(this.options.installationId
+          ? {}
+          : { body: JSON.stringify({ repositories: [scopedRepository] }) }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(
+          `GitHub App token request failed with status ${response.status}`,
+        );
+      }
+      const body = (await response.json()) as {
+        token?: unknown;
+        expires_at?: unknown;
+      };
+      if (
+        typeof body.token !== 'string' ||
+        body.token.length < 20 ||
+        typeof body.expires_at !== 'string'
+      ) {
+        throw new Error('GitHub App token response is invalid');
+      }
+      const expiresAt = new Date(body.expires_at);
+      if (
+        !Number.isFinite(expiresAt.getTime()) ||
+        expiresAt.getTime() <= now.getTime()
+      ) {
+        throw new Error('GitHub App token expiry is invalid');
+      }
+      const credential = {
+        value: body.token,
+        expiresAt,
+        ...(this.actor ? { actor: this.actor } : {}),
+      };
+      this.cached.set(key, credential);
+      return credential;
+    })();
+    this.inFlight.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.inFlight.get(key) === pending) this.inFlight.delete(key);
+    }
   }
 }
 
@@ -211,6 +443,12 @@ export function gitHubCommandCredentialEnvironment(
   return {
     ...gitHubCredentialEnvironment(credential),
     [gitHubCliTokenEnvironmentName(host)]: credential.value,
+    ...(credential.actor
+      ? {
+          [GITHUB_AUTHOR_NAME_ENV_NAME]: credential.actor.name,
+          [GITHUB_AUTHOR_EMAIL_ENV_NAME]: credential.actor.email,
+        }
+      : {}),
   };
 }
 
@@ -222,7 +460,10 @@ export function gitHubApiHost(host: string): string {
   return host === 'github.com' ? 'api.github.com' : host;
 }
 
-export function gitHubMaskedCredentialVariables(host: string): Array<{
+export function gitHubMaskedCredentialVariables(
+  host: string,
+  includeActor = false,
+): Array<{
   name: string;
   injectHosts: string[];
   extract: string;
@@ -238,6 +479,21 @@ export function gitHubMaskedCredentialVariables(host: string): Array<{
       extract: '^(.+)$',
       injectHosts: [gitHubApiHost(host)],
     },
+    ...(includeActor
+      ? [
+          {
+            name: GITHUB_AUTHOR_NAME_ENV_NAME,
+            extract: '^([A-Za-z0-9_.-]+\\[bot\\])$',
+            injectHosts: [host],
+          },
+          {
+            name: GITHUB_AUTHOR_EMAIL_ENV_NAME,
+            extract:
+              '^([1-9][0-9]+\\+[A-Za-z0-9_.-]+\\[bot\\]@users\\.noreply\\.github\\.com)$',
+            injectHosts: [host],
+          },
+        ]
+      : []),
   ];
 }
 
@@ -260,12 +516,10 @@ export function gitHubAuthenticationPolicyIdentity(options: {
     return `${identity}:fingerprint:${fingerprint}`;
   }
   if (options.mode !== 'app') return identity;
-  if (!options.appId || !options.installationId) {
-    throw new Error(
-      'GitHub App policy identity requires an App and installation ID',
-    );
+  if (!options.appId) {
+    throw new Error('GitHub App policy identity requires an App ID');
   }
-  return `${identity}:app:${options.appId}:installation:${options.installationId}`;
+  return `${identity}:app:${options.appId}:installation:${options.installationId ?? 'repository'}`;
 }
 
 export function normalizeGitHubHost(value: string): string {
@@ -292,16 +546,24 @@ export function wrapGitHubCredentialCommand(
       'set "GIT_CONFIG_GLOBAL=NUL"',
       'set "GIT_CONFIG_NOSYSTEM=1"',
       ...(cliHost ? [`set "GH_HOST=${cliHost}"`] : []),
-      `set "GIT_CONFIG_PARAMETERS='http.proxyAuthMethod=basic' '${key}=Authorization: Basic %${GITHUB_CREDENTIAL_ENV_NAME}%'"`,
+      'set "LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG="',
+      `if defined ${GITHUB_AUTHOR_NAME_ENV_NAME} if defined ${GITHUB_AUTHOR_EMAIL_ENV_NAME} set "LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG= 'user.name=%${GITHUB_AUTHOR_NAME_ENV_NAME}%' 'user.email=%${GITHUB_AUTHOR_EMAIL_ENV_NAME}%'"`,
+      `set "GIT_CONFIG_PARAMETERS='http.proxyAuthMethod=basic' '${key}=Authorization: Basic %${GITHUB_CREDENTIAL_ENV_NAME}%'%LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG%"`,
       `set "${GITHUB_CREDENTIAL_ENV_NAME}="`,
+      `set "${GITHUB_AUTHOR_NAME_ENV_NAME}="`,
+      `set "${GITHUB_AUTHOR_EMAIL_ENV_NAME}="`,
+      'set "LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG="',
       command,
     ].join(' && ');
   }
   return [
     'export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1',
     ...(cliHost ? [`export GH_HOST=${cliHost}`] : []),
-    `export GIT_CONFIG_PARAMETERS="'http.proxyAuthMethod=basic' '${key}=Authorization: Basic \${${GITHUB_CREDENTIAL_ENV_NAME}}'"`,
+    `LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG=; if [ -n "\${${GITHUB_AUTHOR_NAME_ENV_NAME}:-}" ] && [ -n "\${${GITHUB_AUTHOR_EMAIL_ENV_NAME}:-}" ]; then LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG=" 'user.name=\${${GITHUB_AUTHOR_NAME_ENV_NAME}}' 'user.email=\${${GITHUB_AUTHOR_EMAIL_ENV_NAME}}'"; fi`,
+    `export GIT_CONFIG_PARAMETERS="'http.proxyAuthMethod=basic' '${key}=Authorization: Basic \${${GITHUB_CREDENTIAL_ENV_NAME}}'\${LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG}"`,
     `unset ${GITHUB_CREDENTIAL_ENV_NAME}`,
+    `unset ${GITHUB_AUTHOR_NAME_ENV_NAME} ${GITHUB_AUTHOR_EMAIL_ENV_NAME}`,
+    'unset LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG',
     command,
   ].join(';\n');
 }

@@ -182,7 +182,10 @@ export interface NativeSrtWorkspaceCommandSandboxOptions {
       injectHosts: string[];
       extract?: string;
     }>;
-    resolve(signal?: AbortSignal): Promise<Record<string, string>>;
+    resolve(
+      signal?: AbortSignal,
+      cwd?: string,
+    ): Promise<Record<string, string>>;
     wrapCommand?(command: string, platform: NodeJS.Platform): string;
   };
 }
@@ -883,7 +886,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     >;
     try {
       const credentialEnvironment =
-        await this.options.maskedEnvironment?.resolve(signal);
+        await this.options.maskedEnvironment?.resolve(signal, cwd);
       wrapped = await this.withTemporaryHostEnvironment(
         {
           ...TRUSTED_GIT_ENVIRONMENT,

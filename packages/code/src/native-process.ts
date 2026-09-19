@@ -2,7 +2,7 @@ import { execFile, fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { access, realpath } from 'node:fs/promises';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { WorkspaceToolError } from './workspace.js';
 import { NATIVE_PROGRAMMATIC_COMMAND } from './native-programmatic.js';
@@ -436,7 +436,10 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
       if (signal?.aborted) throw new Error('aborted');
       programmaticExecutables = await this.resolveProgrammaticExecutables();
       if (signal?.aborted) throw new Error('aborted');
-      credentials = await this.options.maskedEnvironment?.resolve(signal);
+      credentials = await this.options.maskedEnvironment?.resolve(
+        signal,
+        this.options.workspaceRoot,
+      );
       if (signal?.aborted) throw new Error('aborted');
       wrappedCommand = this.options.maskedEnvironment?.wrapCommand?.(
         NATIVE_PROGRAMMATIC_COMMAND,
@@ -529,7 +532,8 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
     try {
       await this.prepare();
       if (signal?.aborted) throw new Error('aborted');
-      credentials = await this.options.maskedEnvironment?.resolve(signal);
+      const cwd = resolve(this.options.workspaceRoot, request.cwd ?? '.');
+      credentials = await this.options.maskedEnvironment?.resolve(signal, cwd);
       if (signal?.aborted) throw new Error('aborted');
       wrappedCommand = this.options.maskedEnvironment?.wrapCommand?.(
         request.command,

@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import {
   chmod,
   mkdtemp,
@@ -14,6 +15,8 @@ import assert from 'node:assert/strict';
 
 import {
   GITHUB_ALLOWED_DOMAINS,
+  GITHUB_AUTHOR_EMAIL_ENV_NAME,
+  GITHUB_AUTHOR_NAME_ENV_NAME,
   GitHubAppCredentialProvider,
   StaticGitHubCredentialProvider,
   gitHubAuthenticationPolicyIdentity,
@@ -22,6 +25,7 @@ import {
   gitHubMaskedCredentialVariables,
   GITHUB_CREDENTIAL_ENV_NAME,
   gitHubCredentialEnvironment,
+  gitHubRepositoryForDirectory,
   normalizeGitHubHost,
   wrapGitHubCredentialCommand,
 } from './github.js';
@@ -136,6 +140,107 @@ test('mints and caches a short-lived GitHub App installation token', async (t) =
   assert.equal(calls, 1);
 });
 
+test('routes and scopes GitHub App tokens per repository installation', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'librechat-code-github-routing-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const privateKeyPath = join(directory, 'app.pem');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await writeFile(
+    privateKeyPath,
+    privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    { mode: 0o600 },
+  );
+  const calls: Array<{ url: string; body?: string }> = [];
+  const provider = new GitHubAppCredentialProvider({
+    appId: '123',
+    privateKeyPath,
+    now: () => new Date('2030-01-01T00:00:00Z'),
+    fetch: (async (input, init) => {
+      const url = String(input);
+      calls.push({ url, body: typeof init?.body === 'string' ? init.body : undefined });
+      if (url.endsWith('/app')) {
+        return Response.json({ slug: 'lia-by-librechat' });
+      }
+      if (url.endsWith('/users/lia-by-librechat%5Bbot%5D')) {
+        return Response.json({
+          id: 328778573,
+          login: 'lia-by-librechat[bot]',
+          type: 'Bot',
+        });
+      }
+      if (url.endsWith('/repos/danny-avila/LibreChat/installation')) {
+        return Response.json({ id: 111 });
+      }
+      if (url.endsWith('/repos/LibreChat-AI/code-interpreter/installation')) {
+        return Response.json({ id: 222 });
+      }
+      const installation = /\/app\/installations\/(\d+)\/access_tokens$/.exec(url)?.[1];
+      if (installation) {
+        return Response.json(
+          {
+            token: `ghs_${installation}_abcdefghijklmnopqrstuvwxyz`,
+            expires_at: '2030-01-01T01:00:00Z',
+          },
+          { status: 201 },
+        );
+      }
+      return Response.json({}, { status: 404 });
+    }) as typeof fetch,
+  });
+
+  await provider.validate();
+  const [personal, organization] = await Promise.all([
+    provider.getCredential(undefined, 'danny-avila/LibreChat'),
+    provider.getCredential(undefined, 'LibreChat-AI/code-interpreter'),
+  ]);
+  assert.equal(
+    (await provider.getCredential(undefined, 'danny-avila/LibreChat')).value,
+    personal.value,
+  );
+  assert.equal(personal.value, 'ghs_111_abcdefghijklmnopqrstuvwxyz');
+  assert.equal(organization.value, 'ghs_222_abcdefghijklmnopqrstuvwxyz');
+  assert.deepEqual(personal.actor, {
+    name: 'lia-by-librechat[bot]',
+    email:
+      '328778573+lia-by-librechat[bot]@users.noreply.github.com',
+  });
+  assert.equal(
+    calls.filter(call => call.url.includes('/repos/danny-avila/')).length,
+    1,
+  );
+  assert.deepEqual(
+    calls
+      .filter(call => call.url.endsWith('/access_tokens'))
+      .map(call => JSON.parse(call.body ?? '{}')),
+    [
+      { repositories: ['LibreChat'] },
+      { repositories: ['code-interpreter'] },
+    ],
+  );
+});
+
+test('discovers the GitHub repository from a command working directory', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'librechat-code-github-repo-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  execFileSync('git', ['init', directory]);
+  execFileSync('git', [
+    '-C',
+    directory,
+    'remote',
+    'add',
+    'origin',
+    'git@github.com:LibreChat-AI/code-interpreter.git',
+  ]);
+  assert.equal(
+    await gitHubRepositoryForDirectory(directory),
+    'LibreChat-AI/code-interpreter',
+  );
+  assert.equal(
+    await gitHubRepositoryForDirectory(directory, 'github.example.test'),
+    undefined,
+  );
+});
+
 test('builds process-scoped Git HTTPS authorization without embedding credentials in URLs', async () => {
   const provider = new StaticGitHubCredentialProvider(
     'github_pat_abcdefghijklmnopqrstuvwxyz',
@@ -175,6 +280,28 @@ test('adds a GitHub CLI token only to the command-sandbox credential bundle', as
       GH_ENTERPRISE_TOKEN: 'github_pat_abcdefghijklmnopqrstuvwxyz',
     },
   );
+});
+
+test('binds Git commits to the GitHub App bot identity', () => {
+  const environment = gitHubCommandCredentialEnvironment({
+    value: 'ghs_abcdefghijklmnopqrstuvwxyz',
+    actor: {
+      name: 'lia-by-librechat[bot]',
+      email:
+        '328778573+lia-by-librechat[bot]@users.noreply.github.com',
+    },
+  });
+  assert.equal(environment[GITHUB_AUTHOR_NAME_ENV_NAME], 'lia-by-librechat[bot]');
+  assert.equal(
+    environment[GITHUB_AUTHOR_EMAIL_ENV_NAME],
+    '328778573+lia-by-librechat[bot]@users.noreply.github.com',
+  );
+  const variables = gitHubMaskedCredentialVariables('github.com', true);
+  assert.ok(variables.some(variable => variable.name === GITHUB_AUTHOR_NAME_ENV_NAME));
+  assert.ok(variables.some(variable => variable.name === GITHUB_AUTHOR_EMAIL_ENV_NAME));
+  const wrapped = wrapGitHubCredentialCommand('git commit -m test');
+  assert.match(wrapped, /user\.name=/);
+  assert.match(wrapped, /user\.email=/);
 });
 
 test('selects the GitHub CLI token variable for public and enterprise hosts', () => {

@@ -46,6 +46,7 @@ import type { LocalWorkspaceConfig } from './workspace.js';
 import {
   GITHUB_ALLOWED_DOMAINS,
   GitHubAppCredentialProvider,
+  gitHubRepositoryForDirectory,
   gitHubCommandCredentialEnvironment,
   gitHubMaskedCredentialVariables,
   StaticGitHubCredentialProvider,
@@ -149,6 +150,7 @@ function githubCredentials(): {
   host: string;
   privateKeyPath?: string;
   mode?: 'app' | 'token';
+  repositoryRouting?: boolean;
   policyIdentity: string;
 } {
   const token = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_TOKEN);
@@ -161,9 +163,9 @@ function githubCredentials(): {
   );
   const appValues = [appId, installationId, privateKeyPath];
   const hasApp = appValues.some(Boolean);
-  if (hasApp && !appValues.every(Boolean)) {
+  if (hasApp && (!appId || !privateKeyPath)) {
     throw new Error(
-      'GitHub App authentication requires LIBRECHAT_CODE_GITHUB_APP_ID, LIBRECHAT_CODE_GITHUB_INSTALLATION_ID, and LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE',
+      'GitHub App authentication requires LIBRECHAT_CODE_GITHUB_APP_ID and LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE; LIBRECHAT_CODE_GITHUB_INSTALLATION_ID is an optional legacy fallback',
     );
   }
   if (hasApp && token) {
@@ -203,6 +205,7 @@ function githubCredentials(): {
     return {
       host,
       mode: 'app',
+      repositoryRouting: !installationId,
       policyIdentity: gitHubAuthenticationPolicyIdentity({
         mode: 'app',
         host,
@@ -212,7 +215,7 @@ function githubCredentials(): {
       privateKeyPath,
       provider: new GitHubAppCredentialProvider({
         appId: appId!,
-        installationId: installationId!,
+        installationId,
         privateKeyPath: privateKeyPath!,
         host,
         apiUrl,
@@ -928,10 +931,23 @@ async function run(
     ...(github.provider
       ? {
           maskedEnvironment: {
-            variables: gitHubMaskedCredentialVariables(github.host),
-            async resolve(signal?: AbortSignal) {
+            variables: gitHubMaskedCredentialVariables(
+              github.host,
+              github.mode === 'app',
+            ),
+            async resolve(signal?: AbortSignal, cwd?: string) {
+              const repository = cwd
+                ? await gitHubRepositoryForDirectory(
+                    cwd,
+                    github.host,
+                    signal,
+                  )
+                : undefined;
+              if (!repository && github.repositoryRouting) {
+                return {};
+              }
               return gitHubCommandCredentialEnvironment(
-                await github.provider!.getCredential(signal),
+                await github.provider!.getCredential(signal, repository),
                 github.host,
               );
             },
@@ -1022,7 +1038,10 @@ async function run(
     );
   }
   try {
-    await github.provider?.getCredential(controller.signal);
+    await github.provider?.validate?.(controller.signal);
+    if (github.provider && !github.provider.validate) {
+      await github.provider.getCredential(controller.signal);
+    }
     await nativeCommandSandbox?.prepare();
         for (const environment of option(args, '--reset-workspace-quarantine') == null ? environments : []) {
             const setup = environment.definition.setup;

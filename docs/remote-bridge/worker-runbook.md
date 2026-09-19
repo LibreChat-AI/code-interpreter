@@ -323,13 +323,21 @@ Configure the worker, preferably in a separate service drop-in:
 ```ini
 [Service]
 Environment=LIBRECHAT_CODE_GITHUB_APP_ID=12345
-Environment=LIBRECHAT_CODE_GITHUB_INSTALLATION_ID=67890
 Environment=LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE=/home/librechat-code/.config/librechat-code/github-app.pem
 ```
 
-The trusted worker mints short-lived installation tokens. Sandboxed commands
-receive masked Git/`gh` credentials only for the configured GitHub hosts; the
-token is not written to the repository, remote URL, or Git configuration.
+Install the same App separately on every personal account or organization the
+worker is allowed to use. The trusted worker resolves the correct installation
+from the repository containing each command's working directory, then mints and
+caches a repository-scoped token. Cross-repository work therefore does not
+require changing an installation ID or restarting the worker. Set
+`LIBRECHAT_CODE_GITHUB_INSTALLATION_ID` only as a legacy fixed-installation
+fallback.
+
+Sandboxed commands receive masked Git/`gh` credentials only for the configured
+GitHub hosts; the token is not written to the repository, remote URL, or Git
+configuration. Git commits receive the App bot's canonical no-reply identity so
+GitHub renders the bot profile and avatar.
 
 ## 10. Run under systemd
 
@@ -518,7 +526,8 @@ command, cancellation, or settlement whose effects may be incomplete.
 -   [ ] Pairing is principal-bound and the identity file is private.
 -   [ ] Definitions are outside roots and immutable to sandboxed tools.
 -   [ ] Workspace ancestors are not group/other writable.
--   [ ] GitHub App is optional, least-privilege, and installed only where needed.
+-   [ ] GitHub App is optional, least-privilege, and installed on every account
+        the worker is expected to use.
 -   [ ] Approval policy remains enforced independently of worker capability.
 -   [ ] Service manager uses the intended executable and configuration.
 -   [ ] Worker is online, ready, and advertises the expected workspace.
