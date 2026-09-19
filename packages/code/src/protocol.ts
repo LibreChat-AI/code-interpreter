@@ -265,8 +265,8 @@ export function workspaceIsolationKey(
     instanceId?: string,
 ): string {
     return instanceId === undefined
-        ? `workspace:${workspaceId}`
-        : `git-worktree:${Buffer.byteLength(workspaceId, 'utf8')}:${workspaceId}:${instanceId}`;
+        ? workspaceId
+        : `\0git-worktree\0${workspaceId}\0${instanceId}`;
 }
 
 export type BridgeWorkspaceToolOperation =

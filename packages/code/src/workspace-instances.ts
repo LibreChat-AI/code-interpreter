@@ -28,7 +28,7 @@ export interface GitWorktreeWorkspaceToolsOptions {
   sources: ReadonlyMap<string, WorkspaceInstanceSource>;
 }
 
-function internalWorkspaceId(workspaceId: string, instanceId: string): string {
+export function internalWorkspaceId(workspaceId: string, instanceId: string): string {
   return `instance-${createHash('sha256')
     .update(`${workspaceId}\0${instanceId}`)
     .digest('hex')}`;

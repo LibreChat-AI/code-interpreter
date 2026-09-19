@@ -336,6 +336,50 @@ test('rejects invalid identities, overlapping storage and exhausted capacity', a
   );
 });
 
+test('serializes provisioning across manager instances sharing storage', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const options = {
+    maxCount: 1,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([['primary', await source(fixture.root)]]),
+  };
+  const results = await Promise.allSettled([
+    new GitWorktreeManager(options).resolve('primary', 'a'.repeat(64)),
+    new GitWorktreeManager(options).resolve('primary', 'b'.repeat(64)),
+  ]);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+  assert.match(
+    (results.find((result) => result.status === 'rejected') as PromiseRejectedResult).reason.message,
+    /capacity is exhausted/,
+  );
+});
+
+test('prepares a new checkout before publishing its completion marker', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  let attempts = 0;
+  const options = {
+    maxCount: 1,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([['primary', await source(fixture.root)]]),
+    prepareInstance: async (instance: { root: string }) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('setup failed');
+      await writeFile(join(instance.root, 'prepared'), 'yes\n');
+    },
+  };
+  const id = 'c'.repeat(64);
+  await assert.rejects(
+    new GitWorktreeManager(options).resolve('primary', id),
+    /setup failed/,
+  );
+  const instance = await new GitWorktreeManager(options).resolve('primary', id);
+  assert.equal(await readFile(join(instance.root, 'prepared'), 'utf8'), 'yes\n');
+  assert.equal(attempts, 2);
+});
+
 test('rejects a source whose admitted filesystem identity changed', async (t) => {
   const fixture = await repository();
   t.after(() => rm(fixture.parent, { recursive: true, force: true }));

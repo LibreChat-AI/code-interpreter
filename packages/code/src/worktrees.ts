@@ -9,6 +9,7 @@ import {
   rename,
   rm,
   stat,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -43,6 +44,18 @@ export interface GitWorktreeManagerOptions {
   maxCount: number;
   root: string;
   sources: ReadonlyMap<string, GitWorktreeSource>;
+  prepareInstance?: (
+    instance: GitWorktreeInstance,
+    signal?: AbortSignal,
+  ) => Promise<void>;
+}
+
+const PROVISIONING_LOCK = '.provision.lock';
+const PROVISIONING_LOCK_STALE_MS = 60_000;
+const PROVISIONING_LOCK_HEARTBEAT_MS = 10_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isInside(parent: string, candidate: string): boolean {
@@ -269,6 +282,7 @@ export class GitWorktreeManager {
     const sourceDirectories = await readdir(root, { withFileTypes: true });
     let count = 0;
     for (const sourceDirectory of sourceDirectories) {
+      if (sourceDirectory.name.startsWith(PROVISIONING_LOCK)) continue;
       if (!sourceDirectory.isDirectory() || sourceDirectory.isSymbolicLink())
         continue;
       const entries = await readdir(join(root, sourceDirectory.name), {
@@ -292,6 +306,52 @@ export class GitWorktreeManager {
       }
     }
     return count;
+  }
+
+  private async withProvisioningLock<T>(operation: () => Promise<T>): Promise<T> {
+    const root = await this.root();
+    const lock = join(root, PROVISIONING_LOCK);
+    const owner = randomUUID();
+    for (;;) {
+      try {
+        await mkdir(lock, { mode: 0o700 });
+        await writeFile(join(lock, 'owner'), owner, { mode: 0o600, flag: 'wx' });
+        break;
+      } catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || error.code !== 'EEXIST') {
+          throw error;
+        }
+        const metadata = await stat(lock).catch(() => undefined);
+        if (metadata && Date.now() - metadata.mtimeMs > PROVISIONING_LOCK_STALE_MS) {
+          const stale = `${lock}.stale-${randomUUID()}`;
+          try {
+            await rename(lock, stale);
+            await rm(stale, { recursive: true, force: true });
+          } catch (renameError) {
+            if (!(renameError instanceof Error) || !('code' in renameError) || renameError.code !== 'ENOENT') {
+              throw renameError;
+            }
+          }
+          continue;
+        }
+        await delay(50);
+      }
+    }
+    const heartbeat = setInterval(() => {
+      void (async () => {
+        if ((await readFile(join(lock, 'owner'), 'utf8').catch(() => undefined)) !== owner) return;
+        const now = new Date();
+        await utimes(lock, now, now);
+      })().catch(() => undefined);
+    }, PROVISIONING_LOCK_HEARTBEAT_MS);
+    heartbeat.unref();
+    try {
+      return await operation();
+    } finally {
+      clearInterval(heartbeat);
+      const currentOwner = await readFile(join(lock, 'owner'), 'utf8').catch(() => undefined);
+      if (currentOwner === owner) await rm(lock, { recursive: true, force: true });
+    }
   }
 
   private completionMarker(path: string): string {
@@ -380,7 +440,7 @@ export class GitWorktreeManager {
     );
   }
 
-  private async create(
+  private async createLocked(
     sourceWorkspaceId: string,
     instanceId: string,
     signal?: AbortSignal,
@@ -452,6 +512,7 @@ export class GitWorktreeManager {
         path,
         signal,
       );
+      await this.options.prepareInstance?.(instance, signal);
       await this.writeCompletionMarker(path);
       return instance;
     } catch (error) {
@@ -459,6 +520,16 @@ export class GitWorktreeManager {
       await rm(this.completionMarker(path), { force: true });
       throw error;
     }
+  }
+
+  private async create(
+    sourceWorkspaceId: string,
+    instanceId: string,
+    signal?: AbortSignal,
+  ): Promise<GitWorktreeInstance> {
+    return await this.withProvisioningLock(() =>
+      this.createLocked(sourceWorkspaceId, instanceId, signal),
+    );
   }
 
   async resolve(

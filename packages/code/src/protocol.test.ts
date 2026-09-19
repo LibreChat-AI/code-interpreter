@@ -97,6 +97,7 @@ test('workspace isolation keys keep roots and instances in disjoint namespaces',
     workspaceIsolationKey(`foo:git-worktree:${instanceId}`),
     workspaceIsolationKey('foo', instanceId),
   );
+  assert.equal(workspaceIsolationKey('foo'), 'foo');
   assert.notEqual(
     workspaceIsolationKey('foo'),
     workspaceIsolationKey('workspace:foo'),

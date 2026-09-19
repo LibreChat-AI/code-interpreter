@@ -44,6 +44,7 @@ import {
     SessionKeyResolutionError,
 } from '../session-key';
 import { getCredentialId, getPrincipalOrReject } from '../auth/principal';
+import { principalWorkspaceInstanceId } from '../bridge/workspace-instance';
 import { getExecutionIdentity } from '../execution-identity';
 import { PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION } from '../runtime-session/job-policy';
 import {
@@ -1334,7 +1335,11 @@ router.post(
             error: 'Invalid code workspace instance ID',
           });
         }
-        workspaceInstanceId = requestedWorkspaceInstanceId;
+        workspaceInstanceId = principalWorkspaceInstanceId({
+          instanceId: requestedWorkspaceInstanceId,
+          tenantId: principal.tenantId,
+          principalId: principal.userId,
+        });
       }
     } catch (error) {
       if (error instanceof BridgeWorkerSelectionError) {

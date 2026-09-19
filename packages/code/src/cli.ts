@@ -36,7 +36,7 @@ import {
 import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { NativeWorkspaceCommandPool } from './native-pool.js';
-import { GitWorktreeWorkspaceTools } from './workspace-instances.js';
+import { GitWorktreeWorkspaceTools, internalWorkspaceId } from './workspace-instances.js';
 import { GitWorktreeManager } from './worktrees.js';
 import { captureWorkspaceRootIdentity } from './root-identity.js';
 import {
@@ -1062,6 +1062,40 @@ async function run(
         cloneTimeoutMs: conversationWorktreeCloneTimeoutMs,
         maxCount: conversationWorktreeMax,
         root: conversationWorktreeRoot,
+        ...(nativeCommandSandbox instanceof NativeWorkspaceCommandPool
+          ? {
+              prepareInstance: async (instance, signal) => {
+                const setup = environments.find(
+                  (environment) =>
+                    environment.definition.name === instance.sourceWorkspaceId,
+                )?.definition.setup;
+                if (!setup) return;
+                const id = internalWorkspaceId(instance.sourceWorkspaceId, instance.id);
+                await nativeCommandSandbox.registerRoot(id, {
+                  ...nativeOptions,
+                  gitSharedObjectDirectory: instance.gitSharedObjectDirectory,
+                  workspaceIdentity: instance.identity,
+                  workspaceRoot: instance.root,
+                });
+                const result = await nativeCommandSandbox.execute(
+                  {
+                    protocolVersion: 1,
+                    operation: 'execute_command',
+                    workspaceId: id,
+                    command: setup.command,
+                    timeoutMs: setup.timeoutMs,
+                    maxOutputBytes: 8192,
+                  },
+                  signal,
+                );
+                if (result.exitCode !== 0 || result.timedOut) {
+                  throw new Error(
+                    `Environment ${instance.sourceWorkspaceId} setup failed for its conversation worktree`,
+                  );
+                }
+              },
+            }
+          : {}),
         sources: new Map(
           await Promise.all(
             roots.map(async (root) => [
