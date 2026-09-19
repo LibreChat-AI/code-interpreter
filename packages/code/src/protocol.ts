@@ -712,6 +712,8 @@ export interface BridgeWorkerStatusResponse {
   online: boolean;
   ready: boolean;
   leaseExpiresInMs?: number;
+  /** Server-owned execution ceiling for workspace commands. Omitted by legacy servers. */
+  maxCommandTimeoutMs?: number;
   capabilities?: BridgeWorkerCapabilities;
 }
 
