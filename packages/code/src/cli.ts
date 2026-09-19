@@ -933,7 +933,6 @@ async function run(
           maskedEnvironment: {
             variables: gitHubMaskedCredentialVariables(
               github.host,
-              github.mode === 'app',
             ),
             async resolve(signal?: AbortSignal, cwd?: string) {
               const repository = cwd
@@ -951,11 +950,16 @@ async function run(
                 github.host,
               );
             },
-            wrapCommand(command: string, platform: NodeJS.Platform) {
+            wrapCommand(
+              command: string,
+              platform: NodeJS.Platform,
+              environment: Readonly<Record<string, string>>,
+            ) {
               return wrapGitHubCredentialCommand(
                 command,
                 github.host,
                 platform,
+                environment,
               );
             },
           },

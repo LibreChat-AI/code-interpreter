@@ -52,6 +52,27 @@ export interface GitHubAppCredentialProviderOptions {
 
 const execFileAsync = promisify(execFile);
 
+async function waitForShared<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const aborted = () => {
+      try {
+        signal.throwIfAborted();
+      } catch (error) {
+        reject(error);
+      }
+    };
+    signal.addEventListener('abort', aborted, { once: true });
+    void promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', aborted);
+    });
+  });
+}
+
 function repositoryName(value: string): { owner: string; name: string } {
   const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(value);
   if (!match) throw new Error('GitHub repository must be owner/name');
@@ -241,61 +262,70 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     signal?: AbortSignal,
   ): Promise<NonNullable<GitHubCredential['actor']>> {
     if (this.actor) return this.actor;
-    this.actorInFlight ??= (async () => {
-      const appResponse = await this.request('/app', jwt, signal);
-      if (!appResponse.ok) {
-        throw new Error(
-          `GitHub App identity request failed with status ${appResponse.status}`,
+    if (!this.actorInFlight) {
+      const pending = (async () => {
+        const appResponse = await this.request('/app', jwt);
+        if (!appResponse.ok) {
+          throw new Error(
+            `GitHub App identity request failed with status ${appResponse.status}`,
+          );
+        }
+        const app = (await appResponse.json()) as { slug?: unknown };
+        if (
+          typeof app.slug !== 'string' ||
+          !/^[A-Za-z0-9-]+$/.test(app.slug)
+        ) {
+          throw new Error('GitHub App identity response is invalid');
+        }
+        const login = `${app.slug}[bot]`;
+        const userResponse = await this.request(
+          `/users/${encodeURIComponent(login)}`,
+          jwt,
         );
-      }
-      const app = (await appResponse.json()) as { slug?: unknown };
-      if (
-        typeof app.slug !== 'string' ||
-        !/^[A-Za-z0-9-]+$/.test(app.slug)
-      ) {
-        throw new Error('GitHub App identity response is invalid');
-      }
-      const login = `${app.slug}[bot]`;
-      const userResponse = await this.request(
-        `/users/${encodeURIComponent(login)}`,
-        jwt,
-        signal,
+        if (!userResponse.ok) {
+          throw new Error(
+            `GitHub App bot identity request failed with status ${userResponse.status}`,
+          );
+        }
+        const user = (await userResponse.json()) as {
+          id?: unknown;
+          login?: unknown;
+          type?: unknown;
+        };
+        if (
+          !Number.isSafeInteger(user.id) ||
+          Number(user.id) <= 0 ||
+          user.login !== login ||
+          user.type !== 'Bot'
+        ) {
+          throw new Error('GitHub App bot identity response is invalid');
+        }
+        return {
+          name: login,
+          email: `${user.id}+${login}@users.noreply.github.com`,
+        };
+      })();
+      this.actorInFlight = pending;
+      void pending.then(
+        actor => {
+          this.actor = actor;
+          if (this.actorInFlight === pending) this.actorInFlight = undefined;
+        },
+        () => {
+          if (this.actorInFlight === pending) this.actorInFlight = undefined;
+        },
       );
-      if (!userResponse.ok) {
-        throw new Error(
-          `GitHub App bot identity request failed with status ${userResponse.status}`,
-        );
-      }
-      const user = (await userResponse.json()) as {
-        id?: unknown;
-        login?: unknown;
-        type?: unknown;
-      };
-      if (
-        !Number.isSafeInteger(user.id) ||
-        Number(user.id) <= 0 ||
-        user.login !== login ||
-        user.type !== 'Bot'
-      ) {
-        throw new Error('GitHub App bot identity response is invalid');
-      }
-      return {
-        name: login,
-        email: `${user.id}+${login}@users.noreply.github.com`,
-      };
-    })();
-    try {
-      this.actor = await this.actorInFlight;
-      return this.actor;
-    } finally {
-      this.actorInFlight = undefined;
     }
+    return waitForShared(this.actorInFlight, signal);
   }
 
   async validate(signal?: AbortSignal): Promise<void> {
     const now = (this.options.now ?? (() => new Date()))();
     const jwt = await this.appJwt(now);
     await this.resolveActor(jwt, signal);
+    if (this.options.installationId) {
+      await this.getCredential(signal);
+    }
   }
 
   private async resolveInstallationId(
@@ -332,6 +362,7 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     signal?: AbortSignal,
     repository?: string,
   ): Promise<GitHubCredential> {
+    signal?.throwIfAborted();
     if (!this.options.installationId && !repository) {
       throw new Error(
         'GitHub App authentication requires a GitHub repository for this command',
@@ -348,7 +379,7 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       return cached;
     }
     const existing = this.inFlight.get(key);
-    if (existing) return existing;
+    if (existing) return waitForShared(existing, signal);
     const pending = (async () => {
       const jwt = await this.appJwt(now);
       const scopedRepository = repository
@@ -357,22 +388,40 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       const installationId = await this.resolveInstallationId(
         repository ?? '',
         jwt,
-        signal,
       );
-      const response = await this.request(
+      let response = await this.request(
         `/app/installations/${installationId}/access_tokens`,
         jwt,
-        signal,
+        undefined,
         {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        ...(this.options.installationId
-          ? {}
-          : { body: JSON.stringify({ repositories: [scopedRepository] }) }),
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          ...(this.options.installationId
+            ? {}
+            : { body: JSON.stringify({ repositories: [scopedRepository] }) }),
         },
       );
+      if (!this.options.installationId && response.status === 404) {
+        this.installationIds.delete(repository!);
+        const refreshedInstallationId = await this.resolveInstallationId(
+          repository!,
+          jwt,
+        );
+        response = await this.request(
+          `/app/installations/${refreshedInstallationId}/access_tokens`,
+          jwt,
+          undefined,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ repositories: [scopedRepository] }),
+          },
+        );
+      }
       if (!response.ok) {
         throw new Error(
           `GitHub App token request failed with status ${response.status}`,
@@ -405,11 +454,11 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       return credential;
     })();
     this.inFlight.set(key, pending);
-    try {
-      return await pending;
-    } finally {
+    const clearPending = () => {
       if (this.inFlight.get(key) === pending) this.inFlight.delete(key);
-    }
+    };
+    void pending.then(clearPending, clearPending);
+    return waitForShared(pending, signal);
   }
 }
 
@@ -460,10 +509,7 @@ export function gitHubApiHost(host: string): string {
   return host === 'github.com' ? 'api.github.com' : host;
 }
 
-export function gitHubMaskedCredentialVariables(
-  host: string,
-  includeActor = false,
-): Array<{
+export function gitHubMaskedCredentialVariables(host: string): Array<{
   name: string;
   injectHosts: string[];
   extract: string;
@@ -479,21 +525,6 @@ export function gitHubMaskedCredentialVariables(
       extract: '^(.+)$',
       injectHosts: [gitHubApiHost(host)],
     },
-    ...(includeActor
-      ? [
-          {
-            name: GITHUB_AUTHOR_NAME_ENV_NAME,
-            extract: '^([A-Za-z0-9_.-]+\\[bot\\])$',
-            injectHosts: [host],
-          },
-          {
-            name: GITHUB_AUTHOR_EMAIL_ENV_NAME,
-            extract:
-              '^([1-9][0-9]+\\+[A-Za-z0-9_.-]+\\[bot\\]@users\\.noreply\\.github\\.com)$',
-            injectHosts: [host],
-          },
-        ]
-      : []),
   ];
 }
 
@@ -538,32 +569,46 @@ export function wrapGitHubCredentialCommand(
   command: string,
   host = 'github.com',
   platform: NodeJS.Platform = process.platform,
+  environment: Readonly<Record<string, string>> = {},
 ): string {
   const key = `http.https://${host}/.extraheader`;
   const cliHost = host === 'github.com' ? undefined : host;
+  const hasCredential = Boolean(environment[GITHUB_CREDENTIAL_ENV_NAME]);
+  const actorName = environment[GITHUB_AUTHOR_NAME_ENV_NAME];
+  const actorEmail = environment[GITHUB_AUTHOR_EMAIL_ENV_NAME];
+  const hasActor =
+    /^[A-Za-z0-9_.-]+\[bot\]$/.test(actorName ?? '') &&
+    /^[1-9][0-9]+\+[A-Za-z0-9_.-]+\[bot\]@users\.noreply\.github\.com$/.test(
+      actorEmail ?? '',
+    );
   if (platform === 'win32') {
     return [
       'set "GIT_CONFIG_GLOBAL=NUL"',
       'set "GIT_CONFIG_NOSYSTEM=1"',
       ...(cliHost ? [`set "GH_HOST=${cliHost}"`] : []),
-      'set "LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG="',
-      `if defined ${GITHUB_AUTHOR_NAME_ENV_NAME} if defined ${GITHUB_AUTHOR_EMAIL_ENV_NAME} set "LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG= 'user.name=%${GITHUB_AUTHOR_NAME_ENV_NAME}%' 'user.email=%${GITHUB_AUTHOR_EMAIL_ENV_NAME}%'"`,
-      `set "GIT_CONFIG_PARAMETERS='http.proxyAuthMethod=basic' '${key}=Authorization: Basic %${GITHUB_CREDENTIAL_ENV_NAME}%'%LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG%"`,
+      ...(hasCredential
+        ? [`set "GIT_CONFIG_PARAMETERS='http.proxyAuthMethod=basic' '${key}=Authorization: Basic %${GITHUB_CREDENTIAL_ENV_NAME}%'"`]
+        : ['set "GIT_CONFIG_PARAMETERS="']),
+      ...(hasActor
+        ? [`set "GIT_CONFIG_PARAMETERS=%GIT_CONFIG_PARAMETERS% 'user.name=${actorName}' 'user.email=${actorEmail}'"`]
+        : []),
       `set "${GITHUB_CREDENTIAL_ENV_NAME}="`,
       `set "${GITHUB_AUTHOR_NAME_ENV_NAME}="`,
       `set "${GITHUB_AUTHOR_EMAIL_ENV_NAME}="`,
-      'set "LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG="',
       command,
     ].join(' && ');
   }
   return [
     'export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1',
     ...(cliHost ? [`export GH_HOST=${cliHost}`] : []),
-    `LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG=; if [ -n "\${${GITHUB_AUTHOR_NAME_ENV_NAME}:-}" ] && [ -n "\${${GITHUB_AUTHOR_EMAIL_ENV_NAME}:-}" ]; then LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG=" 'user.name=\${${GITHUB_AUTHOR_NAME_ENV_NAME}}' 'user.email=\${${GITHUB_AUTHOR_EMAIL_ENV_NAME}}'"; fi`,
-    `export GIT_CONFIG_PARAMETERS="'http.proxyAuthMethod=basic' '${key}=Authorization: Basic \${${GITHUB_CREDENTIAL_ENV_NAME}}'\${LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG}"`,
+    ...(hasCredential
+      ? [`export GIT_CONFIG_PARAMETERS="'http.proxyAuthMethod=basic' '${key}=Authorization: Basic \${${GITHUB_CREDENTIAL_ENV_NAME}}'"`]
+      : ['export GIT_CONFIG_PARAMETERS=']),
+    ...(hasActor
+      ? [`export GIT_CONFIG_PARAMETERS="\${GIT_CONFIG_PARAMETERS} 'user.name=${actorName}' 'user.email=${actorEmail}'"`]
+      : []),
     `unset ${GITHUB_CREDENTIAL_ENV_NAME}`,
     `unset ${GITHUB_AUTHOR_NAME_ENV_NAME} ${GITHUB_AUTHOR_EMAIL_ENV_NAME}`,
-    'unset LIBRECHAT_CODE_GITHUB_IDENTITY_CONFIG',
     command,
   ].join(';\n');
 }

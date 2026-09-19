@@ -186,7 +186,11 @@ export interface NativeSrtWorkspaceCommandSandboxOptions {
       signal?: AbortSignal,
       cwd?: string,
     ): Promise<Record<string, string>>;
-    wrapCommand?(command: string, platform: NodeJS.Platform): string;
+    wrapCommand?(
+      command: string,
+      platform: NodeJS.Platform,
+      environment: Readonly<Record<string, string>>,
+    ): string;
   };
 }
 
@@ -875,18 +879,19 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       );
     }
     const commandId = `librechat-code-${randomUUID()}`;
-    const sandboxedCommand = this.options.maskedEnvironment?.wrapCommand
-      ? this.options.maskedEnvironment.wrapCommand(
-          request.command,
-          this.platform,
-        )
-      : request.command;
     let wrapped: Awaited<
       ReturnType<NativeSandboxManager['wrapWithSandboxArgv']>
     >;
     try {
       const credentialEnvironment =
         await this.options.maskedEnvironment?.resolve(signal, cwd);
+      const sandboxedCommand = this.options.maskedEnvironment?.wrapCommand
+        ? this.options.maskedEnvironment.wrapCommand(
+            request.command,
+            this.platform,
+            credentialEnvironment ?? {},
+          )
+        : request.command;
       wrapped = await this.withTemporaryHostEnvironment(
         {
           ...TRUSTED_GIT_ENVIRONMENT,

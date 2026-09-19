@@ -444,6 +444,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
       wrappedCommand = this.options.maskedEnvironment?.wrapCommand?.(
         NATIVE_PROGRAMMATIC_COMMAND,
         process.platform,
+        credentials ?? {},
       );
       if (signal?.aborted) throw new Error('aborted');
     } catch (error) {
@@ -538,6 +539,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
       wrappedCommand = this.options.maskedEnvironment?.wrapCommand?.(
         request.command,
         process.platform,
+        credentials ?? {},
       );
       if (signal?.aborted) throw new Error('aborted');
     } catch (error) {
