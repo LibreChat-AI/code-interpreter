@@ -706,8 +706,36 @@ Slots are per machine, not a fleet-wide execution limit. A busy machine does not
 consume another machine's slots. Requests for the same root remain serialized,
 including commands started through background tools. Independent checkouts can
 use different slots; selecting subdirectories beneath one registered parent root
-does not create separate scheduling boundaries. Linked Git worktrees share Git
-metadata and are not supported by selected-project registration.
+does not create separate scheduling boundaries.
+
+To bind each conversation to an isolated checkout of the selected Git
+repository, configure worker-owned conversation worktrees:
+
+```sh
+librechat-code run \
+  --worker-dir /projects/LibreChat \
+  --workspace-lease-slots 4 \
+  --conversation-worktree-root /var/lib/librechat-code/worktrees \
+  --conversation-worktree-max 64 \
+  --allow-workspace-writes \
+  --allow-workspace-commands
+```
+
+`LIBRECHAT_CODE_CONVERSATION_WORKTREE_ROOT` and
+`LIBRECHAT_CODE_CONVERSATION_WORKTREE_MAX` are the environment equivalents.
+The storage root must be owner-controlled, must not overlap a registered
+workspace, and every registered source must be a Git repository. The worker
+creates a deterministic branch and linked worktree for the opaque conversation
+identity supplied by LibreChat. Host paths remain private. The configured count
+is a hard per-machine quota, creation is serialized against Git metadata, and
+operations for one conversation remain serialized while different
+conversations may occupy different lease slots.
+
+GitHub App routing is inherited from the operator-admitted source repository;
+commands cannot select a different installation by rewriting a worktree remote.
+Legacy requests without a conversation identity continue to use the selected
+source root. Older Code API deployments do not negotiate the capability, so the
+worker omits it until every request path understands the isolation boundary.
 
 Admission waits at most 30 seconds. A `WORKSPACE_QUEUE_TIMEOUT` response (HTTP
 503, `Retry-After: 1`) means the operation was not assigned or started; wait for

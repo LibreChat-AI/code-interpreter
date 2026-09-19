@@ -26,13 +26,20 @@ async function register(workspaceLeaseSlots = 2) {
       workspaceTools: {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         operations: ['read_file'],
-        workspaces: [{ id: 'a' }, { id: 'b' }],
+        workspaces: [
+          { id: 'a', workspaceInstances: ['git_worktree'] },
+          { id: 'b' },
+        ],
       },
     },
   });
   await store.confirmReady(workerId, incarnationId, generation);
 }
-function dispatch(workspaceId: string, signal = new AbortController().signal) {
+function dispatch(
+  workspaceId: string,
+  signal = new AbortController().signal,
+  workspaceInstanceId?: string,
+) {
   const promise = store.dispatchWorkspaceTool({
     workerId,
     signal,
@@ -41,6 +48,7 @@ function dispatch(workspaceId: string, signal = new AbortController().signal) {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       operation: 'read_file',
       workspaceId,
+      ...(workspaceInstanceId == null ? {} : { workspaceInstanceId }),
       path: 'file.txt',
     },
   });
@@ -344,6 +352,52 @@ test('same-root work waits while another root progresses', async () => {
   await settle(second!);
   await settle(third!);
   await Promise.all([nextA, b]);
+});
+
+test('conversation worktrees on one source use independent capacity lanes', async () => {
+  await register();
+  const firstId = 'a'.repeat(64);
+  const secondId = 'b'.repeat(64);
+  const firstPending = dispatch('a', undefined, firstId);
+  const first = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  const samePending = dispatch('a', undefined, firstId);
+  const secondPending = dispatch('a', undefined, secondId);
+  const second = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    1,
+  ))!;
+  expect(second.request).toMatchObject({
+    workspaceId: 'a',
+    workspaceInstanceId: secondId,
+  });
+  await settle(first);
+  await firstPending;
+  const same = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  expect(same.request).toMatchObject({
+    workspaceId: 'a',
+    workspaceInstanceId: firstId,
+  });
+  await settle(second);
+  await settle(same);
+  await Promise.all([samePending, secondPending]);
 });
 
 test('queued cancellation never leases and does not block another root', async () => {

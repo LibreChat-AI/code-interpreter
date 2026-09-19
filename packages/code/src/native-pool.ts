@@ -27,7 +27,7 @@ export class NativeWorkspaceCommandPool {
   private allocation: Promise<unknown> = Promise.resolve();
   private closing = false;
   constructor(
-    private readonly roots: ReadonlyMap<string, NativeProcessSandboxOptions>,
+    roots: ReadonlyMap<string, NativeProcessSandboxOptions>,
     private readonly capacity: number,
     private readonly createSandbox: (
       options: NativeProcessSandboxOptions,
@@ -42,6 +42,24 @@ export class NativeWorkspaceCommandPool {
     ) {
       throw new Error('Native executor capacity must be between 1 and 8');
     }
+    this.roots = new Map(roots);
+  }
+
+  private readonly roots: Map<string, NativeProcessSandboxOptions>;
+
+  /** Add a worker-owned isolated root without exposing its host path. */
+  registerRoot(id: string, options: NativeProcessSandboxOptions): void {
+    const existing = this.roots.get(id);
+    if (existing) {
+      if (existing.workspaceRoot !== options.workspaceRoot) {
+        throw new WorkspaceToolError(
+          'Native workspace identity changed',
+          'REGISTRATION_INVALID',
+        );
+      }
+      return;
+    }
+    this.roots.set(id, options);
   }
 
   private allocate(root: string): Promise<Entry> {

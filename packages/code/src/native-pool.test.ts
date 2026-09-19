@@ -38,6 +38,44 @@ test('native pool preflights every registered root with bounded concurrency', as
   await pool.close();
 });
 
+test('native pool admits worker-owned roots after startup', async () => {
+  const created: string[] = [];
+  const pool = new NativeWorkspaceCommandPool(
+    new Map([['primary', { workspaceRoot: '/fixture/primary' }]]),
+    2,
+    (options) => ({
+      async prepare() {},
+      async close() {},
+      async execute(req) {
+        created.push(options.workspaceRoot);
+        return {
+          protocolVersion: 1,
+          operation: 'execute_command',
+          workspaceId: req.workspaceId,
+          stdout: '',
+          stderr: '',
+          exitCode: 0,
+          truncated: false,
+          timedOut: false,
+        };
+      },
+    }),
+  );
+  pool.registerRoot('conversation', {
+    workspaceRoot: '/fixture/conversation',
+  });
+  await pool.execute(request('conversation'));
+  assert.deepEqual(created, ['/fixture/conversation']);
+  assert.throws(
+    () =>
+      pool.registerRoot('conversation', {
+        workspaceRoot: '/fixture/replaced',
+      }),
+    { code: 'REGISTRATION_INVALID' },
+  );
+  await pool.close();
+});
+
 test('a known-clean executor failure is retired without replaying the command', async () => {
   let created = 0;
   let executed = 0;

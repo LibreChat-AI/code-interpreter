@@ -590,6 +590,35 @@ test('trusted-vm permits unmatched egress and local development sockets', async 
   ]);
 });
 
+test('linked worktrees admit only their operator-selected Git metadata', async t => {
+  const parent = await mkdtemp(join(tmpdir(), 'librechat-code-worktree-'));
+  const root = join(parent, 'worktree');
+  const gitCommonDirectory = join(parent, 'source.git');
+  await mkdir(root);
+  await mkdir(gitCommonDirectory);
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    gitCommonDirectory,
+    manager: fake.manager,
+  });
+  t.after(() => sandbox.close());
+
+  await sandbox.prepare();
+
+  assert.ok(
+    fake.config?.filesystem.allowRead.includes(
+      await realpath(gitCommonDirectory),
+    ),
+  );
+  assert.ok(
+    fake.config?.filesystem.allowWrite.includes(
+      await realpath(gitCommonDirectory),
+    ),
+  );
+});
+
 test('provides an isolated scratch directory to commands and restores the host environment', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   t.after(() => rm(root, { recursive: true, force: true }));

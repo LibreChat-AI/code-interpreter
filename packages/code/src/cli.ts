@@ -36,6 +36,8 @@ import {
 import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { NativeWorkspaceCommandPool } from './native-pool.js';
+import { GitWorktreeWorkspaceTools } from './workspace-instances.js';
+import { GitWorktreeManager } from './worktrees.js';
 import {
   resolveNativeSrtCommandPolicy,
   serializeNativeSrtCommandPolicy,
@@ -600,6 +602,18 @@ async function run(
   );
   if (workspaceLeaseSlots > 8)
     throw new Error('Workspace lease slots cannot exceed 8');
+  const conversationWorktreeRoot =
+    option(args, '--conversation-worktree-root') ??
+    process.env.LIBRECHAT_CODE_CONVERSATION_WORKTREE_ROOT?.trim();
+  const conversationWorktreeMax = positiveInteger(
+    'LIBRECHAT_CODE_CONVERSATION_WORKTREE_MAX',
+    option(args, '--conversation-worktree-max') ??
+      process.env.LIBRECHAT_CODE_CONVERSATION_WORKTREE_MAX,
+    64,
+  );
+  if (conversationWorktreeMax > 1024) {
+    throw new Error('Conversation worktree capacity cannot exceed 1024');
+  }
   const roots: LocalWorkspaceConfig[] = canonicalWorkerDirectory
     ? [
         {
@@ -702,6 +716,16 @@ async function run(
         );
   }
   if (
+    conversationWorktreeRoot &&
+    (!allowWorkspaceCommands ||
+      commandSandboxMode !== 'native-srt' ||
+      workspaceLeaseSlots < 2)
+  ) {
+    throw new Error(
+      'Conversation worktrees require native-srt commands and at least two workspace lease slots',
+    );
+  }
+  if (
     roots.length > 1 &&
     process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim()
   ) {
@@ -730,6 +754,14 @@ async function run(
             await gitHubRepositoryForDirectory(root.root, github.host),
           ] as const),
         ),
+      )
+    : undefined;
+  const repositoriesByWorkspace = admittedGitHubRepositories
+    ? new Map(
+        roots.map((root) => [
+          root.id,
+          admittedGitHubRepositories.get(root.root),
+        ]),
       )
     : undefined;
   const localWorkspaceTools = workerDirectory
@@ -981,7 +1013,7 @@ async function run(
   };
   const nativeCommandSandbox =
     allowWorkspaceCommands && commandSandboxMode === 'native-srt'
-      ? roots.length > 1 || workspaceLeaseSlots > 1
+      ? roots.length > 1 || workspaceLeaseSlots > 1 || conversationWorktreeRoot
         ? new NativeWorkspaceCommandPool(
             new Map(
                           roots.map(root => [
@@ -1008,6 +1040,51 @@ async function run(
           incarnationId,
         }),
     });
+  }
+  const conversationWorktrees = conversationWorktreeRoot
+    ? new GitWorktreeManager({
+        maxCount: conversationWorktreeMax,
+        root: conversationWorktreeRoot,
+        sources: new Map(
+          roots.map((root) => [
+            root.id,
+            { root: root.root, identity: root.identity },
+          ]),
+        ),
+      })
+    : undefined;
+  let conversationWorkspaceTools: GitWorktreeWorkspaceTools | undefined;
+  if (conversationWorktrees && workspaceTools) {
+    if (!(nativeCommandSandbox instanceof NativeWorkspaceCommandPool)) {
+      throw new Error('Conversation worktrees require a native command pool');
+    }
+    conversationWorkspaceTools = new GitWorktreeWorkspaceTools({
+      commandPool: nativeCommandSandbox,
+      delegate: workspaceTools,
+      manager: conversationWorktrees,
+      onResolve(workspaceId, root) {
+        if (admittedGitHubRepositories) {
+          admittedGitHubRepositories.set(
+            root,
+            repositoriesByWorkspace?.get(workspaceId),
+          );
+        }
+      },
+      sources: new Map(
+        roots.map((root) => [
+          root.id,
+          {
+            command: {
+              ...nativeOptions,
+              workspaceIdentity: root.identity,
+              workspaceRoot: root.root,
+            },
+            writable: root.writable ?? false,
+          },
+        ]),
+      ),
+    });
+    workspaceTools = conversationWorkspaceTools;
   }
     if (workspaceTools && environments.length) {
         workspaceTools = new EnvironmentWorkspaceTools(
@@ -1059,6 +1136,7 @@ async function run(
     if (github.provider && !github.provider.validate) {
       await github.provider.getCredential(controller.signal);
     }
+    await conversationWorktrees?.prepare();
     await nativeCommandSandbox?.prepare();
         for (const environment of option(args, '--reset-workspace-quarantine') == null ? environments : []) {
             const setup = environment.definition.setup;
@@ -1110,7 +1188,31 @@ async function run(
       capabilities,
       workspaceTools,
       ...(nativeProgrammaticEnabled && nativeCommandSandbox
-        ? { workspaceProgrammatic: nativeCommandSandbox }
+        ? {
+            workspaceProgrammatic:
+              conversationWorkspaceTools ?? nativeCommandSandbox,
+          }
+        : {}),
+      ...(conversationWorktrees
+        ? {
+            workspaceQuarantineResolver: async (
+              selectedWorkspaceId: string,
+              workspaceInstanceId: string,
+            ) =>
+              workspaceMutationGuard(
+                defaultWorkspaceQuarantinePath({
+                  codeApiUrl,
+                  workerId,
+                  workspaceRoot: await conversationWorktrees.plannedRoot(
+                    selectedWorkspaceId,
+                    workspaceInstanceId,
+                  ),
+                }),
+                workerId,
+                `${selectedWorkspaceId}:git-worktree:${workspaceInstanceId}`,
+                incarnationId,
+              ),
+          }
         : {}),
       ...(workspaceLeaseSlots > 1 || roots.length > 1
         ? {
@@ -1222,14 +1324,19 @@ async function run(
     }
     const resetNativeRoot = option(args, '--reset-workspace-quarantine');
     if (resetNativeRoot != null) {
+      const resetWorkspaceInstance = option(
+        args,
+        '--reset-workspace-instance',
+      );
       await worker.refreshCredential(controller.signal);
       await worker.registerForMaintenance(controller.signal);
             await worker.resetNativeWorkspace(
                 resetNativeRoot,
                 controller.signal,
+                resetWorkspaceInstance,
             );
       process.stdout.write(
-        `librechat-code: reset acknowledged for native workspace ${resetNativeRoot}\n`,
+        `librechat-code: reset acknowledged for native workspace ${resetNativeRoot}${resetWorkspaceInstance ? ` instance ${resetWorkspaceInstance}` : ''}\n`,
       );
       return;
     }
