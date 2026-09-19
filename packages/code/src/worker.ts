@@ -7,6 +7,7 @@ import {
   bridgeWorkerPath,
   isBridgeWorkspaceProgrammaticRequest,
   isWorkspaceToolResult,
+  workspaceIsolationKey,
 } from './protocol.js';
 import { EndpointRuntimeSupervisor } from './runtime.js';
 import { signBridgeRequest } from './identity.js';
@@ -816,10 +817,7 @@ export class BridgeWorker {
     const workspace = this.options.capabilities.workspaceTools?.workspaces.find(
       (root) => root.id === workspaceId,
     );
-    const key =
-      workspaceInstanceId == null
-        ? workspaceId
-        : `${workspaceId}:git-worktree:${workspaceInstanceId}`;
+    const key = workspaceIsolationKey(workspaceId, workspaceInstanceId);
     const guard =
       workspaceInstanceId == null
         ? this.options.workspaceQuarantines?.get(workspaceId)
@@ -1404,9 +1402,7 @@ export class BridgeWorker {
     const workspaceId = this.assignmentBaseWorkspaceId(assignment);
     if (workspaceId == null) return undefined;
     const instanceId = this.assignmentWorkspaceInstanceId(assignment);
-    return instanceId == null
-      ? workspaceId
-      : `${workspaceId}:git-worktree:${instanceId}`;
+    return workspaceIsolationKey(workspaceId, instanceId);
   }
 
   private assignmentBaseWorkspaceId(

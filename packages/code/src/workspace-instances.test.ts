@@ -10,6 +10,7 @@ import { GitWorktreeWorkspaceTools } from './workspace-instances.js';
 import { LocalWorkspaceTools } from './workspace.js';
 import { GitWorktreeManager } from './worktrees.js';
 import { readRepositoryInstructions } from './instructions.js';
+import { captureWorkspaceRootIdentity } from './root-identity.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -34,16 +35,21 @@ async function repository(): Promise<{ parent: string; root: string }> {
   return { parent, root: await realpath(root) };
 }
 
+async function source(root: string) {
+  return { root, identity: await captureWorkspaceRootIdentity(root) };
+}
+
 test('routes each conversation to its own writable Git worktree', async (t) => {
   const fixture = await repository();
   t.after(() => rm(fixture.parent, { recursive: true, force: true }));
   const delegate = await LocalWorkspaceTools.create({
+    repositoryInstructions: true,
     workspaces: [{ id: 'primary', root: fixture.root, writable: true }],
   });
   const manager = new GitWorktreeManager({
     maxCount: 4,
     root: join(fixture.parent, 'instances'),
-    sources: new Map([['primary', { root: fixture.root }]]),
+    sources: new Map([['primary', await source(fixture.root)]]),
   });
   const tools = new GitWorktreeWorkspaceTools({
     delegate,
@@ -100,7 +106,8 @@ test('routes each conversation to its own writable Git worktree', async (t) => {
   assert.equal(result.operation, 'read_file');
   assert.equal(result.content, 'first');
 
-  const instructions = await readRepositoryInstructions(first.root);
+  await writeFile(join(fixture.root, 'AGENTS.md'), 'local repository rules\n');
+  const instructions = await readRepositoryInstructions(fixture.root);
   assert.ok(instructions);
   const instructionResult = await tools.execute({
     protocolVersion: 1,
@@ -111,7 +118,49 @@ test('routes each conversation to its own writable Git worktree', async (t) => {
     instructionSha256: instructions.descriptor.sha256,
   });
   assert.equal(instructionResult.operation, 'read_file');
-  assert.equal(instructionResult.content, 'follow repository rules\n');
+  assert.equal(instructionResult.content, 'local repository rules\n');
+});
+
+test('reports provisioning rejection as an atomic workspace error', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const delegate = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root: fixture.root, writable: true }],
+  });
+  const tools = new GitWorktreeWorkspaceTools({
+    delegate,
+    manager: new GitWorktreeManager({
+      maxCount: 1,
+      root: join(fixture.parent, 'instances'),
+      sources: new Map([['primary', await source(fixture.root)]]),
+    }),
+    sources: new Map([
+      ['primary', { repositoryInstructions: false, writable: true }],
+    ]),
+  });
+  await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'primary',
+    workspaceInstanceId: 'a'.repeat(64),
+    path: 'first.txt',
+    content: 'first',
+  });
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      workspaceInstanceId: 'b'.repeat(64),
+      path: 'second.txt',
+      content: 'second',
+    }),
+    {
+      code: 'WRITE_UNAVAILABLE',
+      mutationMayHaveCommitted: false,
+      requiresQuarantine: false,
+    },
+  );
 });
 
 test('leaves legacy requests on the selected source workspace', async (t) => {
@@ -125,7 +174,7 @@ test('leaves legacy requests on the selected source workspace', async (t) => {
     manager: new GitWorktreeManager({
       maxCount: 1,
       root: join(fixture.parent, 'instances'),
-      sources: new Map([['primary', { root: fixture.root }]]),
+      sources: new Map([['primary', await source(fixture.root)]]),
     }),
     sources: new Map([
       ['primary', { repositoryInstructions: false, writable: false }],

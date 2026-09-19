@@ -15,8 +15,9 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
-  isWorkspaceToolRequest,
-  isWorkspaceToolResult,
+    isWorkspaceToolRequest,
+    isWorkspaceToolResult,
+    workspaceIsolationKey,
 } from '../../../packages/code/src/protocol';
 import type { BridgeWorkerBinding } from './pairing';
 import { BridgeAdmissionQueue } from './admission';
@@ -193,13 +194,11 @@ function workspaceInstanceId(body: t.PayloadBody): string | undefined {
   return undefined;
 }
 
-function workspaceAdmissionId(
+export function workspaceAdmissionId(
   workspaceId: string,
   instanceId?: string,
 ): string {
-  return instanceId === undefined
-    ? workspaceId
-    : `${workspaceId}:git-worktree:${instanceId}`;
+  return workspaceIsolationKey(workspaceId, instanceId);
 }
 
 function workerKey(workerId: string): string {

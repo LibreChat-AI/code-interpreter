@@ -38,6 +38,7 @@ import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { NativeWorkspaceCommandPool } from './native-pool.js';
 import { GitWorktreeWorkspaceTools } from './workspace-instances.js';
 import { GitWorktreeManager } from './worktrees.js';
+import { captureWorkspaceRootIdentity } from './root-identity.js';
 import {
   resolveNativeSrtCommandPolicy,
   serializeNativeSrtCommandPolicy,
@@ -63,8 +64,9 @@ import type { WorkspaceToolExecutor } from './workspace.js';
 import {
   BRIDGE_WORKSPACE_NAME_MAX_LENGTH,
   BridgeProtocolError,
-  isValidBridgeWorkerCapabilities,
-  isValidBridgeWorkerId,
+    isValidBridgeWorkerCapabilities,
+    isValidBridgeWorkerId,
+    workspaceIsolationKey,
 } from './protocol.js';
 
 function workspaceSecurityIdentity(
@@ -1046,10 +1048,17 @@ async function run(
         maxCount: conversationWorktreeMax,
         root: conversationWorktreeRoot,
         sources: new Map(
-          roots.map((root) => [
-            root.id,
-            { root: root.root, identity: root.identity },
-          ]),
+          await Promise.all(
+            roots.map(async (root) => [
+              root.id,
+              {
+                root: root.root,
+                identity:
+                  root.identity ??
+                  (await captureWorkspaceRootIdentity(root.root)),
+              },
+            ] as const),
+          ),
         ),
       })
     : undefined;
@@ -1210,7 +1219,10 @@ async function run(
                   ),
                 }),
                 workerId,
-                `${selectedWorkspaceId}:git-worktree:${workspaceInstanceId}`,
+                workspaceIsolationKey(
+                  selectedWorkspaceId,
+                  workspaceInstanceId,
+                ),
                 incarnationId,
               ),
           }

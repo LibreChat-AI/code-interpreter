@@ -10,6 +10,7 @@ import {
   isValidBridgeWorkerId,
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
+  workspaceIsolationKey,
 } from './protocol.js';
 import type {
   WorkspaceEditFileRequest,
@@ -87,6 +88,18 @@ test('bridgeWorkerPath encodes worker-controlled path segments', () => {
   assert.equal(
     bridgeWorkerPath('vm/example worker'),
     '/bridge/workers/vm%2Fexample%20worker',
+  );
+});
+
+test('workspace isolation keys keep roots and instances in disjoint namespaces', () => {
+  const instanceId = 'a'.repeat(64);
+  assert.notEqual(
+    workspaceIsolationKey(`foo:git-worktree:${instanceId}`),
+    workspaceIsolationKey('foo', instanceId),
+  );
+  assert.notEqual(
+    workspaceIsolationKey('foo'),
+    workspaceIsolationKey('workspace:foo'),
   );
 });
 

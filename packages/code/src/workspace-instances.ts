@@ -78,11 +78,31 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
         'INVALID_REQUEST',
       );
     }
-    const instance = await this.options.manager.resolve(
-      workspaceId,
-      instanceId,
-      signal,
-    );
+    let instance;
+    try {
+      instance = await this.options.manager.resolve(
+        workspaceId,
+        instanceId,
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof WorkspaceToolError) throw error;
+      if (
+        signal?.aborted ||
+        (error instanceof Error && error.name === 'AbortError')
+      ) {
+        throw new WorkspaceToolError(
+          'Conversation worktree provisioning aborted',
+          'EXECUTION_ABORTED',
+        );
+      }
+      throw new WorkspaceToolError(
+        error instanceof Error
+          ? error.message
+          : 'Conversation worktree provisioning failed',
+        'WRITE_UNAVAILABLE',
+      );
+    }
     this.options.onResolve?.(workspaceId, instance.root);
     const internalId = internalWorkspaceId(workspaceId, instanceId);
     const key = `${workspaceId}\0${instanceId}`;
@@ -116,6 +136,14 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
   ): Promise<WorkspaceToolResult> {
     if (!request.workspaceInstanceId) {
       return await this.options.delegate.execute(request, signal);
+    }
+    if (
+      request.operation === 'read_file' &&
+      request.instructionSha256 !== undefined
+    ) {
+      const { workspaceInstanceId: _workspaceInstanceId, ...sourceRequest } =
+        request;
+      return await this.options.delegate.execute(sourceRequest, signal);
     }
     const { workspaceInstanceId, ...baseRequest } = request;
     const source = this.options.sources.get(request.workspaceId);

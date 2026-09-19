@@ -14,6 +14,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 
 import { GitWorktreeManager } from './worktrees.js';
+import { captureWorkspaceRootIdentity } from './root-identity.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -50,13 +51,17 @@ async function repository(): Promise<{ parent: string; root: string }> {
   return { parent, root: await realpath(root) };
 }
 
+async function source(root: string) {
+  return { root, identity: await captureWorkspaceRootIdentity(root) };
+}
+
 test('creates and reuses an isolated worktree for one conversation identity', async (t) => {
   const fixture = await repository();
   t.after(() => rm(fixture.parent, { recursive: true, force: true }));
   const manager = new GitWorktreeManager({
     maxCount: 4,
     root: join(fixture.parent, 'instances'),
-    sources: new Map([['primary', { root: fixture.root }]]),
+    sources: new Map([['primary', await source(fixture.root)]]),
   });
   const id = 'a'.repeat(64);
 
@@ -66,7 +71,7 @@ test('creates and reuses an isolated worktree for one conversation identity', as
   ]);
   assert.deepEqual(concurrent, first);
   assert.notEqual(first.root, fixture.root);
-  assert.equal(first.gitSharedObjectDirectory.startsWith(fixture.root), true);
+  assert.equal(first.gitSharedObjectDirectory.startsWith(first.root), true);
   const instanceCommon = await realpath(
     await git(
       first.root,
@@ -90,7 +95,7 @@ test('creates and reuses an isolated worktree for one conversation identity', as
   const restarted = new GitWorktreeManager({
     maxCount: 4,
     root: join(fixture.parent, 'instances'),
-    sources: new Map([['primary', { root: fixture.root }]]),
+    sources: new Map([['primary', await source(fixture.root)]]),
   });
   assert.equal((await restarted.resolve('primary', id)).root, first.root);
 });
@@ -103,7 +108,7 @@ test('replaces an incomplete checkout before admitting it after restart', async 
   const manager = new GitWorktreeManager({
     maxCount: 4,
     root: storage,
-    sources: new Map([['primary', { root: fixture.root }]]),
+    sources: new Map([['primary', await source(fixture.root)]]),
   });
   const first = await manager.resolve('primary', id);
   await writeFile(join(first.root, 'README.md'), 'partial mutation\n');
@@ -112,12 +117,72 @@ test('replaces an incomplete checkout before admitting it after restart', async 
   const restarted = new GitWorktreeManager({
     maxCount: 4,
     root: storage,
-    sources: new Map([['primary', { root: fixture.root }]]),
+    sources: new Map([['primary', await source(fixture.root)]]),
   });
   const recovered = await restarted.resolve('primary', id);
   assert.equal(
     await readFile(join(recovered.root, 'README.md'), 'utf8'),
     'source\n',
+  );
+});
+
+test('does not count an incomplete checkout against capacity after restart', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const storage = join(fixture.parent, 'instances');
+  const manager = new GitWorktreeManager({
+    maxCount: 1,
+    root: storage,
+    sources: new Map([['primary', await source(fixture.root)]]),
+  });
+  const abandoned = await manager.resolve('primary', 'c'.repeat(64));
+  await rm(`${abandoned.root}.complete`);
+
+  const restarted = new GitWorktreeManager({
+    maxCount: 1,
+    root: storage,
+    sources: new Map([['primary', await source(fixture.root)]]),
+  });
+  const replacement = await restarted.resolve('primary', 'd'.repeat(64));
+  assert.equal((await stat(replacement.root)).isDirectory(), true);
+  await assert.rejects(stat(abandoned.root), { code: 'ENOENT' });
+});
+
+test('keeps a conversation checkout independent of source object pruning', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  await writeFile(join(fixture.root, 'SECOND.md'), 'second\n');
+  await git(fixture.root, 'add', 'SECOND.md');
+  await git(
+    fixture.root,
+    '-c',
+    'user.name=Test',
+    '-c',
+    'user.email=test@example.com',
+    'commit',
+    '-m',
+    'second',
+  );
+  const manager = new GitWorktreeManager({
+    maxCount: 1,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([['primary', await source(fixture.root)]]),
+  });
+  const instance = await manager.resolve('primary', 'e'.repeat(64));
+  const retainedHead = await git(instance.root, 'rev-parse', 'HEAD');
+
+  await git(fixture.root, 'reset', '--hard', 'HEAD~1');
+  await git(fixture.root, 'reflog', 'expire', '--expire=now', '--all');
+  await git(fixture.root, 'gc', '--prune=now');
+
+  assert.equal(await git(instance.root, 'rev-parse', 'HEAD'), retainedHead);
+  assert.equal(
+    await readFile(join(instance.root, 'SECOND.md'), 'utf8'),
+    'second\n',
+  );
+  await assert.rejects(
+    readFile(join(instance.gitSharedObjectDirectory, 'info', 'alternates')),
+    { code: 'ENOENT' },
   );
 });
 
@@ -136,8 +201,8 @@ test('keeps conversations and source repositories isolated', async (t) => {
     maxCount: 4,
     root: storage,
     sources: new Map([
-      ['first', { root: first.root }],
-      ['second', { root: second.root }],
+      ['first', await source(first.root)],
+      ['second', await source(second.root)],
     ]),
   });
 
@@ -160,7 +225,7 @@ test('rejects invalid identities, overlapping storage and exhausted capacity', a
   const overlapping = new GitWorktreeManager({
     maxCount: 1,
     root: join(fixture.root, 'instances'),
-    sources: new Map([['primary', { root: fixture.root }]]),
+    sources: new Map([['primary', await source(fixture.root)]]),
   });
   await assert.rejects(
     overlapping.resolve('primary', 'a'.repeat(64)),
@@ -170,7 +235,7 @@ test('rejects invalid identities, overlapping storage and exhausted capacity', a
   const manager = new GitWorktreeManager({
     maxCount: 1,
     root: join(fixture.parent, 'instances'),
-    sources: new Map([['primary', { root: fixture.root }]]),
+    sources: new Map([['primary', await source(fixture.root)]]),
   });
   await assert.rejects(manager.resolve('primary', '../escape'), /SHA-256/);
   const first = await manager.resolve('primary', 'a'.repeat(64));

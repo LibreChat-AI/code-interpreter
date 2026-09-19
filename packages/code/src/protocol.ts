@@ -259,6 +259,16 @@ export function bridgeArtifactMediaType(name: string): string {
 
 export type BridgeProtocolVersion = typeof BRIDGE_PROTOCOL_VERSION;
 
+/** Collision-free identity shared by scheduling and worker quarantine state. */
+export function workspaceIsolationKey(
+    workspaceId: string,
+    instanceId?: string,
+): string {
+    return instanceId === undefined
+        ? `workspace:${workspaceId}`
+        : `git-worktree:${Buffer.byteLength(workspaceId, 'utf8')}:${workspaceId}:${instanceId}`;
+}
+
 export type BridgeWorkspaceToolOperation =
   | 'read_file'
   | 'search_text'

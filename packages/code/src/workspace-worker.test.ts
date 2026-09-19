@@ -974,6 +974,93 @@ test('worker executes a workspace tool assignment locally without acquiring a sa
   });
 });
 
+test('worker isolates dynamic worktree guards from collision-shaped root IDs', async () => {
+  const instanceId = 'a'.repeat(64);
+  const collisionRoot = `foo:git-worktree:${instanceId}`;
+  const lifecycle: string[] = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    workspaces: [
+      { id: 'foo', workspaceInstances: ['git_worktree'] as ['git_worktree'] },
+      { id: collisionRoot },
+    ],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      mutationFailuresAreAtomic: true,
+      async execute(request) {
+        return {
+          protocolVersion: 1,
+          operation: 'write_file',
+          workspaceId: request.workspaceId,
+          path: 'result.txt',
+          created: true,
+          bytesWritten: 2,
+        };
+      },
+    },
+    workspaceQuarantines: new Map([
+      [
+        collisionRoot,
+        mutationQuarantine(
+          undefined,
+          () => lifecycle.push('root:arm'),
+          () => lifecycle.push('root:clear'),
+        ),
+      ],
+    ]),
+    workspaceQuarantineResolver: async () =>
+      mutationQuarantine(
+        undefined,
+        () => lifecycle.push('instance:arm'),
+        () => lifecycle.push('instance:clear'),
+      ),
+    fetchImpl: async () =>
+      Response.json({ protocolVersion: 1, accepted: true }),
+  });
+  const assignment = (workspaceId: string, suffix: string) => ({
+    protocolVersion: 1 as const,
+    assignmentId: `assignment-${suffix}`,
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: `lease-token-that-is-long-enough-${suffix}`,
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool' as const,
+    request: {
+      protocolVersion: 1 as const,
+      operation: 'write_file' as const,
+      workspaceId,
+      path: 'result.txt',
+      content: 'ok',
+      ...(workspaceId === 'foo' ? { workspaceInstanceId: instanceId } : {}),
+    },
+  });
+
+  await worker.executeAndSettle(assignment('foo', 'instance'));
+  await worker.executeAndSettle(assignment(collisionRoot, 'root'));
+
+  assert.deepEqual(lifecycle, [
+    'instance:arm',
+    'instance:clear',
+    'root:arm',
+    'root:clear',
+  ]);
+});
+
 test('worker executes programmatic Bash in the selected workspace and preserves its fence', async () => {
   const programmaticRequests: object[] = [];
   const quarantineEvents: string[] = [];

@@ -2,7 +2,10 @@ import { afterEach, expect, test } from 'bun:test';
 import RedisMock from 'ioredis-mock';
 import type Redis from 'ioredis';
 import { RedisBridgeStore } from './store';
-import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  workspaceIsolationKey,
+} from '../../../packages/code/src/protocol';
 import type { CodeBridgeAssignment } from './store';
 
 const redis = new RedisMock() as unknown as Redis;
@@ -602,7 +605,11 @@ test('post-settlement fences are authenticated, idempotent, and invalidated by r
   await expect(dispatch('a')).rejects.toMatchObject({
     code: 'WORKSPACE_QUARANTINED',
   });
-  await store.resetWorkspace(workerId, incarnationId, 'native-workspace:a');
+  await store.resetWorkspace(
+    workerId,
+    incarnationId,
+    `native-workspace:${workspaceIsolationKey('a')}`,
+  );
   await expect(
     store.settle(
       workerId,

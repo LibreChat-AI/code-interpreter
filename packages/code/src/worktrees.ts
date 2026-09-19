@@ -22,7 +22,7 @@ const WORKTREE_INSTANCE_PATTERN = /^[a-f0-9]{64}$/;
 const GIT_TIMEOUT_MS = 30_000;
 
 export interface GitWorktreeSource {
-  identity?: WorkspaceRootIdentity;
+  identity: WorkspaceRootIdentity;
   root: string;
 }
 
@@ -115,7 +115,6 @@ async function commonDirectory(
 export class GitWorktreeManager {
   private readonly inFlight = new Map<string, Promise<GitWorktreeInstance>>();
   private readonly instances = new Map<string, GitWorktreeInstance>();
-  private readonly sourceObjectDirectories = new Map<string, Promise<string>>();
   private canonicalRoot?: Promise<string>;
   private provisioning: Promise<unknown> = Promise.resolve();
 
@@ -202,9 +201,9 @@ export class GitWorktreeManager {
   async prepare(): Promise<void> {
     await this.root();
     await Promise.all(
-      [...this.options.sources].map(async ([workspaceId, source]) => {
+      [...this.options.sources].map(async ([_workspaceId, source]) => {
         const sourceRoot = await this.admittedSourceRoot(source);
-        await this.sourceObjectDirectory(workspaceId, sourceRoot);
+        await commonDirectory(sourceRoot);
       }),
     );
   }
@@ -212,7 +211,6 @@ export class GitWorktreeManager {
   private async admittedSourceRoot(source: GitWorktreeSource): Promise<string> {
     const sourceRoot = await realpath(source.root);
     if (
-      source.identity &&
       !(await matchesWorkspaceRoot(sourceRoot, source.identity))
     ) {
       throw new Error('Conversation worktree source changed after admission');
@@ -230,28 +228,18 @@ export class GitWorktreeManager {
       const entries = await readdir(join(root, sourceDirectory.name), {
         withFileTypes: true,
       });
-      count += entries.filter(
-        (entry) => entry.isDirectory() && !entry.isSymbolicLink(),
-      ).length;
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+        const path = join(root, sourceDirectory.name, entry.name);
+        if (await this.hasCompletionMarker(path)) {
+          count += 1;
+        } else {
+          await rm(path, { recursive: true, force: true });
+          await rm(this.completionMarker(path), { force: true });
+        }
+      }
     }
     return count;
-  }
-
-  private sourceObjectDirectory(
-    sourceWorkspaceId: string,
-    sourceRoot: string,
-  ): Promise<string> {
-    let directory = this.sourceObjectDirectories.get(sourceWorkspaceId);
-    if (!directory) {
-      directory = git(sourceRoot, [
-        'rev-parse',
-        '--path-format=absolute',
-        '--git-path',
-        'objects',
-      ]).then((path) => realpath(path));
-      this.sourceObjectDirectories.set(sourceWorkspaceId, directory);
-    }
-    return directory;
   }
 
   private completionMarker(path: string): string {
@@ -278,7 +266,6 @@ export class GitWorktreeManager {
 
   private async validateRepository(
     sourceWorkspaceId: string,
-    sourceRoot: string,
     instanceId: string,
     path: string,
     signal?: AbortSignal,
@@ -289,31 +276,16 @@ export class GitWorktreeManager {
         'Conversation worktree escaped its configured storage root',
       );
     }
-    const [sourceObjects, instanceCommon] = await Promise.all([
-      this.sourceObjectDirectory(sourceWorkspaceId, sourceRoot),
-      commonDirectory(canonicalPath, signal),
-    ]);
+    const instanceCommon = await commonDirectory(canonicalPath, signal);
     if (!isInside(canonicalPath, instanceCommon)) {
       throw new Error('Conversation worktree does not own its Git metadata');
     }
-    const alternates = await readFile(
-      join(instanceCommon, 'objects', 'info', 'alternates'),
-      'utf8',
-    );
-    const admittedObjects = await Promise.all(
-      alternates
-        .split(/\r?\n/u)
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line) => realpath(line)),
-    );
-    if (admittedObjects.length !== 1 || admittedObjects[0] !== sourceObjects) {
-      throw new Error(
-        'Conversation worktree belongs to a different repository',
-      );
+    const instanceObjects = await realpath(join(instanceCommon, 'objects'));
+    if (!isInside(canonicalPath, instanceObjects)) {
+      throw new Error('Conversation worktree does not own its Git objects');
     }
     return {
-      gitSharedObjectDirectory: sourceObjects,
+      gitSharedObjectDirectory: instanceObjects,
       id: instanceId,
       identity: await directoryIdentity(canonicalPath),
       root: canonicalPath,
@@ -323,7 +295,6 @@ export class GitWorktreeManager {
 
   private async validateExisting(
     sourceWorkspaceId: string,
-    sourceRoot: string,
     instanceId: string,
     path: string,
     signal?: AbortSignal,
@@ -335,7 +306,6 @@ export class GitWorktreeManager {
     }
     return await this.validateRepository(
       sourceWorkspaceId,
-      sourceRoot,
       instanceId,
       path,
       signal,
@@ -359,7 +329,6 @@ export class GitWorktreeManager {
     try {
       return await this.validateExisting(
         sourceWorkspaceId,
-        sourceRoot,
         instanceId,
         path,
         signal,
@@ -384,7 +353,14 @@ export class GitWorktreeManager {
       const remote = await sourceRemote(sourceRoot);
       await git(
         resolve(path, '..'),
-        ['clone', '--shared', '--no-checkout', '--no-tags', sourceRoot, path],
+        [
+          'clone',
+          '--no-hardlinks',
+          '--no-checkout',
+          '--no-tags',
+          sourceRoot,
+          path,
+        ],
         signal,
       );
       if (remote) {
@@ -395,7 +371,6 @@ export class GitWorktreeManager {
       await git(path, ['checkout', '--force', '-b', branch, 'HEAD'], signal);
       const instance = await this.validateRepository(
         sourceWorkspaceId,
-        sourceRoot,
         instanceId,
         path,
         signal,
