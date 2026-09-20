@@ -146,6 +146,7 @@ test('executor bootstrap excludes bridge credentials and Node injection variable
   assert.deepEqual(fake.options?.execArgv, []);
   assert.deepEqual(fake.options?.env, { PATH: '/bin' });
   assert.equal(JSON.stringify(fake.messages).includes('secret'), false);
+  assert.equal('gitSharedObjectDirectory' in fake.messages[0].options, false);
   await sandbox.close();
 });
 

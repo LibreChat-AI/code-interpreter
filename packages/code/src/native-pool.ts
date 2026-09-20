@@ -12,9 +12,7 @@ interface Entry {
     NativeProcessWorkspaceCommandSandbox,
     'prepare' | 'execute' | 'close'
   > &
-    Partial<
-      Pick<NativeProcessWorkspaceCommandSandbox, 'executeProgrammatic'>
-    >;
+    Partial<Pick<NativeProcessWorkspaceCommandSandbox, 'executeProgrammatic'>>;
   busy: boolean;
 }
 
@@ -27,12 +25,12 @@ export class NativeWorkspaceCommandPool {
   private allocation: Promise<unknown> = Promise.resolve();
   private closing = false;
   constructor(
-    private readonly roots: ReadonlyMap<string, NativeProcessSandboxOptions>,
+    roots: ReadonlyMap<string, NativeProcessSandboxOptions>,
     private readonly capacity: number,
     private readonly createSandbox: (
-      options: NativeProcessSandboxOptions,
+      options: NativeProcessSandboxOptions
     ) => Entry['sandbox'] = (options) =>
-      new NativeProcessWorkspaceCommandSandbox(options),
+      new NativeProcessWorkspaceCommandSandbox(options)
   ) {
     if (
       !Number.isSafeInteger(capacity) ||
@@ -42,6 +40,74 @@ export class NativeWorkspaceCommandPool {
     ) {
       throw new Error('Native executor capacity must be between 1 and 8');
     }
+    this.roots = new Map(roots);
+  }
+
+  private readonly roots: Map<string, NativeProcessSandboxOptions>;
+
+  /** Confirm executor cleanup before a failed provisioning attempt removes its root. */
+  async unregisterRoot(id: string): Promise<void> {
+    const pending = this.allocation.then(async () => {
+      const entry = this.entries.get(id);
+      if (entry?.busy) {
+        throw new WorkspaceToolError(
+          'Native workspace still executing',
+          'COMMAND_UNAVAILABLE'
+        );
+      }
+      if (entry) await entry.sandbox.close();
+      this.entries.delete(id);
+      this.roots.delete(id);
+    });
+    this.allocation = pending.catch(() => undefined);
+    await pending;
+  }
+
+  /** Add or safely replace a worker-owned isolated root. */
+  async registerRoot(
+    id: string,
+    options: NativeProcessSandboxOptions
+  ): Promise<void> {
+    const pending = this.allocation.then(async () => {
+      if (this.closing) {
+        throw new WorkspaceToolError(
+          'Native workspace unavailable',
+          'REGISTRATION_INVALID'
+        );
+      }
+      const existing = this.roots.get(id);
+      if (!existing) {
+        this.roots.set(id, options);
+        return;
+      }
+      if (existing.workspaceRoot !== options.workspaceRoot) {
+        throw new WorkspaceToolError(
+          'Native workspace identity changed',
+          'REGISTRATION_INVALID'
+        );
+      }
+      if (
+        existing.workspaceIdentity?.dev === options.workspaceIdentity?.dev &&
+        existing.workspaceIdentity?.ino === options.workspaceIdentity?.ino &&
+        existing.workspaceIdentity?.path === options.workspaceIdentity?.path
+      ) {
+        return;
+      }
+      const entry = this.entries.get(id);
+      if (entry?.busy) {
+        throw new WorkspaceToolError(
+          'Native workspace changed during execution',
+          'REGISTRATION_INVALID'
+        );
+      }
+      if (entry) {
+        await entry.sandbox.close();
+        this.entries.delete(id);
+      }
+      this.roots.set(id, options);
+    });
+    this.allocation = pending.catch(() => undefined);
+    await pending;
   }
 
   private allocate(root: string): Promise<Entry> {
@@ -50,23 +116,23 @@ export class NativeWorkspaceCommandPool {
       if (this.closing || !options)
         throw new WorkspaceToolError(
           'Native workspace unavailable',
-          'REGISTRATION_INVALID',
+          'REGISTRATION_INVALID'
         );
       let entry = this.entries.get(root);
       if (entry?.busy)
         throw new WorkspaceToolError(
           'Native workspace already executing',
-          'COMMAND_UNAVAILABLE',
+          'COMMAND_UNAVAILABLE'
         );
       if (!entry) {
         if (this.entries.size >= this.capacity) {
           const idle = [...this.entries].find(
-            ([, candidate]) => !candidate.busy,
+            ([, candidate]) => !candidate.busy
           );
           if (!idle)
             throw new WorkspaceToolError(
               'Native executor capacity reached',
-              'COMMAND_UNAVAILABLE',
+              'COMMAND_UNAVAILABLE'
             );
           await idle[1].sandbox.close();
           this.entries.delete(idle[0]);
@@ -88,7 +154,7 @@ export class NativeWorkspaceCommandPool {
       if (error instanceof WorkspaceToolError) throw error;
       throw new WorkspaceToolError(
         'Native executor allocation failed',
-        'COMMAND_UNAVAILABLE',
+        'COMMAND_UNAVAILABLE'
       );
     });
     this.allocation = checked.catch(() => undefined);
@@ -112,14 +178,14 @@ export class NativeWorkspaceCommandPool {
               entry.busy = false;
             }
           }
-        },
-      ),
+        }
+      )
     );
   }
 
   async execute(
     request: WorkspaceExecuteCommandRequest,
-    signal?: AbortSignal,
+    signal?: AbortSignal
   ): Promise<WorkspaceExecuteCommandResult> {
     const entry = await this.allocate(request.workspaceId);
     let enteredExecutor = false;
@@ -127,7 +193,7 @@ export class NativeWorkspaceCommandPool {
       if (signal?.aborted)
         throw new WorkspaceToolError(
           'Command cancelled before dispatch',
-          'EXECUTION_ABORTED',
+          'EXECUTION_ABORTED'
         );
       enteredExecutor = true;
       return await entry.sandbox.execute(request, signal);
@@ -156,7 +222,7 @@ export class NativeWorkspaceCommandPool {
   async executeProgrammatic(
     workspaceId: string,
     request: BridgeWorkspaceProgrammaticRequest,
-    signal?: AbortSignal,
+    signal?: AbortSignal
   ): Promise<object> {
     const entry = await this.allocate(workspaceId);
     let enteredExecutor = false;
@@ -164,19 +230,19 @@ export class NativeWorkspaceCommandPool {
       if (signal?.aborted)
         throw new WorkspaceToolError(
           'Programmatic execution cancelled before dispatch',
-          'EXECUTION_ABORTED',
+          'EXECUTION_ABORTED'
         );
       enteredExecutor = true;
       if (!entry.sandbox.executeProgrammatic) {
         throw new WorkspaceToolError(
           'Native programmatic executor is unavailable',
-          'COMMAND_UNAVAILABLE',
+          'COMMAND_UNAVAILABLE'
         );
       }
       return await entry.sandbox.executeProgrammatic(
         workspaceId,
         request,
-        signal,
+        signal
       );
     } catch (error) {
       if (
@@ -202,7 +268,7 @@ export class NativeWorkspaceCommandPool {
     this.closing = true;
     await this.allocation;
     const results = await Promise.allSettled(
-      [...this.entries.values()].map((entry) => entry.sandbox.close()),
+      [...this.entries.values()].map((entry) => entry.sandbox.close())
     );
     this.entries.clear();
     const errors = results

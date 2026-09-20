@@ -706,8 +706,63 @@ Slots are per machine, not a fleet-wide execution limit. A busy machine does not
 consume another machine's slots. Requests for the same root remain serialized,
 including commands started through background tools. Independent checkouts can
 use different slots; selecting subdirectories beneath one registered parent root
-does not create separate scheduling boundaries. Linked Git worktrees share Git
-metadata and are not supported by selected-project registration.
+does not create separate scheduling boundaries.
+
+To bind each conversation to an isolated checkout of the selected Git
+repository, configure worker-owned conversation worktrees:
+
+```sh
+librechat-code run \
+  --worker-dir /projects/LibreChat \
+  --workspace-lease-slots 4 \
+  --conversation-worktree-root /var/lib/librechat-code/worktrees \
+  --conversation-worktree-max 64 \
+  --conversation-worktree-clone-timeout-ms 300000 \
+  --allow-workspace-writes \
+  --allow-workspace-commands
+```
+
+`LIBRECHAT_CODE_CONVERSATION_WORKTREE_ROOT` and
+`LIBRECHAT_CODE_CONVERSATION_WORKTREE_MAX` are the environment equivalents;
+`LIBRECHAT_CODE_CONVERSATION_WORKTREE_CLONE_TIMEOUT_MS` controls the bounded
+clone budget (five minutes by default, from 30 seconds through 30 minutes).
+The storage root must be owner-controlled, must not overlap a registered
+workspace, and every registered source must be a Git repository. The worker
+creates a deterministic branch in an isolated local checkout for the opaque
+conversation identity supplied by LibreChat. Each checkout owns its writable
+Git metadata and object storage, without alternates or hardlinks to the source.
+Provisioning pins the source Git-directory and object-store identities. It copies
+Git data through no-follow, descriptor-relative reads into private staging before
+running Git; source hooks and config includes are not used. The clone budget
+also bounds this snapshot. Local hardlinks only connect private staging to its
+new checkout, never to the source; staging is removed before setup. Source
+alternates admitted at worker startup are materialized into independent objects.
+Git metadata replacement requires operator recovery, not automatic re-admission.
+Host paths remain private. The configured count
+is a hard per-machine quota, provisioning is serialized, and operations for one
+conversation remain serialized while different conversations may occupy
+different lease slots. Recognizable abandoned checkouts without a lifecycle
+record are discarded before admission. New provisioning reserves its record
+before starting Git or setup; a worker crash leaves that checkout reserved for
+operator recovery because child processes might still be running.
+Reservations count even when a crash happens before a checkout directory exists.
+
+Cancellation also covers waiting for the provisioning lock, cloning, and setup.
+The worker waits for setup cleanup before releasing the assignment. If cleanup
+cannot be confirmed, the checkout stays reserved and fails closed on restart.
+A completed checkout with a changed source identity or invalid completion record
+is preserved for operator recovery, including any uncommitted work. After stopping
+the worker and confirming no executor still uses the checkout, an operator can
+archive the affected checkout and its adjacent `.complete` record before retrying.
+Also archive any adjacent `.source` staging directory. Pre-release version-1
+completion records are deliberately preserved but not admitted by this version;
+they do not contain the required source Git identity binding.
+
+GitHub App routing is inherited from the operator-admitted source repository;
+commands cannot select a different installation by rewriting a worktree remote.
+Legacy requests without a conversation identity continue to use the selected
+source root. Older Code API deployments do not negotiate the capability, so the
+worker omits it until every request path understands the isolation boundary.
 
 Admission waits at most 30 seconds. A `WORKSPACE_QUEUE_TIMEOUT` response (HTTP
 503, `Retry-After: 1`) means the operation was not assigned or started; wait for

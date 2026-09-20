@@ -259,6 +259,16 @@ export function bridgeArtifactMediaType(name: string): string {
 
 export type BridgeProtocolVersion = typeof BRIDGE_PROTOCOL_VERSION;
 
+/** Collision-free identity shared by scheduling and worker quarantine state. */
+export function workspaceIsolationKey(
+    workspaceId: string,
+    instanceId?: string,
+): string {
+    return instanceId === undefined
+        ? workspaceId
+        : `\0git-worktree\0${workspaceId}\0${instanceId}`;
+}
+
 export type BridgeWorkspaceToolOperation =
   | 'read_file'
   | 'search_text'
@@ -280,6 +290,8 @@ export interface BridgeWorkspaceDescriptor {
   instructions?: RepositoryInstructionDescriptor[];
   /** Optional per-workspace restriction. Omitted by protocol-v1 readers. */
   operations?: BridgeWorkspaceToolOperation[];
+  /** Worker-owned isolation schemes available beneath this selected root. */
+  workspaceInstances?: ['git_worktree'];
     environment?: {
         fingerprint: string;
         repo?: string;
@@ -308,6 +320,7 @@ export interface WorkspaceReadFileRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'read_file';
   workspaceId: string;
+  workspaceInstanceId?: string;
   path: string;
   startLine?: number;
   maxLines?: number;
@@ -350,6 +363,7 @@ export interface WorkspaceSearchTextRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'search_text';
   workspaceId: string;
+  workspaceInstanceId?: string;
   query: string;
   path?: string;
   maxResults?: number;
@@ -374,6 +388,7 @@ export interface WorkspaceListFilesRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'list_files';
   workspaceId: string;
+  workspaceInstanceId?: string;
   path?: string;
   maxResults?: number;
   /** Continue strictly after this canonical path from a previous page. */
@@ -394,6 +409,7 @@ export interface WorkspaceWriteFileRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'write_file';
   workspaceId: string;
+  workspaceInstanceId?: string;
   path: string;
   content: string;
   /** False requires an atomic create and refuses to replace an existing file. */
@@ -413,6 +429,7 @@ interface WorkspaceEditFileRequestBase {
   protocolVersion: BridgeProtocolVersion;
   operation: 'edit_file';
   workspaceId: string;
+  workspaceInstanceId?: string;
   path: string;
   /** Refuses the mutation unless current file bytes match this preview revision. */
   expectedBaseSha256?: string;
@@ -457,6 +474,7 @@ interface WorkspacePreviewEditRequestBase {
   protocolVersion: BridgeProtocolVersion;
   operation: 'preview_edit';
   workspaceId: string;
+  workspaceInstanceId?: string;
   path: string;
 }
 
@@ -494,6 +512,7 @@ export interface WorkspaceExecuteCommandRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'execute_command';
   workspaceId: string;
+  workspaceInstanceId?: string;
   /** Shell source evaluated only inside the selected sandbox runtime. */
   command: string;
   /** Portable path relative to the workspace root; defaults to '.'. */
@@ -538,6 +557,7 @@ const WORKSPACE_READ_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
   'path',
   'startLine',
   'maxLines',
@@ -546,6 +566,7 @@ const WORKSPACE_SEARCH_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
   'query',
   'path',
   'maxResults',
@@ -554,6 +575,7 @@ const WORKSPACE_LIST_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
   'path',
   'maxResults',
   'afterPath',
@@ -562,6 +584,7 @@ const WORKSPACE_WRITE_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
   'path',
   'content',
   'overwrite',
@@ -570,6 +593,7 @@ const WORKSPACE_EDIT_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
   'path',
   'oldText',
   'newText',
@@ -580,6 +604,7 @@ const WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
   'path',
   'oldText',
   'newText',
@@ -591,6 +616,7 @@ const WORKSPACE_COMMAND_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
   'command',
   'cwd',
   'timeoutMs',
@@ -702,6 +728,8 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceListFileFeatures?: WorkspaceListFileFeature[];
   /** PTC languages this Code API can safely route into a selected workspace. */
   supportedWorkspaceProgrammaticLanguages?: WorkspaceProgrammaticLanguage[];
+  /** Workspace isolation schemes this Code API understands and can route. */
+  supportedWorkspaceInstanceTypes?: ['git_worktree'];
 }
 
 /** Administrator-visible liveness for a configured worker. Credentials,
@@ -748,6 +776,7 @@ export type BridgeProgrammaticPayloadFile =
 export interface BridgeWorkspaceProgrammaticBody {
   language: 'bash';
   version: string;
+  workspace_instance_id?: string;
     /** Stable identity shared by every replay iteration of one execution. */
     execution_id?: string;
     /** Declared replay tools; zero allows the worker to skip the probe pass. */
@@ -912,6 +941,9 @@ export function isBridgeWorkspaceProgrammaticRequest(
     typeof body.version !== 'string' ||
     body.version.length === 0 ||
     body.version.length > BRIDGE_RUNTIME_MAX_LENGTH ||
+    (body.workspace_instance_id !== undefined &&
+      (typeof body.workspace_instance_id !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(body.workspace_instance_id))) ||
         (body.execution_id !== undefined &&
             (typeof body.execution_id !== 'string' ||
                 !/^[A-Za-z0-9_-]{1,128}$/.test(body.execution_id))) ||
@@ -1161,7 +1193,10 @@ export function isWorkspaceToolRequest(
   if (
     request.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
     typeof request.workspaceId !== 'string' ||
-    !isValidBridgeWorkerId(request.workspaceId)
+    !isValidBridgeWorkerId(request.workspaceId) ||
+    (request.workspaceInstanceId !== undefined &&
+      (typeof request.workspaceInstanceId !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(request.workspaceInstanceId)))
   ) {
     return false;
   }
@@ -1614,12 +1649,17 @@ export function isValidBridgeWorkspaceToolCapabilities(
                     key !== 'id' &&
                     key !== 'name' &&
                     key !== 'operations' &&
+                    key !== 'workspaceInstances' &&
                     key !== 'instructions' &&
                     key !== 'environment',
       ) ||
       typeof descriptor.id !== 'string' ||
       !isValidBridgeWorkerId(descriptor.id) ||
       workspaceIds.has(descriptor.id) ||
+      (descriptor.workspaceInstances !== undefined &&
+        (!Array.isArray(descriptor.workspaceInstances) ||
+          descriptor.workspaceInstances.length !== 1 ||
+          descriptor.workspaceInstances[0] !== 'git_worktree')) ||
       (descriptor.instructions !== undefined && (!Array.isArray(descriptor.instructions) || descriptor.instructions.length > 1 || !descriptor.instructions.every(isRepositoryInstructionDescriptor))) ||
             (descriptor.environment !== undefined &&
                 !isValidCodeEnvironmentDescriptor(descriptor.environment)) ||

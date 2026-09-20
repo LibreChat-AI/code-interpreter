@@ -13,6 +13,7 @@ import { executionProfileMiddleware } from '../middleware/execution-profile';
 import { hostedAppPreviewGateway } from '../hosted-app/preview-gateway';
 import { applyPrincipal } from '../auth/principal';
 import { BridgeStoreError } from '../bridge/store';
+import { principalWorkspaceInstanceId } from '../bridge/workspace-instance';
 import { bridgeStoreStatus, createWorkspaceToolsRouter } from './router';
 import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 
@@ -34,6 +35,36 @@ afterEach(() => {
 test('maps invalid worker results to an upstream failure', () => {
   expect(bridgeStoreStatus(new BridgeStoreError('RESULT_INVALID', 'invalid worker result'))).toBe(502);
   expect(bridgeStoreStatus(new BridgeStoreError('WORKER_QUEUE_FULL', 'queue full'))).toBe(429);
+});
+
+test('binds instance admission to the authenticated tenant and user while preserving legacy requests', async () => {
+  const app = express();
+  app.use(json());
+  app.use((req, _res, next) => {
+    applyPrincipal(req, { userId: 'user-1', tenantId: 'tenant-1', principalSource: 'librechat_jwt', codeWorkerId: 'user-worker' });
+    next();
+  });
+  const dispatched: WorkspaceToolRequest[] = [];
+  app.use(createWorkspaceToolsRouter({
+    backend: 'remote-bridge', configuredWorkerId: 'user-worker', dynamicWorkers: false,
+    store: { async dispatchWorkspaceTool(args) {
+      dispatched.push(args.request);
+      return { protocolVersion: 1, generation: 1, leaseToken: 'lease', incarnationId: 'incarnation', status: 'rejected', error: 'fixture' };
+    } },
+  }));
+  server = createServer(app);
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Missing listener');
+  for (const workspaceInstanceId of ['a'.repeat(64), undefined]) {
+    const response = await fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', workspaceInstanceId, path: 'README.md' }),
+    });
+    await response.json();
+  }
+  expect(dispatched[0]?.workspaceInstanceId).toBe(principalWorkspaceInstanceId({ instanceId: 'a'.repeat(64), tenantId: 'tenant-1', principalId: 'user-1' }));
+  expect(dispatched[1]?.workspaceInstanceId).toBeUndefined();
 });
 
 test.each<[WorkspaceToolRequest, number, number?]>([
