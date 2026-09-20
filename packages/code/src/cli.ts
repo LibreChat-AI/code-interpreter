@@ -1079,7 +1079,6 @@ async function run(
                 const id = internalWorkspaceId(instance.sourceWorkspaceId, instance.id);
                 await nativeCommandSandbox.registerRoot(id, {
                   ...nativeOptions,
-                  gitSharedObjectDirectory: instance.gitSharedObjectDirectory,
                   workspaceIdentity: instance.identity,
                   workspaceRoot: instance.root,
                 });

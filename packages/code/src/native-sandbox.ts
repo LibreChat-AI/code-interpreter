@@ -162,8 +162,6 @@ type SpawnCommand = (
 export interface NativeSrtWorkspaceCommandSandboxOptions {
   workspaceIdentity?: WorkspaceRootIdentity;
   workspaceRoot: string;
-  /** Git's operator-admitted object store, shared read-only by an isolated clone. */
-  gitSharedObjectDirectory?: string;
   commandPolicy?: NativeSrtCommandPolicy;
   /** Trusted worker files that must never become workspace-readable or writable. */
   protectedPaths?: string[];
@@ -377,18 +375,6 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     const protectedPaths = await Promise.all(
       (this.options.protectedPaths ?? []).map(canonicalPath),
     );
-    const gitSharedObjectDirectory = this.options.gitSharedObjectDirectory
-      ? await realpath(this.options.gitSharedObjectDirectory)
-      : undefined;
-    if (
-      gitSharedObjectDirectory != null &&
-      protectedPaths.some((path) => isWithin(gitSharedObjectDirectory, path))
-    ) {
-      throw new WorkspaceToolError(
-        'Git metadata cannot contain worker control files',
-        'REGISTRATION_INVALID',
-      );
-    }
         if (protectedPaths.some(path => isWithin(root, path))) {
       throw new WorkspaceToolError(
         'Native sandbox workspace cannot contain worker control files',
@@ -473,7 +459,6 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         ],
         allowRead: [
           root,
-          ...(gitSharedObjectDirectory ? [gitSharedObjectDirectory] : []),
                     ...(canonicalScratchDirectory
                         ? [canonicalScratchDirectory]
                         : []),

@@ -18,6 +18,7 @@ import { matchesWorkspaceRoot } from './root-identity.js';
 import type { WorkspaceRootIdentity } from './root-identity.js';
 import { assertPrivateStorageAncestors } from './private-storage.js';
 import { withProcessLock } from './process-lock.js';
+import { GitSourceSnapshot } from './git-snapshot.js';
 
 const execFileAsync = promisify(execFile);
 const WORKTREE_INSTANCE_PATTERN = /^[a-f0-9]{64}$/;
@@ -31,7 +32,6 @@ export interface GitWorktreeSource {
 }
 
 export interface GitWorktreeInstance {
-  gitSharedObjectDirectory: string;
   id: string;
   identity: WorkspaceRootIdentity;
   root: string;
@@ -107,12 +107,24 @@ async function git(
   }
 }
 
-async function sourceRemote(
+async function sourceConfig(
   root: string,
+  key: string,
   signal?: AbortSignal
 ): Promise<string | undefined> {
   try {
-    const remote = await git(root, ['remote', 'get-url', 'origin'], signal);
+    const remote = await git(
+      root,
+      [
+        'config',
+        '--no-includes',
+        '--file',
+        join(root, 'source-config'),
+        '--get',
+        key,
+      ],
+      signal
+    );
     return remote || undefined;
   } catch {
     signal?.throwIfAborted();
@@ -148,20 +160,12 @@ async function directoryIdentity(path: string): Promise<WorkspaceRootIdentity> {
   };
 }
 
-async function commonDirectory(
-  root: string,
-  signal?: AbortSignal
-): Promise<string> {
-  const path = await git(
-    root,
-    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-    signal
-  );
-  return await realpath(path);
-}
-
 export class GitWorktreeManager {
   private readonly instances = new Map<string, GitWorktreeInstance>();
+  private readonly sourceSnapshots = new Map<
+    string,
+    Promise<GitSourceSnapshot>
+  >();
   private canonicalRoot?: Promise<{
     identity: WorkspaceRootIdentity;
     path: string;
@@ -273,7 +277,7 @@ export class GitWorktreeManager {
     await Promise.all(
       [...this.options.sources].map(async ([_workspaceId, source]) => {
         const sourceRoot = await this.admittedSourceRoot(source);
-        await commonDirectory(sourceRoot);
+        await this.sourceSnapshot(sourceRoot, source);
       })
     );
   }
@@ -284,6 +288,20 @@ export class GitWorktreeManager {
       throw new Error('Conversation worktree source changed after admission');
     }
     return sourceRoot;
+  }
+
+  private async sourceSnapshot(
+    root: string,
+    source: GitWorktreeSource
+  ): Promise<GitSourceSnapshot> {
+    let snapshot = this.sourceSnapshots.get(root);
+    if (!snapshot) {
+      snapshot = GitSourceSnapshot.admit(source.identity);
+      this.sourceSnapshots.set(root, snapshot);
+    }
+    const admitted = await snapshot;
+    await admitted.validate();
+    return admitted;
   }
 
   private async countInstances(): Promise<number> {
@@ -301,6 +319,21 @@ export class GitWorktreeManager {
       const entries = await readdir(join(root, sourceDirectory.name), {
         withFileTypes: true,
       });
+      const reserved = new Set<string>();
+      for (const entry of entries) {
+        const id = entry.name.endsWith('.complete')
+          ? entry.name.slice(0, -9)
+          : '';
+        if (!WORKTREE_INSTANCE_PATTERN.test(id)) continue;
+        if (!entry.isFile() || entry.isSymbolicLink())
+          throw new Error('Invalid worktree reservation');
+        if (
+          await this.hasCompletionMarker(join(root, sourceDirectory.name, id))
+        ) {
+          reserved.add(id);
+          count += 1;
+        }
+      }
       for (const entry of entries) {
         if (entry.isFile() && COMPLETION_TEMP_PATTERN.test(entry.name)) {
           await rm(join(root, sourceDirectory.name, entry.name), {
@@ -315,9 +348,7 @@ export class GitWorktreeManager {
         )
           continue;
         const path = join(root, sourceDirectory.name, entry.name);
-        if (await this.hasCompletionMarker(path)) {
-          count += 1;
-        } else {
+        if (!reserved.has(entry.name)) {
           await rm(path, { recursive: true, force: true });
           await rm(this.completionMarker(path), { force: true });
         }
@@ -343,7 +374,8 @@ export class GitWorktreeManager {
 
   private async hasCompletionMarker(
     path: string,
-    source?: WorkspaceRootIdentity
+    source?: WorkspaceRootIdentity,
+    sourceGit?: string
   ): Promise<boolean> {
     try {
       const record = JSON.parse(
@@ -352,9 +384,12 @@ export class GitWorktreeManager {
         version?: unknown;
         source?: Partial<WorkspaceRootIdentity>;
         provisioningFailed?: boolean;
+        sourceGit?: string;
       };
       const valid =
-        record.version === 1 &&
+        record.version === 2 &&
+        typeof record.sourceGit === 'string' &&
+        WORKTREE_INSTANCE_PATTERN.test(record.sourceGit) &&
         typeof record.source?.path === 'string' &&
         typeof record.source.dev === 'string' &&
         typeof record.source.ino === 'string';
@@ -366,7 +401,8 @@ export class GitWorktreeManager {
         source != null &&
         (record.source!.path !== source.path ||
           record.source!.dev !== source.dev ||
-          record.source!.ino !== source.ino)
+          record.source!.ino !== source.ino ||
+          record.sourceGit !== sourceGit)
       ) {
         throw new Error(
           'Conversation worktree source identity changed; existing checkout preserved'
@@ -393,6 +429,7 @@ export class GitWorktreeManager {
   private async writeCompletionMarker(
     path: string,
     source: WorkspaceRootIdentity,
+    sourceGit: string,
     provisioningFailed = false
   ): Promise<void> {
     const marker = this.completionMarker(path);
@@ -401,8 +438,9 @@ export class GitWorktreeManager {
       await writeFile(
         temporary,
         `${JSON.stringify({
-          version: 1,
+          version: 2,
           source,
+          sourceGit,
           ...(provisioningFailed ? { provisioningFailed: true } : {}),
         })}\n`,
         { mode: 0o600, flag: 'wx' }
@@ -425,9 +463,28 @@ export class GitWorktreeManager {
         'Conversation worktree escaped its configured storage root'
       );
     }
-    const instanceCommon = await commonDirectory(canonicalPath, signal);
-    if (!isInside(canonicalPath, instanceCommon)) {
+    signal?.throwIfAborted();
+    const instanceCommon = join(canonicalPath, '.git');
+    const gitMetadata = await lstat(instanceCommon);
+    if (
+      !gitMetadata.isDirectory() ||
+      gitMetadata.isSymbolicLink() ||
+      (await realpath(instanceCommon)) !== instanceCommon
+    ) {
       throw new Error('Conversation worktree does not own its Git metadata');
+    }
+    try {
+      await lstat(join(instanceCommon, 'commondir'));
+      throw new Error(
+        'Conversation worktree must not redirect its Git metadata'
+      );
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !('code' in error) ||
+        error.code !== 'ENOENT'
+      )
+        throw error;
     }
     const instanceObjects = await realpath(join(instanceCommon, 'objects'));
     if (!isInside(canonicalPath, instanceObjects)) {
@@ -448,7 +505,6 @@ export class GitWorktreeManager {
       }
     }
     return {
-      gitSharedObjectDirectory: instanceObjects,
       id: instanceId,
       identity: await directoryIdentity(canonicalPath),
       root: canonicalPath,
@@ -461,9 +517,10 @@ export class GitWorktreeManager {
     instanceId: string,
     path: string,
     source: WorkspaceRootIdentity,
+    sourceGit: string,
     signal?: AbortSignal
   ): Promise<GitWorktreeInstance> {
-    if (!(await this.hasCompletionMarker(path, source))) {
+    if (!(await this.hasCompletionMarker(path, source, sourceGit))) {
       const error = new Error('Conversation worktree is incomplete');
       Object.assign(error, { code: 'EINCOMPLETE' });
       throw error;
@@ -489,6 +546,7 @@ export class GitWorktreeManager {
     const source = this.options.sources.get(sourceWorkspaceId);
     if (!source) throw new Error('Conversation worktree source is unavailable');
     const sourceRoot = await this.admittedSourceRoot(source);
+    const snapshot = await this.sourceSnapshot(sourceRoot, source);
     const path = await this.instancePath(sourceWorkspaceId, instanceId);
     try {
       return await this.validateExisting(
@@ -496,6 +554,7 @@ export class GitWorktreeManager {
         instanceId,
         path,
         source.identity,
+        snapshot.fingerprint,
         signal
       );
     } catch (error) {
@@ -515,26 +574,55 @@ export class GitWorktreeManager {
     await mkdir(resolve(path, '..'), { mode: 0o700, recursive: true });
     const branch = this.branch(sourceWorkspaceId, instanceId);
     let instance: GitWorktreeInstance | undefined;
+    const staging = `${path}.source`;
     try {
-      const remote = await sourceRemote(sourceRoot, signal);
       // Reserve before launching any writer. A worker crash may leave a Git
       // child or setup executor alive after the parent's kernel lock releases.
       // Recovery must not sweep or reuse that uncertain directory.
-      await this.writeCompletionMarker(path, source.identity, true);
+      await this.writeCompletionMarker(
+        path,
+        source.identity,
+        snapshot.fingerprint,
+        true
+      );
+      const cloneSignal = AbortSignal.any([
+        ...(signal ? [signal] : []),
+        AbortSignal.timeout(
+          this.options.cloneTimeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS
+        ),
+      ]);
+      await snapshot.copyTo(staging, cloneSignal);
+      const remote = await sourceConfig(
+        staging,
+        'remote.origin.url',
+        cloneSignal
+      );
+      const objectFormat = await sourceConfig(
+        staging,
+        'extensions.objectformat',
+        cloneSignal
+      );
+      if (
+        objectFormat &&
+        objectFormat !== 'sha1' &&
+        objectFormat !== 'sha256'
+      ) {
+        throw new Error('Unsupported source Git object format');
+      }
+      if (objectFormat === 'sha256') {
+        await writeFile(
+          join(staging, 'config'),
+          '[core]\nrepositoryformatversion = 1\nbare = true\n[extensions]\nobjectformat = sha256\n',
+          { mode: 0o600 }
+        );
+      }
       await git(
         resolve(path, '..'),
-        [
-          'clone',
-          '--no-local',
-          '--no-hardlinks',
-          '--no-checkout',
-          '--no-tags',
-          sourceRoot,
-          path,
-        ],
-        signal,
+        ['clone', '--local', '--no-checkout', '--no-tags', staging, path],
+        cloneSignal,
         this.options.cloneTimeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS
       );
+      await rm(staging, { recursive: true, force: true });
       const sourceHasHead = await hasCommittedHead(path, signal);
       if (remote) {
         await git(path, ['remote', 'set-url', 'origin', remote], signal);
@@ -556,8 +644,22 @@ export class GitWorktreeManager {
       );
       await this.options.prepareInstance?.(instance, signal);
       signal?.throwIfAborted();
+      if (!(await matchesWorkspaceRoot(instance.root, instance.identity))) {
+        throw new Error('Conversation worktree changed during setup');
+      }
+      await this.validateRepository(
+        sourceWorkspaceId,
+        instanceId,
+        path,
+        signal
+      );
       await this.admittedSourceRoot(source);
-      await this.writeCompletionMarker(path, source.identity);
+      await snapshot.validate();
+      await this.writeCompletionMarker(
+        path,
+        source.identity,
+        snapshot.fingerprint
+      );
       return instance;
     } catch (error) {
       if (instance) {
@@ -565,6 +667,7 @@ export class GitWorktreeManager {
         await this.options.discardInstance?.(instance);
       }
       await rm(path, { recursive: true, force: true });
+      await rm(staging, { recursive: true, force: true });
       await rm(this.completionMarker(path), { force: true });
       throw error;
     }
@@ -591,13 +694,18 @@ export class GitWorktreeManager {
     const cached = this.instances.get(key);
     if (cached) {
       await this.root();
-      await this.admittedSourceRoot(
-        this.options.sources.get(sourceWorkspaceId)!
-      );
+      const source = this.options.sources.get(sourceWorkspaceId)!;
+      await this.sourceSnapshot(await this.admittedSourceRoot(source), source);
       if (!(await matchesWorkspaceRoot(cached.root, cached.identity))) {
         this.instances.delete(key);
         throw new Error('Conversation worktree changed after admission');
       }
+      await this.validateRepository(
+        sourceWorkspaceId,
+        instanceId,
+        cached.root,
+        signal
+      );
       return cached;
     }
     // The same kernel lock coordinates callers and processes. Keep cancellation

@@ -7,6 +7,19 @@ import { SandboxWorkspaceTools, WorkspaceToolError } from './workspace.js';
 
 const incarnationId = 'incarnation-00000001';
 
+test('instance advertisement requires a guard resolver even for reads and with base guards', () => {
+  for (const operation of ['read_file', 'write_file'] as const) {
+    const workspaceTools = { protocolVersion: 1 as const, operations: [operation], workspaces: [{ id: 'primary', workspaceInstances: ['git_worktree'] as ['git_worktree'] }] };
+    assert.throws(() => new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1', token: 'worker-secret', workerId: 'vm-1', incarnationId,
+      sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: { statefulWorkspace: false, sandboxProfile: 'anthropic-srt', runtimes: [], workspaceTools },
+      workspaceQuarantines: new Map([['primary', mutationQuarantine()]]),
+      workspaceTools: { capabilities: workspaceTools, async execute() { throw new Error('must not execute'); } },
+    }), /instance capabilities require a durable quarantine resolver/);
+  }
+});
+
 test('worker clears named actions when command execution is not negotiated', async () => {
   const workspaceTools = {
     protocolVersion: 1 as const,

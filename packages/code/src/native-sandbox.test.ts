@@ -590,27 +590,28 @@ test('trusted-vm permits unmatched egress and local development sockets', async 
   ]);
 });
 
-test('isolated checkouts can read but cannot write their shared Git objects', async t => {
+test('recreated executors never grant reads through a replaced Git object directory', async t => {
   const parent = await mkdtemp(join(tmpdir(), 'librechat-code-worktree-'));
   const root = join(parent, 'worktree');
   const gitSharedObjectDirectory = join(parent, 'source.git', 'objects');
-  await mkdir(root);
+  await mkdir(join(root, '.git'), { recursive: true });
   await mkdir(gitSharedObjectDirectory, { recursive: true });
+  await symlink(gitSharedObjectDirectory, join(root, '.git', 'objects'));
   t.after(() => rm(parent, { recursive: true, force: true }));
   const fake = fakeManager();
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
     workspaceRoot: root,
-    gitSharedObjectDirectory,
     manager: fake.manager,
   });
   t.after(() => sandbox.close());
 
   await sandbox.prepare();
 
-  assert.ok(
+  assert.equal(
     fake.config?.filesystem.allowRead?.includes(
       await realpath(gitSharedObjectDirectory),
     ),
+    false,
   );
   assert.equal(
     fake.config?.filesystem.allowWrite?.includes(

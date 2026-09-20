@@ -337,7 +337,6 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
     const {
       workspaceRoot,
       workspaceIdentity,
-      gitSharedObjectDirectory,
       commandPolicy,
       protectedPaths,
       allowedDomains,
@@ -351,7 +350,6 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
         options: {
           workspaceRoot,
           workspaceIdentity,
-          gitSharedObjectDirectory,
           commandPolicy,
           protectedPaths,
           allowedDomains,

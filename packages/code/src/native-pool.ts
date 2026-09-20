@@ -89,8 +89,7 @@ export class NativeWorkspaceCommandPool {
       if (
         existing.workspaceIdentity?.dev === options.workspaceIdentity?.dev &&
         existing.workspaceIdentity?.ino === options.workspaceIdentity?.ino &&
-        existing.workspaceIdentity?.path === options.workspaceIdentity?.path &&
-        existing.gitSharedObjectDirectory === options.gitSharedObjectDirectory
+        existing.workspaceIdentity?.path === options.workspaceIdentity?.path
       ) {
         return;
       }

@@ -163,7 +163,7 @@ test('reports provisioning rejection as an atomic workspace error', async (t) =>
   );
 });
 
-test('rebuilds dependent file executors after checkout replacement', async (t) => {
+test('rebuilds file executors only after operator recovery releases the reservation', async (t) => {
   const fixture = await repository();
   t.after(() => rm(fixture.parent, { recursive: true, force: true }));
   const manager = new GitWorktreeManager({
@@ -196,6 +196,10 @@ test('rebuilds dependent file executors after checkout replacement', async (t) =
   await assert.rejects(tools.execute(request), {
     code: 'WRITE_UNAVAILABLE',
   });
+  await assert.rejects(tools.execute(request), /capacity is exhausted/);
+  // Missing checkout directories do not prove an interrupted writer is gone.
+  // Simulate operator recovery after confirming there is no active executor.
+  await rm(`${initial.root}.complete`);
   const recovered = await tools.execute(request);
   assert.equal(recovered.operation, 'read_file');
   assert.equal(recovered.content, 'source');

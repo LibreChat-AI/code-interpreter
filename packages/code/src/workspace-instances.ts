@@ -69,7 +69,6 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     signal?: AbortSignal,
   ): Promise<{
     executor: LocalWorkspaceTools;
-    gitSharedObjectDirectory: string;
     identity: WorkspaceRootIdentity;
     internalId: string;
     root: string;
@@ -134,7 +133,6 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     }
     return {
       executor: await cached.value,
-      gitSharedObjectDirectory: instance.gitSharedObjectDirectory,
       identity: instance.identity,
       internalId,
       root: instance.root,
@@ -176,7 +174,6 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
       }
       await this.options.commandPool.registerRoot(resolved.internalId, {
         ...source.command,
-        gitSharedObjectDirectory: resolved.gitSharedObjectDirectory,
         workspaceIdentity: resolved.identity,
         workspaceRoot: resolved.root,
       });
@@ -223,7 +220,6 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     const resolved = await this.executor(workspaceId, instanceId, signal);
     await this.options.commandPool.registerRoot(resolved.internalId, {
       ...source.command,
-      gitSharedObjectDirectory: resolved.gitSharedObjectDirectory,
       workspaceIdentity: resolved.identity,
       workspaceRoot: resolved.root,
     });

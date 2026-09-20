@@ -512,6 +512,16 @@ export class BridgeWorker {
         'Workspace mutation capabilities require durable quarantine storage',
       );
     }
+    if (
+      options.capabilities.workspaceTools?.workspaces.some(
+        (root) => (root.workspaceInstances?.length ?? 0) > 0,
+      ) &&
+      options.workspaceQuarantineResolver == null
+    ) {
+      throw new BridgeProtocolError(
+        'Workspace instance capabilities require a durable quarantine resolver',
+      );
+    }
     if ((options.capabilities.workspaceLeaseSlots ?? 1) > 1) {
       if (
         options.capabilities.requiresReadyConfirmation !== true ||
