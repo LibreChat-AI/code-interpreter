@@ -235,7 +235,10 @@ execution.
 - Remote bridge deployments use backend-specific BullMQ queues and serialize
   the expected backend on every new job, preventing Lambda or HTTP consumers
   from accepting attached-worker executions.
-- Code API permits one active assignment per worker.
+- Code API negotiates a bounded number of active workspace assignments per
+  worker. The lower API or worker slot ceiling wins, and assignments sharing
+  the same workspace isolation key remain serialized while independent
+  conversation worktrees may run concurrently.
 - Dynamic workers are fenced to their server-issued tenant before assignment.
 - Each assignment has an absolute deadline, generation, and random lease token.
 - Settlements with the wrong worker, generation, token, or expired deadline are
