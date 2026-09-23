@@ -511,6 +511,11 @@ test('checkout routing follows nested repositories only inside an admitted root'
     await gitHubRepositoryForCommand(escaped, admitted, 'checkout'),
     undefined,
   );
+  admitted.set(outside, 'acme/outside');
+  assert.equal(
+    await gitHubRepositoryForCommand(escaped, admitted, 'checkout'),
+    undefined,
+  );
   assert.equal(
     await gitHubRepositoryForCommand(nested, admitted, 'checkout', 'github.example.test'),
     undefined,

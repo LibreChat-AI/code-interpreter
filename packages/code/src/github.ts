@@ -181,7 +181,9 @@ export async function gitHubRepositoryForCommand(
     signal?.throwIfAborted();
     return undefined;
   }
-  if (!admittedRepositoryEntry(canonicalCwd, repositories)) return undefined;
+  if (admittedRepositoryEntry(canonicalCwd, repositories)?.[0] !== admitted[0]) {
+    return undefined;
+  }
   return gitHubRepositoryForDirectory(canonicalCwd, host, signal);
 }
 
