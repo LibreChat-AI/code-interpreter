@@ -293,9 +293,23 @@ installation tokens. At startup, the worker binds each explicitly admitted
 workspace root to its Git repository. Commands in those independent roots can
 use simultaneous installations on personal accounts and organizations without
 being restarted or reconfigured, while a command cannot gain access by changing
-its workspace's remote URL. Tokens are scoped and cached per repository. For
-compatibility with deployments
-that intentionally bind a worker to one installation, set the optional legacy
+its workspace's remote URL. Tokens are scoped and cached per repository.
+
+For trusted VMs that intentionally work in multiple Git checkouts beneath one
+admitted root, opt in to `--github-repository-routing checkout` (or
+`LIBRECHAT_CODE_GITHUB_REPOSITORY_ROUTING=checkout`) together with the
+`trusted-vm` command policy. Each command then uses the repository identified
+by its current checkout's local `origin` URL, including linked worktrees.
+The command must set its working directory to that checkout; a shell `cd`
+inside a command does not change which credential was selected before launch.
+This does not widen the admitted filesystem roots, but a command able to alter
+a checkout's remote can obtain a token for **any repository where the App is
+installed**. Use this mode only where the machine operator trusts the VM and
+the App's installation scope; the default `admitted` mode keeps the startup
+binding. Checkout routing requires an App without a fixed installation ID.
+
+For compatibility with deployments that intentionally bind a worker to one
+installation, set the optional legacy
 `LIBRECHAT_CODE_GITHUB_INSTALLATION_ID` fallback.
 
 App-authenticated commits use the GitHub App bot's canonical no-reply identity,
@@ -758,8 +772,10 @@ Also archive any adjacent `.source` staging directory. Pre-release version-1
 completion records are deliberately preserved but not admitted by this version;
 they do not contain the required source Git identity binding.
 
-GitHub App routing is inherited from the operator-admitted source repository;
-commands cannot select a different installation by rewriting a worktree remote.
+By default, GitHub App routing is inherited from the operator-admitted source
+repository; commands cannot select a different installation by rewriting a
+worktree remote. On trusted VMs, the opt-in checkout routing mode above instead
+uses the current worktree's local `origin` URL, within the admitted root.
 Legacy requests without a conversation identity continue to use the selected
 source root. Older Code API deployments do not negotiate the capability, so the
 worker omits it until every request path understands the isolation boundary.

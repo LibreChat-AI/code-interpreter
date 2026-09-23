@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -242,6 +242,8 @@ test('CLI accepts repository-routed GitHub App authentication without a fixed in
   t.after(() => rm(directory, { recursive: true, force: true }));
   const privateKeyPath = join(directory, 'app.pem');
   const preload = join(directory, 'fetch.mjs');
+  const workspace = join(directory, 'workspace');
+  await mkdir(workspace);
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   await writeFile(
     privateKeyPath,
@@ -251,13 +253,8 @@ test('CLI accepts repository-routed GitHub App authentication without a fixed in
   await writeFile(
     preload,
     `
-      globalThis.fetch = async (input) => {
-        const url = String(input);
-        if (url.endsWith('/app')) return Response.json({ slug: 'lia-by-librechat' });
-        if (url.endsWith('/users/lia-by-librechat%5Bbot%5D')) {
-          return Response.json({ id: 328778573, login: 'lia-by-librechat[bot]', type: 'Bot' });
-        }
-        throw new Error('test stopped after GitHub App validation');
+      globalThis.fetch = async () => {
+        throw new Error('test reached GitHub App validation');
       };
     `,
   );
@@ -276,7 +273,7 @@ test('CLI accepts repository-routed GitHub App authentication without a fixed in
         LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
         LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
         LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
-        LIBRECHAT_CODE_WORKER_DIR: directory,
+        LIBRECHAT_CODE_WORKER_DIR: workspace,
         LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS: 'true',
         LIBRECHAT_CODE_GITHUB_TOKEN: undefined,
         LIBRECHAT_CODE_GITHUB_APP_ID: '123',
@@ -288,6 +285,77 @@ test('CLI accepts repository-routed GitHub App authentication without a fixed in
   assert.notEqual(result.status, 0);
   assert.doesNotMatch(result.stderr, /GitHub App authentication requires/);
   assert.doesNotMatch(result.stderr, /installation ID/i);
+  assert.match(result.stderr, /test reached GitHub App validation/);
+
+  const checkout = spawnSync(
+    process.execPath,
+    ['--import', preload, fileURLToPath(new URL('./cli.js', import.meta.url))],
+    {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: {
+        ...process.env,
+        LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+        LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+        LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        LIBRECHAT_CODE_WORKER_DIR: workspace,
+        LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS: 'true',
+        LIBRECHAT_CODE_COMMAND_POLICY_PRESET: 'trusted-vm',
+        LIBRECHAT_CODE_GITHUB_TOKEN: undefined,
+        LIBRECHAT_CODE_GITHUB_APP_ID: '123',
+        LIBRECHAT_CODE_GITHUB_INSTALLATION_ID: undefined,
+        LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE: privateKeyPath,
+        LIBRECHAT_CODE_GITHUB_REPOSITORY_ROUTING: 'checkout',
+      },
+    },
+  );
+  assert.notEqual(checkout.status, 0);
+  assert.doesNotMatch(
+    checkout.stderr,
+    /Checkout GitHub repository routing requires/,
+  );
+  assert.match(checkout.stderr, /test reached GitHub App validation/);
+});
+
+test('CLI rejects checkout routing outside a trusted VM or without repository-scoped App auth', () => {
+  const base = {
+    ...process.env,
+    LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+    LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+    LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+    LIBRECHAT_CODE_WORKER_DIR: process.cwd(),
+    LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS: 'true',
+    LIBRECHAT_CODE_GITHUB_APP_ID: '123',
+    LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE: '/does/not/matter',
+    LIBRECHAT_CODE_GITHUB_INSTALLATION_ID: undefined,
+    LIBRECHAT_CODE_GITHUB_TOKEN: undefined,
+    LIBRECHAT_CODE_GITHUB_REPOSITORY_ROUTING: 'checkout',
+  };
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+  const restricted = spawnSync(process.execPath, [cli], {
+    encoding: 'utf8',
+    env: base,
+  });
+  assert.notEqual(restricted.status, 0);
+  assert.match(restricted.stderr, /requires the trusted-vm command policy/);
+
+  const fixed = spawnSync(process.execPath, [cli], {
+    encoding: 'utf8',
+    env: {
+      ...base,
+      LIBRECHAT_CODE_GITHUB_INSTALLATION_ID: '456',
+      LIBRECHAT_CODE_COMMAND_POLICY_PRESET: 'trusted-vm',
+    },
+  });
+  assert.notEqual(fixed.status, 0);
+  assert.match(fixed.stderr, /without a fixed installation ID/);
+
+  const invalid = spawnSync(process.execPath, [cli], {
+    encoding: 'utf8',
+    env: { ...base, LIBRECHAT_CODE_GITHUB_REPOSITORY_ROUTING: 'unknown' },
+  });
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /must be admitted or checkout/);
 });
 
 test('CLI requires a runtime image for Docker supervision', () => {

@@ -49,7 +49,7 @@ import type { LocalWorkspaceConfig } from './workspace.js';
 import {
   GITHUB_ALLOWED_DOMAINS,
   GitHubAppCredentialProvider,
-  gitHubRepositoryForAdmittedDirectory,
+  gitHubRepositoryForCommand,
   gitHubRepositoryForDirectory,
   gitHubCommandCredentialEnvironment,
   gitHubMaskedCredentialVariables,
@@ -150,12 +150,13 @@ function nonEmpty(value: string | undefined): string | undefined {
   return value?.trim().length ? value : undefined;
 }
 
-function githubCredentials(): {
+function githubCredentials(args: string[]): {
   provider?: GitHubCredentialProvider;
   host: string;
   privateKeyPath?: string;
   mode?: 'app' | 'token';
   repositoryRouting?: boolean;
+  checkoutRouting?: boolean;
   policyIdentity: string;
 } {
   const token = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_TOKEN);
@@ -163,6 +164,13 @@ function githubCredentials(): {
   const installationId = nonEmpty(
     process.env.LIBRECHAT_CODE_GITHUB_INSTALLATION_ID,
   );
+  const routing =
+    option(args, '--github-repository-routing')?.trim().toLowerCase() ??
+    process.env.LIBRECHAT_CODE_GITHUB_REPOSITORY_ROUTING?.trim().toLowerCase() ??
+    'admitted';
+  if (routing !== 'admitted' && routing !== 'checkout') {
+    throw new Error('GitHub repository routing must be admitted or checkout');
+  }
   const privateKeyPath = nonEmpty(
     process.env.LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE,
   );
@@ -176,6 +184,11 @@ function githubCredentials(): {
   if (hasApp && token) {
     throw new Error(
       'Configure either GitHub App authentication or a GitHub token, not both',
+    );
+  }
+  if (routing === 'checkout' && (!hasApp || installationId)) {
+    throw new Error(
+      'Checkout GitHub repository routing requires a GitHub App without a fixed installation ID',
     );
   }
   const configuredHostValue = nonEmpty(
@@ -211,12 +224,13 @@ function githubCredentials(): {
       host,
       mode: 'app',
       repositoryRouting: !installationId,
+      checkoutRouting: routing === 'checkout',
       policyIdentity: gitHubAuthenticationPolicyIdentity({
         mode: 'app',
         host,
         appId,
         installationId,
-      }),
+      }) + (routing === 'checkout' ? ':routing:checkout' : ''),
       privateKeyPath,
       provider: new GitHubAppCredentialProvider({
         appId: appId!,
@@ -530,9 +544,11 @@ async function run(
   }
   const github =
     runtimeSessionId == null
-      ? githubCredentials()
+      ? githubCredentials(args)
       : {
           host: 'github.com',
+          repositoryRouting: false,
+          checkoutRouting: false,
           policyIdentity: gitHubAuthenticationPolicyIdentity({
             host: 'github.com',
           }),
@@ -545,6 +561,11 @@ async function run(
   if (github.provider && commandSandboxMode !== 'native-srt') {
     throw new Error(
       'GitHub authentication currently requires the native-srt command sandbox',
+    );
+  }
+  if (github.checkoutRouting && commandPolicy.preset !== 'trusted-vm') {
+    throw new Error(
+      'Checkout GitHub repository routing requires the trusted-vm command policy',
     );
   }
   const githubDomains = github.provider
@@ -759,9 +780,8 @@ async function run(
       }),
     ]),
   );
-  // Bind credentials to immutable, explicitly admitted roots. The repository
-  // remote is operator input at startup, never an authorization input that a
-  // sandboxed command may change for its next invocation.
+  // Keep an admission boundary even when trusted-VM checkout routing uses a
+  // nested repository's remote for the current command.
   const admittedGitHubRepositories = github.provider && github.repositoryRouting
     ? new Map(
         await Promise.all(
@@ -998,9 +1018,12 @@ async function run(
             ),
             async resolve(signal?: AbortSignal, cwd?: string) {
               const repository = cwd && admittedGitHubRepositories
-                ? gitHubRepositoryForAdmittedDirectory(
+                ? await gitHubRepositoryForCommand(
                     cwd,
                     admittedGitHubRepositories,
+                    github.checkoutRouting ? 'checkout' : 'admitted',
+                    github.host,
+                    signal,
                   )
                 : undefined;
               if (!repository && github.repositoryRouting) {
