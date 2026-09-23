@@ -137,21 +137,45 @@ export async function gitHubRepositoryForDirectory(
   return repository;
 }
 
-/** Return the startup-bound repository for the admitted root containing cwd. */
-export function gitHubRepositoryForAdmittedDirectory(
+function admittedRepositoryEntry(
   cwd: string,
   repositories: ReadonlyMap<string, string | undefined>,
-): string | undefined {
-  for (const [root, repository] of repositories) {
+): readonly [string, string | undefined] | undefined {
+  let closest: readonly [string, string | undefined] | undefined;
+  for (const entry of repositories) {
+    const [root] = entry;
     const path = relative(root, cwd);
     if (
       path === '' ||
       (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
     ) {
-      return repository;
+      if (!closest || root.length > closest[0].length) closest = entry;
     }
   }
-  return undefined;
+  return closest;
+}
+
+/** Return the startup-bound repository for the admitted root containing cwd. */
+export function gitHubRepositoryForAdmittedDirectory(
+  cwd: string,
+  repositories: ReadonlyMap<string, string | undefined>,
+): string | undefined {
+  return admittedRepositoryEntry(cwd, repositories)?.[1];
+}
+
+/** Resolve a checkout repository only when its cwd remains inside an admitted root. */
+export async function gitHubRepositoryForCommand(
+  cwd: string,
+  repositories: ReadonlyMap<string, string | undefined>,
+  routing: 'admitted' | 'checkout',
+  host = 'github.com',
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const admitted = admittedRepositoryEntry(cwd, repositories);
+  if (!admitted) return undefined;
+  return routing === 'checkout'
+    ? gitHubRepositoryForDirectory(cwd, host, signal)
+    : admitted[1];
 }
 
 function base64UrlJson(value: unknown): string {

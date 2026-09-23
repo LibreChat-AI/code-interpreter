@@ -327,12 +327,17 @@ Environment=LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE=/home/librechat-code/.config/
 ```
 
 Install the same App separately on every personal account or organization the
-worker is allowed to use. The trusted worker resolves the correct installation
-from the repository containing each command's working directory, then mints and
-caches a repository-scoped token. Cross-repository work therefore does not
-require changing an installation ID or restarting the worker. Set
-`LIBRECHAT_CODE_GITHUB_INSTALLATION_ID` only as a legacy fixed-installation
-fallback.
+worker is allowed to use. By default, the worker binds each admitted workspace
+root to its repository at startup, then mints and caches repository-scoped
+tokens. Different admitted roots can use different installations without
+restarting the worker. For a trusted VM with multiple checkouts under one root,
+set `LIBRECHAT_CODE_GITHUB_REPOSITORY_ROUTING=checkout` and use the `trusted-vm`
+command policy. This opt-in resolves the local `origin` URL of each command's
+current checkout, including linked worktrees. It remains inside the admitted
+filesystem root, but anyone able to alter a checkout's remote can select any
+repository where the App is installed; keep the App's installation scope narrow.
+Set `LIBRECHAT_CODE_GITHUB_INSTALLATION_ID` only as a legacy
+fixed-installation fallback; it cannot be combined with checkout routing.
 
 Sandboxed commands receive masked Git/`gh` credentials only for the configured
 GitHub hosts; the token is not written to the repository, remote URL, or Git

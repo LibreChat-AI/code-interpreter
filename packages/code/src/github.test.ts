@@ -26,6 +26,7 @@ import {
   GITHUB_CREDENTIAL_ENV_NAME,
   gitHubCredentialEnvironment,
   gitHubRepositoryForAdmittedDirectory,
+  gitHubRepositoryForCommand,
   gitHubRepositoryForDirectory,
   normalizeGitHubHost,
   wrapGitHubCredentialCommand,
@@ -456,6 +457,64 @@ test('keeps repository authorization bound to the admitted workspace root', asyn
   assert.equal(
     gitHubRepositoryForAdmittedDirectory(dirname(directory), admitted),
     undefined,
+  );
+});
+
+test('checkout routing follows nested repositories only inside an admitted root', async (t) => {
+  const directory = await mkdtemp(
+    join(tmpdir(), 'librechat-code-github-checkout-'),
+  );
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const nested = join(directory, 'worktrees', 'other');
+  await mkdir(nested, { recursive: true });
+  execFileSync('git', ['init', directory]);
+  execFileSync('git', [
+    '-C', directory, 'remote', 'add', 'origin', 'git@github.com:acme/outer.git',
+  ]);
+  execFileSync('git', ['init', nested]);
+  execFileSync('git', [
+    '-C', nested, 'remote', 'add', 'origin', 'git@github.com:acme/inner.git',
+  ]);
+  const admitted = new Map([[directory, 'acme/outer']]);
+
+  assert.equal(
+    await gitHubRepositoryForCommand(nested, admitted, 'admitted'),
+    'acme/outer',
+  );
+  assert.equal(
+    await gitHubRepositoryForCommand(nested, admitted, 'checkout'),
+    'acme/inner',
+  );
+  execFileSync('git', [
+    '-C', nested, 'remote', 'set-url', 'origin', 'git@github.com:acme/changed.git',
+  ]);
+  assert.equal(
+    await gitHubRepositoryForCommand(nested, admitted, 'checkout'),
+    'acme/changed',
+  );
+  assert.equal(
+    await gitHubRepositoryForCommand(dirname(directory), admitted, 'checkout'),
+    undefined,
+  );
+  assert.equal(
+    await gitHubRepositoryForCommand(nested, admitted, 'checkout', 'github.example.test'),
+    undefined,
+  );
+
+  const linked = join(directory, 'worktrees', 'linked');
+  execFileSync('git', [
+    '-C', nested, '-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+    'commit', '--allow-empty', '-m', 'initial',
+  ]);
+  execFileSync('git', ['-C', nested, 'worktree', 'add', '--detach', linked]);
+  assert.equal(
+    await gitHubRepositoryForCommand(linked, admitted, 'checkout'),
+    'acme/changed',
+  );
+  admitted.set(linked, 'acme/linked');
+  assert.equal(
+    await gitHubRepositoryForCommand(linked, admitted, 'admitted'),
+    'acme/linked',
   );
 });
 
