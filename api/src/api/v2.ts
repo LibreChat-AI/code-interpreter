@@ -46,6 +46,34 @@ import {
 const router = express.Router();
 const SYNTHETIC_PRINCIPAL_SOURCE = 'synthetic_test';
 
+/**
+ * Deduplicate files by destination name. Some callers (e.g. LibreChat)
+ * send the same file more than once per request when a user re-uploads a
+ * file in the same conversation. The sandbox rejects duplicate destinations,
+ * which surfaces to the end user as a confusing "sandbox is down" error.
+ * Keeps the first occurrence and drops subsequent duplicates.
+ */
+export function deduplicateFilesByDestination(files: TFile[]): TFile[] {
+  const seen = new Set<string>();
+  const deduped: TFile[] = [];
+  for (const f of files) {
+    const dest = f?.name || `file${deduped.length}.code`;
+    if (seen.has(dest)) {
+      logger.warn({ destination: dest }, 'Dropping duplicate file destination');
+      continue;
+    }
+    seen.add(dest);
+    deduped.push(f);
+  }
+  if (deduped.length < files.length) {
+    logger.info(
+      { original: files.length, deduped: deduped.length },
+      'Deduplicated file list before validation',
+    );
+  }
+  return deduped;
+}
+
 function existingDestinationConflictMessage(existing: string, destination: string): string {
   return existing === destination
     ? `files contains duplicate destination "${destination}"`
@@ -251,12 +279,13 @@ function getJob(
   runtimeSessionHeader?: string | string[],
 ): Job {
   const {
-    session_id, language, version, args, stdin, files,
+    session_id, language, version, args, stdin, files: rawFiles,
     compile_memory_limit, run_memory_limit,
     compile_timeout,
     run_cpu_time, compile_cpu_time,
     env_vars,
   } = body;
+  let files = rawFiles;
 
   if (!language || typeof language !== 'string') {
     throw { message: 'language is required as a string' };
@@ -271,6 +300,7 @@ function getJob(
     throw { message: 'tool_call_socket must be a boolean if specified' };
   }
   validateExecuteArguments(args, stdin);
+  files = deduplicateFilesByDestination(files);
   validateExecuteFiles(files);
 
   const rt = getLatestRuntimeMatchingLanguageVersion(language, version);

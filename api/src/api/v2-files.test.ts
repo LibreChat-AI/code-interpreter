@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { config } from '../config';
 import type { TFile } from '../job';
-import { validateExecuteArguments, validateExecuteFiles } from './v2';
+import { validateExecuteArguments, validateExecuteFiles, deduplicateFilesByDestination } from './v2';
 
 function messageOf(fn: () => void): string {
   try {
@@ -84,5 +84,37 @@ describe('execute file validation', () => {
       { id: 'masked', storage_session_id: 'masked-session', name: 'copy/a.csv', input_cache_key: key },
     ];
     expect(() => validateExecuteFiles(files)).not.toThrow();
+  });
+
+  test('deduplicateFilesByDestination keeps the first occurrence and drops subsequent duplicates', () => {
+    const files: TFile[] = [
+      { name: 'data.csv', content: 'first' },
+      { name: 'data.csv', content: 'second' },
+      { name: 'other.csv', content: 'unique' },
+      { name: 'data.csv', content: 'third' },
+    ];
+    const result = deduplicateFilesByDestination(files);
+    expect(result).toHaveLength(2);
+    expect(result[0].name).toBe('data.csv');
+    expect(result[0].content).toBe('first');
+    expect(result[1].name).toBe('other.csv');
+  });
+
+  test('deduplicateFilesByDestination returns the same array when there are no duplicates', () => {
+    const files: TFile[] = [
+      { name: 'a.csv', content: 'a' },
+      { name: 'b.csv', content: 'b' },
+    ];
+    const result = deduplicateFilesByDestination(files);
+    expect(result).toHaveLength(2);
+  });
+
+  test('deduplicateFilesByDestination allows validateExecuteFiles to accept previously-duplicate input', () => {
+    const files: TFile[] = [
+      { name: 'data.csv', content: 'first' },
+      { name: 'data.csv', content: 'second' },
+    ];
+    const deduped = deduplicateFilesByDestination(files);
+    expect(() => validateExecuteFiles(deduped)).not.toThrow();
   });
 });
