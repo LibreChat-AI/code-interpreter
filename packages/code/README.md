@@ -300,6 +300,8 @@ admitted root, opt in to `--github-repository-routing checkout` (or
 `LIBRECHAT_CODE_GITHUB_REPOSITORY_ROUTING=checkout`) together with the
 `trusted-vm` command policy. Each command then uses the repository identified
 by its current checkout's local `origin` URL, including linked worktrees.
+The command must set its working directory to that checkout; a shell `cd`
+inside a command does not change which credential was selected before launch.
 This does not widen the admitted filesystem roots, but a command able to alter
 a checkout's remote can obtain a token for **any repository where the App is
 installed**. Use this mode only where the machine operator trusts the VM and

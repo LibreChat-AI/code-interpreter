@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, sign } from 'node:crypto';
-import { open } from 'node:fs/promises';
+import { open, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { projectRemote } from './projects.js';
@@ -173,9 +173,16 @@ export async function gitHubRepositoryForCommand(
 ): Promise<string | undefined> {
   const admitted = admittedRepositoryEntry(cwd, repositories);
   if (!admitted) return undefined;
-  return routing === 'checkout'
-    ? gitHubRepositoryForDirectory(cwd, host, signal)
-    : admitted[1];
+  if (routing === 'admitted') return admitted[1];
+  let canonicalCwd: string;
+  try {
+    canonicalCwd = await realpath(cwd);
+  } catch {
+    signal?.throwIfAborted();
+    return undefined;
+  }
+  if (!admittedRepositoryEntry(canonicalCwd, repositories)) return undefined;
+  return gitHubRepositoryForDirectory(canonicalCwd, host, signal);
 }
 
 function base64UrlJson(value: unknown): string {

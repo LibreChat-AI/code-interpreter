@@ -4,6 +4,7 @@ import {
   chmod,
   mkdtemp,
   mkdir,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -461,8 +462,8 @@ test('keeps repository authorization bound to the admitted workspace root', asyn
 });
 
 test('checkout routing follows nested repositories only inside an admitted root', async (t) => {
-  const directory = await mkdtemp(
-    join(tmpdir(), 'librechat-code-github-checkout-'),
+  const directory = await realpath(
+    await mkdtemp(join(tmpdir(), 'librechat-code-github-checkout-')),
   );
   t.after(() => rm(directory, { recursive: true, force: true }));
   const nested = join(directory, 'worktrees', 'other');
@@ -494,6 +495,20 @@ test('checkout routing follows nested repositories only inside an admitted root'
   );
   assert.equal(
     await gitHubRepositoryForCommand(dirname(directory), admitted, 'checkout'),
+    undefined,
+  );
+  const outside = await realpath(
+    await mkdtemp(join(tmpdir(), 'librechat-code-github-outside-')),
+  );
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  execFileSync('git', ['init', outside]);
+  execFileSync('git', [
+    '-C', outside, 'remote', 'add', 'origin', 'git@github.com:acme/outside.git',
+  ]);
+  const escaped = join(directory, 'worktrees', 'escaped');
+  await symlink(outside, escaped);
+  assert.equal(
+    await gitHubRepositoryForCommand(escaped, admitted, 'checkout'),
     undefined,
   );
   assert.equal(

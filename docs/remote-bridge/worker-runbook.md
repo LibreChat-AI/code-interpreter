@@ -336,6 +336,8 @@ command policy. This opt-in resolves the local `origin` URL of each command's
 current checkout, including linked worktrees. It remains inside the admitted
 filesystem root, but anyone able to alter a checkout's remote can select any
 repository where the App is installed; keep the App's installation scope narrow.
+Pass the checkout as the command working directory; changing directories only
+inside the shell cannot change the token chosen before command launch.
 Set `LIBRECHAT_CODE_GITHUB_INSTALLATION_ID` only as a legacy
 fixed-installation fallback; it cannot be combined with checkout routing.
 
