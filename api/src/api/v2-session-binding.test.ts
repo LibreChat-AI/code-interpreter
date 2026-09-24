@@ -281,6 +281,52 @@ describe('per-request session binding', () => {
     }
   });
 
+  test('uses the latest upload without renumbering later unnamed files', async () => {
+    config.session_workspace_enabled = false;
+    config.require_execution_manifest = false;
+
+    const originalPrime = Job.prototype.prime;
+    const originalExecute = Job.prototype.execute;
+    const originalCleanup = Job.prototype.cleanup;
+
+    let primedFiles: Array<{ name: string; content?: string }> = [];
+    Job.prototype.prime = async function captureFiles(): Promise<void> {
+      primedFiles = this.files.map(({ name, content }) => ({ name, content }));
+    };
+    Job.prototype.execute = async function executeWithoutSandbox() {
+      return {} as Awaited<ReturnType<Job['execute']>>;
+    };
+    Job.prototype.cleanup = async function cleanupWithoutFilesystem(): Promise<void> {};
+
+    try {
+      const response = await fetch(`${baseUrl}/api/v2/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          language: testLanguage,
+          version: testVersion,
+          files: [
+            { name: 'main.txt', content: 'source' },
+            { name: 'data.csv', content: 'old upload' },
+            { name: 'data.csv', content: 'new upload' },
+            { content: 'unnamed source' },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(primedFiles).toEqual([
+        { name: 'main.txt', content: 'source' },
+        { name: 'data.csv', content: 'new upload' },
+        { name: 'file3.code', content: 'unnamed source' },
+      ]);
+    } finally {
+      Job.prototype.prime = originalPrime;
+      Job.prototype.execute = originalExecute;
+      Job.prototype.cleanup = originalCleanup;
+    }
+  });
+
   test('a post-prime failure still reports the workspace as dirty', async () => {
     config.session_workspace_enabled = true;
     config.require_execution_manifest = false;
