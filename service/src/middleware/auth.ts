@@ -1,10 +1,12 @@
 import type { Response, NextFunction } from 'express';
 import type { AuthenticatedRequest } from '../types';
+import axios from 'axios';
 import { connection } from '../queue';
 import { isValidId } from '../utils';
 import { env } from '../config';
 import { resolveSessionKey, parseUploadSessionKeyInput, SessionKeyResolutionError } from '../session-key';
 import { authorizeSessionOwnership } from '../session-ownership';
+import { internalServiceHeaders } from '../internal-service-auth';
 import { LibreChatJwtAuthProvider, CodeApiJwtAuthError } from '../auth/librechat-jwt';
 import { applyPrincipal, type CodeApiPrincipal } from '../auth/principal';
 import { applyLocalPrincipal } from '../auth/local';
@@ -184,6 +186,20 @@ export const apiKeyAuth = async (
  * resolves the same key and is authorized; for `'user'` only the
  * uploading user does.
  */
+const isObjectAbsent = async (session_id: string, fileId: string | undefined): Promise<boolean> => {
+  if (!fileId) {
+    return false;
+  }
+  try {
+    await axios.get(`${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}/metadata`, {
+      headers: internalServiceHeaders({ Accept: 'application/json' }),
+    });
+    return false;
+  } catch (error) {
+    return axios.isAxiosError(error) && error.response?.status === 404;
+  }
+};
+
 export const sessionAuth = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void | Response> => {
   const { session_id, fileId } = req.params as { session_id?: string; fileId?: string };
 
@@ -263,6 +279,15 @@ export const sessionAuth = async (req: AuthenticatedRequest, res: Response, next
     return res.status(500).json({ error: 'Internal server error' });
   }
   if (!ownership.authorized) {
+    /* A delete of an object that no longer exists has nothing to protect.
+     * Sessions that predate the durable owner record can never be
+     * authorized, so answering 403 would keep the client retrying a
+     * reference to a file the bucket has already dropped. Report absence
+     * as 404 so the client can retire the reference. */
+    if (isDelete && (await isObjectAbsent(session_id as string, fileId))) {
+      logger.info(`Delete of absent object without ownership record - Session ID: ${session_id} | File ID: ${fileId}`);
+      return res.status(404).json({ error: 'File not found' });
+    }
     logger.error(`Unauthorized ${isDelete ? 'delete' : 'download'}: Cached session key: ${ownership.cachedSessionKey} | Expected session key: ${sessionKey} | Session ID: ${session_id} | File ID: ${fileId} | Reason: ${ownership.reason}`);
     return res.status(403).json({ error: 'Unauthorized' });
   }
