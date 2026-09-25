@@ -512,6 +512,11 @@ metrics:
   enabled: false    # Set to true to create PodMonitors for Prometheus scraping
   interval: "30s"
   scrapeTimeout: "10s"
+  sandboxRunner:
+    # Explicit NetworkPolicy peers allowed to scrape the runner when metrics and
+    # networkPolicy are enabled. Empty preserves worker-only ingress. This port
+    # also serves /execute, so select only trusted Prometheus pods (see README).
+    ingressFrom: []
 
 # =============================================================================
 # NETWORK POLICIES

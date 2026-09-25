@@ -37,6 +37,9 @@ jobs:
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
 
+      - name: Sandbox-runner metrics discovery and network policy
+        run: tests/sandbox_runner_metrics.sh
+
       - name: Bridge pairing rollout safety
         run: tests/bridge_pairing_rollout.sh
 
