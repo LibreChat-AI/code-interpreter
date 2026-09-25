@@ -46,10 +46,100 @@ import {
 const router = express.Router();
 const SYNTHETIC_PRINCIPAL_SOURCE = 'synthetic_test';
 
+/**
+ * Deduplicate files by destination name. Some callers (e.g. LibreChat)
+ * send the same file more than once per request when a user re-uploads a
+ * file in the same conversation. The sandbox rejects duplicate destinations,
+ * which surfaces to the end user as a confusing "sandbox is down" error.
+ * Keeps the latest occurrence, preserving the order of surviving files.
+ */
+export function deduplicateFilesByDestination(files: TFile[]): TFile[] {
+  if (files.length > config.max_input_files) {
+    throw { message: `files cannot contain more than ${config.max_input_files} destinations` };
+  }
+  const seen = new Set<string>();
+  const deduped: TFile[] = [];
+  for (let i = files.length - 1; i >= 0; i--) {
+    const file = files[i];
+    // Validate even entries that would otherwise be dropped as duplicates.
+    const destination = validateExecuteFile(file, i);
+    if (seen.has(destination)) continue;
+    seen.add(destination);
+    // Manifest claims use original indices; Job would otherwise renumber this file.
+    deduped.push(file.name ? file : { ...file, name: destination });
+  }
+  deduped.reverse();
+  if (deduped.length < files.length) {
+    logger.warn(
+      { original: files.length, deduped: deduped.length },
+      'Deduplicated file list before validation',
+    );
+  }
+  return deduped;
+}
+
 function existingDestinationConflictMessage(existing: string, destination: string): string {
   return existing === destination
     ? `files contains duplicate destination "${destination}"`
     : `files contains conflicting destinations "${existing}" and "${destination}"`;
+}
+
+function validateExecuteFile(value: TFile, i: number): string {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw { message: `files[${i}] must be an object` };
+  }
+  const file = value as TFile;
+  const inline = typeof file.content === 'string';
+  const byRef = typeof file.id === 'string' && file.id.length > 0;
+  if (inline === byRef) {
+    throw {
+      message: `files[${i}] must contain exactly one of non-empty id or string content`,
+    };
+  }
+  if (file.id !== undefined && !byRef) {
+    throw { message: `files[${i}].id must be a non-empty string if provided` };
+  }
+  if (byRef) {
+    if (typeof file.storage_session_id !== 'string' || file.storage_session_id.length === 0) {
+      throw { message: `files[${i}].storage_session_id is required as a non-empty string for file refs` };
+    }
+  } else if (file.storage_session_id !== undefined || file.input_cache_key !== undefined) {
+    throw {
+      message: `files[${i}] inline content cannot include storage_session_id or input_cache_key`,
+    };
+  }
+  if (file.name !== undefined && typeof file.name !== 'string') {
+    throw { message: `files[${i}].name must be a string if provided` };
+  }
+  if (
+    file.encoding !== undefined
+    && !(['base64', 'hex', 'utf8'] as const).includes(file.encoding)
+  ) {
+    throw { message: `files[${i}].encoding must be base64, hex, or utf8 if provided` };
+  }
+  if (file.entity_id !== undefined && typeof file.entity_id !== 'string') {
+    throw { message: `files[${i}].entity_id must be a string if provided` };
+  }
+  if (
+    file.input_cache_key !== undefined &&
+    (
+      typeof file.input_cache_key !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(file.input_cache_key)
+    )
+  ) {
+    throw { message: `files[${i}].input_cache_key must be a 64-character lowercase hex digest` };
+  }
+  const destination = file.name || `file${i}.code`;
+  try {
+    validateFilePath(destination, '/tmp/codeapi-request-validation');
+  } catch (error) {
+    throw {
+      message: error instanceof Error
+        ? `files[${i}].name is invalid: ${error.message}`
+        : `files[${i}].name is invalid`,
+    };
+  }
+  return destination;
 }
 
 export function validateExecuteFiles(files: TFile[]): void {
@@ -58,60 +148,7 @@ export function validateExecuteFiles(files: TFile[]): void {
   }
   const destinations = new Set<string>();
   for (const [i, value] of files.entries()) {
-    if (value == null || typeof value !== 'object' || Array.isArray(value)) {
-      throw { message: `files[${i}] must be an object` };
-    }
-    const file = value as TFile;
-    const inline = typeof file.content === 'string';
-    const byRef = typeof file.id === 'string' && file.id.length > 0;
-    if (inline === byRef) {
-      throw {
-        message: `files[${i}] must contain exactly one of non-empty id or string content`,
-      };
-    }
-    if (file.id !== undefined && !byRef) {
-      throw { message: `files[${i}].id must be a non-empty string if provided` };
-    }
-    if (byRef) {
-      if (typeof file.storage_session_id !== 'string' || file.storage_session_id.length === 0) {
-        throw { message: `files[${i}].storage_session_id is required as a non-empty string for file refs` };
-      }
-    } else if (file.storage_session_id !== undefined || file.input_cache_key !== undefined) {
-      throw {
-        message: `files[${i}] inline content cannot include storage_session_id or input_cache_key`,
-      };
-    }
-    if (file.name !== undefined && typeof file.name !== 'string') {
-      throw { message: `files[${i}].name must be a string if provided` };
-    }
-    if (
-      file.encoding !== undefined
-      && !(['base64', 'hex', 'utf8'] as const).includes(file.encoding)
-    ) {
-      throw { message: `files[${i}].encoding must be base64, hex, or utf8 if provided` };
-    }
-    if (file.entity_id !== undefined && typeof file.entity_id !== 'string') {
-      throw { message: `files[${i}].entity_id must be a string if provided` };
-    }
-    if (
-      file.input_cache_key !== undefined &&
-      (
-        typeof file.input_cache_key !== 'string' ||
-        !/^[0-9a-f]{64}$/.test(file.input_cache_key)
-      )
-    ) {
-      throw { message: `files[${i}].input_cache_key must be a 64-character lowercase hex digest` };
-    }
-    const destination = file.name || `file${i}.code`;
-    try {
-      validateFilePath(destination, '/tmp/codeapi-request-validation');
-    } catch (error) {
-      throw {
-        message: error instanceof Error
-          ? `files[${i}].name is invalid: ${error.message}`
-          : `files[${i}].name is invalid`,
-      };
-    }
+    const destination = validateExecuteFile(value, i);
     const conflict = [...destinations].find(
       existing =>
         existing === destination ||
@@ -251,12 +288,13 @@ function getJob(
   runtimeSessionHeader?: string | string[],
 ): Job {
   const {
-    session_id, language, version, args, stdin, files,
+    session_id, language, version, args, stdin, files: rawFiles,
     compile_memory_limit, run_memory_limit,
     compile_timeout,
     run_cpu_time, compile_cpu_time,
     env_vars,
   } = body;
+  let files = rawFiles;
 
   if (!language || typeof language !== 'string') {
     throw { message: 'language is required as a string' };
@@ -271,6 +309,7 @@ function getJob(
     throw { message: 'tool_call_socket must be a boolean if specified' };
   }
   validateExecuteArguments(args, stdin);
+  files = deduplicateFilesByDestination(files);
   validateExecuteFiles(files);
 
   const rt = getLatestRuntimeMatchingLanguageVersion(language, version);
