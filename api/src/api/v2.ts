@@ -588,9 +588,13 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
         }
       }
 
+      /* Upload must finish before cleanup, and cleanup must settle before
+       * acknowledging completion. Failed removals retain a quarantined UID. */
+      await cleanupHandler();
       metricsOutcome = 'success';
       return res.status(200).json(result);
     } catch (error) {
+      await cleanupHandler();
       /* Deliberately BEFORE the ValidationError branch below: once priming has
        * completed, the workspace has been written to, so any later failure —
        * including a validation one — leaves state the next execute must not

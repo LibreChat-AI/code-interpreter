@@ -37,6 +37,9 @@ jobs:
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
 
+      - name: Sandbox-runner metrics discovery and network policy
+        run: tests/sandbox_runner_metrics.sh
+
       - name: Bridge pairing rollout safety
         run: tests/bridge_pairing_rollout.sh
 
@@ -120,6 +123,17 @@ jobs:
 
       - name: Bun tests
         run: bun run test
+
+      - name: File-heavy workspace cleanup on tmpfs
+        run: |
+          docker run --rm --user 0 \
+            --tmpfs /tmp:rw,size=1g \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+            --workdir /work/api \
+            --env SANDBOX_CLEANUP_TMPFS_TEST=1 \
+            --env SANDBOX_LOG_LEVEL=error \
+            oven/bun:1.3.14-debian \
+            bun test src/cleanup.integration.test.ts
 
   service-unit-tests:
     name: Service Unit Tests

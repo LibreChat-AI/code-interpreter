@@ -55,6 +55,43 @@ platform rather than templated here: external ingress/service mesh, KEDA-style
 queue-depth autoscaling, and cloud-IAM secret delivery (the env hooks below
 cover all of them).
 
+**Prometheus scraping.** With `metrics.enabled=true` and
+`workerSandbox.enabled=true`, separate PodMonitors scrape the service-worker's `health` port and the sandbox-runner's
+`sandbox` port at `/metrics`. Only the latter exports
+`codeapi_sandbox_post_cleanup_*` metrics. Both inherit `metrics.interval` and
+`metrics.scrapeTimeout`. Install the Prometheus Operator PodMonitor CRD and
+configure Prometheus to discover this release's PodMonitors and namespace.
+
+The default NetworkPolicy allows runner ingress only from service-worker pods.
+To permit scraping with `networkPolicy.enabled=true`, explicitly match your
+trusted Prometheus namespace **and** pod labels in one peer, for example:
+
+```yaml
+metrics:
+  enabled: true
+  sandboxRunner:
+    ingressFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: observability
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+```
+
+Replace the example labels with those of your scraper. The default empty list
+adds no access, even when metrics are enabled. This rule is rendered only while
+metrics and the worker/sandbox tier are enabled. It uses the configured runner
+port and does not change sandbox egress. Any policies on the Prometheus side
+must also allow the scrape connection. When chart network policies are disabled,
+allow scraping through your platform's policies instead.
+
+NetworkPolicy cannot restrict access to an HTTP path. These peers can reach the
+runner's execution endpoint as well, so do not use unrestricted peers such as
+`{}` or disable execution-manifest verification to enable scraping. No extra
+Service or externally exposed port is created. Chart upgrades do not modify
+runner images or require changes to stored session state for this scrape wiring.
+
 **Pairing-fence rollbacks.** Do not use a direct `helm rollback` from a chart
 revision containing the bridge pairing fence to an older revision. Helm runs
 rollback hooks from the target revision, so a pre-fence target cannot stop its

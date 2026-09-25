@@ -14,6 +14,7 @@ import { logger as rootLogger } from './logger';
 import { getRuntimes } from './runtime';
 import { execute } from './nsjail';
 import { config } from './config';
+import { recordCleanupResources } from './cleanup-metrics';
 import { internalServiceHeaders } from './internal-service-auth';
 import { EGRESS_GRANT_HEADER, EGRESS_ERROR_CODE_HEADER } from './egress';
 import { injectTraceHeaders } from './telemetry';
@@ -2716,49 +2717,61 @@ export class Job {
       this.log.info('Cleaning up');
     }
 
-    /* Session mode: the workspace and pinned UID belong to the long-lived
-     * session, not this job. Keep both so the next call sees prior files;
-     * teardown happens on the /terminate hook (or explicit session reset). */
-    if (this.session) {
-      this.workspaceLease = undefined;
-      this.submissionDir = '';
-      this.jobIdentity = undefined;
-      return;
-    }
-
-    let workspaceRemoved = true;
-    const workspaceLease = this.workspaceLease;
-    const jobIdentity = this.jobIdentity;
-
-    if (workspaceLease) {
-      try {
-        workspaceRemoved = await cleanupSandboxWorkspace(workspaceLease);
-      } catch (error) {
-        workspaceRemoved = false;
-        this.log.error({ submissionDir: this.submissionDir, err: error }, 'Failed to clean up');
-      } finally {
+    let outcome: 'removed' | 'preserved' | 'retained' | 'error' = 'error';
+    try {
+      /* Session mode: the workspace and pinned UID belong to the long-lived
+       * session, not this job. Keep both so the next call sees prior files;
+       * teardown happens on the /terminate hook (or explicit session reset). */
+      if (this.session) {
         this.workspaceLease = undefined;
         this.submissionDir = '';
+        this.jobIdentity = undefined;
+        outcome = 'preserved';
+        return;
       }
-    }
 
-    if (jobIdentity) {
-      if (!workspaceLease || workspaceRemoved) {
-        releaseJobIdentity(jobIdentity);
-      } else {
-        retainWorkspaceCleanupUntilRemoved(workspaceLease, () => {
-          releaseJobIdentity(jobIdentity);
-          this.log.info(
-            { uid: jobIdentity.uid, gid: jobIdentity.gid, slot: jobIdentity.slot },
-            'Released retained sandbox job UID slot after workspace cleanup',
-          );
-        });
-        this.log.error(
-          { uid: jobIdentity.uid, gid: jobIdentity.gid, slot: jobIdentity.slot },
-          'Retaining sandbox job UID slot after failed workspace cleanup',
-        );
+      let workspaceRemoved = true;
+      const workspaceLease = this.workspaceLease;
+      const jobIdentity = this.jobIdentity;
+
+      if (workspaceLease) {
+        try {
+          workspaceRemoved = await cleanupSandboxWorkspace(workspaceLease);
+        } catch (error) {
+          workspaceRemoved = false;
+          this.log.error({ submissionDir: this.submissionDir, err: error }, 'Failed to clean up');
+        } finally {
+          this.workspaceLease = undefined;
+          this.submissionDir = '';
+        }
       }
-      this.jobIdentity = undefined;
+
+      if (jobIdentity) {
+        if (!workspaceLease || workspaceRemoved) {
+          releaseJobIdentity(jobIdentity);
+        } else {
+          retainWorkspaceCleanupUntilRemoved(workspaceLease, () => {
+            releaseJobIdentity(jobIdentity);
+            this.log.info(
+              { uid: jobIdentity.uid, gid: jobIdentity.gid, slot: jobIdentity.slot },
+              'Released retained sandbox job UID slot after workspace cleanup',
+            );
+          });
+          this.log.error(
+            { uid: jobIdentity.uid, gid: jobIdentity.gid, slot: jobIdentity.slot },
+            'Retaining sandbox job UID slot after failed workspace cleanup',
+          );
+        }
+        this.jobIdentity = undefined;
+      }
+      outcome = workspaceRemoved ? 'removed' : 'retained';
+    } finally {
+      recordCleanupResources({
+        job: this.uuid,
+        mode: this.session ? 'session' : 'disposable',
+        outcome,
+        suppressSuccessLogs: this.isSynthetic,
+      });
     }
   }
 }
