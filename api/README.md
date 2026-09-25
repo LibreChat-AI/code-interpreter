@@ -139,3 +139,70 @@ validation behavior.
 Roll out this sandbox behavior before enabling timeout forwarding in the
 service's plain `/exec` handler. Older sandboxes reject caps above their local
 runtime limit; older services remain compatible with updated sandboxes.
+
+### Runner memory after cleanup
+
+`Job.cleanup()` emits `Post-cleanup resources` after workspace removal and UID
+release (or quarantine). `/execute` now waits for cleanup before sending success
+or execution-failure responses. Artifact upload still finishes before cleanup.
+Persistent session workspaces and their pinned UIDs are intentionally preserved;
+failed disposable cleanup still quarantines the directory and retains its UID
+for the existing retry path. This change does not alter those policies.
+
+The following metrics use only fixed, low-cardinality labels:
+
+| Metric suffix (prefix `codeapi_sandbox_`) | Meaning |
+| --- | --- |
+| `post_cleanup_memory_bytes{kind}` | `current`, `anon`, `file`, `shmem` at the visible cgroup v2 mount root |
+| `post_cleanup_tmp_used{resource}` | `/tmp` allocated `bytes`, allocated `inodes`, and `is_tmpfs` (0 or 1) |
+| `post_cleanup_workspaces{kind}` | Remaining `disposable`, `session`, and `other` entries in `/tmp/sandbox` |
+| `cleanup_total{mode,outcome}` | Disposable/session cleanup attempts: `removed`, `preserved`, `retained`, `error` |
+| `post_cleanup_sample_success{source}` | Whether `memory`, `tmp`, or `workspaces` was readable on the last sample |
+| `post_cleanup_timestamp_seconds` | When the last cleanup sample was taken |
+
+These are runner-wide **last-cleanup samples**, not live gauges or per-job
+memory attribution. Other jobs can still be running. Reaper-only changes are
+visible on the next job cleanup, not immediately. Interpret the workspace counts
+alongside active executions and the sample timestamp. Unavailable sources are
+reported as unavailable and their old gauge values are removed, never replaced
+with a healthy-looking zero. The structured log also includes active UID slots
+and the number of retained cleanup retries. Synthetic jobs update metrics while
+suppressing successful per-job logs as before.
+
+The visible cgroup root covers the API and sibling NsJail cgroups. The old
+`Post-execution memory` log instead samples `/proc/self/cgroup` **before** job
+cleanup, so it can have a different scope. `file` includes `shmem`; do not add
+them or assume all `file` memory is reclaimable page cache.
+
+`statfs` measures allocation, including deleted-but-open files on the sampled
+mount, without walking user files. The runner's 1 GiB `/tmp` mount is distinct
+from each jail's 20 MiB `/tmp` mount. Its ceiling does not cap all container
+memory. If workspace counts fall but shmem does not, investigate descendant
+processes and retained mounts as well as files. A stable API-process FD count
+alone cannot exclude those cases. Memory requests and HPA settings are unchanged.
+
+#### Cleanup stress tests
+
+Ordinary unit tests cover metrics, unavailable sources, session/disposable
+classification and response ordering. The opt-in stress tests must run in an
+**isolated test container**, never on an active runner:
+
+```bash
+# From api/, with /tmp mounted as tmpfs and per-job chown available:
+SANDBOX_CLEANUP_TMPFS_TEST=1 bun test src/cleanup.integration.test.ts
+
+# Additionally requires the runner's NsJail binary, spec-guard, config,
+# and normal namespace/cgroup permissions. Run this file alone.
+NSJAIL_CONFIG=/sandbox_api/config/sandbox.cfg \
+SANDBOX_CLEANUP_NSJAIL_TEST=1 bun test src/cleanup.integration.test.ts
+```
+
+The first test repeats real Job priming and cleanup with large payloads and many
+small files, checking tmpfs bytes/inodes and UID slots after every iteration.
+CI runs it in a dedicated Bun container with a 1 GiB `/tmp` tmpfs. It does not
+execute NsJail. The second test uses real NsJail jobs covering normal completion,
+timeout and output overflow, including a detached child holding an unlinked file.
+It asserts no processes remain under the job UID before removing its workspace,
+then checks workspace removal and post-cleanup tmpfs allocation. This test is
+skipped unless explicitly enabled; a unit-test pass is not proof of namespace
+teardown on the production kernel.

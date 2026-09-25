@@ -523,10 +523,10 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
   });
   const wallTime = Date.now() - startTime;
 
-  // Log memory metrics after each execution to track potential leaks.
+  // Pre-cleanup diagnostic only: Job.cleanup records post-cleanup resources.
   // Reads from /proc/self/cgroup to find the actual cgroup path, then reads
   // memory.current and memory.stat from that cgroup.
-  // Distinguishes real usage (anon) from reclaimable kernel page cache (file).
+  // `file` includes shmem/tmpfs and is not all reclaimable page cache.
   try {
     const cgroupLine = fs.readFileSync('/proc/self/cgroup', 'utf8').trim();
     // cgroup v2 format: "0::<path>"
