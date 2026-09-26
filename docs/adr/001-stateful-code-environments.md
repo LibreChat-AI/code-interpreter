@@ -52,8 +52,11 @@ worker replacement; the UI and operator documentation must not imply otherwise.
 - The VM requires no inbound internet listener.
 - Code API, not the worker, authenticates LibreChat users and normalizes work.
 - A stolen short-lived credential is insufficient without the worker private
-  key; a stolen private key is insufficient after credential expiry or
-  revocation.
+  key. In the original pairing-only model, a stolen private key is insufficient
+  after credential expiry or revocation. With optional durable machine
+  enrollment and signed credential recovery, the private key itself remains
+  a revocable long-lived credential: access-credential expiry alone does not
+  protect against theft of that key. Revocation invalidates both.
 - Pairing codes and credentials are stored by digest where lookup permits.
 - One configured worker has at most one active fenced assignment.
 - Sandbox isolation and default-deny egress remain the mandatory default;

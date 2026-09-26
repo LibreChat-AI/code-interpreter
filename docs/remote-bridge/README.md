@@ -31,6 +31,36 @@ CODEAPI_BRIDGE_TOKEN=<strong-administrator-bootstrap-secret>
 CODEAPI_BRIDGE_AUTH_MODE=paired
 ```
 
+To opt in to durable machine authorization on every Code API replica, set a
+single stable public **Code API** origin (not the LibreChat URL):
+
+```dotenv
+CODEAPI_BRIDGE_RECOVERY_SERVER_ID=https://code.example.com
+# 0 (default): enrolled machine keys remain authorized until revoked.
+# CODEAPI_BRIDGE_ENROLLMENT_TTL_SECONDS=0
+# CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS=60
+# CODEAPI_BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE=12
+# CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE=30
+```
+
+Omitting the server ID retains the existing pairing and refresh behavior and
+hides the recovery routes. Deploy the compatible Code API version to **all**
+replicas before setting this value and enrolling workers again. Older Code API
+replicas can still pair or refresh a worker but do not write durable enrollment;
+they must not serve device login or recovery requests. Only a pairing redeemed
+after this option is enabled has a recoverable key. Updating Code API alone
+does not make old workers reconnect automatically: the CLI must also implement
+this recovery protocol in the later worker release.
+
+Store Redis state durably across restarts (for example, persistent Redis with
+AOF enabled, a managed persistent Redis service, and backups). Revocation and
+machine enrollment share that state across replicas; do not configure eviction
+of authorization keys. If enrollment state is missing, credentials minted under
+that enrollment fail closed, and the worker must be explicitly enrolled again.
+Restoring a backup from *before* a revocation can revive trust; reconcile
+revocations after recovery from backup. Use a distinct server ID for each Code
+API deployment and keep it stable when the endpoint changes behind a proxy.
+
 Use `strict` instead of `affinity` if every request must include a runtime
 session hint. In hardened mode, startup requires the bridge token to be at least
 32 bytes. `PTC_MODE=blocking` is rejected; replay mode is required because a
@@ -226,7 +256,24 @@ execution.
   atomically on their first redemption attempt.
 - Worker credentials expire after fifteen minutes and are bound to an Ed25519
   public key. Exact-request signatures include the HTTP method, path, body
-  digest, timestamp, nonce, and credential.
+  digest, timestamp, nonce, and credential. With recovery enabled, redeeming a
+  pairing also persists a separate machine authorization and its public key in
+  Redis without a TTL by default; an operator can instead set a bounded
+  enrollment lifetime.
+- `POST /v1/bridge/workers/:workerId/credentials/challenge` accepts
+  `{ "protocolVersion": 1 }` without an administrator token and returns a
+  single-use, short-lived challenge with the configured server ID, worker ID,
+  enrollment generation, operation and expiry. The enrolled key signs that
+  entire challenge using `signBridgeRecovery` from `@librechat/code`'s identity
+  module. `POST .../credentials/recover` accepts the challenge fields plus
+  `signature` and returns a new short-lived credential. Creation and proof
+  attempts are bounded in shared Redis; HTTP 429 means back off.
+- Recovery and revocation are atomic Redis transitions across API replicas.
+  A missing, revoked, expired or superseded enrollment never creates new
+  credentials. Recovery only restores transport authentication. It does not
+  clear assignment fences, worker or workspace quarantine, or uncertain
+  execution state. The worker private key is a durable, revocable credential;
+  expiry of an access credential alone does **not** protect against key theft.
 - Accepted proof nonces cannot be replayed, credentials rotate before expiry,
   and an administrator can revoke the active worker identity immediately.
 - Assignment leases bind to a stable paired identity rather than an individual

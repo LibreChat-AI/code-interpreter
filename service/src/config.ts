@@ -426,6 +426,19 @@ export const env = {
   BRIDGE_AUTH_MODE: bridgeAuthMode,
   /** Enrollment and lease credential shared only with the configured worker. */
   BRIDGE_TOKEN: process.env.CODEAPI_BRIDGE_TOKEN ?? '',
+  /** Opt-in stable HTTPS origin of this Code API deployment (shared by all replicas). */
+  BRIDGE_RECOVERY_SERVER_ID: process.env.CODEAPI_BRIDGE_RECOVERY_SERVER_ID ?? '',
+  /** Zero preserves machine authorization until explicit revocation. */
+  BRIDGE_ENROLLMENT_TTL_SECONDS: Number(process.env.CODEAPI_BRIDGE_ENROLLMENT_TTL_SECONDS ?? 0),
+  BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS: Number(
+    process.env.CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS ?? 60,
+  ),
+  BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE: Number(
+    process.env.CODEAPI_BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE ?? 12,
+  ),
+  BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE: Number(
+    process.env.CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE ?? 30,
+  ),
   /**
    * Runtime session affinity for stateful sandbox backends.
    * - `stateless` (default): no runtime sessions; `runtime_session_hint` ignored.

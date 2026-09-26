@@ -310,6 +310,77 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     }
   }));
 
+  router.post('/workers/:workerId/credentials/challenge', asyncRoute(async (req, res) => {
+    if (options.authMode !== 'paired' || !options.pairings.recoveryEnabled) {
+      res.status(404).json({ error: 'Machine recovery is disabled' });
+      return;
+    }
+    const workerId = req.params.workerId;
+    if (!validWorkerId(workerId) || !configuredWorker(workerId) ||
+      !isRecord(req.body) || req.body.protocolVersion !== BRIDGE_PROTOCOL_VERSION) {
+      res.status(400).json({ error: 'Invalid machine recovery challenge request' });
+      return;
+    }
+    try {
+      const challenge = await options.pairings.createRecoveryChallenge(workerId);
+      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ...challenge });
+    } catch (error) {
+      if (error instanceof BridgePairingError) {
+        res.status(error.code === 'RECOVERY_RATE_LIMITED' ? 429 : 401)
+          .json({ error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
+  }));
+
+  router.post('/workers/:workerId/credentials/recover', asyncRoute(async (req, res) => {
+    if (options.authMode !== 'paired' || !options.pairings.recoveryEnabled) {
+      res.status(404).json({ error: 'Machine recovery is disabled' });
+      return;
+    }
+    const workerId = req.params.workerId;
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      !validWorkerId(workerId) || !configuredWorker(workerId) ||
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      body.operation !== 'credential.recover' ||
+      typeof body.serverId !== 'string' || body.serverId.length > 256 ||
+      typeof body.enrollmentGeneration !== 'string' ||
+      !/^[A-Za-z0-9_-]{24}$/.test(body.enrollmentGeneration) ||
+      typeof body.challenge !== 'string' ||
+      !/^[A-Za-z0-9_-]{43}$/.test(body.challenge) ||
+      typeof body.expiresAt !== 'string' || body.expiresAt.length > 64 ||
+      typeof body.signature !== 'string' ||
+      !/^[A-Za-z0-9_-]{86}$/.test(body.signature)
+    ) {
+      res.status(400).json({ error: 'Invalid machine recovery proof' });
+      return;
+    }
+    try {
+      const credential = await options.pairings.recoverCredential(
+        workerId,
+        {
+          operation: 'credential.recover',
+          serverId: body.serverId,
+          workerId,
+          enrollmentGeneration: body.enrollmentGeneration,
+          challenge: body.challenge,
+          expiresAt: body.expiresAt,
+        },
+        body.signature,
+      );
+      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ...credential });
+    } catch (error) {
+      if (error instanceof BridgePairingError) {
+        res.status(error.code === 'RECOVERY_RATE_LIMITED' ? 429 : 401)
+          .json({ error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
+  }));
+
   router.post(
     '/workers/:workerId/revoke',
     adminAuth,
