@@ -479,11 +479,16 @@ it still advertises named environments.
 
 ### Expired bridge credential
 
-A running worker refreshes its short-lived credential automatically. If a
-machine is offline long enough that refresh can no longer authenticate, issue
-a fresh one-time pairing for the same worker ID and redeem it with a newly
-generated keypair. Reusing the worker ID preserves the LibreChat environment
-record and its agent assignments; creating a new ID creates a new environment.
+A running worker refreshes its short-lived credential automatically. With
+Code API durable enrollment enabled, a worker that still has its enrolled
+private key can request a short-lived challenge and recover a new access
+credential without manual re-pairing. The current CLI does **not** yet invoke
+that endpoint automatically; update it when worker reconnect support ships.
+Until then, or if enrollment is missing or revoked, use the one-time operator
+pairing fallback. A new pairing replaces the Code API worker identity and may
+require LibreChat environment reauthorization; reusing a worker ID alone does
+not guarantee preservation of its LibreChat environment or agent assignments.
+Never clear quarantine or workspace fences as part of credential recovery.
 
 ### Failed environment setup or uncertain mutation
 
