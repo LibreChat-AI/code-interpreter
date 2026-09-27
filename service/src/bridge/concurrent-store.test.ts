@@ -357,6 +357,51 @@ test('same-root work waits while another root progresses', async () => {
   await Promise.all([nextA, b]);
 });
 
+test('a long same-root queue allowance does not extend slot or assignment TTLs', async () => {
+  await register();
+  const active = dispatch('a');
+  const activeAssignment = await store.lease(
+    workerId, incarnationId, 1000, undefined, undefined, 0,
+  );
+  const controller = new AbortController();
+  const queued = store.dispatchWorkspaceTool({
+    workerId,
+    signal: controller.signal,
+    deadlineAtMs: Date.now() + 300_000,
+    executionTimeoutMs: 305_000,
+    request: { protocolVersion: 1, operation: 'read_file', workspaceId: 'a', path: 'second.txt' },
+  });
+  void queued.catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await settle(activeAssignment!);
+  await active;
+
+  const assignment = await store.lease(
+    workerId, incarnationId, 1000, undefined, undefined, 0,
+  );
+  if (assignment == null) {
+    controller.abort();
+    await queued.catch(() => undefined);
+    throw new Error('Queued request was not leased');
+  }
+  expect(assignment.request).toMatchObject({ path: 'second.txt' });
+  try {
+    const expiresAtMs = Date.parse(assignment.expiresAt);
+    const slotExpiresAtMs = Number(await redis.hget(
+      `codeapi:bridge:v1:worker:${workerId}:workspace-slots`, 'e:0',
+    ));
+    expect(slotExpiresAtMs).toBeGreaterThan(expiresAtMs + 28_000);
+    expect(slotExpiresAtMs).toBeLessThan(expiresAtMs + 32_000);
+    const assignmentTtlMs = await redis.pttl(`codeapi:bridge:v1:assignment:${assignment.assignmentId}`);
+    const remainingMs = expiresAtMs - Date.now();
+    expect(assignmentTtlMs).toBeGreaterThan(remainingMs + 28_000);
+    expect(assignmentTtlMs).toBeLessThan(remainingMs + 32_000);
+  } finally {
+    await settle(assignment);
+    await queued;
+  }
+});
+
 test('conversation worktrees on one source use independent capacity lanes', async () => {
   await register();
   const firstId = 'a'.repeat(64);

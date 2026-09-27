@@ -161,6 +161,72 @@ test('execution receives a fresh budget after waiting and the lock covers long c
   await second;
 });
 
+test('a long queue allowance does not extend serial lock or assignment TTLs after admission', async () => {
+  await register();
+  const active = dispatch('first');
+  const activeAssignment = await store.lease(workerId, incarnationId, 1000);
+  const controller = new AbortController();
+  const queued = dispatch('second', controller, 300_000, 305_000);
+  void queued.catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await settle(activeAssignment);
+  await active;
+
+  const assignment = await store.lease(workerId, incarnationId, 1000);
+  if (assignment == null) {
+    controller.abort();
+    await queued.catch(() => undefined);
+    throw new Error('Queued request was not leased');
+  }
+  expect(assignment.request).toMatchObject({ path: 'second' });
+  try {
+    const expiresAtMs = Date.parse(assignment.expiresAt);
+    for (const key of [
+      `codeapi:bridge:v1:worker:${workerId}:lock`,
+      `codeapi:bridge:v1:worker:${workerId}:lock:incarnation`,
+      `codeapi:bridge:v1:assignment:${assignment.assignmentId}`,
+    ]) {
+      const ttlMs = await redis.pttl(key);
+      const remainingMs = expiresAtMs - Date.now();
+      expect(ttlMs).toBeGreaterThan(remainingMs + 28_000);
+      expect(ttlMs).toBeLessThan(remainingMs + 32_000);
+    }
+  } finally {
+    await settle(assignment);
+    await queued;
+  }
+});
+
+test('absolute-deadline callers keep only their remaining deadline in the serial lock TTL', async () => {
+  await register();
+  const active = dispatch('first');
+  const activeAssignment = await store.lease(workerId, incarnationId, 1000);
+  const controller = new AbortController();
+  const queued = dispatch('absolute', controller, 2_500);
+  void queued.catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 1450));
+  await settle(activeAssignment);
+  await active;
+
+  const assignment = await store.lease(workerId, incarnationId, 1000);
+  if (assignment == null) {
+    controller.abort();
+    await queued.catch(() => undefined);
+    throw new Error('Queued request was not leased');
+  }
+  expect(assignment.request).toMatchObject({ path: 'absolute' });
+  try {
+    const remainingMs = Date.parse(assignment.expiresAt) - Date.now();
+    expect(remainingMs).toBeGreaterThan(0);
+    const ttlMs = await redis.pttl(`codeapi:bridge:v1:worker:${workerId}:lock`);
+    expect(ttlMs).toBeGreaterThan(remainingMs + 28_000);
+    expect(ttlMs).toBeLessThan(remainingMs + 31_000);
+  } finally {
+    await settle(assignment);
+    await queued;
+  }
+});
+
 test('execution expires independently of an unused queue allowance', async () => {
   await register();
   const completion = dispatch('short', new AbortController(), 5000, 150);

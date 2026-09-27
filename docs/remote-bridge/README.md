@@ -243,7 +243,8 @@ execution.
   and five minutes while the HTTP caller remains connected. Disconnects cancel
   waiting, and admitted work receives a separate execution budget. A shorter
   client or proxy timeout can end the wait sooner; Code API does not receive an
-  absolute caller deadline.
+  absolute caller deadline. See [BYOM worker admission](../byom-worker-admission.md)
+  for the caller and proxy timeout requirements.
 - Dynamic workers are fenced to their server-issued tenant before assignment.
 - Each assignment has an absolute deadline, generation, and random lease token.
 - Settlements with the wrong worker, generation, token, or expired deadline are

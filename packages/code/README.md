@@ -780,11 +780,17 @@ Legacy requests without a conversation identity continue to use the selected
 source root. Older Code API deployments do not negotiate the capability, so the
 worker omits it until every request path understands the isolation boundary.
 
-Admission waits at most 30 seconds. A `WORKSPACE_QUEUE_TIMEOUT` response (HTTP
-503, `Retry-After: 1`) means the operation was not assigned or started; wait for
+On an updated Code API, admission waits up to the smaller of `JOB_TIMEOUT` and
+five minutes while the HTTP caller remains connected; older Code API versions
+waited at most 30 seconds. A `WORKSPACE_QUEUE_TIMEOUT` response (HTTP 503,
+`Retry-After: 1`) means the operation was not assigned or started; wait for
 capacity before submitting it again. This is distinct from `ASSIGNMENT_EXPIRED`
 or a transport timeout after dispatch, where execution may have occurred and
 mutations must not be blindly retried. No automatic retry is added by this policy.
+Align the client's per-attempt timeout and any proxy with the queue **plus**
+execution budget before relying on the longer wait. See the
+[BYOM worker admission guide](../../docs/byom-worker-admission.md) for the
+current client limitation and the timeout calculations.
 
 Keep the existing URL, pairing/identity, and network policy configuration.
 The primary root keeps its configured workspace ID (default `primary`). Repeat

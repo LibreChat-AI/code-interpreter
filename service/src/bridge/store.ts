@@ -863,10 +863,6 @@ export class RedisBridgeStore {
 
     const assignmentId = randomBytes(18).toString('base64url');
     const leaseToken = randomBytes(32).toString('base64url');
-    // The lock is acquired before admission finishes; it must outlive the later execution deadline.
-    const ttlSeconds = assignmentTtlSeconds(
-      args.deadlineAtMs + (args.executionTimeoutMs ?? 0),
-    );
     const lockIncarnationId = registration.incarnationId;
     let assignment: StoredAssignment | undefined;
     let enqueueAttempted = false;
@@ -931,6 +927,14 @@ export class RedisBridgeStore {
           );
           continue;
         }
+        // A queued request may have waited nearly its full admission budget.
+        // Reserve for the *remaining* absolute deadline or a fresh execution
+        // budget, not the original queue window plus execution again.
+        const ttlSeconds = assignmentTtlSeconds(
+          args.executionTimeoutMs === undefined
+            ? args.deadlineAtMs
+            : Date.now() + args.executionTimeoutMs,
+        );
         if (workspaceSlots != null) {
           workspaceLeaseSlot = await this.dispatchCommand(
             () =>
@@ -1070,7 +1074,7 @@ export class RedisBridgeStore {
             enqueueAttempted = true;
             return this.enqueueForActiveIncarnation(
               assignment!,
-              ttlSeconds,
+              assignmentTtlSeconds(Date.parse(assignment!.expiresAt)),
               readyToken,
             );
           },
