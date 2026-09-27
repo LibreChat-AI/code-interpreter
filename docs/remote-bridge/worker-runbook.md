@@ -338,6 +338,15 @@ filesystem root, but anyone able to alter a checkout's remote can select any
 repository where the App is installed; keep the App's installation scope narrow.
 Pass the checkout as the command working directory; changing directories only
 inside the shell cannot change the token chosen before command launch.
+For a trusted VM that needs to switch among repositories in the same installed
+account or organization inside one command, set
+`LIBRECHAT_CODE_GITHUB_TOKEN_SCOPE=installation`. The resolved installation
+token covers only repositories and permissions GitHub granted to that App
+installation. It refreshes after two minutes so newly approved permissions
+become available without a worker restart. The default is `repository`.
+Commands spanning different accounts or organizations must start in a checkout
+from the target account or organization; a shell `cd` cannot switch the
+installation chosen at command launch.
 Set `LIBRECHAT_CODE_GITHUB_INSTALLATION_ID` only as a legacy
 fixed-installation fallback; it cannot be combined with checkout routing.
 

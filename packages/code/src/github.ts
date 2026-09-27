@@ -41,6 +41,8 @@ export interface GitHubAppCredentialProviderOptions {
   appId: string;
   /** Legacy fixed installation. Omit to resolve the installation per repository. */
   installationId?: string;
+  /** Opt in to all repositories granted to the resolved installation. */
+  tokenScope?: 'repository' | 'installation';
   privateKeyPath: string;
   apiUrl?: string;
   /** Git HTTPS hostname; non-public hosts default to the GHES /api/v3 base. */
@@ -52,6 +54,7 @@ export interface GitHubAppCredentialProviderOptions {
 
 const execFileAsync = promisify(execFile);
 const GITHUB_SHARED_REQUEST_TIMEOUT_MS = 30_000;
+const GITHUB_INSTALLATION_CACHE_MS = 2 * 60_000;
 
 async function waitForShared<T>(
   promise: Promise<T>,
@@ -248,8 +251,10 @@ function createAppJwt(appId: string, privateKey: string, now: Date): string {
 
 export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
   private readonly cached = new Map<string, GitHubCredential>();
+  private readonly cachedAt = new Map<string, number>();
   private readonly inFlight = new Map<string, Promise<GitHubCredential>>();
   private readonly installationIds = new Map<string, string>();
+  private readonly installationIdCachedAt = new Map<string, number>();
   private appLogin?: string;
   private appLoginInFlight?: Promise<string>;
   private actor?: GitHubCredential['actor'];
@@ -428,7 +433,11 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
   ): Promise<string> {
     if (this.options.installationId) return this.options.installationId;
     const cached = this.installationIds.get(repository);
-    if (cached) return cached;
+    const now = (this.options.now ?? (() => new Date()))().getTime();
+    if (
+      cached &&
+      now - (this.installationIdCachedAt.get(repository) ?? 0) < GITHUB_INSTALLATION_CACHE_MS
+    ) return cached;
     const { owner, name } = repositoryName(repository);
     const response = await this.request(
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/installation`,
@@ -448,6 +457,7 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     }
     const installationId = String(body.id);
     this.installationIds.set(repository, installationId);
+    this.installationIdCachedAt.set(repository, now);
     return installationId;
   }
 
@@ -463,31 +473,41 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
     }
     if (repository) repositoryName(repository);
     const now = (this.options.now ?? (() => new Date()))();
-    const key = this.options.installationId ?? repository!;
+    const installationScope = this.options.tokenScope === 'installation';
+    const cachedInstallation = repository && this.installationIds.get(repository);
+    const installationId = installationScope
+      ? cachedInstallation &&
+        now.getTime() - (this.installationIdCachedAt.get(repository!) ?? 0) < GITHUB_INSTALLATION_CACHE_MS
+        ? cachedInstallation
+        : await this.resolveInstallationId(repository ?? '', await this.appJwt(now), signal)
+      : undefined;
+    const key = installationId ?? this.options.installationId ?? repository!;
     const cached = this.cached.get(key);
     if (
       cached?.expiresAt != null &&
-      cached.expiresAt.getTime() - now.getTime() > 5 * 60_000
+      cached.expiresAt.getTime() - now.getTime() > 5 * 60_000 &&
+      (!installationScope || now.getTime() - (this.cachedAt.get(key) ?? 0) < GITHUB_INSTALLATION_CACHE_MS)
     ) {
       return cached;
     }
     const existing = this.inFlight.get(key);
     if (existing) return waitForShared(existing, signal);
     const pending = (async () => {
+      let cacheKey = key;
       const sharedSignal = AbortSignal.timeout(
         GITHUB_SHARED_REQUEST_TIMEOUT_MS,
       );
       const jwt = await this.appJwt(now);
-      const scopedRepository = repository
+      const scopedRepository = !installationScope && repository
         ? repositoryName(repository).name
         : undefined;
-      const installationId = await this.resolveInstallationId(
+      const resolvedInstallationId = installationId ?? await this.resolveInstallationId(
         repository ?? '',
         jwt,
         sharedSignal,
       );
       let response = await this.request(
-        `/app/installations/${installationId}/access_tokens`,
+        `/app/installations/${resolvedInstallationId}/access_tokens`,
         jwt,
         sharedSignal,
         {
@@ -495,18 +515,20 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
           headers: {
             'Content-Type': 'application/json',
           },
-          ...(this.options.installationId
+          ...(this.options.installationId || installationScope
             ? {}
             : { body: JSON.stringify({ repositories: [scopedRepository] }) }),
         },
       );
       if (!this.options.installationId && response.status === 404) {
         this.installationIds.delete(repository!);
+        this.installationIdCachedAt.delete(repository!);
         const refreshedInstallationId = await this.resolveInstallationId(
           repository!,
           jwt,
           sharedSignal,
         );
+        if (installationScope) cacheKey = refreshedInstallationId;
         response = await this.request(
           `/app/installations/${refreshedInstallationId}/access_tokens`,
           jwt,
@@ -516,7 +538,9 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
             headers: {
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ repositories: [scopedRepository] }),
+            ...(installationScope
+              ? {}
+              : { body: JSON.stringify({ repositories: [scopedRepository] }) }),
           },
         );
       }
@@ -553,7 +577,8 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
         expiresAt,
         actor,
       };
-      this.cached.set(key, credential);
+      this.cached.set(cacheKey, credential);
+      this.cachedAt.set(cacheKey, now.getTime());
       return credential;
     })();
     this.inFlight.set(key, pending);

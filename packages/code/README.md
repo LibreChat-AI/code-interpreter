@@ -308,6 +308,17 @@ installed**. Use this mode only where the machine operator trusts the VM and
 the App's installation scope; the default `admitted` mode keeps the startup
 binding. Checkout routing requires an App without a fixed installation ID.
 
+On a trusted VM, `--github-token-scope installation` (or
+`LIBRECHAT_CODE_GITHUB_TOKEN_SCOPE=installation`) mints one token for all
+repositories GitHub grants to the resolved App installation. This lets a
+command started in one checkout push to another repository in the same account
+or organization, including through `cd` or `git -C`, and use organization
+Projects. GitHub still enforces the installation's selected repositories and
+permissions. Tokens are shared by installation, refreshed after two minutes,
+and kept out of the sandbox's readable environment. The default remains
+`repository`. A command crossing to another account or organization still
+needs to start in a checkout belonging to that account or organization.
+
 For compatibility with deployments that intentionally bind a worker to one
 installation, set the optional legacy
 `LIBRECHAT_CODE_GITHUB_INSTALLATION_ID` fallback.

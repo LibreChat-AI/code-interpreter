@@ -157,6 +157,7 @@ function githubCredentials(args: string[]): {
   mode?: 'app' | 'token';
   repositoryRouting?: boolean;
   checkoutRouting?: boolean;
+  installationTokenScope?: boolean;
   policyIdentity: string;
 } {
   const token = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_TOKEN);
@@ -189,6 +190,18 @@ function githubCredentials(args: string[]): {
   if (routing === 'checkout' && (!hasApp || installationId)) {
     throw new Error(
       'Checkout GitHub repository routing requires a GitHub App without a fixed installation ID',
+    );
+  }
+  const tokenScope =
+    option(args, '--github-token-scope')?.trim().toLowerCase() ??
+    process.env.LIBRECHAT_CODE_GITHUB_TOKEN_SCOPE?.trim().toLowerCase() ??
+    'repository';
+  if (tokenScope !== 'repository' && tokenScope !== 'installation') {
+    throw new Error('GitHub token scope must be repository or installation');
+  }
+  if (tokenScope === 'installation' && (!hasApp || installationId)) {
+    throw new Error(
+      'Installation-scoped GitHub tokens require a GitHub App without a fixed installation ID',
     );
   }
   const configuredHostValue = nonEmpty(
@@ -225,16 +238,19 @@ function githubCredentials(args: string[]): {
       mode: 'app',
       repositoryRouting: !installationId,
       checkoutRouting: routing === 'checkout',
+      installationTokenScope: tokenScope === 'installation',
       policyIdentity: gitHubAuthenticationPolicyIdentity({
         mode: 'app',
         host,
         appId,
         installationId,
-      }) + (routing === 'checkout' ? ':routing:checkout' : ''),
+      }) + (routing === 'checkout' ? ':routing:checkout' : '') +
+        (tokenScope === 'installation' ? ':scope:installation' : ''),
       privateKeyPath,
       provider: new GitHubAppCredentialProvider({
         appId: appId!,
         installationId,
+        tokenScope,
         privateKeyPath: privateKeyPath!,
         host,
         apiUrl,
@@ -566,6 +582,11 @@ async function run(
   if (github.checkoutRouting && commandPolicy.preset !== 'trusted-vm') {
     throw new Error(
       'Checkout GitHub repository routing requires the trusted-vm command policy',
+    );
+  }
+  if (github.installationTokenScope && commandPolicy.preset !== 'trusted-vm') {
+    throw new Error(
+      'Installation-scoped GitHub tokens require the trusted-vm command policy',
     );
   }
   const githubDomains = github.provider
