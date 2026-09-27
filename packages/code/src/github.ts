@@ -56,6 +56,12 @@ const execFileAsync = promisify(execFile);
 const GITHUB_SHARED_REQUEST_TIMEOUT_MS = 30_000;
 const GITHUB_INSTALLATION_CACHE_MS = 2 * 60_000;
 
+class InstallationChangedError extends Error {
+  constructor(readonly installationId: string) {
+    super('GitHub App installation changed while issuing a token');
+  }
+}
+
 async function waitForShared<T>(
   promise: Promise<T>,
   signal?: AbortSignal,
@@ -255,6 +261,10 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
   private readonly inFlight = new Map<string, Promise<GitHubCredential>>();
   private readonly installationIds = new Map<string, string>();
   private readonly installationIdCachedAt = new Map<string, number>();
+  private readonly installationIdInFlight = new Map<
+    string,
+    Promise<{ id: string; jwt: string }>
+  >();
   private appLogin?: string;
   private appLoginInFlight?: Promise<string>;
   private actor?: GitHubCredential['actor'];
@@ -428,37 +438,80 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
 
   private async resolveInstallationId(
     repository: string,
-    jwt: string,
     signal?: AbortSignal,
-  ): Promise<string> {
-    if (this.options.installationId) return this.options.installationId;
+    jwt?: string,
+  ): Promise<{ id: string; jwt?: string }> {
+    if (this.options.installationId) {
+      return { id: this.options.installationId, jwt };
+    }
     const cached = this.installationIds.get(repository);
     const now = (this.options.now ?? (() => new Date()))().getTime();
     if (
       cached &&
       now - (this.installationIdCachedAt.get(repository) ?? 0) < GITHUB_INSTALLATION_CACHE_MS
-    ) return cached;
-    const { owner, name } = repositoryName(repository);
-    const response = await this.request(
-      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/installation`,
-      jwt,
-      signal,
-    );
-    if (!response.ok) {
-      throw new Error(
-        response.status === 404
-          ? `GitHub App is not installed for ${repository}`
-          : `GitHub App installation lookup failed with status ${response.status}`,
+    ) return { id: cached, jwt };
+    const existing = this.installationIdInFlight.get(repository);
+    if (existing) return waitForShared(existing, signal);
+    const pending = (async () => {
+      const sharedSignal = AbortSignal.timeout(GITHUB_SHARED_REQUEST_TIMEOUT_MS);
+      const lookupJwt = jwt ?? await this.appJwt(
+        (this.options.now ?? (() => new Date()))(),
       );
+      const { owner, name } = repositoryName(repository);
+      const response = await this.request(
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/installation`,
+        lookupJwt,
+        sharedSignal,
+      );
+      if (!response.ok) {
+        throw new Error(
+          response.status === 404
+            ? `GitHub App is not installed for ${repository}`
+            : `GitHub App installation lookup failed with status ${response.status}`,
+        );
+      }
+      const body = (await response.json()) as { id?: unknown };
+      if (!Number.isSafeInteger(body.id) || Number(body.id) <= 0) {
+        throw new Error('GitHub App installation response is invalid');
+      }
+      const id = String(body.id);
+      this.installationIds.set(repository, id);
+      this.installationIdCachedAt.set(
+        repository,
+        (this.options.now ?? (() => new Date()))().getTime(),
+      );
+      return { id, jwt: lookupJwt };
+    })();
+    this.installationIdInFlight.set(repository, pending);
+    const clearPending = () => {
+      if (this.installationIdInFlight.get(repository) === pending) {
+        this.installationIdInFlight.delete(repository);
+      }
+    };
+    void pending.then(clearPending, clearPending);
+    return waitForShared(pending, signal);
+  }
+
+  private async waitForCredential(
+    pending: Promise<GitHubCredential>,
+    signal: AbortSignal | undefined,
+    repository: string | undefined,
+    retried: boolean,
+  ): Promise<GitHubCredential> {
+    try {
+      return await waitForShared(pending, signal);
+    } catch (error) {
+      if (!(error instanceof InstallationChangedError) || retried || !repository) {
+        throw error;
+      }
+      // A shared mint can serve several repositories. Never pass its replacement
+      // installation's token to a repository whose grant has not been checked.
+      if (this.installationIds.get(repository) === error.installationId) {
+        this.installationIds.delete(repository);
+        this.installationIdCachedAt.delete(repository);
+      }
+      return this.getCredentialAttempt(signal, repository, true);
     }
-    const body = (await response.json()) as { id?: unknown };
-    if (!Number.isSafeInteger(body.id) || Number(body.id) <= 0) {
-      throw new Error('GitHub App installation response is invalid');
-    }
-    const installationId = String(body.id);
-    this.installationIds.set(repository, installationId);
-    this.installationIdCachedAt.set(repository, now);
-    return installationId;
   }
 
   async getCredential(
@@ -472,16 +525,21 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       );
     }
     if (repository) repositoryName(repository);
-    const now = (this.options.now ?? (() => new Date()))();
+    return this.getCredentialAttempt(signal, repository, false);
+  }
+
+  private async getCredentialAttempt(
+    signal: AbortSignal | undefined,
+    repository: string | undefined,
+    retried: boolean,
+  ): Promise<GitHubCredential> {
+    signal?.throwIfAborted();
     const installationScope = this.options.tokenScope === 'installation';
-    const cachedInstallation = repository && this.installationIds.get(repository);
-    const installationId = installationScope
-      ? cachedInstallation &&
-        now.getTime() - (this.installationIdCachedAt.get(repository!) ?? 0) < GITHUB_INSTALLATION_CACHE_MS
-        ? cachedInstallation
-        : await this.resolveInstallationId(repository ?? '', await this.appJwt(now), signal)
+    const installation = installationScope
+      ? await this.resolveInstallationId(repository ?? '', signal)
       : undefined;
-    const key = installationId ?? this.options.installationId ?? repository!;
+    const now = (this.options.now ?? (() => new Date()))();
+    const key = installation?.id ?? this.options.installationId ?? repository!;
     const cached = this.cached.get(key);
     if (
       cached?.expiresAt != null &&
@@ -491,21 +549,20 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       return cached;
     }
     const existing = this.inFlight.get(key);
-    if (existing) return waitForShared(existing, signal);
+    if (existing) return this.waitForCredential(existing, signal, repository, retried);
     const pending = (async () => {
-      let cacheKey = key;
       const sharedSignal = AbortSignal.timeout(
         GITHUB_SHARED_REQUEST_TIMEOUT_MS,
       );
-      const jwt = await this.appJwt(now);
+      const jwt = installation?.jwt ?? await this.appJwt(now);
       const scopedRepository = !installationScope && repository
         ? repositoryName(repository).name
         : undefined;
-      const resolvedInstallationId = installationId ?? await this.resolveInstallationId(
+      const resolvedInstallationId = installation?.id ?? (await this.resolveInstallationId(
         repository ?? '',
-        jwt,
         sharedSignal,
-      );
+        jwt,
+      )).id;
       let response = await this.request(
         `/app/installations/${resolvedInstallationId}/access_tokens`,
         jwt,
@@ -521,14 +578,14 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
         },
       );
       if (!this.options.installationId && response.status === 404) {
+        if (installationScope) throw new InstallationChangedError(resolvedInstallationId);
         this.installationIds.delete(repository!);
         this.installationIdCachedAt.delete(repository!);
-        const refreshedInstallationId = await this.resolveInstallationId(
+        const refreshedInstallationId = (await this.resolveInstallationId(
           repository!,
-          jwt,
           sharedSignal,
-        );
-        if (installationScope) cacheKey = refreshedInstallationId;
+          jwt,
+        )).id;
         response = await this.request(
           `/app/installations/${refreshedInstallationId}/access_tokens`,
           jwt,
@@ -577,8 +634,11 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
         expiresAt,
         actor,
       };
-      this.cached.set(cacheKey, credential);
-      this.cachedAt.set(cacheKey, now.getTime());
+      this.cached.set(key, credential);
+      this.cachedAt.set(
+        key,
+        (this.options.now ?? (() => new Date()))().getTime(),
+      );
       return credential;
     })();
     this.inFlight.set(key, pending);
@@ -586,7 +646,7 @@ export class GitHubAppCredentialProvider implements GitHubCredentialProvider {
       if (this.inFlight.get(key) === pending) this.inFlight.delete(key);
     };
     void pending.then(clearPending, clearPending);
-    return waitForShared(pending, signal);
+    return this.waitForCredential(pending, signal, repository, retried);
   }
 }
 
