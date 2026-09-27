@@ -20,6 +20,8 @@ import {
 } from '../bridge/selection';
 import { principalWorkspaceInstanceId } from '../bridge/workspace-instance';
 
+const MAX_WORKSPACE_QUEUE_WAIT_MS = 5 * 60_000;
+
 interface WorkspaceToolsRouterOptions {
   store: Pick<RedisBridgeStore, 'dispatchWorkspaceTool'>;
   backend: 'http' | 'lambda-microvm' | 'remote-bridge';
@@ -50,14 +52,18 @@ export function bridgeStoreStatus(error: BridgeStoreError): number {
 }
 
 export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions): Router {
-  const queueBudgetMs = options.queueTimeoutMs ?? 30_000;
-  if (!Number.isSafeInteger(queueBudgetMs) || queueBudgetMs < 1 || queueBudgetMs > 30_000) {
-    throw new RangeError('Workspace queue timeout must be between 1 and 30000 milliseconds');
-  }
   if (options.timeoutMs !== undefined && (
     !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1
   )) {
     throw new RangeError('Workspace execution timeout must be a positive safe integer');
+  }
+  // The HTTP disconnect cancels waiting; this bounds admission while the caller remains connected.
+  const queueBudgetMs = options.queueTimeoutMs ?? Math.min(
+    options.timeoutMs ?? 30_000,
+    MAX_WORKSPACE_QUEUE_WAIT_MS,
+  );
+  if (!Number.isSafeInteger(queueBudgetMs) || queueBudgetMs < 1 || queueBudgetMs > MAX_WORKSPACE_QUEUE_WAIT_MS) {
+    throw new RangeError('Workspace queue timeout must be between 1 and 300000 milliseconds');
   }
   const router = Router();
 
@@ -86,13 +92,13 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
       const principalRequest: WorkspaceToolRequest = req.body.workspaceInstanceId == null
         ? req.body
         : {
-            ...req.body,
-            workspaceInstanceId: principalWorkspaceInstanceId({
-              instanceId: req.body.workspaceInstanceId,
-              tenantId: principal.tenantId,
-              principalId: principal.userId,
-            }),
-          };
+          ...req.body,
+          workspaceInstanceId: principalWorkspaceInstanceId({
+            instanceId: req.body.workspaceInstanceId,
+            tenantId: principal.tenantId,
+            principalId: principal.userId,
+          }),
+        };
       const request: WorkspaceToolRequest = principalRequest.operation === 'execute_command'
         ? { ...principalRequest, timeoutMs: Math.min(
           principalRequest.timeoutMs ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS,

@@ -67,13 +67,16 @@ test('binds instance admission to the authenticated tenant and user while preser
   expect(dispatched[1]?.workspaceInstanceId).toBeUndefined();
 });
 
-test.each<[WorkspaceToolRequest, number, number?]>([
-  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 300_000 }, 305_000, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 6000, 1000],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, 600_000],
-])('separates the admission deadline from execution budget for %j', async (request, expectedExecution, ceiling) => {
+test.each<[WorkspaceToolRequest, number, number?, number?]>([
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, 125_000, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 90_000 }, 95_000, 125_000, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 300_000 }, 305_000, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 6000, 1000, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, 600_000, undefined],
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, 125_000, 5000],
+])('separates the admission deadline from execution budget for %j', async (request, expectedExecution, ceiling, queueTimeoutMs) => {
   const app = express();
   app.use(json());
   app.use((req, _res, next) => {
@@ -86,6 +89,7 @@ test.each<[WorkspaceToolRequest, number, number?]>([
   app.use(createWorkspaceToolsRouter({
     backend: 'remote-bridge', configuredWorkerId: 'user-worker', dynamicWorkers: false,
     timeoutMs: ceiling,
+    queueTimeoutMs,
     store: { async dispatchWorkspaceTool(args) {
       executionBudget = args.executionTimeoutMs;
       if (args.request.operation === 'execute_command') commandTimeout = args.request.timeoutMs;
@@ -103,8 +107,19 @@ test.each<[WorkspaceToolRequest, number, number?]>([
   await response.json();
   expect(executionBudget).toBe(expectedExecution);
   if (request.operation === 'execute_command') expect(commandTimeout).toBe(expectedExecution - 5000);
-  expect(queueRemaining).toBeGreaterThan(29_000);
-  expect(queueRemaining).toBeLessThanOrEqual(30_000);
+  const expectedQueueBudget = queueTimeoutMs ?? Math.min(ceiling ?? 30_000, 300_000);
+  expect(queueRemaining).toBeGreaterThan(expectedQueueBudget - 1000);
+  expect(queueRemaining).toBeLessThanOrEqual(expectedQueueBudget);
+});
+
+test.each([0, 300_001, Number.POSITIVE_INFINITY])('rejects an unbounded queue override (%s)', (queueTimeoutMs) => {
+  expect(() => createWorkspaceToolsRouter({
+    backend: 'remote-bridge',
+    configuredWorkerId: 'user-worker',
+    dynamicWorkers: false,
+    queueTimeoutMs,
+    store: { async dispatchWorkspaceTool() { throw new Error('must not dispatch'); } },
+  })).toThrow('Workspace queue timeout must be between 1 and 300000 milliseconds');
 });
 
 test('rejects new workspace dispatches while the service is shutting down', async () => {
@@ -404,7 +419,7 @@ test.each([
       status: expectedStatus,
       errorCode,
       outcome: 'completed',
-      deadlineBudgetMs: 60_000,
+      deadlineBudgetMs: 330_000,
       dispatchDurationMs: expect.any(Number),
     }),
   );
@@ -486,6 +501,7 @@ test('logs a disconnected dispatch once without inventing HTTP 200', async () =>
   const closed = Promise.withResolvers<void>();
   const settlementGate = Promise.withResolvers<void>();
   let dispatchAborted = false;
+  let queueRemaining: number | undefined;
   let closeConnection = (): void => { throw new Error('connection not ready'); };
   app.use(json());
   app.use((req, res, next) => {
@@ -499,8 +515,10 @@ test('logs a disconnected dispatch once without inventing HTTP 200', async () =>
       backend: 'remote-bridge',
       configuredWorkerId: 'user-worker',
       dynamicWorkers: true,
+      timeoutMs: 125_000,
       store: {
-        async dispatchWorkspaceTool({ signal }) {
+        async dispatchWorkspaceTool({ deadlineAtMs, signal }) {
+          queueRemaining = deadlineAtMs - Date.now();
           started.resolve();
           return await new Promise((_resolve, reject) => {
             signal.addEventListener(
@@ -531,6 +549,7 @@ test('logs a disconnected dispatch once without inventing HTTP 200', async () =>
   closeConnection();
   await expect(response).rejects.toThrow();
   await closed.promise;
+  expect(queueRemaining).toBeGreaterThan(120_000);
   expect(dispatchAborted).toBe(true);
   expect(logSpy).not.toHaveBeenCalled();
   settlementGate.resolve();
