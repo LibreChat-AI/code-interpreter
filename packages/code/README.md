@@ -791,17 +791,22 @@ Legacy requests without a conversation identity continue to use the selected
 source root. Older Code API deployments do not negotiate the capability, so the
 worker omits it until every request path understands the isolation boundary.
 
-On an updated Code API, admission waits up to the smaller of `JOB_TIMEOUT` and
-five minutes while the HTTP caller remains connected; older Code API versions
-waited at most 30 seconds. A `WORKSPACE_QUEUE_TIMEOUT` response (HTTP 503,
+On an updated Code API, admission waits up to 30 seconds without the
+`X-LibreChat-Workspace-Queue-Wait-Ms` request header. A caller may advertise a
+positive integer millisecond allowance up to five minutes, capped by any server
+queue ceiling. This allowance is separate from the `JOB_TIMEOUT` execution
+budget and cannot outlast a shorter client or proxy timeout. A
+`WORKSPACE_QUEUE_TIMEOUT` response (HTTP 503,
 `Retry-After: 1`) means the operation was not assigned or started; wait for
 capacity before submitting it again. This is distinct from `ASSIGNMENT_EXPIRED`
 or a transport timeout after dispatch, where execution may have occurred and
 mutations must not be blindly retried. No automatic retry is added by this policy.
-Align the client's per-attempt timeout and any proxy with the queue **plus**
-execution budget before relying on the longer wait. See the
+Align the client's per-attempt timeout and every proxy with the queue **plus**
+execution, settlement, and delivery budget before relying on a longer wait.
+LibreChat keeps the 30-second admission allowance unless its longer total HTTP
+budget is explicitly enabled and the live ingress path is verified. See the
 [BYOM worker admission guide](../../docs/byom-worker-admission.md) for the
-current client limitation and the timeout calculations.
+timeout calculations.
 
 Keep the existing URL, pairing/identity, and network policy configuration.
 The primary root keeps its configured workspace ID (default `primary`). Repeat

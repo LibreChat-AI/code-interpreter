@@ -124,6 +124,32 @@ test('an expired queued call never reaches the worker and does not strand later 
   await third;
 });
 
+test('an already-expired workspace deadline is a definite queue timeout before registration', async () => {
+  await register();
+  await expect(dispatch('expired-before-read', new AbortController(), -1)).rejects.toMatchObject({
+    code: 'WORKSPACE_QUEUE_TIMEOUT',
+  });
+  expect(await redis.zcard(`codeapi:bridge:v1:worker:${workerId}:admission`)).toBe(0);
+  expect(await store.lease(workerId, incarnationId, 20)).toBeUndefined();
+});
+
+test('expiry during the registration read never becomes an ambiguous assignment error', async () => {
+  await register();
+  const registrationRead = spyOn(redis, 'mget').mockImplementation(async () => {
+    await new Promise(resolve => setTimeout(resolve, 25));
+    throw new Error('registration read outlived its queue budget');
+  });
+  try {
+    await expect(dispatch('expired-during-read', new AbortController(), 1)).rejects.toMatchObject({
+      code: 'WORKSPACE_QUEUE_TIMEOUT',
+    });
+  } finally {
+    registrationRead.mockRestore();
+  }
+  expect(await redis.zcard(`codeapi:bridge:v1:worker:${workerId}:admission`)).toBe(0);
+  expect(await store.lease(workerId, incarnationId, 20)).toBeUndefined();
+});
+
 test('a queued request is rejected if the worker withdraws its capability', async () => {
   await register();
   const first = dispatch('first');

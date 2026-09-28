@@ -5,8 +5,13 @@ The limit is 32 admitted requests per worker, including the active request. When
 the limit is reached, the workspace endpoint returns HTTP 429 with
 `WORKER_QUEUE_FULL`. A different worker has an independent admission queue.
 
-The Code API workspace HTTP endpoint allows up to the smaller of `JOB_TIMEOUT`
-and five minutes for admission while the caller stays connected. After admission
+The Code API workspace HTTP endpoint allows 30 seconds for admission when the
+request has no `X-LibreChat-Workspace-Queue-Wait-Ms` header. A caller can
+advertise a positive integer allowance in milliseconds through that header,
+up to five minutes and any configured server queue ceiling. An invalid or
+out-of-range value is rejected before dispatch. This queue budget is
+independent of `JOB_TIMEOUT`; a shorter client or proxy deadline still ends
+the wait. After admission
 and worker validation, a separate execution deadline starts. Commands receive
 their requested timeout (30 seconds by default, up to five minutes), capped by
 the operator's `JOB_TIMEOUT`, plus five seconds to settle the result. Other
@@ -29,22 +34,27 @@ Existing workers still execute one assignment at a time. Parallel execution acro
 workspaces requires separate lease claims and isolated native sandbox contexts;
 this admission change does not advertise that capability.
 
-Clients and reverse proxies must allow queue time plus execution/settlement time
-and five seconds for HTTP delivery. With the default five-minute `JOB_TIMEOUT`,
-that is at least 335 seconds for non-command tools, 340 seconds for default
-commands, and 610 seconds for five-minute commands. With a smaller `JOB_TIMEOUT`,
-use `min(JOB_TIMEOUT, 300s)` for the queue, plus `min(JOB_TIMEOUT, 30s)` for other
+Clients and reverse proxies must allow the admitted queue budget plus
+execution/settlement time and five seconds for HTTP delivery. With the default
+five-minute `JOB_TIMEOUT` and no queue header, that is at least 65 seconds for
+non-command tools, 70 seconds for default commands, and 340 seconds for
+five-minute commands. At the maximum advertised five-minute queue allowance,
+those totals become 335, 340, and 610 seconds respectively. With a smaller
+`JOB_TIMEOUT`, use the advertised allowance (or 30 seconds without a header),
+bounded by the server queue ceiling, plus `min(JOB_TIMEOUT, 30s)` for other
 operations or `min(JOB_TIMEOUT, requested command timeout) + 5s` for commands,
-plus five seconds for delivery.
+plus five seconds for delivery. The caller should advertise only the queue time
+left after reserving execution, settlement, and delivery under its own HTTP
+deadline; Code API does not receive that absolute deadline.
 
-At the time of this change, LibreChat's `getWorkspaceToolTimeoutMs` still budgets
-only 30 seconds for a single admission attempt (65/70/340 seconds in total).
-Its `maxQueueWaitMs` is a retry horizon after a typed capacity rejection, **not**
-a per-attempt HTTP timeout. Updating Code API alone therefore does not guarantee
-the full wait. An earlier client, tool, or proxy timeout disconnects the request;
-if work was already admitted, a mutation may have run and must not be blindly
-retried. Match LibreChat's per-attempt timeout and each intermediary to the new
-budget before relying on it. Existing workers do not need an update.
+LibreChat's `maxQueueWaitMs` is a retry horizon after a typed capacity
+rejection, **not** a per-attempt HTTP timeout. Without its opt-in
+`maxRequestTimeoutMs`, LibreChat keeps a 30-second admission allowance per
+attempt. Enabling a longer client budget requires LibreChat's header support on
+every API replica and a timed canary through each intermediary; changing Code
+API alone does not guarantee the full wait. An earlier client, tool, or proxy
+timeout disconnects the request; if work was already admitted, a mutation may
+have run and must not be blindly retried. Existing workers do not need an update.
 
 Focused regression coverage lives in `service/src/bridge/admission.test.ts`,
 `service/src/bridge/worker-admission.test.ts`,

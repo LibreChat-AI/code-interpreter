@@ -65,6 +65,26 @@ export class BridgeStoreError extends Error {
   }
 }
 
+function classifyPreEnqueueExpiry(
+  error: unknown,
+  args: { workspaceRequest?: WorkspaceToolRequest; workspaceId?: string; signal: AbortSignal },
+): unknown {
+  // A queue deadline reached before the assignment enqueue attempt is a
+  // definite non-execution, including expiry during the initial Redis reads.
+  if (
+    (args.workspaceRequest != null || args.workspaceId != null) &&
+    !args.signal.aborted &&
+    error instanceof BridgeStoreError &&
+    error.code === 'ASSIGNMENT_EXPIRED'
+  ) {
+    return new BridgeStoreError(
+      'WORKSPACE_QUEUE_TIMEOUT',
+      'Workspace capacity was unavailable before the queue deadline. The operation was not started. Wait for active work to finish or select an independent workspace on a machine with available capacity.',
+    );
+  }
+  return error;
+}
+
 interface StoredAssignment extends CodeBridgeAssignment {
   leaseTokenHash: string;
   workerIdentityId?: string;
@@ -778,12 +798,17 @@ export class RedisBridgeStore {
         'Invalid workspace execution budget',
       );
     }
-    this.assertDispatchActive(args.signal, args.deadlineAtMs);
-    const dispatchable = await this.dispatchCommand(
-      () => this.dispatchableRegistration(args.workerId),
-      args,
-      'Bridge worker registration read',
-    );
+    let dispatchable: Awaited<ReturnType<typeof this.dispatchableRegistration>>;
+    try {
+      this.assertDispatchActive(args.signal, args.deadlineAtMs);
+      dispatchable = await this.dispatchCommand(
+        () => this.dispatchableRegistration(args.workerId),
+        args,
+        'Bridge worker registration read',
+      );
+    } catch (error) {
+      throw classifyPreEnqueueExpiry(error, args);
+    }
     if (dispatchable == null) {
       throw new BridgeStoreError(
         'WORKER_OFFLINE',
@@ -844,17 +869,20 @@ export class RedisBridgeStore {
         `Bridge worker ${args.workerId} does not advertise programmatic execution for the selected workspace`,
       );
     }
-    if (
-      args.runtimeSessionId !== undefined &&
-      (await this.dispatchCommand(
-        () =>
-          this.redis.exists(
-            workspaceQuarantineKey(args.workerId, args.runtimeSessionId ?? ''),
-          ),
-        args,
-        'Bridge workspace fence read',
-      )) === 1
-    ) {
+    let quarantined = false;
+    const runtimeSessionId = args.runtimeSessionId;
+    if (runtimeSessionId !== undefined) {
+      try {
+        quarantined = (await this.dispatchCommand(
+          () => this.redis.exists(workspaceQuarantineKey(args.workerId, runtimeSessionId)),
+          args,
+          'Bridge workspace fence read',
+        )) === 1;
+      } catch (error) {
+        throw classifyPreEnqueueExpiry(error, args);
+      }
+    }
+    if (quarantined) {
       throw new BridgeStoreError(
         'WORKSPACE_QUARANTINED',
         'Bridge workspace is quarantined after an incomplete result commit',
@@ -1181,15 +1209,7 @@ export class RedisBridgeStore {
       }
     } catch (error) {
       // Once enqueue starts, even a lost Redis response may hide execution.
-      if (
-        admission != null && !enqueueAttempted && !args.signal.aborted &&
-        error instanceof BridgeStoreError && error.code === 'ASSIGNMENT_EXPIRED'
-      ) {
-        throw new BridgeStoreError(
-          'WORKSPACE_QUEUE_TIMEOUT',
-          'Workspace capacity was unavailable before the queue deadline. The operation was not started. Wait for active work to finish or select an independent workspace on a machine with available capacity.',
-        );
-      }
+      if (!enqueueAttempted) throw classifyPreEnqueueExpiry(error, args);
       throw error;
     } finally {
       if (admission != null) {

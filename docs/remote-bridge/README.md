@@ -239,12 +239,14 @@ execution.
   worker. The lower API or worker slot ceiling wins, and assignments sharing
   the same workspace isolation key remain serialized while independent
   conversation worktrees may run concurrently.
-- Workspace tool admission waits for capacity up to the smaller of `JOB_TIMEOUT`
-  and five minutes while the HTTP caller remains connected. Disconnects cancel
-  waiting, and admitted work receives a separate execution budget. A shorter
-  client or proxy timeout can end the wait sooner; Code API does not receive an
-  absolute caller deadline. See [BYOM worker admission](../byom-worker-admission.md)
-  for the caller and proxy timeout requirements.
+- Workspace tool admission waits for capacity up to 30 seconds without a
+  `X-LibreChat-Workspace-Queue-Wait-Ms` header. A caller can advertise a longer
+  per-request allowance, bounded by five minutes and any server queue ceiling.
+  Disconnects cancel waiting, and admitted work receives a separate execution
+  budget capped by `JOB_TIMEOUT`. A shorter client or proxy timeout can end the
+  wait sooner; Code API does not receive an absolute caller deadline. See
+  [BYOM worker admission](../byom-worker-admission.md) for the total-request
+  and proxy timeout requirements.
 - Dynamic workers are fenced to their server-issued tenant before assignment.
 - Each assignment has an absolute deadline, generation, and random lease token.
 - Settlements with the wrong worker, generation, token, or expired deadline are
