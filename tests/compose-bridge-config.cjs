@@ -20,6 +20,7 @@ function render(overrides) {
       CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS: '',
       CODEAPI_BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE: '',
       CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE: '',
+      CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE: '',
       ...overrides,
     },
   }));
@@ -38,6 +39,7 @@ for (const overrides of [
     CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS: '90',
     CODEAPI_BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE: '8',
     CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE: '16',
+    CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE: '400',
   },
 ]) {
   const config = render(overrides);
@@ -54,10 +56,12 @@ for (const overrides of [
     assert.equal(env.CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS, overrides.CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS ?? '60');
     assert.equal(env.CODEAPI_BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE, overrides.CODEAPI_BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE ?? '12');
     assert.equal(env.CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE, overrides.CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE ?? '30');
+    assert.equal(env.CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE, overrides.CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE ?? '240');
   }
   for (const name of ['egress_gateway', 'sandbox-runner']) {
     assert.equal(config.services[name].environment.CODEAPI_BRIDGE_TOKEN, undefined);
     assert.equal(config.services[name].environment.CODEAPI_BRIDGE_RECOVERY_SERVER_ID, undefined);
+    assert.equal(config.services[name].environment.CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE, undefined);
   }
   assert.match(JSON.stringify(config.services.redis.command), /--appendonly.*yes/);
   assert.ok(config.services.redis.volumes.some(volume => volume.target === '/data' && volume.type === 'volume'));

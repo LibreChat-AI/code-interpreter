@@ -24,6 +24,7 @@ const PROOF_CLOCK_SKEW_MS = 60_000;
 const DEFAULT_CHALLENGE_TTL_SECONDS = 60;
 const DEFAULT_CHALLENGES_PER_MINUTE = 12;
 const DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE = 30;
+const DEFAULT_UNTRUSTED_RECOVERY_REQUESTS_PER_MINUTE = 240;
 const RECOVERY_START_NONCE_TTL_SECONDS = 3 * 60;
 const LEGACY_SCAN_CLAIM_TTL_MS = 5_000;
 const LEGACY_SCAN_POLL_INTERVAL_MS = 25;
@@ -232,6 +233,8 @@ export interface BridgeRecoveryOptions {
   challengeTtlSeconds?: number;
   maxChallengesPerMinute?: number;
   maxAttemptsPerMinute?: number;
+  /** Shared per-connection-peer cap, separate from machine-signed budgets. */
+  maxUntrustedRequestsPerMinute?: number;
 }
 
 export type BridgeRecoveryChallenge = BridgeRecoveryProofInput;
@@ -304,6 +307,11 @@ function recoveryStartNonceKey(workerId: string, nonce: string): string {
 
 function recoveryChallengeAttemptKey(challenge: string): string {
   return `${PREFIX}:recovery:attempt:${digest(challenge)}`;
+}
+
+function untrustedRecoveryRateKey(peer: string, operation: 'challenge' | 'recover'): string {
+  // Never partition by a caller-supplied worker ID or an untrusted forwarded IP.
+  return `${PREFIX}:recovery:untrusted:${operation}:${digest(peer)}`;
 }
 
 function recoveryRateKey(
@@ -380,6 +388,7 @@ export class RedisBridgePairingStore {
       [recovery.challengeTtlSeconds ?? DEFAULT_CHALLENGE_TTL_SECONDS, 300],
       [recovery.maxChallengesPerMinute ?? DEFAULT_CHALLENGES_PER_MINUTE, 120],
       [recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE, 120],
+      [recovery.maxUntrustedRequestsPerMinute ?? DEFAULT_UNTRUSTED_RECOVERY_REQUESTS_PER_MINUTE, 1200],
     ]) {
       if (!Number.isSafeInteger(value) || value < 0 || value > max) {
         throw new RangeError('Invalid bridge recovery lifetime or rate limit');
@@ -388,7 +397,8 @@ export class RedisBridgePairingStore {
     if (
       (recovery.challengeTtlSeconds ?? DEFAULT_CHALLENGE_TTL_SECONDS) === 0 ||
       (recovery.maxChallengesPerMinute ?? DEFAULT_CHALLENGES_PER_MINUTE) === 0 ||
-      (recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE) === 0
+      (recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE) === 0 ||
+      (recovery.maxUntrustedRequestsPerMinute ?? DEFAULT_UNTRUSTED_RECOVERY_REQUESTS_PER_MINUTE) === 0
     ) {
       throw new RangeError('Bridge recovery challenge lifetime and rate limits must be positive');
     }
@@ -396,6 +406,24 @@ export class RedisBridgePairingStore {
 
   get recoveryEnabled(): boolean {
     return this.recovery != null;
+  }
+
+  async limitUntrustedRecovery(
+    peer: string,
+    operation: 'challenge' | 'recover',
+  ): Promise<void> {
+    if (this.recovery == null) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Machine recovery is disabled');
+    }
+    const allowed = await this.redis.eval(
+      LIMIT_RECOVERY_ATTEMPTS_SCRIPT,
+      1,
+      untrustedRecoveryRateKey(peer, operation),
+      String(this.recovery.maxUntrustedRequestsPerMinute ?? DEFAULT_UNTRUSTED_RECOVERY_REQUESTS_PER_MINUTE),
+    );
+    if (allowed !== 1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many recovery requests from this peer');
+    }
   }
 
   private checkedEnrollment(

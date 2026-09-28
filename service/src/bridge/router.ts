@@ -310,7 +310,25 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     }
   }));
 
-  router.post('/workers/:workerId/credentials/challenge', asyncRoute(async (req, res) => {
+  const untrustedRecoveryLimit = (operation: 'challenge' | 'recover'): RequestHandler =>
+    (req, res, next) => {
+      if (options.authMode !== 'paired' || !options.pairings.recoveryEnabled) {
+        next();
+        return;
+      }
+      // req.ip trusts X-Forwarded-For in our server. Use the connection peer so
+      // untrusted headers and arbitrary worker IDs cannot create new buckets.
+      void options.pairings.limitUntrustedRecovery(req.socket.remoteAddress ?? '', operation)
+        .then(() => next(), (error: unknown) => {
+          if (error instanceof BridgePairingError && error.code === 'RECOVERY_RATE_LIMITED') {
+            res.set('Retry-After', '60').status(429).json({ error: error.message, code: error.code });
+            return;
+          }
+          next(error);
+        });
+    };
+
+  router.post('/workers/:workerId/credentials/challenge', untrustedRecoveryLimit('challenge'), asyncRoute(async (req, res) => {
     if (options.authMode !== 'paired' || !options.pairings.recoveryEnabled) {
       res.status(404).json({ error: 'Machine recovery is disabled' });
       return;
@@ -353,7 +371,7 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     }
   }));
 
-  router.post('/workers/:workerId/credentials/recover', asyncRoute(async (req, res) => {
+  router.post('/workers/:workerId/credentials/recover', untrustedRecoveryLimit('recover'), asyncRoute(async (req, res) => {
     if (options.authMode !== 'paired' || !options.pairings.recoveryEnabled) {
       res.status(404).json({ error: 'Machine recovery is disabled' });
       return;

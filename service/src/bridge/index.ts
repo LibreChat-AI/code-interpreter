@@ -24,6 +24,7 @@ export const bridgePairings = new RedisBridgePairingStore(
       challengeTtlSeconds: env.BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS,
       maxChallengesPerMinute: env.BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE,
       maxAttemptsPerMinute: env.BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE,
+      maxUntrustedRequestsPerMinute: env.BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE,
     }
     : undefined,
 );

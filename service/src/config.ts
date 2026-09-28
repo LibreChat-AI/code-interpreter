@@ -439,6 +439,9 @@ export const env = {
   BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE: Number(
     process.env.CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE ?? 30,
   ),
+  BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE: Number(
+    process.env.CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE ?? 240,
+  ),
   /**
    * Runtime session affinity for stateful sandbox backends.
    * - `stateless` (default): no runtime sessions; `runtime_session_hint` ignored.

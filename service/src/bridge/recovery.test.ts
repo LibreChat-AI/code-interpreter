@@ -344,6 +344,27 @@ describe('durable bridge enrollment', () => {
     }
   });
 
+  test('isolates untrusted recovery limits by socket peer and endpoint from signed machine quotas', async () => {
+    const identity = createBridgeIdentity();
+    const first = recoverableStore({
+      maxUntrustedRequestsPerMinute: 1, maxChallengesPerMinute: 1, maxAttemptsPerMinute: 1,
+    });
+    const second = recoverableStore({
+      maxUntrustedRequestsPerMinute: 1, maxChallengesPerMinute: 1, maxAttemptsPerMinute: 1,
+    });
+    await enroll(first, identity.publicKey);
+    await first.limitUntrustedRecovery('192.0.2.1', 'challenge');
+    await expect(second.limitUntrustedRecovery('192.0.2.1', 'challenge'))
+      .rejects.toMatchObject({ code: 'RECOVERY_RATE_LIMITED' });
+    await expect(second.limitUntrustedRecovery('192.0.2.2', 'challenge'))
+      .resolves.toBeUndefined();
+    await expect(second.limitUntrustedRecovery('192.0.2.1', 'recover'))
+      .resolves.toBeUndefined();
+    expect((await redis.keys('codeapi:bridge:v1:recovery:rate:start:*')).length).toBe(0);
+    const { credential } = await recover(second, identity.privateKey);
+    expect(credential.workerId).toBe(workerId);
+  });
+
   test('only a signed, fresh, unused start request consumes the worker challenge budget', async () => {
     const identity = createBridgeIdentity();
     const outsider = createBridgeIdentity();
@@ -490,6 +511,8 @@ describe('durable bridge enrollment', () => {
       expect(() => recoverableStore({ serverId: invalid })).toThrow();
     }
     expect(() => recoverableStore({ maxAttemptsPerMinute: 0 })).toThrow();
+    expect(() => recoverableStore({ maxUntrustedRequestsPerMinute: 0 })).toThrow();
+    expect(() => recoverableStore({ maxUntrustedRequestsPerMinute: 1201 })).toThrow();
     expect(() => recoverableStore({ challengeTtlSeconds: 301 })).toThrow();
   });
 });

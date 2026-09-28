@@ -21,7 +21,7 @@ import { RedisBridgeStore } from './store';
 const redis = new RedisMock() as unknown as Redis;
 const workerId = 'http-recovery-worker';
 const serverId = 'https://code.example.test';
-let server: Server | undefined;
+const servers: Server[] = [];
 
 function signedStart(privateKey: string): BridgeRecoveryChallengeRequest {
   const request = {
@@ -40,6 +40,7 @@ function signedStart(privateKey: string): BridgeRecoveryChallengeRequest {
 
 async function startRouter(pairings: RedisBridgePairingStore): Promise<string> {
   const app = express();
+  app.set('trust proxy', 1);
   app.use(json());
   app.use('/v1/bridge', createBridgeRouter({
     store: new RedisBridgeStore(redis),
@@ -48,24 +49,30 @@ async function startRouter(pairings: RedisBridgePairingStore): Promise<string> {
     adminToken: 'operator-only',
     configuredWorkerId: workerId,
   }));
-  server = createServer(app);
-  await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+  const server = createServer(app);
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
   return `http://127.0.0.1:${address.port}/v1/bridge/workers/${workerId}/credentials`;
 }
 
-function post(url: string, body: object): Promise<Response> {
+function post(
+  url: string,
+  body: object,
+  headers: Record<string, string> = {},
+): Promise<Response> {
   return fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify(body),
   });
 }
 
 afterEach(async () => {
-  server?.close();
-  server = undefined;
+  await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => {
+    server.close(error => error ? reject(error) : resolve());
+  })));
   await redis.flushall();
 });
 
@@ -123,6 +130,67 @@ describe('machine credential recovery HTTP API', () => {
     const replay = await post(`${baseUrl}/recover`, { ...challenge, signature });
     expect(replay.status).toBe(401);
     await expect(replay.json()).resolves.toMatchObject({ code: 'CHALLENGE_INVALID' });
+  });
+
+  test('limits forged starts before signature work across replicas despite spoofed proxy headers', async () => {
+    const first = new RedisBridgePairingStore(redis, 600, 300, 5_000, '', {
+      serverId, maxUntrustedRequestsPerMinute: 2,
+    });
+    const second = new RedisBridgePairingStore(redis, 600, 300, 5_000, '', {
+      serverId, maxUntrustedRequestsPerMinute: 2,
+    });
+    const identity = createBridgeIdentity();
+    const attacker = createBridgeIdentity();
+    const pairing = await first.issue(workerId);
+    await first.redeem({ workerId, code: pairing.code, publicKey: identity.publicKey });
+    const firstUrl = await startRouter(first);
+    const secondUrl = await startRouter(second);
+    let signatureChecks = 0;
+    for (const store of [first, second]) {
+      const original = store.createRecoveryChallenge.bind(store);
+      store.createRecoveryChallenge = async (
+        ...args
+      ): ReturnType<RedisBridgePairingStore['createRecoveryChallenge']> => {
+        signatureChecks += 1;
+        return original(...args);
+      };
+    }
+
+    const forged = async (url: string, suffix: number): Promise<Response> => post(
+      `${url}/challenge`, signedStart(attacker.privateKey),
+      { 'X-Forwarded-For': `198.51.100.${suffix}` },
+    );
+    const firstResponse = await forged(firstUrl, 1);
+    const secondResponse = await forged(secondUrl, 2);
+    const blocked = await forged(
+      firstUrl.replace(`/workers/${workerId}/`, '/workers/attacker-selected-worker/'),
+      3,
+    );
+    expect([firstResponse.status, secondResponse.status, blocked.status]).toEqual([401, 401, 429]);
+    await expect(blocked.json()).resolves.toMatchObject({ code: 'RECOVERY_RATE_LIMITED' });
+    expect(Number(blocked.headers.get('retry-after'))).toBeGreaterThan(0);
+    expect(signatureChecks).toBe(2);
+    expect(await redis.keys('codeapi:bridge:v1:recovery:rate:start:*')).toEqual([]);
+
+    // Bogus completions use another untrusted bucket, not the worker's signed quota.
+    const fake = {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'credential.recover',
+      serverId,
+      workerId,
+      enrollmentGeneration: 'a'.repeat(24),
+      challenge: randomBytes(32).toString('base64url'),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      signature: 'a'.repeat(86),
+    };
+    const rejected = await post(`${secondUrl}/recover`, fake);
+    expect(rejected.status).toBe(401);
+    expect(await redis.keys('codeapi:bridge:v1:recovery:rate:complete:*')).toEqual([]);
+    const recovered = await post(`${secondUrl}/recover`, fake);
+    expect(recovered.status).toBe(401);
+    const blockedCompletion = await post(`${secondUrl}/recover`, fake);
+    expect(blockedCompletion.status).toBe(429);
+    await expect(blockedCompletion.json()).resolves.toMatchObject({ code: 'RECOVERY_RATE_LIMITED' });
   });
 
   test('limits recovery challenges across two API routers sharing Redis', async () => {

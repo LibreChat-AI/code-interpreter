@@ -41,6 +41,7 @@ CODEAPI_BRIDGE_RECOVERY_SERVER_ID=https://code.example.com
 # CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS=60
 # CODEAPI_BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE=12
 # CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE=30
+# CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE=240
 ```
 
 Omitting the server ID retains the existing pairing and refresh behavior and
@@ -280,7 +281,15 @@ execution.
   `signature` to `POST .../credentials/recover` to obtain a new short-lived
   credential. Invalid proofs are limited per high-entropy challenge; only
   successfully verified, unused proofs consume the machine's shared recovery
-  budget. Both limits live in shared Redis; HTTP 429 means back off.
+  budget. Separately, both recovery endpoints limit all incoming requests per
+  connection peer *before* key verification, including well-formed JSON with
+  malformed or forged proofs; forged headers and worker IDs cannot bypass
+  that limit or consume the signed machine budget. All limits live in shared
+  Redis; HTTP 429 means back off. When a reverse proxy connects to Code API,
+  its clients share that peer's limit. Restrict direct backend access and apply
+  client-IP and global
+  abuse limits at the trusted ingress to keep one proxy peer from becoming a
+  shared bottleneck; do not trust an arbitrary `X-Forwarded-For` on Code API.
 - Recovery and revocation are atomic Redis transitions across API replicas.
   A missing, revoked, expired or superseded enrollment never creates new
   credentials. Recovery only restores transport authentication. It does not
