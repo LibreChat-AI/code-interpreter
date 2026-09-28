@@ -19,6 +19,15 @@ export interface BridgeRequestProofInput {
   body: string;
 }
 
+/** Signed without an access credential before requesting a server recovery challenge. */
+export interface BridgeRecoveryStartProofInput {
+  operation: 'credential.challenge';
+  serverId: string;
+  workerId: string;
+  timestamp: string;
+  nonce: string;
+}
+
 /** Signed separately from access-credential requests, so neither proof can be reused for the other. */
 export interface BridgeRecoveryProofInput {
   operation: 'credential.recover';
@@ -67,6 +76,43 @@ export function verifyBridgeRequest(
     return verify(
       null,
       Buffer.from(canonicalBridgeRequest(input)),
+      publicKey,
+      Buffer.from(signature, 'base64url'),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function canonicalBridgeRecoveryStart(input: BridgeRecoveryStartProofInput): string {
+  return [
+    'librechat-code:bridge-recovery-start:v1',
+    input.operation,
+    input.serverId,
+    input.workerId,
+    input.timestamp,
+    input.nonce,
+  ].join('\n');
+}
+
+export function signBridgeRecoveryStart(
+  privateKey: string,
+  input: BridgeRecoveryStartProofInput,
+): string {
+  return sign(null, Buffer.from(canonicalBridgeRecoveryStart(input)), privateKey).toString(
+    'base64url',
+  );
+}
+
+export function verifyBridgeRecoveryStart(
+  publicKey: string,
+  input: BridgeRecoveryStartProofInput,
+  signature: string,
+): boolean {
+  try {
+    return verify(
+      null,
+      Buffer.from(canonicalBridgeRecoveryStart(input)),
       publicKey,
       Buffer.from(signature, 'base64url'),
     );

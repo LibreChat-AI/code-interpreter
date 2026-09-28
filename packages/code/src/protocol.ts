@@ -759,6 +759,17 @@ export interface BridgeWorkerCredentialResponse {
   expiresAt: string;
 }
 
+/** The enrolled machine signs this request before Code API issues a challenge. */
+export interface BridgeRecoveryChallengeRequest {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'credential.challenge';
+  serverId: string;
+  workerId: string;
+  timestamp: string;
+  nonce: string;
+  signature: string;
+}
+
 /** A short-lived, single-use challenge for an already enrolled machine key. */
 export interface BridgeRecoveryChallengeResponse {
   protocolVersion: BridgeProtocolVersion;

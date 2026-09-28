@@ -316,13 +316,32 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
       return;
     }
     const workerId = req.params.workerId;
-    if (!validWorkerId(workerId) || !configuredWorker(workerId) ||
-      !isRecord(req.body) || req.body.protocolVersion !== BRIDGE_PROTOCOL_VERSION) {
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      !validWorkerId(workerId) || !configuredWorker(workerId) ||
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      body.operation !== 'credential.challenge' ||
+      typeof body.serverId !== 'string' || body.serverId.length > 256 ||
+      body.workerId !== workerId ||
+      typeof body.timestamp !== 'string' || body.timestamp.length > 64 ||
+      typeof body.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.nonce) ||
+      typeof body.signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(body.signature)
+    ) {
       res.status(400).json({ error: 'Invalid machine recovery challenge request' });
       return;
     }
     try {
-      const challenge = await options.pairings.createRecoveryChallenge(workerId);
+      const challenge = await options.pairings.createRecoveryChallenge(
+        workerId,
+        {
+          operation: 'credential.challenge',
+          serverId: body.serverId,
+          workerId,
+          timestamp: body.timestamp,
+          nonce: body.nonce,
+        },
+        body.signature,
+      );
       res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ...challenge });
     } catch (error) {
       if (error instanceof BridgePairingError) {
@@ -838,7 +857,6 @@ router.post(
       }
     }),
   );
-
 
   return router;
 }

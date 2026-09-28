@@ -52,8 +52,13 @@ after this option is enabled has a recoverable key. Updating Code API alone
 does not make old workers reconnect automatically: the CLI must also implement
 this recovery protocol in the later worker release.
 
-Store Redis state durably across restarts (for example, persistent Redis with
-AOF enabled, a managed persistent Redis service, and backups). Revocation and
+Store Redis state durably across restarts. The primary `docker-compose.yaml`
+now uses Redis AOF and a named `/data` volume; preserve that volume when
+recreating the stack. If upgrading a running stack with an in-memory Redis,
+migrate its state before recreating the container: mounting an empty volume
+does **not** preserve active assignments, fences, or earlier revocations. Other
+deployments must provide equivalent durable Redis (for example, a managed
+persistent Redis service and backups). Revocation and
 machine enrollment share that state across replicas; do not configure eviction
 of authorization keys. If enrollment state is missing, credentials minted under
 that enrollment fail closed, and the worker must be explicitly enrolled again.
@@ -260,14 +265,22 @@ execution.
   pairing also persists a separate machine authorization and its public key in
   Redis without a TTL by default; an operator can instead set a bounded
   enrollment lifetime.
-- `POST /v1/bridge/workers/:workerId/credentials/challenge` accepts
-  `{ "protocolVersion": 1 }` without an administrator token and returns a
-  single-use, short-lived challenge with the configured server ID, worker ID,
-  enrollment generation, operation and expiry. The enrolled key signs that
-  entire challenge using `signBridgeRecovery` from `@librechat/code`'s identity
-  module. `POST .../credentials/recover` accepts the challenge fields plus
-  `signature` and returns a new short-lived credential. Creation and proof
-  attempts are bounded in shared Redis; HTTP 429 means back off.
+- `POST /v1/bridge/workers/:workerId/credentials/challenge` does not require
+  an administrator token or an existing access credential, but **does** require
+  the enrolled key. Its JSON body contains `protocolVersion: 1`,
+  `operation: "credential.challenge"`, the configured `serverId`, the matching
+  `workerId`, a fresh UTC ISO `timestamp`, a random 32-byte base64url `nonce`,
+  and `signature` computed with `signBridgeRecoveryStart(privateKey, fields)`
+  from `@librechat/code/identity`. Code API verifies the signed fields and
+  consumes the nonce once before charging the machine's shared challenge
+  budget; a fabricated request cannot exhaust another worker's budget.
+- The response is a short-lived, single-use challenge with the server ID,
+  worker ID, enrollment generation, operation and expiry. Sign those fields
+  with `signBridgeRecovery(privateKey, challenge)` and send the fields plus
+  `signature` to `POST .../credentials/recover` to obtain a new short-lived
+  credential. Invalid proofs are limited per high-entropy challenge; only
+  successfully verified, unused proofs consume the machine's shared recovery
+  budget. Both limits live in shared Redis; HTTP 429 means back off.
 - Recovery and revocation are atomic Redis transitions across API replicas.
   A missing, revoked, expired or superseded enrollment never creates new
   credentials. Recovery only restores transport authentication. It does not

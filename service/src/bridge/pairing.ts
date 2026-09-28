@@ -6,8 +6,15 @@ import {
 
 import type Redis from 'ioredis';
 
-import { verifyBridgeRecovery, verifyBridgeRequest } from '../../../packages/code/src/identity';
-import type { BridgeRecoveryProofInput } from '../../../packages/code/src/identity';
+import {
+  verifyBridgeRecovery,
+  verifyBridgeRecoveryStart,
+  verifyBridgeRequest,
+} from '../../../packages/code/src/identity';
+import type {
+  BridgeRecoveryProofInput,
+  BridgeRecoveryStartProofInput,
+} from '../../../packages/code/src/identity';
 
 const PREFIX = 'codeapi:bridge:v1';
 const DEFAULT_PAIRING_TTL_SECONDS = 10 * 60;
@@ -17,6 +24,7 @@ const PROOF_CLOCK_SKEW_MS = 60_000;
 const DEFAULT_CHALLENGE_TTL_SECONDS = 60;
 const DEFAULT_CHALLENGES_PER_MINUTE = 12;
 const DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE = 30;
+const RECOVERY_START_NONCE_TTL_SECONDS = 3 * 60;
 const LEGACY_SCAN_CLAIM_TTL_MS = 5_000;
 const LEGACY_SCAN_POLL_INTERVAL_MS = 25;
 const LEGACY_SCAN_PENDING = 'pending';
@@ -114,10 +122,12 @@ const CREATE_RECOVERY_CHALLENGE_SCRIPT = `
 if redis.call('GET', KEYS[1]) ~= ARGV[1] or (redis.call('GET', KEYS[4]) or '0') ~= ARGV[4] or redis.call('GET', KEYS[5]) ~= ARGV[6] then
   return 0
 end
+if redis.call('EXISTS', KEYS[6]) == 1 then return -2 end
 local count = redis.call('INCR', KEYS[2])
 if count == 1 then redis.call('EXPIRE', KEYS[2], 60) end
 if count > tonumber(ARGV[2]) then return -1 end
 if redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[5], 'NX') ~= 'OK' then return 0 end
+redis.call('SET', KEYS[6], '1', 'EX', ARGV[7])
 return 1
 `;
 const LIMIT_RECOVERY_ATTEMPTS_SCRIPT = `
@@ -132,6 +142,9 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[2]) ~= ARGV[2
 end
 local stableIdentity = redis.call('GET', KEYS[5])
 if stableIdentity and stableIdentity ~= ARGV[4] then return 0 end
+local count = redis.call('INCR', KEYS[8])
+if count == 1 then redis.call('EXPIRE', KEYS[8], 60) end
+if count > tonumber(ARGV[9]) then return -1 end
 redis.call('DEL', KEYS[2])
 redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[6])
 redis.call('SET', KEYS[4], ARGV[7], 'EX', ARGV[6])
@@ -285,8 +298,20 @@ function recoveryChallengeKey(challenge: string): string {
   return `${PREFIX}:recovery:challenge:${digest(challenge)}`;
 }
 
-function recoveryRateKey(workerId: string, operation: 'start' | 'complete'): string {
-  return `${PREFIX}:recovery:rate:${operation}:${workerId}`;
+function recoveryStartNonceKey(workerId: string, nonce: string): string {
+  return `${PREFIX}:recovery:nonce:${workerId}:${digest(nonce)}`;
+}
+
+function recoveryChallengeAttemptKey(challenge: string): string {
+  return `${PREFIX}:recovery:attempt:${digest(challenge)}`;
+}
+
+function recoveryRateKey(
+  workerId: string,
+  enrollmentGeneration: string,
+  operation: 'start' | 'complete',
+): string {
+  return `${PREFIX}:recovery:rate:${operation}:${workerId}:${enrollmentGeneration}`;
 }
 
 function workerPairingGenerationKey(workerId: string): string {
@@ -653,7 +678,11 @@ export class RedisBridgePairingStore {
     };
   }
 
-  async createRecoveryChallenge(workerId: string): Promise<BridgeRecoveryChallenge> {
+  async createRecoveryChallenge(
+    workerId: string,
+    request: BridgeRecoveryStartProofInput,
+    signature: string,
+  ): Promise<BridgeRecoveryChallenge> {
     if (this.recovery == null) {
       throw new BridgePairingError('ENROLLMENT_INVALID', 'Machine recovery is disabled');
     }
@@ -663,6 +692,18 @@ export class RedisBridgePairingStore {
       workerEnrollmentRequiredKey(workerId),
     );
     const enrollment = this.checkedEnrollment(workerId, raw, pairingGeneration, requiredGeneration);
+    const proofTime = Date.parse(request.timestamp);
+    if (
+      String(request.operation) !== 'credential.challenge' ||
+      request.serverId !== enrollment.serverId ||
+      request.workerId !== workerId ||
+      !/^[A-Za-z0-9_-]{43}$/.test(request.nonce) ||
+      !Number.isFinite(proofTime) ||
+      Math.abs(Date.now() - proofTime) > PROOF_CLOCK_SKEW_MS ||
+      !verifyBridgeRecoveryStart(enrollment.publicKey, request, signature)
+    ) {
+      throw new BridgePairingError('PROOF_INVALID', 'Machine recovery challenge proof is invalid');
+    }
     const challenge: BridgeRecoveryChallenge = {
       operation: 'credential.recover',
       serverId: enrollment.serverId,
@@ -675,19 +716,24 @@ export class RedisBridgePairingStore {
     };
     const created = await this.redis.eval(
       CREATE_RECOVERY_CHALLENGE_SCRIPT,
-      5,
+      6,
       workerEnrollmentKey(workerId),
-      recoveryRateKey(workerId, 'start'),
+      recoveryRateKey(workerId, enrollment.generation, 'start'),
       recoveryChallengeKey(challenge.challenge),
       workerPairingGenerationKey(workerId),
       workerEnrollmentRequiredKey(workerId),
+      recoveryStartNonceKey(workerId, request.nonce),
       raw!,
       String(this.recovery.maxChallengesPerMinute ?? DEFAULT_CHALLENGES_PER_MINUTE),
       JSON.stringify(challenge),
       String(enrollment.pairingGeneration),
       String(this.recovery.challengeTtlSeconds ?? DEFAULT_CHALLENGE_TTL_SECONDS),
       enrollment.generation,
+      String(RECOVERY_START_NONCE_TTL_SECONDS),
     );
+    if (created === -2) {
+      throw new BridgePairingError('PROOF_REPLAYED', 'Machine recovery challenge proof was already used');
+    }
     if (created === -1) {
       throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many machine recovery challenges');
     }
@@ -704,15 +750,6 @@ export class RedisBridgePairingStore {
   ): Promise<BridgeWorkerCredential> {
     if (this.recovery == null) {
       throw new BridgePairingError('ENROLLMENT_INVALID', 'Machine recovery is disabled');
-    }
-    const allowed = await this.redis.eval(
-      LIMIT_RECOVERY_ATTEMPTS_SCRIPT,
-      1,
-      recoveryRateKey(workerId, 'complete'),
-      String(this.recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE),
-    );
-    if (allowed !== 1) {
-      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many machine recovery attempts');
     }
     const challengeKey = recoveryChallengeKey(proof.challenge);
     const [enrollmentRaw, challengeRaw, pairingGeneration, requiredGeneration] = await this.redis.mget(
@@ -752,6 +789,18 @@ export class RedisBridgePairingStore {
     ) {
       throw new BridgePairingError('CHALLENGE_INVALID', 'Machine recovery challenge is invalid or expired');
     }
+    // Invalid signatures can only exhaust the high-entropy challenge they know,
+    // never the enrolled worker's shared quota. The worker-wide counter is
+    // charged inside completion, after the key proof and replay checks.
+    const attempts = await this.redis.eval(
+      LIMIT_RECOVERY_ATTEMPTS_SCRIPT,
+      1,
+      recoveryChallengeAttemptKey(proof.challenge),
+      String(this.recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE),
+    );
+    if (attempts !== 1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many machine recovery attempts');
+    }
     if (!verifyBridgeRecovery(enrollment.publicKey, saved as BridgeRecoveryChallenge, signature)) {
       throw new BridgePairingError('PROOF_INVALID', 'Machine recovery signature is invalid');
     }
@@ -772,7 +821,7 @@ export class RedisBridgePairingStore {
     // enrollment/generation comparison, with no window to recreate trust.
     const issued = await this.redis.eval(
       COMPLETE_RECOVERY_CHALLENGE_SCRIPT,
-      7,
+      8,
       workerEnrollmentKey(workerId),
       challengeKey,
       credentialDigestKey(credentialDigest),
@@ -780,6 +829,7 @@ export class RedisBridgePairingStore {
       workerStableIdentityKey(workerId),
       workerPairingGenerationKey(workerId),
       workerEnrollmentRequiredKey(workerId),
+      recoveryRateKey(workerId, enrollment.generation, 'complete'),
       enrollmentRaw!,
       challengeRaw!,
       String(enrollment.pairingGeneration),
@@ -788,7 +838,11 @@ export class RedisBridgePairingStore {
       String(this.credentialTtlSeconds),
       credentialDigest,
       enrollment.generation,
+      String(this.recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE),
     );
+    if (issued === -1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many machine recoveries');
+    }
     if (issued !== 1) {
       throw new BridgePairingError('CHALLENGE_INVALID', 'Machine recovery challenge is invalid or expired');
     }
