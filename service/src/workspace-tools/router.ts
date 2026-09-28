@@ -21,6 +21,8 @@ import {
 import { principalWorkspaceInstanceId } from '../bridge/workspace-instance';
 
 const MAX_WORKSPACE_QUEUE_WAIT_MS = 5 * 60_000;
+const DEFAULT_WORKSPACE_QUEUE_WAIT_MS = 30_000;
+const WORKSPACE_QUEUE_WAIT_HEADER = 'X-LibreChat-Workspace-Queue-Wait-Ms';
 
 interface WorkspaceToolsRouterOptions {
   store: Pick<RedisBridgeStore, 'dispatchWorkspaceTool'>;
@@ -57,12 +59,10 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
   )) {
     throw new RangeError('Workspace execution timeout must be a positive safe integer');
   }
-  // The HTTP disconnect cancels waiting; this bounds admission while the caller remains connected.
-  const queueBudgetMs = options.queueTimeoutMs ?? Math.min(
-    options.timeoutMs ?? 30_000,
-    MAX_WORKSPACE_QUEUE_WAIT_MS,
-  );
-  if (!Number.isSafeInteger(queueBudgetMs) || queueBudgetMs < 1 || queueBudgetMs > MAX_WORKSPACE_QUEUE_WAIT_MS) {
+  // A configured queue timeout is a ceiling. Legacy callers get 30 seconds even
+  // when their execution timeout is longer; only the per-request header opts in.
+  const queueCeilingMs = options.queueTimeoutMs ?? MAX_WORKSPACE_QUEUE_WAIT_MS;
+  if (!Number.isSafeInteger(queueCeilingMs) || queueCeilingMs < 1 || queueCeilingMs > MAX_WORKSPACE_QUEUE_WAIT_MS) {
     throw new RangeError('Workspace queue timeout must be between 1 and 300000 milliseconds');
   }
   const router = Router();
@@ -88,6 +88,21 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
         });
         return;
       }
+      const advertisedQueueWait = req.header(WORKSPACE_QUEUE_WAIT_HEADER);
+      if (advertisedQueueWait !== undefined && !/^[1-9]\d*$/.test(advertisedQueueWait)) {
+        outcome.errorCode = 'INVALID_WORKSPACE_QUEUE_WAIT';
+        res.status(400).json({ error: 'Invalid workspace queue wait', code: 'INVALID_WORKSPACE_QUEUE_WAIT' });
+        return;
+      }
+      const requestedQueueWaitMs = advertisedQueueWait === undefined
+        ? DEFAULT_WORKSPACE_QUEUE_WAIT_MS
+        : Number(advertisedQueueWait);
+      if (!Number.isSafeInteger(requestedQueueWaitMs) || requestedQueueWaitMs > MAX_WORKSPACE_QUEUE_WAIT_MS) {
+        outcome.errorCode = 'INVALID_WORKSPACE_QUEUE_WAIT';
+        res.status(400).json({ error: 'Invalid workspace queue wait', code: 'INVALID_WORKSPACE_QUEUE_WAIT' });
+        return;
+      }
+      const queueBudgetMs = Math.min(requestedQueueWaitMs, queueCeilingMs);
       outcome.operation = req.body.operation;
       const principalRequest: WorkspaceToolRequest = req.body.workspaceInstanceId == null
         ? req.body

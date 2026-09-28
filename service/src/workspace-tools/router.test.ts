@@ -67,16 +67,17 @@ test('binds instance admission to the authenticated tenant and user while preser
   expect(dispatched[1]?.workspaceInstanceId).toBeUndefined();
 });
 
-test.each<[WorkspaceToolRequest, number, number?, number?]>([
-  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, undefined, undefined],
-  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, 125_000, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, undefined, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 90_000 }, 95_000, 125_000, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 300_000 }, 305_000, undefined, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 6000, 1000, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, 600_000, undefined],
-  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, 125_000, 5000],
-])('separates the admission deadline from execution budget for %j', async (request, expectedExecution, ceiling, queueTimeoutMs) => {
+test.each<[WorkspaceToolRequest, number, number?, number?, number?]>([
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, undefined, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, 125_000, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, undefined, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 90_000 }, 95_000, 125_000, undefined, 90_000],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 300_000 }, 305_000, undefined, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 6000, 1000, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, 600_000, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, 125_000, 5000, 90_000],
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, undefined, undefined, 300_000],
+])('separates the admission deadline from execution budget for %j', async (request, expectedExecution, ceiling, queueTimeoutMs, advertisedQueueWaitMs) => {
   const app = express();
   app.use(json());
   app.use((req, _res, next) => {
@@ -102,12 +103,15 @@ test.each<[WorkspaceToolRequest, number, number?, number?]>([
   const address = server.address();
   if (address == null || typeof address === 'string') throw new Error('Missing listener');
   const response = await fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+    method: 'POST', headers: {
+      'Content-Type': 'application/json',
+      ...(advertisedQueueWaitMs === undefined ? {} : { 'X-LibreChat-Workspace-Queue-Wait-Ms': String(advertisedQueueWaitMs) }),
+    }, body: JSON.stringify(request),
   });
   await response.json();
   expect(executionBudget).toBe(expectedExecution);
   if (request.operation === 'execute_command') expect(commandTimeout).toBe(expectedExecution - 5000);
-  const expectedQueueBudget = queueTimeoutMs ?? Math.min(ceiling ?? 30_000, 300_000);
+  const expectedQueueBudget = Math.min(advertisedQueueWaitMs ?? 30_000, queueTimeoutMs ?? 300_000);
   expect(queueRemaining).toBeGreaterThan(expectedQueueBudget - 1000);
   expect(queueRemaining).toBeLessThanOrEqual(expectedQueueBudget);
 });
@@ -120,6 +124,32 @@ test.each([0, 300_001, Number.POSITIVE_INFINITY])('rejects an unbounded queue ov
     queueTimeoutMs,
     store: { async dispatchWorkspaceTool() { throw new Error('must not dispatch'); } },
   })).toThrow('Workspace queue timeout must be between 1 and 300000 milliseconds');
+});
+
+test.each(['0', '-1', '300001', '1.5', '01', '1, 2', '999999999999999999999'])('rejects invalid per-request queue allowance %j before dispatch', async (queueWait) => {
+  const app = express();
+  app.use(json());
+  app.use((req, _res, next) => {
+    applyPrincipal(req, { userId: 'user-1', tenantId: 'tenant-1', principalSource: 'librechat_jwt', codeWorkerId: 'user-worker' });
+    next();
+  });
+  let dispatched = false;
+  app.use(createWorkspaceToolsRouter({
+    backend: 'remote-bridge', configuredWorkerId: 'user-worker', dynamicWorkers: false,
+    store: { async dispatchWorkspaceTool() { dispatched = true; throw new Error('must not dispatch'); } },
+  }));
+  server = createServer(app);
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Missing listener');
+  const response = await fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-LibreChat-Workspace-Queue-Wait-Ms': queueWait },
+    body: JSON.stringify({ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }),
+  });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ code: 'INVALID_WORKSPACE_QUEUE_WAIT' });
+  expect(dispatched).toBe(false);
 });
 
 test('rejects new workspace dispatches while the service is shutting down', async () => {
@@ -419,7 +449,7 @@ test.each([
       status: expectedStatus,
       errorCode,
       outcome: 'completed',
-      deadlineBudgetMs: 330_000,
+      deadlineBudgetMs: 60_000,
       dispatchDurationMs: expect.any(Number),
     }),
   );
@@ -549,7 +579,8 @@ test('logs a disconnected dispatch once without inventing HTTP 200', async () =>
   closeConnection();
   await expect(response).rejects.toThrow();
   await closed.promise;
-  expect(queueRemaining).toBeGreaterThan(120_000);
+  expect(queueRemaining).toBeGreaterThan(29_000);
+  expect(queueRemaining).toBeLessThanOrEqual(30_000);
   expect(dispatchAborted).toBe(true);
   expect(logSpy).not.toHaveBeenCalled();
   settlementGate.resolve();
