@@ -51,31 +51,33 @@ const SYNTHETIC_PRINCIPAL_SOURCE = 'synthetic_test';
  * send the same file more than once per request when a user re-uploads a
  * file in the same conversation. The sandbox rejects duplicate destinations,
  * which surfaces to the end user as a confusing "sandbox is down" error.
- * Keeps the latest occurrence, preserving the order of surviving files.
+ * Keeps the latest uploaded file at each destination without moving its
+ * original position (the first runnable file is the program entrypoint).
+ * Never replace inline source code with an uploaded file.
  */
 export function deduplicateFilesByDestination(files: TFile[]): TFile[] {
   if (files.length > config.max_input_files) {
     throw { message: `files cannot contain more than ${config.max_input_files} destinations` };
   }
-  const seen = new Set<string>();
-  const deduped: TFile[] = [];
-  for (let i = files.length - 1; i >= 0; i--) {
-    const file = files[i];
-    // Validate even entries that would otherwise be dropped as duplicates.
+  const byDestination = new Map<string, TFile>();
+  for (const [i, file] of files.entries()) {
+    // Validate even entries that would otherwise be replaced by a later upload.
     const destination = validateExecuteFile(file, i);
-    if (seen.has(destination)) continue;
-    seen.add(destination);
-    // Manifest claims use original indices; Job would otherwise renumber this file.
-    deduped.push(file.name ? file : { ...file, name: destination });
+    const previous = byDestination.get(destination);
+    if (previous && (typeof previous.content === 'string' || typeof file.content === 'string')) {
+      throw { message: `files contains duplicate destination "${destination}" involving inline content` };
+    }
+    // Updating a Map value preserves its first position for Job.execute's entrypoint.
+    // Manifest claims use original indices; Job would otherwise renumber unnamed files.
+    byDestination.set(destination, file.name ? file : { ...file, name: destination });
   }
-  deduped.reverse();
-  if (deduped.length < files.length) {
+  if (byDestination.size < files.length) {
     logger.warn(
-      { original: files.length, deduped: deduped.length },
+      { original: files.length, deduped: byDestination.size },
       'Deduplicated file list before validation',
     );
   }
-  return deduped;
+  return [...byDestination.values()];
 }
 
 function existingDestinationConflictMessage(existing: string, destination: string): string {

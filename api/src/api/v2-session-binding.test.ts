@@ -289,9 +289,9 @@ describe('per-request session binding', () => {
     const originalExecute = Job.prototype.execute;
     const originalCleanup = Job.prototype.cleanup;
 
-    let primedFiles: Array<{ name: string; content?: string }> = [];
+    let primedFiles: Array<{ name: string; id?: string; content?: string }> = [];
     Job.prototype.prime = async function captureFiles(): Promise<void> {
-      primedFiles = this.files.map(({ name, content }) => ({ name, content }));
+      primedFiles = this.files;
     };
     Job.prototype.execute = async function executeWithoutSandbox() {
       return {} as Awaited<ReturnType<Job['execute']>>;
@@ -307,19 +307,59 @@ describe('per-request session binding', () => {
           version: testVersion,
           files: [
             { name: 'main.txt', content: 'source' },
-            { name: 'data.csv', content: 'old upload' },
-            { name: 'data.csv', content: 'new upload' },
+            { name: 'data.csv', id: 'old-upload', storage_session_id: 'uploads' },
+            { name: 'data.csv', id: 'new-upload', storage_session_id: 'uploads' },
             { content: 'unnamed source' },
           ],
         }),
       });
 
       expect(response.status).toBe(200);
-      expect(primedFiles).toEqual([
-        { name: 'main.txt', content: 'source' },
-        { name: 'data.csv', content: 'new upload' },
-        { name: 'file3.code', content: 'unnamed source' },
-      ]);
+      expect(primedFiles.map(file => file.name)).toEqual(['main.txt', 'data.csv', 'file3.code']);
+      expect(primedFiles[0].content).toBe('source');
+      expect(primedFiles[1].id).toBe('new-upload');
+      expect(primedFiles[2].content).toBe('unnamed source');
+    } finally {
+      Job.prototype.prime = originalPrime;
+      Job.prototype.execute = originalExecute;
+      Job.prototype.cleanup = originalCleanup;
+    }
+  });
+
+  test('rejects an upload targeting the submitted source before binding or priming', async () => {
+    config.session_workspace_enabled = true;
+    config.require_execution_manifest = false;
+
+    const originalPrime = Job.prototype.prime;
+    const originalExecute = Job.prototype.execute;
+    const originalCleanup = Job.prototype.cleanup;
+    let primed = false;
+    Job.prototype.prime = async function trackPrime(): Promise<void> { primed = true; };
+    Job.prototype.execute = async function executeWithoutSandbox() {
+      return {} as Awaited<ReturnType<Job['execute']>>;
+    };
+    Job.prototype.cleanup = async function cleanupWithoutFilesystem(): Promise<void> {};
+
+    try {
+      const response = await fetch(`${baseUrl}/api/v2/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Runtime-Session-Id': 'rt_source_collision' },
+        body: JSON.stringify({
+          language: testLanguage,
+          version: testVersion,
+          files: [
+            { name: 'main.txt', content: 'submitted program' },
+            { name: 'data.csv', id: 'data', storage_session_id: 'uploads' },
+            { name: 'main.txt', id: 'uploaded-program', storage_session_id: 'uploads' },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      expect((await response.json() as { message: string }).message)
+        .toContain('duplicate destination "main.txt"');
+      expect(primed).toBe(false);
+      expect(getBoundSessionWorkspace()).toBeUndefined();
     } finally {
       Job.prototype.prime = originalPrime;
       Job.prototype.execute = originalExecute;
