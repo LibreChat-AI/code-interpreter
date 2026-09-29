@@ -3256,6 +3256,51 @@ for (const [operation, extras] of [
   });
 }
 
+for (const [label, operations, allowed, mayRead] of [
+  ['edit-only worker', ['edit_file'], ['edit_file'], false],
+  ['read denied by workspace', ['read_file', 'edit_file'], ['edit_file'], false],
+  ['read permitted by workspace', ['read_file', 'edit_file'], ['read_file', 'edit_file'], true],
+  ['preview permits full file reads', ['preview_edit', 'edit_file'], ['preview_edit', 'edit_file'], true],
+] as const) {
+  test(`edit diagnostics respect ${label} authorization`, async () => {
+    const source = 'confidential-source-line';
+    let settlement: Record<string, unknown> | undefined;
+    const capabilities = {
+      protocolVersion: 1 as const,
+      operations: [...operations],
+      editFileModes: ['single' as const],
+      workspaces: [{ id: 'primary', operations: [...allowed] }],
+    };
+    const worker = new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1', token: 'worker-secret', workerId: 'vm-1',
+      incarnationId, sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: { statefulWorkspace: true, sandboxProfile: 'nsjail', runtimes: ['bash'],
+        workspaceTools: capabilities },
+      workspaceTools: { capabilities, mutationFailuresAreAtomic: true, async execute() {
+        throw new WorkspaceToolError(`old_text was not found; closest line: "${source}"`, 'EDIT_CONFLICT');
+      } },
+      workspaceMutationQuarantine: mutationQuarantine(),
+      fetchImpl: async (_url, init) => {
+        settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ protocolVersion: 1, accepted: true });
+      },
+    });
+    await worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'edit-source-authorization',
+      workerId: 'vm-1', incarnationId, generation: 4,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 5_000).toISOString(),
+      executionKind: 'workspace_tool',
+      request: { protocolVersion: 1, operation: 'edit_file', workspaceId: 'primary',
+        path: 'notes.txt', oldText: 'missing', newText: 'replacement' },
+    });
+    assert.equal(settlement?.status, 'rejected');
+    assert.equal(settlement?.errorCode, 'EDIT_CONFLICT');
+    assert.equal(String(settlement?.error).includes(source), mayRead);
+  });
+}
+
 test('worker rejects legacy replacement writes outside its advertised mode', async () => {
   let executions = 0;
   let settlement: Record<string, unknown> | undefined;

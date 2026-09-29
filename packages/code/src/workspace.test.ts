@@ -1475,6 +1475,26 @@ test('preview and edit peel equivalent newline wrappers without doubling line br
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), `\uFEFF${preview.content}`);
 });
 
+test('tolerant previews and edits keep source indentation when newText uses a different indent', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-indent-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'header\n  foo   bar\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const edit = {
+    protocolVersion: 1 as const, workspaceId: 'primary', path: 'notes.txt',
+    matching: 'tolerant' as const, oldText: '\n  foo bar', newText: '\n\tbaz qux',
+  };
+  const preview = await tools.execute({ ...edit, operation: 'preview_edit' });
+  assert.equal(preview.operation === 'preview_edit' && preview.content, 'header\n  baz qux\n');
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const result = await tools.execute({ ...edit, operation: 'edit_file' });
+  assert.equal(result.operation === 'edit_file' && result.matches?.[0]?.strategy, 'whitespace-normalized');
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'header\n  baz qux\n');
+});
+
 test('tolerant previews and edits reject missing source boundary newlines without changing the file', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-missing-newline-'));
   t.after(() => rm(root, { recursive: true, force: true }));

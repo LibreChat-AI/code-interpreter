@@ -208,6 +208,22 @@ test('whitespace-normalized matching peels a trailing newline even if adjacent s
   assert.equal(result.text, 'baz qux  \r\nnext');
 });
 
+test('whitespace-normalized matching does not prepend new indentation beside preserved source indentation', () => {
+  const source = 'header\n  foo   bar\n';
+  const result = applyTextEdits(source, [{
+    oldText: '\n  foo bar', newText: '\n\tbaz qux',
+  }], 'tolerant');
+  assert.equal(result.text, 'header\n  baz qux\n');
+  assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+});
+
+test('whitespace-normalized matching does not duplicate differing trailing spaces', () => {
+  const result = applyTextEdits('foo   bar  \nnext', [{
+    oldText: 'foo bar  \n', newText: 'baz qux\t\n',
+  }], 'tolerant');
+  assert.equal(result.text, 'baz qux  \nnext');
+});
+
 test('whitespace-normalized matching peels a leading newline even if adjacent spaces differ', () => {
   const result = applyTextEdits('header\r\n  foo   bar\r\nnext', [{
     oldText: '\n  foo bar', newText: '\nchanged',
@@ -364,6 +380,25 @@ test('tolerant matching still refuses an ambiguous edit', () => {
   assert.match(error.message, /matched 2 locations at lines 1, 3/);
 });
 
+test('exact overlap counts UTF-16 offsets while replaceAll consumes whole characters', () => {
+  const error = rejection(() => applyTextEdits('😀😀😀', [
+    { oldText: '😀😀', newText: 'x' },
+  ]));
+  assert.match(error.message, /matched 2 locations/);
+  const result = applyTextEdits('😀😀😀', [{ oldText: '😀😀', newText: 'x', replaceAll: true }]);
+  assert.equal(result.text, 'x😀');
+  assert.deepEqual(result.matches, [{ strategy: 'exact', occurrences: 1 }]);
+});
+
+test('long overlapping exact matches are counted without repeatedly rescanning the input', () => {
+  const text = 'a'.repeat(450_000);
+  const oldText = 'a'.repeat(220_000);
+  const started = performance.now();
+  const error = rejection(() => applyTextEdits(text, [{ oldText, newText: 'b' }]));
+  assert.match(error.message, /matched 230001 locations/);
+  assert.ok(performance.now() - started < 3_000, 'overlapping ambiguity must be counted in linear time');
+});
+
 test('highly repeated exact matches report the count with bounded line samples', () => {
   const error = rejection(() => applyTextEdits('z'.repeat(200_000), [
     { oldText: 'z', newText: 'y' },
@@ -403,6 +438,24 @@ test('replaceAll still fails when nothing matches', () => {
     applyTextEdits('abc', [{ oldText: 'xyz', newText: '', replaceAll: true }]),
   );
   assert.match(error.message, /old_text was not found/);
+});
+
+test('line diagnostic index follows earlier successful batch edits', () => {
+  const error = rejection(() => applyTextEdits('alpha\nbeta\n', [
+    { oldText: 'not present', newText: 'skip' },
+    { oldText: 'alpha', newText: 'first\nsecond' },
+    { oldText: 'beta\nmissing', newText: 'nope' },
+  ]));
+  assert.match(error.message, /Edit 3: old_text was not found; its first line appears at line 3/);
+});
+
+test('newline-dense files do not materialize millions of line objects across failed batch edits', () => {
+  const source = 'a\n'.repeat(450_000);
+  const edits = Array.from({ length: 80 }, () => ({ oldText: 'missing\ntext', newText: 'other' }));
+  const started = performance.now();
+  const error = rejection(() => applyTextEdits(source, edits));
+  assert.equal(error.failures.length, edits.length);
+  assert.ok(performance.now() - started < 10_000, 'a bounded file must not re-index every failed diagnostic');
 });
 
 test('first-line hints report bounded samples even when the line repeats throughout a file', () => {

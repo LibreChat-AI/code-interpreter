@@ -161,6 +161,19 @@ function errorCode(value: object): string | undefined {
   return undefined;
 }
 
+/** Edit conflicts can include source excerpts, so disclosure needs read or full-preview access. */
+function workspaceCanReadSource(
+  capabilities: BridgeWorkerCapabilities['workspaceTools'],
+  workspaceId: string,
+): boolean {
+  const workspace = capabilities?.workspaces.find((entry) => entry.id === workspaceId);
+  if (!workspace || !capabilities) return false;
+  return (['read_file', 'preview_edit'] as const).some(
+    (operation) => capabilities.operations.includes(operation) &&
+      (workspace.operations == null || workspace.operations.includes(operation)),
+  );
+}
+
 function workspaceCapabilitiesMatch(
   advertised: NonNullable<BridgeWorkerCapabilities['workspaceTools']>,
   executor: NonNullable<BridgeWorkerCapabilities['workspaceTools']>,
@@ -1931,9 +1944,14 @@ export class BridgeWorker {
         error instanceof WorkspaceToolError
           ? { errorCode: error.code }
           : {}),
-        error: (error instanceof Error
-          ? error.message
-          : 'Sandbox execution failed'
+        error: (assignment.executionKind === 'workspace_tool' &&
+          isWorkspaceToolRequest(assignment.request) &&
+          assignment.request.operation === 'edit_file' &&
+          !workspaceCanReadSource(this.activeCapabilities.workspaceTools, assignment.request.workspaceId)
+          ? 'Workspace edit failed; source diagnostics require read access'
+          : error instanceof Error
+            ? error.message
+            : 'Sandbox execution failed'
         ).slice(0, MAX_SETTLEMENT_ERROR_LENGTH),
       };
     }

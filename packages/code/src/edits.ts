@@ -79,12 +79,15 @@ export function applyTextEdits(
   matching: WorkspaceEditMatching = 'exact',
 ): AppliedEdits {
   let working = text;
+  let lineIndex: LineIndex | undefined;
+  const lines = (): LineIndex => (lineIndex ??= new LineIndex(working));
   const matches: WorkspaceEditMatch[] = [];
   const failures: EditFailure[] = [];
   edits.forEach((edit, index) => {
-    const outcome = findEditMatch(working, edit, matching);
+    const outcome = findEditMatch(working, edit, matching, lines);
     if (outcome.status === 'matched') {
       working = replaceRanges(working, outcome.ranges);
+      lineIndex = undefined;
       matches.push({ strategy: outcome.strategy, occurrences: outcome.ranges.length });
       return;
     }
@@ -95,7 +98,7 @@ export function applyTextEdits(
           ? describeAmbiguous(working, outcome.strategy, outcome.count, outcome.starts)
           : outcome.status === 'limit'
             ? 'old_text has too many repetitive line-window candidates; include more surrounding lines or use an exact match'
-            : describeMissing(working, edit.oldText, matching),
+            : describeMissing(working, edit.oldText, matching, lines),
     });
   });
   if (failures.length > 0) {
@@ -108,10 +111,11 @@ function findEditMatch(
   text: string,
   edit: WorkspaceTextEdit,
   matching: WorkspaceEditMatching,
+  lines: () => LineIndex,
 ): MatchOutcome {
   const strategies = matching === 'tolerant' ? TOLERANT_STRATEGIES : EXACT_STRATEGIES;
   for (const find of strategies) {
-    const outcome = find(text, edit);
+    const outcome = find(text, edit, lines);
     if (outcome.status !== 'none') return outcome;
   }
   return { status: 'none' };
@@ -160,13 +164,15 @@ function resolve(
 function findExact(text: string, edit: WorkspaceTextEdit): MatchOutcome {
   if (edit.oldText.length === 0) return { status: 'none' };
   const matches = collectedMatches(text);
-  const step = edit.replaceAll === true ? edit.oldText.length : 1;
-  for (
-    let start = text.indexOf(edit.oldText);
-    start >= 0;
-    start = text.indexOf(edit.oldText, start + step)
-  ) {
-    collectMatch(matches, start, start + edit.oldText.length, edit.newText, edit.replaceAll);
+  const prefix = prefixTable(edit.oldText);
+  let matched = 0;
+  for (let index = 0; index < text.length; index++) {
+    while (matched > 0 && text[index] !== edit.oldText[matched]) matched = prefix[matched - 1];
+    if (text[index] === edit.oldText[matched]) matched++;
+    if (matched !== edit.oldText.length) continue;
+    collectMatch(matches, index - matched + 1, index + 1, edit.newText, edit.replaceAll);
+    // Ambiguity counts overlaps, but replaceAll must consume disjoint ranges.
+    matched = edit.replaceAll === true ? 0 : prefix[matched - 1];
   }
   return resolve('exact', matches, edit.replaceAll);
 }
@@ -181,18 +187,42 @@ interface Line {
   text: string;
 }
 
-function splitLines(text: string): Line[] {
-  const lines: Line[] = [];
-  let start = 0;
-  while (start <= text.length) {
-    const newline = text.indexOf('\n', start);
-    const lineEnd = newline < 0 ? text.length : newline;
-    const end = lineEnd > start && text[lineEnd - 1] === '\r' ? lineEnd - 1 : lineEnd;
-    lines.push({ start, end, next: newline < 0 ? undefined : newline + 1, text: text.slice(start, end) });
-    if (newline < 0) break;
-    start = newline + 1;
+/** One bounded index per source revision, shared by matching and diagnostics. */
+class LineIndex {
+  private readonly newlines: Uint32Array;
+  readonly length: number;
+
+  constructor(private readonly source: string) {
+    this.newlines = new Uint32Array(newlineCount(source));
+    let index = 0;
+    for (let offset = source.indexOf('\n'); offset >= 0; offset = source.indexOf('\n', offset + 1)) {
+      this.newlines[index++] = offset;
+    }
+    // A trailing terminator leaves an empty final line, just as before.
+    this.length = this.newlines.length + 1;
   }
-  return lines;
+
+  start(index: number): number {
+    return index === 0 ? 0 : this.newlines[index - 1] + 1;
+  }
+
+  next(index: number): number | undefined {
+    return index < this.newlines.length ? this.newlines[index] + 1 : undefined;
+  }
+
+  end(index: number): number {
+    const start = this.start(index);
+    const end = index < this.newlines.length ? this.newlines[index] : this.source.length;
+    return end > start && this.source[end - 1] === '\r' ? end - 1 : end;
+  }
+
+  text(index: number): string {
+    return this.source.slice(this.start(index), this.end(index));
+  }
+
+  at(index: number): Line {
+    return { start: this.start(index), end: this.end(index), next: this.next(index), text: this.text(index) };
+  }
 }
 
 /**
@@ -244,7 +274,7 @@ function withLineEnding(value: string, ending: '\r\n' | '\n'): string {
   return ending === '\r\n' ? normalized.replace(/\n/g, '\r\n') : normalized;
 }
 
-function prefixTable<T>(values: readonly T[]): Uint32Array {
+function prefixTable<T>(values: ArrayLike<T>): Uint32Array {
   const prefix = new Uint32Array(values.length);
   for (let index = 1, matched = 0; index < values.length; index++) {
     while (matched > 0 && values[index] !== values[matched]) matched = prefix[matched - 1];
@@ -263,10 +293,11 @@ function findLineWindows(
   text: string,
   edit: WorkspaceTextEdit,
   strategy: 'line-trimmed' | 'indentation-flexible',
+  getLines: () => LineIndex,
 ): MatchOutcome {
   const { lines: needle, throughTerminator } = neededLines(edit.oldText);
   if (needle.every((line) => line.trim().length === 0)) return { status: 'none' };
-  const lines = splitLines(text);
+  const lines = getLines();
   const ending = fileLineEnding(text);
   const needleIndent = strategy === 'indentation-flexible' ? commonIndent(needle) : '';
   const normalizedNeedle = needle.map((line) =>
@@ -284,18 +315,18 @@ function findLineWindows(
   let matched = 0;
   let verifications = 0;
   for (let index = 0; index < lines.length; index++) {
-    const value = strategy === 'line-trimmed' ? lines[index].text.trimEnd() : lines[index].text.trim();
+    const value = strategy === 'line-trimmed' ? lines.text(index).trimEnd() : lines.text(index).trim();
     while (matched > 0 && value !== sought[matched]) matched = prefix[matched - 1];
     if (value === sought[matched]) matched++;
     if (matched !== sought.length) continue;
 
     const first = index - sought.length + 1;
-    const end = throughTerminator ? lines[index].next : lines[index].end;
+    const end = throughTerminator ? lines.next(index) : lines.end(index);
     let windowIndent = '';
     let valid = end !== undefined;
     if (valid && strategy === 'indentation-flexible') {
       if (verifications + needle.length > MAX_LINE_WINDOW_VERIFICATIONS) return { status: 'limit' };
-      const window = lines.slice(first, index + 1);
+      const window = Array.from({ length: needle.length }, (_, offset) => lines.at(first + offset));
       verifications += needle.length;
       windowIndent = commonIndent(window.map((line) => line.text));
       valid = window.every((line, offset) =>
@@ -306,9 +337,9 @@ function findLineWindows(
       const replacement = strategy === 'indentation-flexible'
         ? reindent(edit.newText, needleIndent, windowIndent)
         : edit.newText;
-      const lineFeed = lines[first].next ?? lines[first - 1]?.next;
+      const lineFeed = lines.next(first) ?? (first > 0 ? lines.next(first - 1) : undefined);
       const localEnding = lineFeed === undefined ? ending : lineEndingAt(text, lineFeed - 1);
-      collectMatch(collected, lines[first].start, end!, withLineEnding(replacement, localEnding), edit.replaceAll);
+      collectMatch(collected, lines.start(first), end!, withLineEnding(replacement, localEnding), edit.replaceAll);
     }
     // A replacement cannot consume overlapping lines; ambiguity still counts them.
     matched = valid && edit.replaceAll === true ? 0 : prefix[matched - 1];
@@ -335,12 +366,12 @@ function reindent(value: string, from: string, to: string): string {
     .join('\n');
 }
 
-function findLineTrimmed(text: string, edit: WorkspaceTextEdit): MatchOutcome {
-  return findLineWindows(text, edit, 'line-trimmed');
+function findLineTrimmed(text: string, edit: WorkspaceTextEdit, lines: () => LineIndex): MatchOutcome {
+  return findLineWindows(text, edit, 'line-trimmed', lines);
 }
 
-function findIndentationFlexible(text: string, edit: WorkspaceTextEdit): MatchOutcome {
-  return findLineWindows(text, edit, 'indentation-flexible');
+function findIndentationFlexible(text: string, edit: WorkspaceTextEdit, lines: () => LineIndex): MatchOutcome {
+  return findLineWindows(text, edit, 'indentation-flexible', lines);
 }
 
 function newlineCount(text: string): number {
@@ -384,19 +415,28 @@ function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchO
   let newText = edit.newText.replace(/\r\n/g, '\n');
   if (leading.length > 0 && newText.startsWith(leading)) {
     newText = newText.slice(leading.length);
-  } else if (leadingNewlines === 1 && newText.startsWith('\n')) {
-    // Keep the source's indentation when the caller used different spaces.
-    newText = newText.slice(1);
+  } else if (leadingNewlines > 0) {
+    const newLeading = /^\s*/.exec(newText)?.[0] ?? '';
+    if (newlineCount(newLeading) !== leadingNewlines) return { status: 'none' };
+    // The source's whole newline-and-indent prefix remains outside the token
+    // match. Discard its equivalent from newText, not just the line break.
+    newText = newText.slice(newLeading.length);
   } else if (leading.length > 0) {
     // A token-only replacement cannot remove the source's leading whitespace.
     return { status: 'none' };
   }
   if (trailing.length > 0 && newText.endsWith(trailing)) {
     newText = newText.slice(0, -trailing.length);
-  } else if (trailingNewlines === 1 && newText.endsWith('\n')) {
-    // The source terminator is outside the token range. Preserve any extra
-    // caller-requested line breaks by peeling only the shared one.
-    newText = newText.slice(0, -1);
+  } else if (trailingNewlines > 0) {
+    const newTrailing = /\s*$/.exec(newText)?.[0] ?? '';
+    if (newlineCount(newTrailing) === trailingNewlines) {
+      newText = newText.slice(0, -newTrailing.length);
+    } else if (trailingNewlines === 1 && newTrailing === '\n\n') {
+      // An extra, intentional blank line remains before the source newline.
+      newText = newText.slice(0, -1);
+    } else {
+      return { status: 'none' };
+    }
   } else if (trailing.length > 0) {
     // Likewise do not claim success if the caller meant to remove an ending.
     return { status: 'none' };
@@ -444,7 +484,7 @@ function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchO
   return resolve('whitespace-normalized', collected, edit.replaceAll);
 }
 
-type Strategy = (text: string, edit: WorkspaceTextEdit) => MatchOutcome;
+type Strategy = (text: string, edit: WorkspaceTextEdit, lines: () => LineIndex) => MatchOutcome;
 
 /**
  * Loosest last. Line-window strategies run before whitespace normalization
@@ -514,6 +554,7 @@ function describeMissing(
   text: string,
   oldText: string,
   matching: WorkspaceEditMatching,
+  lines: () => LineIndex,
 ): string {
   const hints: string[] = [];
   const nonBlank = neededLines(oldText).lines.filter((line) => line.trim().length > 0);
@@ -524,9 +565,11 @@ function describeMissing(
     hints.push('it appears to include line-number prefixes from read_file output; remove them');
   }
   if (matching === 'exact') {
-    const tolerant = RELAXED_STRATEGIES.map((find) => find(text, { oldText, newText: '' })).find(
-      (outcome) => outcome.status !== 'none',
-    );
+    let tolerant: MatchOutcome | undefined;
+    for (const find of RELAXED_STRATEGIES) {
+      tolerant = find(text, { oldText, newText: '' }, lines);
+      if (tolerant.status !== 'none') break;
+    }
     if (tolerant?.status === 'matched') {
       hints.push(
         `the same text exists at ${formatLineList(text, [tolerant.ranges[0].start])} with different whitespace (${tolerant.strategy}); copy that whitespace exactly`,
@@ -535,7 +578,7 @@ function describeMissing(
       hints.push('the file uses CRLF line endings');
     }
   }
-  const nearest = nearestLine(text, nonBlank[0]);
+  const nearest = nearestLine(nonBlank[0], lines);
   if (nearest != null && hints.length === 0) {
     hints.push(
       nearest.exact
@@ -548,19 +591,20 @@ function describeMissing(
 
 /** Finds where the first line of a failed edit most likely belongs. */
 function nearestLine(
-  text: string,
   firstLine: string | undefined,
+  getLines: () => LineIndex,
 ): { exact: boolean; count: number; starts: number[]; text: string } | undefined {
   const target = firstLine?.trim();
   if (!target) return undefined;
-  const lines = splitLines(text);
+  const lines = getLines();
   const starts: number[] = [];
   let count = 0;
   let firstMatch = '';
-  for (const line of lines) {
-    if (line.text.trim() !== target) continue;
-    if (count++ === 0) firstMatch = line.text;
-    if (starts.length < MAX_REPORTED_LINES) starts.push(line.start);
+  for (let index = 0; index < lines.length; index++) {
+    const content = lines.text(index);
+    if (content.trim() !== target) continue;
+    if (count++ === 0) firstMatch = content;
+    if (starts.length < MAX_REPORTED_LINES) starts.push(lines.start(index));
   }
   if (count > 0) {
     return { exact: true, count, starts, text: firstMatch };
@@ -569,13 +613,14 @@ function nearestLine(
   if (tokens.size < 2) return undefined;
   let best: Line | undefined;
   let bestScore = 0;
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index++) {
+    const content = lines.text(index);
     let score = 0;
-    for (const token of new Set(line.text.split(/\W+/))) {
+    for (const token of new Set(content.split(/\W+/))) {
       if (tokens.has(token)) score++;
     }
     if (score > bestScore) {
-      best = line;
+      best = { start: lines.start(index), end: lines.end(index), next: lines.next(index), text: content };
       bestScore = score;
     }
   }

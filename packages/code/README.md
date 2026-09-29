@@ -597,7 +597,10 @@ fails, the worker still checks the rest and rejects the whole batch with one
 missing edit names the nearest candidate line and flags elided (`...`) or
 line-numbered `oldText`, a whitespace-only difference, or CRLF line endings.
 An ambiguous edit gives its match count and line numbers. Overlapping
-occurrences count as separate locations.
+occurrences count as separate locations. Detailed source-line excerpts require
+`read_file` or `preview_edit` on the same workspace; edit-only workers return a
+generic failure and its error code without revealing file contents. A preview
+itself exposes the resulting file text, so it is read-capable.
 
 Two optional features change matching, each negotiated in `editFileFeatures`
 before Code API dispatches it:
@@ -609,15 +612,17 @@ before Code API dispatches it:
   run between complete whitespace-delimited tokens, never a prefix or suffix
   of another token). Without `replaceAll`, a match must still be unique;
   replacements use the matched line's ending even in mixed-ending files. The
-  whitespace-normalized tier peels a shared boundary newline from `newText`
-  even when CRLF/LF or nearby spaces differ, without removing intentional
-  extra line breaks or duplicating the source line ending. Boundary whitespace
-  claimed by `oldText`, including the number of line breaks, must exist beside
-  the matched tokens in the source; an attempt to remove it with a token-only
-  fallback fails rather than silently preserving it. Exact and line-window
-  matches can still replace terminators.
+  whitespace-normalized tier peels the complete shared newline-and-indentation
+  wrapper from `newText` even when CRLF/LF or nearby spaces differ, without
+  removing intentional extra line breaks or duplicating the source line ending.
+  Boundary whitespace claimed by `oldText`, including the number of line breaks,
+  must exist beside the matched tokens in the source; an attempt to remove it
+  with a token-only fallback fails rather than silently preserving it. Exact and
+  line-window matches can still replace terminators.
   Excessively repetitive indentation candidates fail closed with a request
-  for more context rather than scanning every long window.
+  for more context rather than scanning every long window. Dense files reuse a
+  compact newline index for matching and diagnostics; overlapping exact matches
+  are counted without restarting a scan at each offset.
 - `replace_all`: a batch edit's `replaceAll: true` replaces every
   non-overlapping match instead of requiring exactly one, and still fails when
   nothing matches.
