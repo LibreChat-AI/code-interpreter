@@ -144,3 +144,104 @@ test('a lane rejects a checkout-defined maintenance alias before pruning another
   });
   assert.equal((await run(['cat-file', '-t', object])).stdout.trim(), 'blob');
 });
+
+test('a lane never lets a misspelled maintenance command autocorrect to prune', async t => {
+  if (process.platform === 'win32') return t.skip('lane Git guard requires POSIX');
+  const parent = await mkdtemp(join(tmpdir(), 'linked-worktree-autocorrect-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const bin = join(parent, 'bin');
+  const repo = join(parent, 'repo');
+  await Promise.all([mkdir(bin), mkdir(repo)]);
+  await writeLinkedWorktreeGitGuard(bin);
+  const run = (args: string[]) => execFileAsync('git', args, {
+    cwd: repo,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}` },
+  });
+  await run(['init', '-q', '-b', 'main']);
+  await run(['config', 'help.autocorrect', 'immediate']);
+  await writeFile(join(repo, 'unpublished'), 'a sibling has not made this blob reachable');
+  const object = (await run(['hash-object', '-w', 'unpublished'])).stdout.trim();
+  for (const args of [
+    ['prun', '--expire', 'now'],
+    ['-c', 'help.autocorrect=immediate', 'prun', '--expire=now'],
+  ]) {
+    await assert.rejects(run(args), /not a git command|not a Git command|unknown Git command/i);
+    assert.equal((await run(['cat-file', '-t', object])).stdout.trim(), 'blob');
+  }
+});
+
+test('Git options cannot re-enable automatic maintenance for lane commands', async t => {
+  if (process.platform === 'win32') return t.skip('lane Git guard requires POSIX');
+  const parent = await mkdtemp(join(tmpdir(), 'linked-worktree-maintenance-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const bin = join(parent, 'bin');
+  const repo = join(parent, 'repo');
+  const remote = join(parent, 'remote.git');
+  await Promise.all([mkdir(bin), mkdir(repo)]);
+  await writeLinkedWorktreeGitGuard(bin);
+  const run = (args: string[], additionalEnv: NodeJS.ProcessEnv = {}) => execFileAsync('git', args, {
+    cwd: repo,
+    env: { ...process.env, ...additionalEnv, PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}` },
+  });
+  await run(['init', '-q', '-b', 'main']);
+  await execFileAsync('git', ['init', '-q', '--bare', remote]);
+  for (const [key, supplied, enforced] of [
+    ['maintenance.auto', 'true', 'false'],
+    ['gc.auto', '1', '0'],
+    ['help.autocorrect', 'immediate', '0'],
+  ]) {
+    const { stdout } = await run(['-c', `${key}=${supplied}`, 'config', '--get', key]);
+    assert.equal(stdout.trim(), enforced, `${key} must be enforced after caller-supplied -c`);
+  }
+  const { stdout } = await run(['config', '--get', 'maintenance.auto'], {
+    GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'maintenance.auto', GIT_CONFIG_VALUE_0: 'true',
+  });
+  assert.equal(stdout.trim(), 'false', 'inherited configuration must not re-enable maintenance');
+  const configuredGc = await run(['--config-env=gc.auto=LANE_TEST_GC_AUTO', 'config', '--get', 'gc.auto'], {
+    LANE_TEST_GC_AUTO: '1',
+  });
+  assert.equal(configuredGc.stdout.trim(), '0', 'config-env cannot override the enforced setting');
+  await writeFile(join(repo, 'unpublished'), 'not referenced yet');
+  const object = (await run(['hash-object', '-w', 'unpublished'])).stdout.trim();
+  for (const args of [
+    ['fetch', '--auto-maintenance', remote],
+    ['fetch', '--auto-maintenance=true', remote],
+    ['-c', 'maintenance.auto=true', 'fetch', '--auto-gc', remote],
+    ['fetch', '--auto-gc=true', remote],
+    ['-c', 'gc.auto=1', 'fetch', '--auto-maintenance', remote],
+    ['pull', '--auto-maintenance', remote],
+  ]) {
+    await assert.rejects(run(args), /run storage maintenance from the checkout/);
+    assert.equal((await run(['cat-file', '-t', object])).stdout.trim(), 'blob');
+  }
+  await run(['-c', 'maintenance.auto=true', '-c', 'gc.auto=1', 'fetch', '--no-auto-maintenance', remote, 'refs/heads/*:refs/remotes/origin/*']);
+  assert.equal((await run(['cat-file', '-t', object])).stdout.trim(), 'blob');
+});
+
+test('Git LFS fetch and pull cannot request pruning in a lane', async t => {
+  if (process.platform === 'win32') return t.skip('lane Git guard requires POSIX');
+  const parent = await mkdtemp(join(tmpdir(), 'linked-worktree-lfs-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const bin = join(parent, 'bin');
+  const repo = join(parent, 'repo');
+  await Promise.all([mkdir(bin), mkdir(repo)]);
+  await writeLinkedWorktreeGitGuard(bin);
+  const run = (args: string[]) => execFileAsync('git', args, {
+    cwd: repo,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}` },
+  });
+  await run(['init', '-q', '-b', 'main']);
+  await writeFile(join(repo, 'unpublished'), 'an LFS sibling has no ref yet');
+  const object = (await run(['hash-object', '-w', 'unpublished'])).stdout.trim();
+  for (const args of [
+    ['lfs', 'fetch', '--prune'],
+    ['lfs', 'fetch', '-p'],
+    ['lfs', 'fetch', '-rp'],
+    ['lfs', 'fetch', '--prune', '--recent'],
+    ['lfs', 'pull', '--prune'],
+    ['-C', repo, 'lfs', 'fetch', '--prune'],
+  ]) {
+    await assert.rejects(run(args), /run storage maintenance from the checkout/);
+    assert.equal((await run(['cat-file', '-t', object])).stdout.trim(), 'blob');
+  }
+});

@@ -829,7 +829,12 @@ and maintenance are disabled, and `git gc` itself cannot run in a lane (it
 needs to write `.git/gc.pid` and `packed-refs`). A lane's `PATH` starts with
 a read-only Git wrapper that refuses `prune`, `gc`, `repack`, `prune-packed`,
 `maintenance`, `multi-pack-index` and `git lfs prune`, including after Git
-options such as `-C` or `-c`. It also refuses **all configured Git aliases**,
+options such as `-C` or `-c`. It rejects `git lfs fetch` or `pull` with
+`--prune`/`-p`, and `git fetch` or `pull` with `--auto-maintenance`/`--auto-gc`.
+It enforces `maintenance.auto=false`, `gc.auto=0` and `help.autocorrect=0`
+after caller-supplied Git options, preventing those overrides from restoring
+automatic maintenance or correcting a misspelled command to `prune`.
+It also refuses **all configured Git aliases**,
 including harmless ones: aliases can hide destructive maintenance through
 local config, `-c`, `--config-env`, includes or shell commands. Call the
 underlying Git command instead, or run the alias from the checkout. Git's
