@@ -165,6 +165,29 @@ test.skipIf(!redisUrl)('a lane may not start while its checkout is quarantined',
   });
 });
 
+test.skipIf(!redisUrl)('a checkout is refused while a lane beneath it keeps a stuck fence', async () => {
+  await withLaneWorker(async ({ redis, workerId, dispatch, lease, settle }) => {
+    const settleNext = async (request: Partial<WorkspaceToolRequest>) => {
+      const pending = dispatch(request);
+      const assignment = await lease(0);
+      expect((assignment?.request as WorkspaceToolRequest).worktree).toBe(request.worktree);
+      await settle(assignment!);
+      await Promise.allSettled([pending]);
+    };
+    await settleNext({ worktree: 'task-a' });
+    await settleNext({});
+
+    // A lane whose cleanup was never acknowledged keeps its fence after its slot is released.
+    await settleNext({ worktree: 'task-a' });
+    await redis.set(
+      fenceKey(workerId, 'native-workspace:\0linked-worktree\0repo\0task-a'),
+      'quarantined:cleanup-unacknowledged',
+    );
+
+    await expect(dispatch({})).rejects.toMatchObject({ code: 'WORKSPACE_QUARANTINED' });
+  });
+});
+
 test.skipIf(!redisUrl)('a lane is refused unless the worker advertises linked-worktree scopes', async () => {
   await withLaneWorker(async ({ dispatch }) => {
     await expect(dispatch({ worktree: 'task-a' })).rejects.toMatchObject({

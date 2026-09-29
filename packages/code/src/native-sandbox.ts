@@ -309,6 +309,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private readonly platform: NodeJS.Platform;
   private initialized?: Promise<void>;
   private canonicalRoot?: string;
+  /** A lane's shared Git directory; replay probes of the lane must read it too. */
+  private canonicalCommonGitDir?: string;
   private runtimeConfig?: SandboxRuntimeConfig;
     private denyReadPaths: string[] = [];
     private denyWritePaths: string[] = [];
@@ -577,6 +579,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       unrestrictedNetwork ? async () => true : undefined,
     );
     this.canonicalRoot = root;
+    this.canonicalCommonGitDir = commonGitDir;
     this.runtimeConfig = config;
         this.denyReadPaths = [
             home,
@@ -808,6 +811,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                           allowRead: [
                               canonicalWorkspaceRoot ?? this.canonicalRoot!,
                               canonicalDataDirectory,
+                              ...(this.canonicalCommonGitDir
+                                  ? [this.canonicalCommonGitDir]
+                                  : []),
                           ],
                           allowWrite: [
                               ...(canonicalWorkspaceRoot != null

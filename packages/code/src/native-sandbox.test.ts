@@ -1630,6 +1630,19 @@ test('a linked worktree lane may write only shared Git storage and its own metad
   assert.ok(!config.filesystem.allowWrite.includes(commonGitDir));
   assert.ok(config.filesystem.allowRead?.includes(commonGitDir));
 
+  const probed = fakeManager();
+  const prober = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: lane,
+    linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths },
+    environment: { PATH: '/usr/bin' },
+    manager: probed.manager,
+  });
+  t.after(() => prober.close());
+  const dataDirectory = await prober.createExecutionDirectory();
+  await prober.executeProgrammatic(request, dataDirectory, undefined, { probe: true });
+  assert.ok(probed.customConfigSeenDuringWrap?.filesystem?.allowRead?.includes(commonGitDir));
+  assert.ok(!probed.customConfigSeenDuringWrap?.filesystem?.allowWrite?.includes(commonGitDir));
+
   await assert.rejects(
     prepare([commonGitDir]),
     (error: unknown) =>
