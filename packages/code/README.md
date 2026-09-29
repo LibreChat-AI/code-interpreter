@@ -829,17 +829,24 @@ and maintenance are disabled, and `git gc` itself cannot run in a lane (it
 needs to write `.git/gc.pid` and `packed-refs`). A lane's `PATH` starts with
 a read-only Git wrapper that refuses `prune`, `gc`, `repack`, `prune-packed`,
 `maintenance`, `multi-pack-index` and `git lfs prune`, including after Git
-options such as `-C` or `-c`. Run storage maintenance from the checkout.
+options such as `-C` or `-c`. It also refuses **all configured Git aliases**,
+including harmless ones: aliases can hide destructive maintenance through
+local config, `-c`, `--config-env`, includes or shell commands. Call the
+underlying Git command instead, or run the alias from the checkout. Git's
+safe pathspec options (`--literal-pathspecs`, `--glob-pathspecs`,
+`--noglob-pathspecs`, `--icase-pathspecs`) remain usable in lanes. Run storage
+maintenance from the checkout.
+
 This is a guardrail against accidental commands, **not** a filesystem
 boundary: invoking Git by an absolute path, resetting `PATH`, or using a
 script that does either bypasses it. Such commands can still delete a sibling
 lane's unpublished objects. Do not enable concurrent lanes for agents or
-scripts that deliberately bypass the wrapper. The POSIX-only guard must be
-available or lane commands are not admitted. Deleting a branch or tag also
-needs the checkout, because Git locks `packed-refs` for every ref deletion.
-Each lane has its own durable quarantine guard. A lane
-cannot start while its checkout is quarantined, and a checkout cannot start
-while any lane beneath it is.
+scripts that deliberately bypass the wrapper. The guard requires `/bin/bash`
+and a trusted system Git executable; without either, lane commands are not
+admitted. Deleting a branch or tag also needs the checkout, because Git locks
+`packed-refs` for every ref deletion. Each lane has its own durable quarantine
+guard. A lane cannot start while its checkout is quarantined, and a checkout
+cannot start while any lane beneath it is.
 
 Lanes require native-srt commands and at least two lease slots, and cannot yet
 be combined with conversation worktrees. Code API must advertise
