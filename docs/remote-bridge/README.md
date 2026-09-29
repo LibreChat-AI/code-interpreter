@@ -165,7 +165,10 @@ backslashes, symlink escapes, unexpected fields, and host roots are rejected.
 Workspace mutation remains disabled unless the operator starts the worker with
 `--allow-workspace-writes` (or
 `LIBRECHAT_CODE_ALLOW_WORKSPACE_WRITES=true`). That adds bounded `write_file`
-and exact-match `edit_file` operations. Writes are limited to 1 MiB of UTF-8
+and `edit_file` operations. `edit_file` matches exactly by default; the
+negotiated `tolerant_match` and `replace_all` edit features add
+whitespace-tolerant matching and multi-location replacement (see
+`packages/code/README.md`). Writes are limited to 1 MiB of UTF-8
 text, require an existing in-workspace parent directory, reject symlinks, and
 commit atomically. The worker capability is an enforcement boundary; LibreChat
 should still route every mutation through its configurable tool-approval hooks.

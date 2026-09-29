@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import RedisMock from 'ioredis-mock';
 
 import type Redis from 'ioredis';
+import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 
 import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
 import { RedisBridgeStore } from './store';
@@ -642,6 +643,74 @@ test('rejects fenced edits from workers without the negotiated feature', async (
   ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
   expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
 });
+
+const featureGatedEdits: Array<[string, WorkspaceToolRequest]> = [
+  [
+    'tolerant matching',
+    {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      matching: 'tolerant',
+      edits: [{ oldText: 'before', newText: 'after' }],
+    },
+  ],
+  [
+    'tolerant previews',
+    {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'preview_edit',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      matching: 'tolerant',
+      edits: [{ oldText: 'before', newText: 'after' }],
+    },
+  ],
+  [
+    'replaceAll edits',
+    {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      edits: [{ oldText: 'before', newText: 'after', replaceAll: true }],
+    },
+  ],
+];
+
+test.each(featureGatedEdits)(
+  'rejects %s from workers without the negotiated feature',
+  async (_label, request) => {
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'workspace-worker',
+      incarnationId,
+      capabilities: {
+        statefulWorkspace: true,
+        sandboxProfile: 'nsjail',
+        runtimes: ['bash'],
+        workspaceTools: {
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          operations: ['preview_edit', 'edit_file'],
+          editFileModes: ['single', 'batch'],
+          editFileFeatures: ['expected_base_sha256'],
+          workspaces: [{ id: 'primary' }],
+        },
+      },
+    });
+
+    await expect(
+      store.dispatchWorkspaceTool({
+        workerId: 'workspace-worker',
+        request,
+        deadlineAtMs: Date.now() + 1_000,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+    expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
+  },
+);
 
 test('rejects batch previews from workers without the negotiated mode', async () => {
   await store.register({

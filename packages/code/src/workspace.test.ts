@@ -939,7 +939,7 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
     ],
     writeFileModes: ['replace', 'create'],
     editFileModes: ['single', 'batch'],
-    editFileFeatures: ['expected_base_sha256'],
+    editFileFeatures: ['expected_base_sha256', 'tolerant_match', 'replace_all'],
     listFileFeatures: ['after_path'],
   });
   await tools.execute({
@@ -1349,6 +1349,87 @@ test('exact edits reject missing or repeated text without changing the file', as
       error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
   );
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'aaa');
+});
+
+test('a failed edit batch reports every failing edit and writes nothing', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'alpha\nbeta\nbeta\ngamma\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      edits: [
+        { oldText: 'alpha', newText: 'ALPHA' },
+        { oldText: 'beta', newText: 'BETA' },
+        { oldText: 'delta', newText: 'DELTA' },
+      ],
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'EDIT_CONFLICT' &&
+      /^2 of 3 workspace edits did not apply/.test(error.message) &&
+      /Edit 2: old_text matched 2 locations at lines 2, 3/.test(error.message) &&
+      /Edit 3: old_text was not found/.test(error.message),
+  );
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+});
+
+test('tolerant edits and replaceAll report how each edit matched', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'app.ts'), 'if (ok) {  \r\n  run();\r\n}\r\nrun();\r\n');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  const preview = await tools.execute({
+    protocolVersion: 1,
+    operation: 'preview_edit',
+    workspaceId: 'primary',
+    path: 'app.ts',
+    matching: 'tolerant',
+    edits: [{ oldText: 'if (ok) {\n  run();\n}', newText: 'if (ok) {\n  go();\n}' }],
+  });
+  assert.equal(preview.operation, 'preview_edit');
+  assert.deepEqual(preview.operation === 'preview_edit' && preview.matches, [
+    { strategy: 'line-trimmed', occurrences: 1 },
+  ]);
+
+  const edit = await tools.execute({
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'app.ts',
+    matching: 'tolerant',
+    edits: [
+      { oldText: 'if (ok) {\n  run();\n}', newText: 'if (ok) {\n  go();\n}' },
+      { oldText: 'run();', newText: 'stop();', replaceAll: true },
+    ],
+  });
+  assert.deepEqual(edit, {
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'app.ts',
+    replacements: 2,
+    bytesWritten: 32,
+    matches: [
+      { strategy: 'line-trimmed', occurrences: 1 },
+      { strategy: 'exact', occurrences: 1 },
+    ],
+  });
+  assert.equal(
+    await readFile(join(root, 'app.ts'), 'utf8'),
+    'if (ok) {\r\n  go();\r\n}\r\nstop();\r\n',
+  );
 });
 
 test('writes reject symlink targets and missing parent directories', async (t) => {
@@ -1930,6 +2011,8 @@ test('composes sandboxed commands without exposing them on unconfigured workspac
   assert.deepEqual(tools.capabilities.editFileModes, ['single', 'batch']);
   assert.deepEqual(tools.capabilities.editFileFeatures, [
     'expected_base_sha256',
+    'tolerant_match',
+    'replace_all',
   ]);
   assert.deepEqual(tools.capabilities.listFileFeatures, ['after_path']);
   assert.deepEqual(

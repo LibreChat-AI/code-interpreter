@@ -20,10 +20,15 @@ import {
   isValidBridgeWorkspaceToolCapabilities,
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
+  WORKSPACE_EDIT_FILE_FEATURES,
+  workspaceEditRequestReportsMatches,
 } from './protocol.js';
+import { applyTextEdits, WorkspaceEditMatchError } from './edits.js';
+import type { AppliedEdits } from './edits.js';
 
 import type {
   BridgeWorkspaceDescriptor,
+  WorkspaceEditMatch,
   BridgeWorkspaceToolCapabilities,
   WorkspaceReadFileRequest,
   WorkspaceReadFileResult,
@@ -722,7 +727,10 @@ async function editWorkspaceFile(
         'EDIT_CONFLICT',
       );
     }
-    const { updated, replacements } = applyWorkspaceEdits(original, request);
+    const { updated, replacements, matches } = applyWorkspaceEdits(
+      original,
+      request,
+    );
     await atomicWriteConfinedFile(
       root,
       request.path,
@@ -741,6 +749,7 @@ async function editWorkspaceFile(
       path: request.path,
       replacements,
       bytesWritten: updated.byteLength,
+      ...(matches ? { matches } : {}),
     };
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
@@ -753,7 +762,7 @@ async function editWorkspaceFile(
 function applyWorkspaceEdits(
   original: Buffer,
   request: WorkspaceEditFileRequest | WorkspacePreviewEditRequest,
-): { updated: Buffer; replacements: number } {
+): { updated: Buffer; replacements: number; matches?: WorkspaceEditMatch[] } {
   const hasBom =
     original[0] === 0xef && original[1] === 0xbb && original[2] === 0xbf;
   const body = hasBom ? original.subarray(3) : original;
@@ -767,20 +776,16 @@ function applyWorkspaceEdits(
   const edits = request.edits ?? [
     { oldText: request.oldText ?? '', newText: request.newText ?? '' },
   ];
-  let updatedText = text;
-  for (const edit of edits) {
-    const first = updatedText.indexOf(edit.oldText);
-    if (first < 0 || updatedText.indexOf(edit.oldText, first + 1) >= 0) {
-      throw new WorkspaceToolError(
-        'Workspace edit must match exactly once',
-        'EDIT_CONFLICT',
-      );
+  let applied: AppliedEdits;
+  try {
+    applied = applyTextEdits(text, edits, request.matching ?? 'exact');
+  } catch (error) {
+    if (error instanceof WorkspaceEditMatchError) {
+      throw new WorkspaceToolError(error.message, 'EDIT_CONFLICT');
     }
-    updatedText =
-      updatedText.slice(0, first) +
-      edit.newText +
-      updatedText.slice(first + edit.oldText.length);
+    throw error;
   }
+  const updatedText = applied.text;
   const updatedBody = Buffer.from(updatedText, 'utf8');
   const updated = hasBom
     ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), updatedBody])
@@ -791,7 +796,13 @@ function applyWorkspaceEdits(
       'WRITE_LIMIT_EXCEEDED',
     );
   }
-  return { updated, replacements: edits.length };
+  return {
+    updated,
+    replacements: edits.length,
+    ...(workspaceEditRequestReportsMatches(request)
+      ? { matches: applied.matches }
+      : {}),
+  };
 }
 
 async function previewWorkspaceEdit(
@@ -806,7 +817,10 @@ async function previewWorkspaceEdit(
       'EXECUTION_ABORTED',
     );
   }
-  const { updated, replacements } = applyWorkspaceEdits(original, request);
+  const { updated, replacements, matches } = applyWorkspaceEdits(
+    original,
+    request,
+  );
   if (signal?.aborted) {
     throw new WorkspaceToolError(
       'Workspace tool execution aborted',
@@ -825,6 +839,7 @@ async function previewWorkspaceEdit(
     baseSha256: createHash('sha256').update(original).digest('hex'),
     replacements,
     bytesWritten: updated.byteLength,
+    ...(matches ? { matches } : {}),
   };
 }
 
@@ -1497,7 +1512,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       ...(anyWritable ? { writeFileModes: ['replace', 'create'] } : {}),
       ...(anyWritable ? { editFileModes: ['single', 'batch'] } : {}),
       ...(anyWritable
-        ? { editFileFeatures: ['expected_base_sha256'] }
+        ? { editFileFeatures: [...WORKSPACE_EDIT_FILE_FEATURES] }
         : {}),
       listFileFeatures: ['after_path'],
     };

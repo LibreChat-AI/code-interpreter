@@ -590,6 +590,31 @@ installed as one atomic mutation. Code API dispatches the batch form only after
 the worker and server negotiate `batch` in `editFileModes`.
 Revision-fenced edits likewise require the negotiated
 `expected_base_sha256` entry in `editFileFeatures`.
+
+Edits apply in order, each to the text the earlier ones produced. When any edit
+fails, the worker still checks the rest and rejects the whole batch with one
+`EDIT_CONFLICT` whose message lists every failing edit by position. A
+missing edit names the nearest candidate line and flags elided (`...`) or
+line-numbered `oldText`, a whitespace-only difference, or CRLF line endings.
+An ambiguous edit gives its match count and line numbers. Overlapping
+occurrences count as separate locations.
+
+Two optional features change matching, each negotiated in `editFileFeatures`
+before Code API dispatches it:
+
+- `tolerant_match`: a request-level `matching: 'tolerant'` falls back from an
+  exact match to, in order, `line-trimmed` (ignores trailing whitespace and
+  CRLF), `indentation-flexible` (a uniformly shifted block, with `newText`
+  moved to the file's indentation) and `whitespace-normalized` (any whitespace
+  run between tokens). A match must still be unique, and replacements keep the
+  file's line endings.
+- `replace_all`: a batch edit's `replaceAll: true` replaces every
+  non-overlapping match instead of requiring exactly one, and still fails when
+  nothing matches.
+
+A request that sets `matching` or any `replaceAll` receives `matches`, one
+`{ strategy, occurrences }` entry per edit. Requests that set neither receive
+exactly the legacy result.
 Only IDs, names, protocol version, supported operations, and negotiated write
 modes appear in worker capabilities; absolute host paths remain local to the
 worker process.

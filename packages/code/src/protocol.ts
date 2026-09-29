@@ -280,7 +280,29 @@ export type BridgeWorkspaceToolOperation =
 
 export type WorkspaceWriteFileMode = 'replace' | 'create';
 export type WorkspaceEditFileMode = 'single' | 'batch';
-export type WorkspaceEditFileFeature = 'expected_base_sha256';
+export type WorkspaceEditFileFeature =
+  | 'expected_base_sha256'
+  | 'tolerant_match'
+  | 'replace_all';
+/** Every edit feature this protocol version defines, for capability validation. */
+export const WORKSPACE_EDIT_FILE_FEATURES: readonly WorkspaceEditFileFeature[] = [
+  'expected_base_sha256',
+  'tolerant_match',
+  'replace_all',
+];
+/** `tolerant` falls back from exact matching to whitespace-tolerant strategies. */
+export type WorkspaceEditMatching = 'exact' | 'tolerant';
+export type WorkspaceEditMatchStrategy =
+  | 'exact'
+  | 'line-trimmed'
+  | 'whitespace-normalized'
+  | 'indentation-flexible';
+const WORKSPACE_EDIT_MATCH_STRATEGIES = new Set<WorkspaceEditMatchStrategy>([
+  'exact',
+  'line-trimmed',
+  'whitespace-normalized',
+  'indentation-flexible',
+]);
 export type WorkspaceListFileFeature = 'after_path';
 export type WorkspaceProgrammaticLanguage = 'bash';
 
@@ -433,6 +455,8 @@ interface WorkspaceEditFileRequestBase {
   path: string;
   /** Refuses the mutation unless current file bytes match this preview revision. */
   expectedBaseSha256?: string;
+  /** Requires the `tolerant_match` edit feature. Omitted means `exact`. */
+  matching?: WorkspaceEditMatching;
 }
 
 export interface WorkspaceSingleEditFileRequest
@@ -459,6 +483,15 @@ export type WorkspaceEditFileRequest =
 export interface WorkspaceTextEdit {
   oldText: string;
   newText: string;
+  /** Replaces every match instead of requiring exactly one. Requires `replace_all`. */
+  replaceAll?: boolean;
+}
+
+/** How one edit matched. Present only when the request set `matching` or `replaceAll`. */
+export interface WorkspaceEditMatch {
+  strategy: WorkspaceEditMatchStrategy;
+  /** Locations replaced; always 1 unless the edit set `replaceAll`. */
+  occurrences: number;
 }
 
 export interface WorkspaceEditFileResult {
@@ -466,8 +499,10 @@ export interface WorkspaceEditFileResult {
   operation: 'edit_file';
   workspaceId: string;
   path: string;
+  /** Number of edits applied, which is always the number requested. */
   replacements: number;
   bytesWritten: number;
+  matches?: WorkspaceEditMatch[];
 }
 
 interface WorkspacePreviewEditRequestBase {
@@ -476,6 +511,8 @@ interface WorkspacePreviewEditRequestBase {
   workspaceId: string;
   workspaceInstanceId?: string;
   path: string;
+  /** Requires the `tolerant_match` edit feature. Omitted means `exact`. */
+  matching?: WorkspaceEditMatching;
 }
 
 export interface WorkspaceSinglePreviewEditRequest
@@ -506,6 +543,7 @@ export interface WorkspacePreviewEditResult {
   baseSha256: string;
   replacements: number;
   bytesWritten: number;
+  matches?: WorkspaceEditMatch[];
 }
 
 export interface WorkspaceExecuteCommandRequest {
@@ -599,6 +637,7 @@ const WORKSPACE_EDIT_REQUEST_KEYS = new Set([
   'newText',
   'edits',
   'expectedBaseSha256',
+  'matching',
 ]);
 const WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS = new Set([
   'protocolVersion',
@@ -609,8 +648,10 @@ const WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS = new Set([
   'oldText',
   'newText',
   'edits',
+  'matching',
 ]);
-const WORKSPACE_TEXT_EDIT_KEYS = new Set(['oldText', 'newText']);
+const WORKSPACE_TEXT_EDIT_KEYS = new Set(['oldText', 'newText', 'replaceAll']);
+const WORKSPACE_EDIT_MATCH_KEYS = new Set(['strategy', 'occurrences']);
 const WORKSPACE_COMMAND_REQUEST_KEYS = new Set([
     'environmentAction',
   'protocolVersion',
@@ -663,6 +704,7 @@ const WORKSPACE_EDIT_RESULT_KEYS = new Set([
   'path',
   'replacements',
   'bytesWritten',
+  'matches',
 ]);
 const WORKSPACE_PREVIEW_EDIT_RESULT_KEYS = new Set([
   'protocolVersion',
@@ -674,6 +716,7 @@ const WORKSPACE_PREVIEW_EDIT_RESULT_KEYS = new Set([
   'baseSha256',
   'replacements',
   'bytesWritten',
+  'matches',
 ]);
 const WORKSPACE_COMMAND_RESULT_KEYS = new Set([
   'protocolVersion',
@@ -1145,6 +1188,44 @@ function isWithinRequestedPath(candidate: string, requested?: string): boolean {
   );
 }
 
+/** Whether a request asked for per-edit match reporting (and so must receive it). */
+export function workspaceEditRequestReportsMatches(
+  request: WorkspaceEditFileRequest | WorkspacePreviewEditRequest,
+): boolean {
+  return (
+    request.matching !== undefined ||
+    (request.edits?.some((edit) => edit.replaceAll !== undefined) ?? false)
+  );
+}
+
+function isValidWorkspaceEditMatches(
+  request: WorkspaceEditFileRequest | WorkspacePreviewEditRequest,
+  matches: unknown,
+): boolean {
+  if (!workspaceEditRequestReportsMatches(request)) return matches === undefined;
+  const edits: WorkspaceTextEdit[] = request.edits ?? [
+    { oldText: request.oldText ?? '', newText: request.newText ?? '' },
+  ];
+  return (
+    Array.isArray(matches) &&
+    matches.length === edits.length &&
+    matches.every((match: unknown, index) => {
+      if (typeof match !== 'object' || match === null) return false;
+      const candidate = match as Record<string, unknown>;
+      return (
+        hasOnlyKeys(candidate, WORKSPACE_EDIT_MATCH_KEYS) &&
+        WORKSPACE_EDIT_MATCH_STRATEGIES.has(
+          candidate.strategy as WorkspaceEditMatchStrategy,
+        ) &&
+        (request.matching === 'tolerant' || candidate.strategy === 'exact') &&
+        Number.isSafeInteger(candidate.occurrences) &&
+        Number(candidate.occurrences) >= 1 &&
+        (edits[index]?.replaceAll === true || candidate.occurrences === 1)
+      );
+    })
+  );
+}
+
 function isValidWorkspaceEditRequest(
     request: Record<string, unknown>,
 ): boolean {
@@ -1153,6 +1234,13 @@ function isValidWorkspaceEditRequest(
         hasBatch &&
         (request.oldText !== undefined || request.newText !== undefined)
     ) {
+    return false;
+  }
+  if (
+    request.matching !== undefined &&
+    request.matching !== 'exact' &&
+    request.matching !== 'tolerant'
+  ) {
     return false;
   }
   const edits = hasBatch
@@ -1185,7 +1273,9 @@ function isValidWorkspaceEditRequest(
                 candidate.oldText ||
       typeof candidate.newText !== 'string' ||
             Buffer.from(candidate.newText).toString('utf8') !==
-                candidate.newText
+                candidate.newText ||
+      (candidate.replaceAll !== undefined &&
+        typeof candidate.replaceAll !== 'boolean')
     ) {
       return false;
     }
@@ -1493,7 +1583,8 @@ export function isWorkspaceToolResult(
       result.replacements === replacements &&
       Number.isSafeInteger(result.bytesWritten) &&
       Number(result.bytesWritten) >= 0 &&
-      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES &&
+      isValidWorkspaceEditMatches(request, result.matches)
     );
   }
 
@@ -1514,7 +1605,8 @@ export function isWorkspaceToolResult(
       Number(result.bytesWritten) ===
         new TextEncoder().encode(content).byteLength +
           (result.hasUtf8Bom ? 3 : 0) &&
-      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES &&
+      isValidWorkspaceEditMatches(request, result.matches)
     );
   }
 
@@ -1638,9 +1730,17 @@ export function isValidBridgeWorkspaceToolCapabilities(
   if (
     capabilities.editFileFeatures !== undefined &&
     (!Array.isArray(capabilities.editFileFeatures) ||
-      capabilities.editFileFeatures.length !== 1 ||
+      capabilities.editFileFeatures.length < 1 ||
+      capabilities.editFileFeatures.length >
+        WORKSPACE_EDIT_FILE_FEATURES.length ||
       !capabilities.operations.includes('edit_file') ||
-      capabilities.editFileFeatures[0] !== 'expected_base_sha256')
+      !capabilities.editFileFeatures.every((feature: unknown) =>
+        WORKSPACE_EDIT_FILE_FEATURES.includes(
+          feature as WorkspaceEditFileFeature,
+        ),
+      ) ||
+      new Set(capabilities.editFileFeatures).size !==
+        capabilities.editFileFeatures.length)
   ) {
     return false;
   }

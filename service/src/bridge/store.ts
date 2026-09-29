@@ -168,12 +168,21 @@ function supportsWorkspaceTool(
     const mode = request.edits === undefined ? 'single' : 'batch';
     const modes = capabilities?.editFileModes;
     const supportsMode = modes == null ? mode === 'single' : modes.includes(mode);
-    if (request.operation === 'preview_edit') return supportsMode;
+    const features = capabilities?.editFileFeatures ?? [];
+    const supportsMatching =
+      request.matching === undefined || features.includes('tolerant_match');
+    const supportsReplaceAll =
+      request.edits?.some((edit) => edit.replaceAll !== undefined) !== true ||
+      features.includes('replace_all');
+    if (request.operation === 'preview_edit') {
+      return supportsMode && supportsMatching && supportsReplaceAll;
+    }
     return (
       supportsMode &&
+      supportsMatching &&
+      supportsReplaceAll &&
       (request.expectedBaseSha256 === undefined ||
-        capabilities?.editFileFeatures?.includes('expected_base_sha256') ===
-          true)
+        features.includes('expected_base_sha256'))
     );
   }
   return true;
