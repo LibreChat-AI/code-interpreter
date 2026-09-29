@@ -70,13 +70,6 @@ test('verifies a linked worktree of the checkout and lists the only Git paths it
     join(root, '.git', 'lfs'),
     join(root, '.git', 'worktrees', 'task-a'),
   ]);
-  const gitPath = (...path: string[]) => join(root, '.git', ...path);
-  for (const path of [gitPath('config'), gitPath('hooks'), gitPath('HEAD'), gitPath('index'), gitPath('logs', 'HEAD'), gitPath('worktrees', 'task-b')]) {
-    assert.ok(lane.readableGitPaths.includes(path), path);
-  }
-  for (const path of [gitPath(), gitPath('logs'), gitPath('worktrees'), ...lane.writableGitPaths]) {
-    assert.ok(!lane.readableGitPaths.includes(path), path);
-  }
 });
 
 
@@ -232,7 +225,7 @@ test('lane file tools are confined to the worktree and report the public workspa
   );
 });
 
-test('lane commands register a confined root and refresh it when the shared Git entries change', async (t) => {
+test('lane commands register a confined root once, whatever siblings come and go', async (t) => {
   const { parent, root } = await checkout();
   t.after(() => rm(parent, { recursive: true, force: true }));
   const { pool, calls } = recordingPool();
@@ -260,7 +253,6 @@ test('lane commands register a confined root and refresh it when the shared Git 
   assert.equal(registered.linkedWorktree?.checkoutRoot, root);
 
   assert.ok(!registered.linkedWorktree?.writableGitPaths.includes(join(root, '.git')));
-  assert.ok(!registered.linkedWorktree?.readableGitPaths.includes(join(root, '.git')));
 
   await rejects(tools.execute({
     ...command,
@@ -270,13 +262,9 @@ test('lane commands register a confined root and refresh it when the shared Git 
 
   await git(root, 'worktree', 'add', '-q', '-b', 'task-b', '.worktrees/task-b');
   await tools.execute(command);
-  await tools.execute(command);
   assert.deepEqual(
     calls.slice(3).map((call) => call.action),
-    ['unregister', 'register', 'execute', 'execute'],
-  );
-  assert.ok(
-    calls[4]!.options!.linkedWorktree!.readableGitPaths.includes(join(root, '.git', 'worktrees', 'task-b')),
+    ['execute'],
   );
 });
 

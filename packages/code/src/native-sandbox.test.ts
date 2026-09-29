@@ -1609,17 +1609,17 @@ test('a linked worktree lane may write only shared Git storage and its own metad
     join(commonGitDir, 'refs'),
     join(commonGitDir, 'worktrees', 'task-a'),
   ];
-  const readableGitPaths = [join(commonGitDir, 'config'), join(commonGitDir, 'hooks')];
   await Promise.all(
     [lane, ...writableGitPaths].map(path => mkdir(path, { recursive: true })),
   );
-  const prepare = async (paths: string[], readable = readableGitPaths) => {
+  const prepare = async (paths: string[], platform: NodeJS.Platform = 'linux') => {
     const fake = fakeManager();
     const sandbox = new NativeSrtWorkspaceCommandSandbox({
       workspaceRoot: lane,
-      linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths: paths, readableGitPaths: readable },
+      linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths: paths },
       environment: { PATH: '/usr/bin' },
       manager: fake.manager,
+      platform,
     });
     t.after(() => sandbox.close());
     await sandbox.prepare();
@@ -1629,10 +1629,16 @@ test('a linked worktree lane may write only shared Git storage and its own metad
   const config = await prepare(writableGitPaths);
   assert.deepEqual(config.filesystem.allowWrite.slice(0, 4), [lane, ...writableGitPaths]);
   assert.ok(!config.filesystem.allowWrite.includes(commonGitDir));
-  // A read grant on the common directory would mask the write binds beneath it.
-  assert.ok(!config.filesystem.allowRead?.includes(commonGitDir));
-  for (const path of [...readableGitPaths, ...writableGitPaths]) {
-    assert.ok(config.filesystem.allowRead?.includes(path), path);
+  assert.ok(config.filesystem.allowRead?.includes(commonGitDir));
+  // Deeper read denies make SRT re-bind each writable Git directory after the
+  // read-only bind of the common directory (Linux tmpfs re-binding order).
+  for (const path of writableGitPaths) {
+    assert.ok(config.filesystem.denyRead.includes(path), path);
+  }
+  assert.ok(!config.filesystem.denyRead.includes(join(commonGitDir, 'lfs')));
+  const darwin = await prepare(writableGitPaths, 'darwin');
+  for (const path of writableGitPaths) {
+    assert.ok(!darwin.filesystem.denyRead.includes(path), path);
   }
   const gitGuard = config.filesystem.allowRead?.find(path => path.includes('librechat-code-git-'));
   assert.ok(gitGuard, 'lane Git guard must be readable');
@@ -1643,33 +1649,25 @@ test('a linked worktree lane may write only shared Git storage and its own metad
   const probed = fakeManager();
   const prober = new NativeSrtWorkspaceCommandSandbox({
     workspaceRoot: lane,
-    linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths, readableGitPaths },
+    linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths },
     environment: { PATH: '/usr/bin' },
     manager: probed.manager,
   });
   t.after(() => prober.close());
   const dataDirectory = await prober.createExecutionDirectory();
   await prober.executeProgrammatic(request, dataDirectory, undefined, { probe: true });
-  for (const path of [...readableGitPaths, ...writableGitPaths]) {
-    assert.ok(probed.customConfigSeenDuringWrap?.filesystem?.allowRead?.includes(path), path);
-    assert.ok(!probed.customConfigSeenDuringWrap?.filesystem?.allowWrite?.includes(path), path);
-  }
+  assert.ok(probed.customConfigSeenDuringWrap?.filesystem?.allowRead?.includes(commonGitDir));
+  assert.ok(!probed.customConfigSeenDuringWrap?.filesystem?.allowWrite?.includes(commonGitDir));
   const probeGuard = probed.config?.filesystem.allowRead?.find(path => path.includes('librechat-code-git-'));
   assert.ok(probeGuard);
   assert.ok(probed.customConfigSeenDuringWrap?.filesystem?.allowRead?.includes(probeGuard));
   assert.ok(probed.customConfigSeenDuringWrap?.filesystem?.denyWrite?.includes(probeGuard));
 
-  for (const [paths, readable] of [
-    [[commonGitDir], readableGitPaths],
-    [writableGitPaths, [commonGitDir]],
-    [writableGitPaths, [join(commonGitDir, 'worktrees')]],
-  ] as const) {
-    await assert.rejects(
-      prepare([...paths], [...readable]),
-      (error: unknown) =>
-        error instanceof WorkspaceToolError && error.code === 'REGISTRATION_INVALID',
-    );
-  }
+  await assert.rejects(
+    prepare([commonGitDir]),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'REGISTRATION_INVALID',
+  );
 
   const siblingMetadata = join(commonGitDir, 'worktrees', 'task-b');
   await mkdir(siblingMetadata, { recursive: true });
@@ -1694,7 +1692,7 @@ test('lane commands put the read-only Git guard ahead of the ordinary PATH', asy
   let commandPath: string | undefined;
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
     workspaceRoot: lane,
-    linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths, readableGitPaths: [] },
+    linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths },
     environment: { PATH: '/usr/bin:/bin' },
     manager: fake.manager,
     spawnCommand(command, args, options) {
@@ -1724,7 +1722,7 @@ test('linked worktree Git guard is removed when sandbox initialization fails', a
   const fake = fakeManager({ initializeError: new Error('init failed') });
   const sandbox = new NativeSrtWorkspaceCommandSandbox({
     workspaceRoot: lane,
-    linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths: [objects], readableGitPaths: [] },
+    linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths: [objects] },
     manager: fake.manager,
   });
   await assert.rejects(sandbox.prepare(), /init failed/);
@@ -1743,7 +1741,6 @@ test('linked worktree Git guard refuses Windows rather than admitting an unguard
       checkoutRoot: root,
       commonGitDir: join(root, '.git'),
       writableGitPaths: [join(root, '.git', 'objects')],
-      readableGitPaths: [],
     },
     platform: 'win32',
     manager: fakeManager().manager,

@@ -54,6 +54,7 @@ for (const [location, parent] of [
       join(commonGitDir, 'index'),
       join(commonGitDir, 'config'),
       join(commonGitDir, 'MERGE_HEAD'),
+      join(commonGitDir, 'packed-refs'),
       join(commonGitDir, 'hooks', 'pre-commit'),
       join(commonGitDir, 'worktrees', 'task-b', 'HEAD'),
       join(root, 'tracked.txt'),
@@ -67,7 +68,6 @@ for (const [location, parent] of [
         checkoutRoot: lane.checkoutRoot,
         commonGitDir: lane.commonGitDir,
         writableGitPaths: lane.writableGitPaths,
-        readableGitPaths: lane.readableGitPaths,
       },
       commandPolicy: resolveNativeSrtCommandPolicy('trusted-vm'),
       environment: { PATH: process.env.PATH, LANG: 'C.UTF-8' },
@@ -92,10 +92,15 @@ for (const [location, parent] of [
     for (const path of protectedFiles) {
       await run(`printf tampered > '${path}'`);
     }
+    // Packing must not move refs into storage that vanishes with the sandbox.
+    await run(`${gitInLane} pack-refs --all`);
     await sandbox.close();
 
+    for (const branch of ['main', 'task-a', 'task-b', 'lane-extra']) {
+      assert.ok(await git(root, 'rev-parse', '--verify', '-q', `refs/heads/${branch}`), branch);
+    }
+
     assert.equal(await git(root, 'log', '-1', '--format=%s', 'task-a'), 'lane');
-    assert.equal(await git(root, 'rev-parse', '--verify', '-q', 'refs/heads/lane-extra').then(Boolean), true);
     assert.deepEqual(await snapshot(protectedFiles), before);
     assert.equal(await git(root, 'status', '--porcelain', '--untracked-files=no'), '');
     await assert.rejects(stat(join(commonGitDir, 'MERGE_HEAD')), { code: 'ENOENT' });
