@@ -525,3 +525,56 @@ test('a linked worktree lane fence is reset through its own guard and isolation 
   );
   assert.equal(bodies.length, 1);
 });
+
+test('a checkout waits on quarantined linked worktrees beneath it', async () => {
+  const quarantinedLanes = new Set(['task-b']);
+  const worker = new BridgeWorker({
+    codeApiUrl: 'http://localhost:1',
+    token: 'fixture',
+    workerId: 'worker',
+    sandboxEndpoint: 'http://localhost:2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'fixture',
+      runtimes: [],
+    },
+    linkedWorktreeQuarantineResolver: (_workspaceId, worktree) => ({
+      assertAvailable: async () => {
+        if (quarantinedLanes.has(worktree)) throw new Error(`lane ${worktree} is quarantined`);
+      },
+      arm: async () => undefined,
+      clear: async () => undefined,
+      quarantine: async () => undefined,
+    }),
+    linkedWorktreeNames: async () => ['task-a', 'task-b'],
+  });
+  const internals = worker as unknown as {
+    quarantinedWorkspaces: Set<string>;
+    assertLaneFamilyAvailable: (key: string, assignment: BridgeAssignment) => Promise<void>;
+  };
+  const assignment = (worktree?: string) =>
+    ({
+      assignmentId: 'probe',
+      executionKind: 'workspace_tool',
+      request: {
+        protocolVersion: 1,
+        workspaceId: 'repo',
+        operation: 'read_file',
+        path: 'README.md',
+        ...(worktree ? { worktree } : {}),
+      },
+    }) as BridgeAssignment;
+  const check = (worktree?: string) =>
+    internals.assertLaneFamilyAvailable(
+      workspaceIsolationKey('repo', undefined, worktree),
+      assignment(worktree),
+    );
+
+  await assert.rejects(check(), /task-b is quarantined/);
+  await check('task-a');
+
+  quarantinedLanes.clear();
+  await check();
+  internals.quarantinedWorkspaces.add(workspaceIsolationKey('repo', undefined, 'task-c'));
+  await assert.rejects(check(), /linked worktree/);
+});

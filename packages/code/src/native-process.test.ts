@@ -155,7 +155,7 @@ test('executor forwards the linked worktree policy to the sandbox process', asyn
   const linkedWorktree = {
     checkoutRoot: '/checkout',
     commonGitDir: '/checkout/.git',
-    readOnlyGitPaths: ['/checkout/.git/config', '/checkout/.git/hooks'],
+    writableGitPaths: ['/checkout/.git/objects', '/checkout/.git/refs'],
   };
   const sandbox = new NativeProcessWorkspaceCommandSandbox(
     { workspaceRoot: '/checkout/.worktrees/task-a', linkedWorktree },

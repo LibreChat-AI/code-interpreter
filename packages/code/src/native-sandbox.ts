@@ -171,10 +171,10 @@ export interface NativeSrtWorkspaceCommandSandboxOptions {
   linkedWorktree?: {
     /** The checkout that owns the worktree; trusted as a Git safe directory. */
     checkoutRoot: string;
-    /** `<checkout>/.git`: shared objects and refs the lane must be able to write. */
+    /** `<checkout>/.git`: readable, but writable only at `writableGitPaths`. */
     commonGitDir: string;
-    /** Paths beneath the shared Git directory that stay read-only: hooks, config, sibling metadata. */
-    readOnlyGitPaths: string[];
+    /** Shared objects and refs plus the lane's own metadata beneath `commonGitDir`. */
+    writableGitPaths: string[];
   };
   commandPolicy?: NativeSrtCommandPolicy;
   /** Trusted worker files that must never become workspace-readable or writable. */
@@ -448,8 +448,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     const lane = this.options.linkedWorktree;
     const commonGitDir = lane ? await canonicalPath(lane.commonGitDir) : undefined;
     const checkoutRoot = lane ? await canonicalPath(lane.checkoutRoot) : undefined;
-    const readOnlyGitPaths = lane
-      ? await Promise.all(lane.readOnlyGitPaths.map(canonicalPath))
+    const writableGitPaths = lane
+      ? await Promise.all(lane.writableGitPaths.map(canonicalPath))
       : [];
     if (
       lane &&
@@ -459,7 +459,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         !isWithin(checkoutRoot, root) ||
         isWithin(commonGitDir, home) ||
         protectedPaths.some(path => isWithin(commonGitDir, path)) ||
-        readOnlyGitPaths.some(path => !isWithin(commonGitDir, path)))
+        writableGitPaths.some(
+          path => path === commonGitDir || !isWithin(commonGitDir, path),
+        ))
     ) {
       throw new WorkspaceToolError(
         'Linked worktree Git storage is outside its checkout',
@@ -509,7 +511,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         ],
         allowWrite: [
           root,
-          ...laneGitPaths,
+          ...writableGitPaths,
                     ...(canonicalScratchDirectory
                         ? [canonicalScratchDirectory]
                         : []),
@@ -517,7 +519,6 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         denyWrite: [
           ...protectedPaths,
           ...deniedInheritedWritablePaths,
-          ...readOnlyGitPaths,
         ],
         allowGitConfig: false,
       },
@@ -586,7 +587,6 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         this.denyWritePaths = [
             ...protectedPaths,
             ...deniedInheritedWritablePaths,
-            ...readOnlyGitPaths,
         ];
   }
 

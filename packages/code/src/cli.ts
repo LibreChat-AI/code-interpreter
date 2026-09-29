@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import { basename, join, resolve, relative, isAbsolute, sep } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
@@ -67,6 +67,7 @@ import {
   BridgeProtocolError,
     isValidBridgeWorkerCapabilities,
     isValidBridgeWorkerId,
+    isValidLinkedWorktreeName,
     workspaceIsolationKey,
 } from './protocol.js';
 
@@ -1238,6 +1239,9 @@ async function run(
           );
         }
       },
+      onRelease(root) {
+        admittedGitHubRepositories?.delete(root);
+      },
       sources: new Map(
         roots.map((root) => [
           root.id,
@@ -1404,6 +1408,17 @@ async function run(
                 workspaceIsolationKey(selectedWorkspaceId, undefined, worktree),
                 incarnationId,
               );
+            },
+            linkedWorktreeNames: async (selectedWorkspaceId: string) => {
+              const source = roots.find((root) => root.id === selectedWorkspaceId);
+              if (!source) return [];
+              try {
+                const entries = await readdir(join(source.root, LINKED_WORKTREE_DIRECTORY));
+                return entries.filter(isValidLinkedWorktreeName);
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+                throw error;
+              }
             },
           }
         : {}),

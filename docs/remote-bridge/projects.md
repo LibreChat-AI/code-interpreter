@@ -44,8 +44,8 @@ workspace registration remains available for independent project directories.
     coordinate descendant worktrees before relaxing root exclusion. Linked
     worktree lanes (`--linked-worktree-lanes`) take the second approach for
     `.worktrees/<name>`: hierarchical admission keeps a lane and its checkout
-    exclusive, and each lane's sandbox keeps shared Git configuration, hooks and
-    sibling metadata read-only.
+    exclusive, and each lane's sandbox can write only its worktree, shared
+    object and ref storage, and its own worktree metadata.
 -   Setup and dependency links must remain within the execution policy. Sharing
     writable dependency directories between supposedly isolated worktrees
     reintroduces overlap and requires an explicit operator decision.

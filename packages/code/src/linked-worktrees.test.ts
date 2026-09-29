@@ -53,7 +53,7 @@ async function rejects(promise: Promise<unknown>, code = 'INVALID_REQUEST'): Pro
   await assert.rejects(promise, (error: unknown) => error instanceof WorkspaceToolError && error.code === code);
 }
 
-test('verifies a linked worktree of the checkout and lists the Git paths it may not write', async (t) => {
+test('verifies a linked worktree of the checkout and lists the only Git paths it may write', async (t) => {
   const { parent, root } = await checkout();
   t.after(() => rm(parent, { recursive: true, force: true }));
   await git(root, 'worktree', 'add', '-q', '-b', 'task-b', '.worktrees/task-b');
@@ -63,24 +63,15 @@ test('verifies a linked worktree of the checkout and lists the Git paths it may 
   assert.equal(lane.root, join(root, '.worktrees', 'task-a'));
   assert.equal(lane.checkoutRoot, root);
   assert.equal(lane.commonGitDir, join(root, '.git'));
-  assert.ok(lane.readOnlyGitPaths.includes(join(root, '.git', 'config')));
-  assert.ok(lane.readOnlyGitPaths.includes(join(root, '.git', 'hooks')));
-  assert.ok(lane.readOnlyGitPaths.includes(join(root, '.git', 'worktrees', 'task-b')));
-  assert.ok(!lane.readOnlyGitPaths.includes(join(root, '.git', 'worktrees', 'task-a')));
+  assert.deepEqual(lane.writableGitPaths, [
+    join(root, '.git', 'objects'),
+    join(root, '.git', 'refs'),
+    join(root, '.git', 'logs', 'refs'),
+    join(root, '.git', 'lfs'),
+    join(root, '.git', 'worktrees', 'task-a'),
+  ]);
 });
 
-test('protects shared Git paths that do not exist yet', async (t) => {
-  const { parent, root } = await checkout();
-  t.after(() => rm(parent, { recursive: true, force: true }));
-  await rm(join(root, '.git', 'hooks'), { recursive: true, force: true });
-  await rm(join(root, '.git', 'info'), { recursive: true, force: true });
-
-  const lane = await verifyLinkedWorktree(root, 'task-a');
-
-  for (const path of ['config', 'config.worktree', 'hooks', 'info']) {
-    assert.ok(lane.readOnlyGitPaths.includes(join(root, '.git', path)), path);
-  }
-});
 
 test('rejects directories that are not linked worktrees of this checkout', async (t) => {
   const { parent, root } = await checkout();
@@ -157,7 +148,11 @@ function recordingPool(): {
   return { pool, calls };
 }
 
-async function laneTools(root: string, pool?: NativeWorkspaceCommandPool) {
+async function laneTools(
+  root: string,
+  pool?: NativeWorkspaceCommandPool,
+  onRelease?: (root: string) => void,
+) {
   const delegate = await LocalWorkspaceTools.create({
     repositoryInstructions: false,
     workspaces: [{ id: 'repo', root, writable: true }],
@@ -165,6 +160,7 @@ async function laneTools(root: string, pool?: NativeWorkspaceCommandPool) {
   return new LinkedWorktreeWorkspaceTools({
     commandPool: pool,
     delegate,
+    onRelease,
     sources: new Map([
       [
         'repo',
@@ -217,7 +213,7 @@ test('lane file tools are confined to the worktree and report the public workspa
   );
 });
 
-test('lane commands register a confined root and refresh it when sibling worktrees change', async (t) => {
+test('lane commands register a confined root once, whatever siblings come and go', async (t) => {
   const { parent, root } = await checkout();
   t.after(() => rm(parent, { recursive: true, force: true }));
   const { pool, calls } = recordingPool();
@@ -244,13 +240,37 @@ test('lane commands register a confined root and refresh it when sibling worktre
   assert.equal(registered.linkedWorktree?.commonGitDir, join(root, '.git'));
   assert.equal(registered.linkedWorktree?.checkoutRoot, root);
 
+  assert.ok(!registered.linkedWorktree?.writableGitPaths.includes(join(root, '.git')));
+
   await git(root, 'worktree', 'add', '-q', '-b', 'task-b', '.worktrees/task-b');
   await tools.execute(command);
   assert.deepEqual(
     calls.slice(3).map((call) => call.action),
-    ['unregister', 'register', 'execute'],
+    ['execute'],
   );
-  assert.ok(
-    calls[4]!.options!.linkedWorktree!.readOnlyGitPaths.includes(join(root, '.git', 'worktrees', 'task-b')),
+});
+
+test('a removed lane releases its command root and credential route', async (t) => {
+  const { parent, root } = await checkout();
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const { pool, calls } = recordingPool();
+  const released: string[] = [];
+  const tools = await laneTools(root, pool, (lane) => released.push(lane));
+  const command = {
+    protocolVersion: 1 as const,
+    operation: 'execute_command' as const,
+    workspaceId: 'repo',
+    worktree: 'task-a',
+    command: 'git status',
+  };
+  await tools.execute(command);
+
+  await git(root, 'worktree', 'remove', '.worktrees/task-a');
+  await rejects(tools.execute(command));
+
+  assert.deepEqual(
+    calls.map((call) => call.action),
+    ['register', 'execute', 'unregister'],
   );
+  assert.deepEqual(released, [join(root, '.worktrees', 'task-a')]);
 });

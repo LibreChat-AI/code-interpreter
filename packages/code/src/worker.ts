@@ -72,6 +72,8 @@ export interface BridgeWorkerOptions {
   ) =>
     | WorkspaceMutationQuarantine
     | Promise<WorkspaceMutationQuarantine>;
+  /** Names of the linked worktrees currently beneath a registered root. */
+  linkedWorktreeNames?: (workspaceId: string) => Promise<readonly string[]>;
   leaseWaitMs?: number;
   leaseTransportGraceMs?: number;
   registrationTransportTimeoutMs?: number;
@@ -1450,19 +1452,37 @@ export class BridgeWorker {
   }
 
   /** A lane may not run while the checkout it belongs to is quarantined. */
-  private async assertLaneParentAvailable(
+  /**
+   * A lane may not start while its checkout is quarantined, and a checkout may
+   * not start while any linked worktree beneath it is: root commands can reach
+   * `.worktrees/*`, including `git worktree remove`.
+   */
+  private async assertLaneFamilyAvailable(
     workspaceKey: string,
     assignment: BridgeAssignment,
   ): Promise<void> {
-    const parent = workspaceIsolationParent(workspaceKey);
-    if (parent == null) return;
-    if (this.quarantinedWorkspaces.has(parent)) {
-      throw new Error('Parent workspace requires an explicit quarantine reset');
-    }
     const workspaceId = this.assignmentBaseWorkspaceId(assignment);
-    if (workspaceId != null && parent === workspaceId) {
-      await this.options.workspaceQuarantines?.get(workspaceId)?.assertAvailable();
+    const parent = workspaceIsolationParent(workspaceKey);
+    if (parent != null) {
+      if (this.quarantinedWorkspaces.has(parent)) {
+        throw new Error('Parent workspace requires an explicit quarantine reset');
+      }
+      if (workspaceId != null && parent === workspaceId) {
+        await this.options.workspaceQuarantines?.get(workspaceId)?.assertAvailable();
+      }
+      return;
     }
+    const resolveLaneGuard = this.options.linkedWorktreeQuarantineResolver;
+    if (workspaceId == null || workspaceKey !== workspaceId || resolveLaneGuard == null) return;
+    for (const key of this.quarantinedWorkspaces) {
+      if (workspaceIsolationParent(key) === workspaceKey) {
+        throw new Error('A linked worktree in this workspace requires an explicit quarantine reset');
+      }
+    }
+    const names = (await this.options.linkedWorktreeNames?.(workspaceId)) ?? [];
+    await Promise.all(
+      names.map(async (name) => (await resolveLaneGuard(workspaceId, name)).assertAvailable()),
+    );
   }
 
   private workspaceGuard(
@@ -1687,7 +1707,7 @@ export class BridgeWorker {
             this.options.linkedWorktreeQuarantineResolver != null
           ) {
             await guard?.assertAvailable();
-            await this.assertLaneParentAvailable(workspaceKey, assignment);
+            await this.assertLaneFamilyAvailable(workspaceKey, assignment);
           }
         } catch (error) {
           throw new BridgeWorkspaceQuarantinedError(
@@ -1856,7 +1876,7 @@ export class BridgeWorker {
             this.options.linkedWorktreeQuarantineResolver != null
           ) {
             await guard?.assertAvailable();
-            await this.assertLaneParentAvailable(workspaceKey, assignment);
+            await this.assertLaneFamilyAvailable(workspaceKey, assignment);
           }
         } catch (error) {
           throw new BridgeWorkspaceQuarantinedError(

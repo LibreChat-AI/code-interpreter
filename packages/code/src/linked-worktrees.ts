@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { lstat, open, readdir, realpath } from 'node:fs/promises';
+import { lstat, open, realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import { isValidLinkedWorktreeName } from './protocol.js';
@@ -22,8 +22,14 @@ import type { WorkspaceToolExecutor } from './workspace.js';
 
 /** Linked worktrees are only admitted from this directory beneath a checkout. */
 export const LINKED_WORKTREE_DIRECTORY = '.worktrees';
-/** Shared Git storage that affects every worktree of a checkout. */
-const LINKED_WORKTREE_PROTECTED_GIT_PATHS = ['config', 'config.worktree', 'hooks', 'info'];
+/**
+ * Shared Git storage a lane may write beneath the common Git directory. Every
+ * other path there (config, hooks, the checkout's own HEAD, index and
+ * operation state, sibling metadata) stays read-only.
+ */
+const LINKED_WORKTREE_SHARED_GIT_PATHS = ['objects', 'refs', join('logs', 'refs'), 'lfs'];
+/** Lane registrations kept per worker; the least recently used idle lanes are released first. */
+const LINKED_WORKTREE_LANE_LIMIT = 32;
 /** Git pointer files are a single line; anything larger is not one. */
 const GIT_POINTER_MAX_BYTES = 4096;
 
@@ -40,8 +46,8 @@ export interface VerifiedLinkedWorktree {
   identity: WorkspaceRootIdentity;
   checkoutRoot: string;
   commonGitDir: string;
-  /** Existing paths beneath the shared Git directory a lane may not write. */
-  readOnlyGitPaths: string[];
+  /** Shared object and ref storage plus the lane's own metadata; nothing else in the common Git directory. */
+  writableGitPaths: string[];
 }
 
 export interface LinkedWorktreeWorkspaceToolsOptions {
@@ -49,6 +55,8 @@ export interface LinkedWorktreeWorkspaceToolsOptions {
   delegate: WorkspaceToolExecutor;
   /** Called with each verified lane root, e.g. to route credentials for its repository. */
   onResolve?: (workspaceId: string, root: string) => void;
+  /** Called when a lane root is released, e.g. to drop its credential route. */
+  onRelease?: (root: string) => void;
   programmaticDelegate?: {
     executeProgrammatic(
       workspaceId: string,
@@ -165,15 +173,11 @@ export async function verifyLinkedWorktree(
   } catch {
     throw rejected(`${LINKED_WORKTREE_DIRECTORY}/${name} is unavailable`);
   }
-  const siblings = (await readdir(join(commonGitDir, 'worktrees')).catch(() => [] as string[]))
-    .filter((entry) => entry !== name)
-    .map((entry) => join(commonGitDir, 'worktrees', entry));
-  /** Denied whether or not they exist yet, so a lane cannot create them for its siblings. */
-  const readOnlyGitPaths = [
-    ...LINKED_WORKTREE_PROTECTED_GIT_PATHS.map((path) => join(commonGitDir, path)),
-    ...siblings,
-  ].sort();
-  return { root, identity, checkoutRoot: checkout, commonGitDir, readOnlyGitPaths };
+  const writableGitPaths = [
+    ...LINKED_WORKTREE_SHARED_GIT_PATHS.map((path) => join(commonGitDir, path)),
+    metadata,
+  ];
+  return { root, identity, checkoutRoot: checkout, commonGitDir, writableGitPaths };
 }
 
 function publicResult(result: WorkspaceToolResult, workspaceId: string): WorkspaceToolResult {
@@ -194,6 +198,8 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     { fingerprint: string; value: Promise<LocalWorkspaceTools> }
   >();
   private readonly commandRoots = new Map<string, string>();
+  /** Verified lane roots by internal ID, least recently used first. */
+  private readonly lanes = new Map<string, string>();
 
   constructor(private readonly options: LinkedWorktreeWorkspaceToolsOptions) {
     this.mutationFailuresAreAtomic = options.delegate.mutationFailuresAreAtomic;
@@ -220,9 +226,43 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     if (!source) {
       throw rejected('Workspace does not allow linked worktree lanes');
     }
-    const lane = await verifyLinkedWorktree(source.root, worktree, source.identity);
+    const internalId = linkedWorktreeWorkspaceId(workspaceId, worktree);
+    let lane: VerifiedLinkedWorktree;
+    try {
+      lane = await verifyLinkedWorktree(source.root, worktree, source.identity);
+    } catch (error) {
+      await this.release(internalId);
+      throw error;
+    }
+    this.lanes.delete(internalId);
+    this.lanes.set(internalId, lane.root);
     this.options.onResolve?.(workspaceId, lane.root);
-    return { lane, source, internalId: linkedWorktreeWorkspaceId(workspaceId, worktree) };
+    await this.releaseIdleLanes(internalId);
+    return { lane, source, internalId };
+  }
+
+  /** Forget a lane's executors and routes; a lane still running a command is kept. */
+  private async release(internalId: string): Promise<void> {
+    const root = this.lanes.get(internalId);
+    if (root == null) return;
+    if (this.commandRoots.has(internalId)) {
+      try {
+        await this.options.commandPool?.unregisterRoot(internalId);
+      } catch {
+        return;
+      }
+      this.commandRoots.delete(internalId);
+    }
+    this.executors.delete(internalId);
+    this.lanes.delete(internalId);
+    this.options.onRelease?.(root);
+  }
+
+  private async releaseIdleLanes(current: string): Promise<void> {
+    for (const internalId of [...this.lanes.keys()]) {
+      if (this.lanes.size <= LINKED_WORKTREE_LANE_LIMIT) return;
+      if (internalId !== current) await this.release(internalId);
+    }
   }
 
   private async fileExecutor(
@@ -247,7 +287,7 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     return await cached.value;
   }
 
-  /** Register the lane's command root, replacing it when its identity or read-only Git paths changed. */
+  /** Register the lane's command root, replacing it when its identity or writable Git paths changed. */
   private async registerCommandRoot(
     internalId: string,
     lane: VerifiedLinkedWorktree,
@@ -261,7 +301,7 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
       lane.identity.path,
       lane.identity.dev,
       lane.identity.ino,
-      lane.readOnlyGitPaths,
+      lane.writableGitPaths,
     ]);
     const registered = this.commandRoots.get(internalId);
     if (registered !== fingerprint) {
@@ -273,7 +313,7 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
         linkedWorktree: {
           checkoutRoot: lane.checkoutRoot,
           commonGitDir: lane.commonGitDir,
-          readOnlyGitPaths: lane.readOnlyGitPaths,
+          writableGitPaths: lane.writableGitPaths,
         },
       });
       this.commandRoots.set(internalId, fingerprint);
