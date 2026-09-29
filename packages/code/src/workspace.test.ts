@@ -1432,6 +1432,63 @@ test('tolerant edits and replaceAll report how each edit matched', async (t) => 
   );
 });
 
+test('tolerant previews and edits refuse partial tokens without changing the file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-boundary-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'prereturn   value;\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1, operation, workspaceId: 'primary', path: 'notes.txt',
+      matching: 'tolerant', oldText: 'return value;', newText: 'return changed;',
+    }), (error: unknown) => error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT');
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
+});
+
+test('large whitespace-only differences work for preview and edit_file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-large-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const oldText = `head ${'part '.repeat(16_000)}tail`;
+  const original = `before ${oldText.replace(/ /g, '\t')} after`;
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const base = { protocolVersion: 1 as const, workspaceId: 'primary', path: 'notes.txt',
+    matching: 'tolerant' as const, oldText, newText: 'result' };
+  const preview = await tools.execute({ ...base, operation: 'preview_edit' });
+  assert.equal(preview.operation === 'preview_edit' && preview.content, 'before result after');
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const edited = await tools.execute({ ...base, operation: 'edit_file' });
+  assert.equal(edited.operation === 'edit_file' && edited.matches?.[0]?.strategy, 'whitespace-normalized');
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'before result after');
+});
+
+test('oversized replaceAll previews and edits fail before writing the source file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-limit-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'x'.repeat(10_000);
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1,
+      operation,
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      edits: [{ oldText: 'x', newText: 'y'.repeat(100_000), replaceAll: true }],
+    }), (error: unknown) => error instanceof WorkspaceToolError &&
+      error.code === 'WRITE_LIMIT_EXCEEDED' && !error.mutationMayHaveCommitted);
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
+});
+
 test('writes reject symlink targets and missing parent directories', async (t) => {
   const parent = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(parent, { recursive: true, force: true }));

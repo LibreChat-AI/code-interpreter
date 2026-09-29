@@ -1733,11 +1733,14 @@ export function isValidBridgeWorkspaceToolCapabilities(
       capabilities.editFileFeatures.length < 1 ||
       capabilities.editFileFeatures.length >
         WORKSPACE_EDIT_FILE_FEATURES.length ||
-      !capabilities.operations.includes('edit_file') ||
+      (!capabilities.operations.includes('edit_file') &&
+        !capabilities.operations.includes('preview_edit')) ||
       !capabilities.editFileFeatures.every((feature: unknown) =>
         WORKSPACE_EDIT_FILE_FEATURES.includes(
           feature as WorkspaceEditFileFeature,
-        ),
+        ) &&
+        (feature !== 'expected_base_sha256' ||
+          (capabilities.operations as string[]).includes('edit_file')),
       ) ||
       new Set(capabilities.editFileFeatures).size !==
         capabilities.editFileFeatures.length)

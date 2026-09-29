@@ -23,7 +23,11 @@ import {
   WORKSPACE_EDIT_FILE_FEATURES,
   workspaceEditRequestReportsMatches,
 } from './protocol.js';
-import { applyTextEdits, WorkspaceEditMatchError } from './edits.js';
+import {
+  applyTextEdits,
+  WorkspaceEditMatchError,
+  WorkspaceEditOutputLimitError,
+} from './edits.js';
 import type { AppliedEdits } from './edits.js';
 
 import type {
@@ -782,6 +786,9 @@ function applyWorkspaceEdits(
   } catch (error) {
     if (error instanceof WorkspaceEditMatchError) {
       throw new WorkspaceToolError(error.message, 'EDIT_CONFLICT');
+    }
+    if (error instanceof WorkspaceEditOutputLimitError) {
+      throw new WorkspaceToolError(error.message, 'WRITE_LIMIT_EXCEEDED');
     }
     throw error;
   }

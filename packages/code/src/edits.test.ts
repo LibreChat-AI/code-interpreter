@@ -5,6 +5,7 @@ import {
   applyTextEdits,
   EDIT_DIAGNOSTIC_MAX_CHARS,
   WorkspaceEditMatchError,
+  WorkspaceEditOutputLimitError,
 } from './edits.js';
 
 function rejection(run: () => unknown): WorkspaceEditMatchError {
@@ -140,6 +141,40 @@ test('indentation-flexible matches move new_text to the file indentation', () =>
   assert.deepEqual(applied.matches, [{ strategy: 'indentation-flexible', occurrences: 1 }]);
 });
 
+test('whitespace-normalized matches do not splice prefixes or suffixes of tokens', () => {
+  for (const [source, oldText] of [
+    ['prereturn   value;\n', 'return value;'],
+    ['return   valueSuffix\n', 'return value'],
+    ['return   value;postfix\n', 'return value;'],
+  ]) {
+    const error = rejection(() => applyTextEdits(source, [{ oldText, newText: 'changed' }], 'tolerant'));
+    assert.match(error.message, /old_text was not found/);
+  }
+  const valid = applyTextEdits('return   value;\n', [
+    { oldText: 'return value;', newText: 'return changed;' },
+  ], 'tolerant');
+  assert.equal(valid.text, 'return changed;\n');
+  assert.deepEqual(valid.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+});
+
+test('large whitespace-normalized edits match without compiling a request-sized regular expression', () => {
+  const oldText = `head ${'part '.repeat(16_000)}tail`;
+  const source = `before ${oldText.replace(/ /g, '\t')} after`;
+  const applied = applyTextEdits(source, [{ oldText, newText: 'result' }], 'tolerant');
+  assert.equal(applied.text, 'before result after');
+  assert.deepEqual(applied.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+});
+
+test('whitespace-normalized matches count overlapping token sequences but replaceAll does not overlap', () => {
+  const source = 'a  b   a\tb  a';
+  const edit = { oldText: 'a b a', newText: 'x' };
+  const error = rejection(() => applyTextEdits(source, [edit], 'tolerant'));
+  assert.match(error.message, /matched 2 locations/);
+  const replaced = applyTextEdits(source, [{ ...edit, replaceAll: true }], 'tolerant');
+  assert.equal(replaced.text, 'x\tb  a');
+  assert.deepEqual(replaced.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+});
+
 test('whitespace-normalized matches do not indent new_text twice', () => {
   const text = '    total =   price *\n        quantity;\n';
   const applied = applyTextEdits(
@@ -156,6 +191,13 @@ test('tolerant matching still refuses an ambiguous edit', () => {
     applyTextEdits('x = 1  \ny = 2\nx = 1\n', [{ oldText: 'x = 1', newText: 'x = 3' }], 'tolerant'),
   );
   assert.match(error.message, /matched 2 locations at lines 1, 3/);
+});
+
+test('highly repeated exact matches report the count with bounded line samples', () => {
+  const error = rejection(() => applyTextEdits('z'.repeat(200_000), [
+    { oldText: 'z', newText: 'y' },
+  ]));
+  assert.match(error.message, /matched 200000 locations at lines 1, 1, 1, 1, 1 and 199995 more/);
 });
 
 test('replaceAll replaces every location and reports the count', () => {
@@ -176,11 +218,43 @@ test('replaceAll over line windows never overlaps its own matches', () => {
   assert.deepEqual(applied.matches, [{ strategy: 'exact', occurrences: 2 }]);
 });
 
+test('replaceAll rejects oversized intermediate output before constructing it', () => {
+  assert.throws(
+    () => applyTextEdits('x'.repeat(1_000_000), [
+      { oldText: 'x', newText: 'y'.repeat(100_000), replaceAll: true },
+    ]),
+    WorkspaceEditOutputLimitError,
+  );
+});
+
 test('replaceAll still fails when nothing matches', () => {
   const error = rejection(() =>
     applyTextEdits('abc', [{ oldText: 'xyz', newText: '', replaceAll: true }]),
   );
   assert.match(error.message, /old_text was not found/);
+});
+
+test('first-line hints report bounded samples even when the line repeats throughout a file', () => {
+  const error = rejection(() => applyTextEdits('a\n'.repeat(100_000), [
+    { oldText: 'a\nmissing', newText: 'replacement' },
+  ]));
+  assert.match(error.message, /its first line appears at lines 1, 2, 3, 4, 5 and 99995 more/);
+});
+
+test('repetitive indentation candidates fail closed after a bounded comparison budget', () => {
+  const error = rejection(() => applyTextEdits('    a\n'.repeat(1_200), [
+    { oldText: `${'a\n'.repeat(199)}a`, newText: 'changed' },
+  ], 'tolerant'));
+  assert.match(error.message, /too many repetitive line-window candidates/);
+});
+
+test('repetitive long line windows return a missing-edit diagnosis without quadratic scans', () => {
+  const text = 'line\n'.repeat(24_000);
+  const oldText = `${'line\n'.repeat(6_000)}missing`;
+  const started = performance.now();
+  const error = rejection(() => applyTextEdits(text, [{ oldText, newText: 'replacement' }]));
+  assert.match(error.message, /did not apply and nothing was written/);
+  assert.ok(performance.now() - started < 2_000, 'a bounded edit must not compare every long window');
 });
 
 test('a hundred failing multi-line edits on a large file are diagnosed quickly', () => {

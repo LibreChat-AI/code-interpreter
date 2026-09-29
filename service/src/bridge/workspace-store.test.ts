@@ -4,7 +4,7 @@ import RedisMock from 'ioredis-mock';
 import type Redis from 'ioredis';
 import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 
-import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import { BRIDGE_PROTOCOL_VERSION, isValidBridgeWorkerCapabilities } from '../../../packages/code/src/protocol';
 import { RedisBridgeStore } from './store';
 
 const redis = new RedisMock() as unknown as Redis;
@@ -711,6 +711,63 @@ test.each(featureGatedEdits)(
     expect(await redis.keys('codeapi:bridge:v1:assignment:*')).toHaveLength(0);
   },
 );
+
+test('preview-only workers can dispatch negotiated tolerant and replace-all previews', async () => {
+  expect(isValidBridgeWorkerCapabilities({
+    statefulWorkspace: false,
+    sandboxProfile: 'native-srt',
+    runtimes: [],
+    workspaceTools: {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operations: ['preview_edit'],
+      editFileModes: ['single', 'batch'],
+      editFileFeatures: ['tolerant_match', 'replace_all'],
+      workspaces: [{ id: 'primary' }],
+    },
+  })).toBe(true);
+  await store.register({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    workerId: 'workspace-worker',
+    incarnationId,
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'native-srt',
+      runtimes: [],
+      workspaceTools: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        operations: ['preview_edit'],
+        editFileModes: ['single', 'batch'],
+        editFileFeatures: ['tolerant_match', 'replace_all'],
+        workspaces: [{ id: 'primary' }],
+      },
+    },
+  });
+  const request = {
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    operation: 'preview_edit' as const,
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    matching: 'tolerant' as const,
+    edits: [{ oldText: 'before', newText: 'after', replaceAll: true }],
+  };
+  const completion = store.dispatchWorkspaceTool({
+    workerId: 'workspace-worker',
+    request,
+    deadlineAtMs: Date.now() + 5_000,
+    signal: new AbortController().signal,
+  });
+  const assignment = await store.lease('workspace-worker', incarnationId, 1_000);
+  expect(assignment).toMatchObject({ executionKind: 'workspace_tool', request });
+  await store.settle('workspace-worker', assignment!.assignmentId, {
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    generation: assignment!.generation,
+    leaseToken: assignment!.leaseToken,
+    incarnationId,
+    status: 'rejected',
+    error: 'preview tested',
+  });
+  await expect(completion).resolves.toMatchObject({ status: 'rejected', error: 'preview tested' });
+});
 
 test('rejects batch previews from workers without the negotiated mode', async () => {
   await store.register({

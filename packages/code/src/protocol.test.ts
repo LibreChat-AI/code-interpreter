@@ -670,6 +670,37 @@ test('edit features advertise any unique subset of the known features', () => {
   }
 });
 
+test('preview-only workers may advertise tolerant matching and replace-all, but not edit-only hashes', () => {
+  const previewOnly = {
+    statefulWorkspace: false,
+    sandboxProfile: 'native-srt',
+    runtimes: [],
+    workspaceTools: {
+      protocolVersion: 1,
+      operations: ['read_file', 'preview_edit'],
+      workspaces: [{ id: 'primary' }],
+      editFileModes: ['single', 'batch'],
+    },
+  };
+  for (const features of [
+    ['tolerant_match'],
+    ['replace_all'],
+    ['tolerant_match', 'replace_all'],
+  ]) {
+    assert.equal(isValidBridgeWorkerCapabilities({
+      ...previewOnly,
+      workspaceTools: { ...previewOnly.workspaceTools, editFileFeatures: features },
+    }), true, features.join(','));
+  }
+  assert.equal(isValidBridgeWorkerCapabilities({
+    ...previewOnly,
+    workspaceTools: {
+      ...previewOnly.workspaceTools,
+      editFileFeatures: ['expected_base_sha256', 'tolerant_match'],
+    },
+  }), false);
+});
+
 test('workspace commands require bounded sandbox inputs and outputs', () => {
   const request = {
     protocolVersion: 1 as const,

@@ -606,8 +606,11 @@ before Code API dispatches it:
   exact match to, in order, `line-trimmed` (ignores trailing whitespace and
   CRLF), `indentation-flexible` (a uniformly shifted block, with `newText`
   moved to the file's indentation) and `whitespace-normalized` (any whitespace
-  run between tokens). A match must still be unique, and replacements keep the
-  file's line endings.
+  run between complete whitespace-delimited tokens, never a prefix or suffix
+  of another token). Without `replaceAll`, a match must still be unique;
+  replacements keep the file's line endings. Excessively repetitive
+  indentation candidates fail closed with a request for more context rather
+  than scanning every long window.
 - `replace_all`: a batch edit's `replaceAll: true` replaces every
   non-overlapping match instead of requiring exactly one, and still fails when
   nothing matches.
@@ -680,8 +683,10 @@ non-regular files, and commit through an owner-only temporary file followed by
 an atomic rename. The worker syncs the containing directory and verifies that
 the installed inode still contains the requested bytes before reporting
 success. Edits replace text only when the requested old text occurs exactly
-once and reject if the file changes before commit. These operations do not
-create directories or execute commands.
+once (unless negotiated `replaceAll` selects every non-overlapping match) and
+reject if the file changes before commit. Intermediate replacements are bounded
+before construction, including `replaceAll`; these operations do not create
+directories or execute commands.
 
 Register one directory already present on the worker machine with the
 worker-directory option:

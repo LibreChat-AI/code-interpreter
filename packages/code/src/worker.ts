@@ -363,7 +363,8 @@ function supportedWorkspaceCapabilities(
   });
   if (workspaces.length === 0) return undefined;
   const editFileFeatures = desired.editFileFeatures?.filter((feature) =>
-    registration.supportedWorkspaceEditFileFeatures?.includes(feature),
+    registration.supportedWorkspaceEditFileFeatures?.includes(feature) &&
+    (feature !== 'expected_base_sha256' || operations.includes('edit_file')),
   );
   const listFileFeatures = desired.listFileFeatures?.filter((feature) =>
     registration.supportedWorkspaceListFileFeatures?.includes(feature),
@@ -392,7 +393,7 @@ function supportedWorkspaceCapabilities(
       ...(supportsEditRequests && editFileModes?.length
         ? { editFileModes }
         : {}),
-      ...(operations.includes('edit_file') && editFileFeatures?.length
+      ...(supportsEditRequests && editFileFeatures?.length
         ? { editFileFeatures }
         : {}),
       ...(operations.includes('list_files') && listFileFeatures?.length
@@ -1652,9 +1653,13 @@ export class BridgeWorker {
             );
           }
           if (
-            workspaceRequest.operation === 'edit_file' &&
-            workspaceRequest.expectedBaseSha256 !== undefined &&
-            !advertised.editFileFeatures?.includes('expected_base_sha256')
+            (workspaceRequest.operation === 'edit_file' &&
+              workspaceRequest.expectedBaseSha256 !== undefined &&
+              !advertised.editFileFeatures?.includes('expected_base_sha256')) ||
+            (workspaceRequest.matching !== undefined &&
+              !advertised.editFileFeatures?.includes('tolerant_match')) ||
+            (workspaceRequest.edits?.some((edit) => edit.replaceAll !== undefined) === true &&
+              !advertised.editFileFeatures?.includes('replace_all'))
           ) {
             throw new BridgeProtocolError(
               'Workspace edit feature is not advertised',
