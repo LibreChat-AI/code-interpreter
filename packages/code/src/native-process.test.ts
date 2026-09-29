@@ -150,6 +150,22 @@ test('executor bootstrap excludes bridge credentials and Node injection variable
   await sandbox.close();
 });
 
+test('executor forwards the linked worktree policy to the sandbox process', async () => {
+  const fake = fixture();
+  const linkedWorktree = {
+    checkoutRoot: '/checkout',
+    commonGitDir: '/checkout/.git',
+    readOnlyGitPaths: ['/checkout/.git/config', '/checkout/.git/hooks'],
+  };
+  const sandbox = new NativeProcessWorkspaceCommandSandbox(
+    { workspaceRoot: '/checkout/.worktrees/task-a', linkedWorktree },
+    fake.fork,
+  );
+  await sandbox.prepare();
+  assert.deepEqual(fake.messages[0].options.linkedWorktree, linkedWorktree);
+  await sandbox.close();
+});
+
 test('executor forwards the resolved command policy without worker credentials', async () => {
   const fake = fixture();
   const sandbox = new NativeProcessWorkspaceCommandSandbox(

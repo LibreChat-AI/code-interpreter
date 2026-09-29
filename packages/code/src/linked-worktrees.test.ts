@@ -69,6 +69,19 @@ test('verifies a linked worktree of the checkout and lists the Git paths it may 
   assert.ok(!lane.readOnlyGitPaths.includes(join(root, '.git', 'worktrees', 'task-a')));
 });
 
+test('protects shared Git paths that do not exist yet', async (t) => {
+  const { parent, root } = await checkout();
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  await rm(join(root, '.git', 'hooks'), { recursive: true, force: true });
+  await rm(join(root, '.git', 'info'), { recursive: true, force: true });
+
+  const lane = await verifyLinkedWorktree(root, 'task-a');
+
+  for (const path of ['config', 'config.worktree', 'hooks', 'info']) {
+    assert.ok(lane.readOnlyGitPaths.includes(join(root, '.git', path)), path);
+  }
+});
+
 test('rejects directories that are not linked worktrees of this checkout', async (t) => {
   const { parent, root } = await checkout();
   t.after(() => rm(parent, { recursive: true, force: true }));

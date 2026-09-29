@@ -1521,15 +1521,20 @@ async function run(
         args,
         '--reset-workspace-instance',
       );
+      const resetWorkspaceWorktree = option(
+        args,
+        '--reset-workspace-worktree',
+      );
       await worker.refreshCredential(controller.signal);
       await worker.registerForMaintenance(controller.signal);
             await worker.resetNativeWorkspace(
                 resetNativeRoot,
                 controller.signal,
                 resetWorkspaceInstance,
+                resetWorkspaceWorktree,
             );
       process.stdout.write(
-        `librechat-code: reset acknowledged for native workspace ${resetNativeRoot}${resetWorkspaceInstance ? ` instance ${resetWorkspaceInstance}` : ''}\n`,
+        `librechat-code: reset acknowledged for native workspace ${resetNativeRoot}${resetWorkspaceInstance ? ` instance ${resetWorkspaceInstance}` : ''}${resetWorkspaceWorktree ? ` worktree ${resetWorkspaceWorktree}` : ''}\n`,
       );
       return;
     }

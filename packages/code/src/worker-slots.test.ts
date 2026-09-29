@@ -445,3 +445,83 @@ test('sibling linked-worktree lanes run past each other, but a lane and its chec
   await lane;
   assert.deepEqual(executed, ['lane-b', 'checkout', 'lane-c']);
 });
+
+test('a linked worktree lane fence is reset through its own guard and isolation key', async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const guarded: string[] = [];
+  const worker = new BridgeWorker({
+    codeApiUrl: 'http://localhost:1',
+    token: 'fixture',
+    workerId: 'worker',
+    incarnationId: 'incarnation-reset',
+    sandboxEndpoint: 'http://localhost:2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'native-srt',
+      runtimes: [],
+      workspaceLeaseSlots: 2,
+      requiresReadyConfirmation: true,
+      workspaceTools: {
+        protocolVersion: 1,
+        operations: ['read_file'],
+        workspaces: [{ id: 'repo', workspaceScopes: ['git_linked_worktree'] }, { id: 'plain' }],
+      },
+    },
+    workspaceQuarantines: new Map(
+      ['repo', 'plain'].map((id) => [
+        id,
+        {
+          assertAvailable: async () => undefined,
+          arm: async () => undefined,
+          clear: async () => undefined,
+          quarantine: async () => undefined,
+        },
+      ]),
+    ),
+    workspaceTools: {
+      capabilities: {
+        protocolVersion: 1,
+        operations: ['read_file'],
+        workspaces: [{ id: 'repo', workspaceScopes: ['git_linked_worktree'] }, { id: 'plain' }],
+      },
+      async execute() {
+        throw new Error('must not execute');
+      },
+    },
+    linkedWorktreeQuarantineResolver: (workspaceId, worktree) => {
+      guarded.push(`${workspaceId}/${worktree}`);
+      return {
+        assertAvailable: async () => undefined,
+        arm: async () => undefined,
+        clear: async () => undefined,
+        quarantine: async () => undefined,
+      };
+    },
+    fetchImpl: async (url, init) => {
+      assert.ok(new URL(String(url)).pathname.endsWith('/workspaces/reset'));
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ protocolVersion: 1, reset: true });
+    },
+  });
+
+  await worker.resetNativeWorkspace('repo', undefined, undefined, 'task-a');
+
+  assert.deepEqual(guarded, ['repo/task-a']);
+  assert.equal(
+    bodies[0]?.runtimeSessionId,
+    `native-workspace:${workspaceIsolationKey('repo', undefined, 'task-a')}`,
+  );
+  await assert.rejects(
+    worker.resetNativeWorkspace('plain', undefined, undefined, 'task-a'),
+    /worktree lanes/,
+  );
+  await assert.rejects(
+    worker.resetNativeWorkspace('repo', undefined, 'a'.repeat(64), 'task-a'),
+    /worktree lanes/,
+  );
+  await assert.rejects(
+    worker.resetNativeWorkspace('repo', undefined, undefined, '../task-a'),
+    /worktree lanes/,
+  );
+  assert.equal(bodies.length, 1);
+});

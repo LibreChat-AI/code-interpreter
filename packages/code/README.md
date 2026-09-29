@@ -890,6 +890,11 @@ To recover a quarantined native root:
 3. Run the normal worker command with all its root/slot options plus `--reset-workspace-quarantine second`. This verifies the local guard is cleared, resets the server fence, then exits.
 4. Restart the normal worker command without the reset option.
 
+A linked-worktree lane keeps its own guard and fence. Inspect or restore
+`<root>/.worktrees/<name>`, clear its guard with
+`--worker-dir <root>/.worktrees/<name>`, then add
+`--reset-workspace-worktree <name>` to the reset command in step 3.
+
 The workspace selector in LibreChat must preserve these registered IDs. Adding
 roots here does not grant a principal access or change an agent's selected root.
 # Named project environments

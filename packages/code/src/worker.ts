@@ -6,6 +6,7 @@ import {
   BridgeProtocolError,
   bridgeWorkerPath,
   isBridgeWorkspaceProgrammaticRequest,
+  isValidLinkedWorktreeName,
   isWorkspaceToolResult,
   workspaceIsolationKey,
   workspaceIsolationKeysConflict,
@@ -857,18 +858,33 @@ export class BridgeWorker {
     workspaceId: string,
     signal?: AbortSignal,
     workspaceInstanceId?: string,
+    worktree?: string,
   ): Promise<void> {
     const workspace = this.options.capabilities.workspaceTools?.workspaces.find(
       (root) => root.id === workspaceId,
     );
-    const key = workspaceIsolationKey(workspaceId, workspaceInstanceId);
-    const guard =
-      workspaceInstanceId == null
-        ? this.options.workspaceQuarantines?.get(workspaceId)
-        : await this.options.workspaceQuarantineResolver?.(
-            workspaceId,
-            workspaceInstanceId,
-          );
+    if (
+      worktree != null &&
+      (workspaceInstanceId != null ||
+        !isValidLinkedWorktreeName(worktree) ||
+        workspace?.workspaceScopes?.includes('git_linked_worktree') !== true)
+    ) {
+      throw new BridgeProtocolError(
+        'Linked worktree reset requires a registered checkout with worktree lanes',
+      );
+    }
+    const key = workspaceIsolationKey(workspaceId, workspaceInstanceId, worktree);
+    let guard: WorkspaceMutationQuarantine | undefined;
+    if (worktree != null) {
+      guard = await this.options.linkedWorktreeQuarantineResolver?.(workspaceId, worktree);
+    } else if (workspaceInstanceId != null) {
+      guard = await this.options.workspaceQuarantineResolver?.(
+        workspaceId,
+        workspaceInstanceId,
+      );
+    } else {
+      guard = this.options.workspaceQuarantines?.get(workspaceId);
+    }
     if (
       !guard ||
       this.activeWorkspaceAssignments.size > 0 ||

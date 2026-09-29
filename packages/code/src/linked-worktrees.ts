@@ -22,6 +22,8 @@ import type { WorkspaceToolExecutor } from './workspace.js';
 
 /** Linked worktrees are only admitted from this directory beneath a checkout. */
 export const LINKED_WORKTREE_DIRECTORY = '.worktrees';
+/** Shared Git storage that affects every worktree of a checkout. */
+const LINKED_WORKTREE_PROTECTED_GIT_PATHS = ['config', 'config.worktree', 'hooks', 'info'];
 /** Git pointer files are a single line; anything larger is not one. */
 const GIT_POINTER_MAX_BYTES = 4096;
 
@@ -166,18 +168,12 @@ export async function verifyLinkedWorktree(
   const siblings = (await readdir(join(commonGitDir, 'worktrees')).catch(() => [] as string[]))
     .filter((entry) => entry !== name)
     .map((entry) => join(commonGitDir, 'worktrees', entry));
-  const candidates = [
-    join(commonGitDir, 'hooks'),
-    join(commonGitDir, 'config'),
-    join(commonGitDir, 'config.worktree'),
-    join(commonGitDir, 'info'),
+  /** Denied whether or not they exist yet, so a lane cannot create them for its siblings. */
+  const readOnlyGitPaths = [
+    ...LINKED_WORKTREE_PROTECTED_GIT_PATHS.map((path) => join(commonGitDir, path)),
     ...siblings,
-  ];
-  const readOnlyGitPaths: string[] = [];
-  for (const candidate of candidates) {
-    if ((await lstat(candidate).catch(() => undefined)) != null) readOnlyGitPaths.push(candidate);
-  }
-  return { root, identity, checkoutRoot: checkout, commonGitDir, readOnlyGitPaths: readOnlyGitPaths.sort() };
+  ].sort();
+  return { root, identity, checkoutRoot: checkout, commonGitDir, readOnlyGitPaths };
 }
 
 function publicResult(result: WorkspaceToolResult, workspaceId: string): WorkspaceToolResult {

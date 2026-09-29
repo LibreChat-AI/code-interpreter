@@ -2228,13 +2228,13 @@ export class RedisBridgeStore {
       "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
       'if ARGV[7] ~= "" and redis.call(\'GET\', KEYS[6]) ~= ARGV[7] then return 0 end',
       "if #KEYS >= 7 and redis.call('EXISTS', KEYS[7]) == 1 then return -1 end",
+      "if #KEYS >= 10 and redis.call('EXISTS', KEYS[10]) == 1 then return -1 end",
       'redis.call(\'SET\', KEYS[2], ARGV[2], \"EX\", ARGV[3])',
       "redis.call('RPUSH', KEYS[3], ARGV[4])",
       "redis.call('EXPIRE', KEYS[3], ARGV[3])",
       ...(assignment.workspaceLeaseSlot === undefined
         ? ['redis.call(\'SET\', KEYS[4], ARGV[1], \"PX\", ARGV[5])']
         : []),
-      "if #KEYS >= 10 and redis.call('EXISTS', KEYS[10]) == 1 then return -1 end",
       'redis.call(\'SET\', KEYS[5], "1", \"PXAT\", ARGV[6])',
       "if #KEYS >= 7 then redis.call('SET', KEYS[7], ARGV[4]) end",
       'if #KEYS >= 9 then',
