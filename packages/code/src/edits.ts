@@ -343,17 +343,24 @@ function findIndentationFlexible(text: string, edit: WorkspaceTextEdit): MatchOu
   return findLineWindows(text, edit, 'indentation-flexible');
 }
 
+function newlineCount(text: string): number {
+  let count = 0;
+  for (let index = text.indexOf('\n'); index >= 0; index = text.indexOf('\n', index + 1)) count++;
+  return count;
+}
+
 /** A boundary supplied by oldText must exist beside the candidate tokens. */
 function hasBoundaryWhitespace(
   text: string,
   position: number,
   direction: -1 | 1,
-  needsNewline: boolean,
+  requiredNewlines: number,
 ): boolean {
   for (let index = position; index >= 0 && index < text.length; index += direction) {
     const char = text[index];
     if (!/\s/.test(char)) break;
-    if (!needsNewline || char === '\n') return true;
+    if (char === '\n') requiredNewlines--;
+    if (requiredNewlines <= 0) return true;
   }
   return false;
 }
@@ -372,12 +379,12 @@ function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchO
   // wrappers, otherwise CRLF/LF differences insert a second line break.
   const leading = /^\s*/.exec(oldText)?.[0] ?? '';
   const trailing = /\s*$/.exec(oldText)?.[0] ?? '';
-  const leadingNeedsNewline = leading.includes('\n');
-  const trailingNeedsNewline = trailing.includes('\n');
+  const leadingNewlines = newlineCount(leading);
+  const trailingNewlines = newlineCount(trailing);
   let newText = edit.newText.replace(/\r\n/g, '\n');
   if (leading.length > 0 && newText.startsWith(leading)) {
     newText = newText.slice(leading.length);
-  } else if (leadingNeedsNewline && newText.startsWith('\n')) {
+  } else if (leadingNewlines === 1 && newText.startsWith('\n')) {
     // Keep the source's indentation when the caller used different spaces.
     newText = newText.slice(1);
   } else if (leading.length > 0) {
@@ -386,7 +393,7 @@ function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchO
   }
   if (trailing.length > 0 && newText.endsWith(trailing)) {
     newText = newText.slice(0, -trailing.length);
-  } else if (trailingNeedsNewline && newText.endsWith('\n')) {
+  } else if (trailingNewlines === 1 && newText.endsWith('\n')) {
     // The source terminator is outside the token range. Preserve any extra
     // caller-requested line breaks by peeling only the shared one.
     newText = newText.slice(0, -1);
@@ -417,8 +424,8 @@ function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchO
       const start = tokenStarts[(tokenIndex + 1) % tokens.length];
       const end = word.index + word[0].length;
       const boundariesMatch =
-        (leading.length === 0 || hasBoundaryWhitespace(text, start - 1, -1, leadingNeedsNewline)) &&
-        (trailing.length === 0 || hasBoundaryWhitespace(text, end, 1, trailingNeedsNewline));
+        (leading.length === 0 || hasBoundaryWhitespace(text, start - 1, -1, leadingNewlines)) &&
+        (trailing.length === 0 || hasBoundaryWhitespace(text, end, 1, trailingNewlines));
       if (boundariesMatch) {
         while (nextNewline >= 0 && nextNewline < start) {
           previousNewline = nextNewline;

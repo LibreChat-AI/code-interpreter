@@ -222,6 +222,8 @@ test('whitespace-normalized matching rejects absent required boundary whitespace
     { source: 'previous foo   bar', oldText: '\nfoo bar', newText: '\nbaz qux' },
     { source: 'foo   bar', oldText: ' foo bar', newText: ' baz qux' },
     { source: 'foo   bar', oldText: 'foo bar ', newText: 'baz qux ' },
+    { source: 'foo   bar\nnext', oldText: 'foo bar\n\n', newText: 'baz qux\n\n' },
+    { source: 'header\nfoo   bar\nnext', oldText: '\n\nfoo bar', newText: '\n\nbaz qux' },
   ];
   for (const edit of cases) {
     const { source, ...request } = edit;
@@ -246,6 +248,7 @@ test('whitespace-normalized matching rejects boundary removal outside its token 
     { source: '  foo   bar', oldText: '  foo bar', newText: 'baz qux' },
     { source: 'foo   bar ', oldText: 'foo bar ', newText: 'baz qux' },
     { source: 'header\nfoo   bar\nnext', oldText: '\nfoo bar\n', newText: '\n' },
+    { source: 'foo   bar\n\nnext', oldText: 'foo bar\n\n', newText: 'baz qux\n' },
   ];
   for (const edit of cases) {
     const { source, ...request } = edit;
@@ -257,6 +260,13 @@ test('whitespace-normalized matching rejects boundary removal outside its token 
   }], 'tolerant');
   assert.equal(exact.text, 'baz quxnext');
   assert.deepEqual(exact.matches, [{ strategy: 'exact', occurrences: 1 }]);
+});
+
+test('whitespace-normalized matching preserves two present boundary line breaks', () => {
+  const result = applyTextEdits('foo   bar\n\nnext', [{
+    oldText: 'foo bar\r\n\r\n', newText: 'baz qux\n\n',
+  }], 'tolerant');
+  assert.equal(result.text, 'baz qux\n\nnext');
 });
 
 test('whitespace-normalized matching preserves an intentional extra line break', () => {
