@@ -1475,6 +1475,40 @@ test('preview and edit peel equivalent newline wrappers without doubling line br
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), `\uFEFF${preview.content}`);
 });
 
+test('tolerant previews and edits reject missing source boundary newlines without changing the file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-missing-newline-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'foo   bar';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1, operation, workspaceId: 'primary', path: 'notes.txt',
+      matching: 'tolerant', oldText: 'foo bar\r\n', newText: 'baz qux\n',
+    }), (error: unknown) => error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT');
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
+});
+
+test('tolerant previews and edits reject boundary removal outside the token match', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-remove-newline-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'foo   bar\r\nnext';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1, operation, workspaceId: 'primary', path: 'notes.txt',
+      matching: 'tolerant', oldText: 'foo bar\r\n', newText: 'baz qux',
+    }), (error: unknown) => error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT');
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
+});
+
 test('tolerant previews and edits refuse partial tokens without changing the file', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-boundary-'));
   t.after(() => rm(root, { recursive: true, force: true }));

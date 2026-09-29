@@ -343,6 +343,21 @@ function findIndentationFlexible(text: string, edit: WorkspaceTextEdit): MatchOu
   return findLineWindows(text, edit, 'indentation-flexible');
 }
 
+/** A boundary supplied by oldText must exist beside the candidate tokens. */
+function hasBoundaryWhitespace(
+  text: string,
+  position: number,
+  direction: -1 | 1,
+  needsNewline: boolean,
+): boolean {
+  for (let index = position; index >= 0 && index < text.length; index += direction) {
+    const char = text[index];
+    if (!/\s/.test(char)) break;
+    if (!needsNewline || char === '\n') return true;
+  }
+  return false;
+}
+
 /**
  * Tolerates any run of whitespace, including line breaks, between tokens. The
  * match starts and ends on a token, so whitespace the caller wrapped around
@@ -357,19 +372,27 @@ function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchO
   // wrappers, otherwise CRLF/LF differences insert a second line break.
   const leading = /^\s*/.exec(oldText)?.[0] ?? '';
   const trailing = /\s*$/.exec(oldText)?.[0] ?? '';
+  const leadingNeedsNewline = leading.includes('\n');
+  const trailingNeedsNewline = trailing.includes('\n');
   let newText = edit.newText.replace(/\r\n/g, '\n');
   if (leading.length > 0 && newText.startsWith(leading)) {
     newText = newText.slice(leading.length);
-  } else if (leading.includes('\n') && newText.startsWith('\n')) {
+  } else if (leadingNeedsNewline && newText.startsWith('\n')) {
     // Keep the source's indentation when the caller used different spaces.
     newText = newText.slice(1);
+  } else if (leading.length > 0) {
+    // A token-only replacement cannot remove the source's leading whitespace.
+    return { status: 'none' };
   }
   if (trailing.length > 0 && newText.endsWith(trailing)) {
     newText = newText.slice(0, -trailing.length);
-  } else if (trailing.includes('\n') && newText.endsWith('\n')) {
+  } else if (trailingNeedsNewline && newText.endsWith('\n')) {
     // The source terminator is outside the token range. Preserve any extra
     // caller-requested line breaks by peeling only the shared one.
     newText = newText.slice(0, -1);
+  } else if (trailing.length > 0) {
+    // Likewise do not claim success if the caller meant to remove an ending.
+    return { status: 'none' };
   }
   const lfReplacement = newText;
   const crlfReplacement = withLineEnding(newText, '\r\n');
@@ -392,17 +415,22 @@ function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchO
     if (word[0] === tokens[matched]) matched++;
     if (matched === tokens.length) {
       const start = tokenStarts[(tokenIndex + 1) % tokens.length];
-      while (nextNewline >= 0 && nextNewline < start) {
-        previousNewline = nextNewline;
-        nextNewline = text.indexOf('\n', nextNewline + 1);
+      const end = word.index + word[0].length;
+      const boundariesMatch =
+        (leading.length === 0 || hasBoundaryWhitespace(text, start - 1, -1, leadingNeedsNewline)) &&
+        (trailing.length === 0 || hasBoundaryWhitespace(text, end, 1, trailingNeedsNewline));
+      if (boundariesMatch) {
+        while (nextNewline >= 0 && nextNewline < start) {
+          previousNewline = nextNewline;
+          nextNewline = text.indexOf('\n', nextNewline + 1);
+        }
+        const nearestNewline = nextNewline >= 0 ? nextNewline : previousNewline;
+        const replacement = nearestNewline >= 0 && lineEndingAt(text, nearestNewline) === '\r\n'
+          ? crlfReplacement
+          : lfReplacement;
+        collectMatch(collected, start, end, replacement, edit.replaceAll);
       }
-      const nearestNewline = nextNewline >= 0 ? nextNewline : previousNewline;
-      const replacement = nearestNewline >= 0 && lineEndingAt(text, nearestNewline) === '\r\n'
-        ? crlfReplacement
-        : lfReplacement;
-      collectMatch(collected, start, word.index + word[0].length,
-        replacement, edit.replaceAll);
-      matched = edit.replaceAll === true ? 0 : prefix[matched - 1];
+      matched = boundariesMatch && edit.replaceAll === true ? 0 : prefix[matched - 1];
     }
     tokenIndex++;
   }

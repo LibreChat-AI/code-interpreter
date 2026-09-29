@@ -215,6 +215,50 @@ test('whitespace-normalized matching peels a leading newline even if adjacent sp
   assert.equal(result.text, 'header\r\n  changed\r\nnext');
 });
 
+test('whitespace-normalized matching rejects absent required boundary whitespace', () => {
+  const cases = [
+    { source: 'foo   bar', oldText: 'foo bar\r\n', newText: 'baz qux\n' },
+    { source: 'foo   bar next', oldText: 'foo bar\n', newText: 'baz qux\n' },
+    { source: 'previous foo   bar', oldText: '\nfoo bar', newText: '\nbaz qux' },
+    { source: 'foo   bar', oldText: ' foo bar', newText: ' baz qux' },
+    { source: 'foo   bar', oldText: 'foo bar ', newText: 'baz qux ' },
+  ];
+  for (const edit of cases) {
+    const { source, ...request } = edit;
+    const error = rejection(() => applyTextEdits(source, [request], 'tolerant'));
+    assert.match(error.message, /old_text was not found/, `unmatched boundary: ${JSON.stringify(edit)}`);
+  }
+});
+
+test('whitespace-normalized scanning skips boundary-invalid matches and keeps later valid ones', () => {
+  const source = 'header foo   bar header\nfoo   bar\nend';
+  const result = applyTextEdits(source, [{
+    oldText: '\nfoo bar\n', newText: '\nbaz qux\n', replaceAll: true,
+  }], 'tolerant');
+  assert.equal(result.text, 'header foo   bar header\nbaz qux\nend');
+  assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+});
+
+test('whitespace-normalized matching rejects boundary removal outside its token range', () => {
+  const cases = [
+    { source: 'foo   bar\r\nnext', oldText: 'foo bar\r\n', newText: 'baz qux' },
+    { source: 'header\r\n  foo   bar', oldText: '\n  foo bar', newText: 'baz qux' },
+    { source: '  foo   bar', oldText: '  foo bar', newText: 'baz qux' },
+    { source: 'foo   bar ', oldText: 'foo bar ', newText: 'baz qux' },
+    { source: 'header\nfoo   bar\nnext', oldText: '\nfoo bar\n', newText: '\n' },
+  ];
+  for (const edit of cases) {
+    const { source, ...request } = edit;
+    const error = rejection(() => applyTextEdits(source, [request], 'tolerant'));
+    assert.match(error.message, /old_text was not found/, `unremovable boundary: ${JSON.stringify(edit)}`);
+  }
+  const exact = applyTextEdits('foo bar\r\nnext', [{
+    oldText: 'foo bar\r\n', newText: 'baz qux',
+  }], 'tolerant');
+  assert.equal(exact.text, 'baz quxnext');
+  assert.deepEqual(exact.matches, [{ strategy: 'exact', occurrences: 1 }]);
+});
+
 test('whitespace-normalized matching preserves an intentional extra line break', () => {
   const result = applyTextEdits('foo   bar\r\nnext', [{
     oldText: 'foo bar\r\n', newText: 'baz qux\n\n',

@@ -611,7 +611,10 @@ before Code API dispatches it:
   replacements use the matched line's ending even in mixed-ending files. The
   whitespace-normalized tier peels a shared boundary newline from `newText`
   even when CRLF/LF or nearby spaces differ, without removing intentional
-  extra line breaks or duplicating the source line ending.
+  extra line breaks or duplicating the source line ending. Boundary whitespace
+  claimed by `oldText` must exist beside the matched tokens in the source; an
+  attempt to remove it with a token-only fallback fails rather than silently
+  preserving it. Exact and line-window matches can still replace terminators.
   Excessively repetitive indentation candidates fail closed with a request
   for more context rather than scanning every long window.
 - `replace_all`: a batch edit's `replaceAll: true` replaces every
