@@ -462,7 +462,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         isWithin(commonGitDir, home) ||
         protectedPaths.some(path => isWithin(commonGitDir, path)) ||
         writableGitPaths.some(
-          path => path === commonGitDir || !isWithin(commonGitDir, path),
+          (path, index) =>
+            path !== resolve(lane.writableGitPaths[index]!) ||
+            path === commonGitDir ||
+            !isWithin(commonGitDir, path),
         ))
     ) {
       throw new WorkspaceToolError(

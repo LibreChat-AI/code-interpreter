@@ -115,6 +115,18 @@ test('rejects a checkout whose .worktrees directory is a symlink', async (t) => 
   await rejects(verifyLinkedWorktree(root, 'elsewhere'));
 });
 
+test('rejects shared Git storage symlinks into sibling worktree metadata', async (t) => {
+  const { parent, root } = await checkout();
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  await git(root, 'worktree', 'add', '-q', '-b', 'task-b', '.worktrees/task-b');
+  const commonGitDir = join(root, '.git');
+  const siblingMetadata = join(commonGitDir, 'worktrees', 'task-b');
+  await rm(join(commonGitDir, 'objects'), { recursive: true });
+  await symlink(siblingMetadata, join(commonGitDir, 'objects'));
+
+  await rejects(verifyLinkedWorktree(root, 'task-a'));
+});
+
 function recordingPool(): {
   pool: NativeWorkspaceCommandPool;
   calls: Array<{ action: string; id: string; options?: NativeProcessSandboxOptions }>;
@@ -241,6 +253,12 @@ test('lane commands register a confined root once, whatever siblings come and go
   assert.equal(registered.linkedWorktree?.checkoutRoot, root);
 
   assert.ok(!registered.linkedWorktree?.writableGitPaths.includes(join(root, '.git')));
+
+  await rejects(tools.execute({
+    ...command,
+    environmentAction: { name: 'unresolved', fingerprint: 'a'.repeat(64) },
+  }));
+  assert.equal(calls.length, 3, 'an unresolved action must never reach the command pool');
 
   await git(root, 'worktree', 'add', '-q', '-b', 'task-b', '.worktrees/task-b');
   await tools.execute(command);

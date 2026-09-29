@@ -818,15 +818,21 @@ lanes so it cannot be starved.
 Before admission the worker verifies, without running Git, that the directory
 is a real linked worktree of that checkout: no symlinks on the path, a `.git`
 file pointing at `<root>/.git/worktrees/<name>`, and metadata whose `commondir`
-and `gitdir` point back. A lane's sandbox can write only its worktree, the
+and `gitdir` point back. Shared Git storage paths granted for writes must be
+real directories, not symlinks into sibling metadata; optional log and LFS
+paths may be absent. A lane's sandbox can write only its worktree, the
 shared object and ref storage (`.git/objects`, `.git/refs`, `.git/logs/refs`,
 `.git/lfs`) and its own `.git/worktrees/<name>` metadata. Everything else in
 `.git` stays read-only: configuration, hooks and `info`, the checkout's own
 `HEAD`, index and merge or rebase state, and sibling metadata. Automatic `gc`
 and maintenance are disabled, and `git gc` itself cannot run in a lane (it
 needs to write `.git/gc.pid` and `packed-refs`); run storage maintenance from
-the checkout. Deleting a branch or tag also needs the checkout, because Git
-locks `packed-refs` for every ref deletion. Each lane has its own durable quarantine guard. A lane
+the checkout. Explicit `git prune --expire now`, `git repack -ad`, or LFS
+pruning can still delete objects another lane is writing; the sandbox does
+**not** prevent this race. Do not enable lanes for agents that run destructive
+maintenance until those commands are blocked or serialized. Deleting a branch
+or tag also needs the checkout, because Git locks `packed-refs` for every ref
+deletion. Each lane has its own durable quarantine guard. A lane
 cannot start while its checkout is quarantined, and a checkout cannot start
 while any lane beneath it is.
 

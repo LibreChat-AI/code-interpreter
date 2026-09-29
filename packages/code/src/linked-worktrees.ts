@@ -84,6 +84,20 @@ async function realDirectory(path: string): Promise<boolean> {
   }
 }
 
+/** Optional Git paths may be absent, but cannot redirect a write grant into sibling metadata. */
+async function safeSharedGitStorage(commonGitDir: string): Promise<boolean> {
+  for (const path of ['objects', 'refs', 'logs', join('logs', 'refs'), 'lfs']) {
+    try {
+      const status = await lstat(join(commonGitDir, path));
+      if (!status.isDirectory() || status.isSymbolicLink()) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' ||
+          path === 'objects' || path === 'refs') return false;
+    }
+  }
+  return true;
+}
+
 async function readPointer(path: string): Promise<string | undefined> {
   let handle;
   try {
@@ -120,8 +134,9 @@ function singleLine(value: string | undefined): string | undefined {
  * Verify, without running Git, that `<checkout>/.worktrees/<name>` is a linked
  * worktree of that checkout: a real directory whose `.git` file points at
  * `<checkout>/.git/worktrees/<name>`, whose metadata points back at it, and
- * whose common directory is the checkout's own `.git`. Nothing on the path may
- * be a symlink, so a forged or relocated worktree cannot borrow a lane.
+ * whose common directory is the checkout's own `.git`. Neither the lane path
+ * nor a writable shared Git storage directory may be a symlink, so a forged
+ * worktree cannot borrow a lane or redirect its Git write grants.
  */
 export async function verifyLinkedWorktree(
   checkoutRoot: string,
@@ -148,7 +163,8 @@ export async function verifyLinkedWorktree(
     !(await realDirectory(root)) ||
     (await canonicalOrUndefined(root)) !== root ||
     !(await realDirectory(metadata)) ||
-    (await canonicalOrUndefined(metadata)) !== metadata
+    (await canonicalOrUndefined(metadata)) !== metadata ||
+    !(await safeSharedGitStorage(commonGitDir))
   ) {
     throw rejected(`No linked worktree named ${name} in ${LINKED_WORKTREE_DIRECTORY}`);
   }
@@ -324,6 +340,9 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
   async execute(request: WorkspaceToolRequest, signal?: AbortSignal): Promise<WorkspaceToolResult> {
     if (request.worktree == null) {
       return await this.options.delegate.execute(request, signal);
+    }
+    if (request.operation === 'execute_command' && request.environmentAction) {
+      throw rejected('Environment action was not resolved by this worker');
     }
     const { worktree, ...baseRequest } = request;
     const { lane, source, internalId } = await this.resolveLane(

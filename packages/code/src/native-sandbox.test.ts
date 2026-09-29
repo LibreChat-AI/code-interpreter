@@ -1648,4 +1648,14 @@ test('a linked worktree lane may write only shared Git storage and its own metad
     (error: unknown) =>
       error instanceof WorkspaceToolError && error.code === 'REGISTRATION_INVALID',
   );
+
+  const siblingMetadata = join(commonGitDir, 'worktrees', 'task-b');
+  await mkdir(siblingMetadata, { recursive: true });
+  await rm(join(commonGitDir, 'objects'), { recursive: true });
+  await symlink(siblingMetadata, join(commonGitDir, 'objects'));
+  await assert.rejects(
+    prepare(writableGitPaths),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError && error.code === 'REGISTRATION_INVALID',
+  );
 });
