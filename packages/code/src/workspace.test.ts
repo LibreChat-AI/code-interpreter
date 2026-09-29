@@ -1565,6 +1565,33 @@ test('large whitespace-only differences work for preview and edit_file', async (
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'before result after');
 });
 
+test('large replaceAll previews and edits return bounded content and accurate match counts', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-stream-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'x'.repeat(256 * 1024);
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const request = { protocolVersion: 1 as const, workspaceId: 'primary', path: 'notes.txt',
+    edits: [{ oldText: 'x', newText: 'y', replaceAll: true }] };
+  const previewRequest = { ...request, operation: 'preview_edit' as const };
+  const preview = await tools.execute(previewRequest);
+  if (preview.operation !== 'preview_edit') assert.fail('expected preview result');
+  assert.equal(preview.content, 'y'.repeat(original.length));
+  assert.equal(preview.bytesWritten, original.length);
+  assert.deepEqual(preview.matches, [{ strategy: 'exact', occurrences: original.length }]);
+  assert.equal(isWorkspaceToolResult(previewRequest, preview), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const editRequest = { ...request, operation: 'edit_file' as const,
+    expectedBaseSha256: preview.baseSha256 };
+  const edited = await tools.execute(editRequest);
+  assert.equal(edited.operation === 'edit_file' && edited.bytesWritten, original.length);
+  assert.deepEqual(edited.operation === 'edit_file' && edited.matches, preview.matches);
+  assert.equal(isWorkspaceToolResult(editRequest, edited), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), preview.content);
+});
+
 test('oversized replaceAll previews and edits fail before writing the source file', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-limit-'));
   t.after(() => rm(root, { recursive: true, force: true }));

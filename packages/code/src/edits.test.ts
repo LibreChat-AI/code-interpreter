@@ -424,6 +424,52 @@ test('replaceAll over line windows never overlaps its own matches', () => {
   assert.deepEqual(applied.matches, [{ strategy: 'exact', occurrences: 2 }]);
 });
 
+test('replaceAll bounds memory for a million identical and changed matches', () => {
+  const source = 'x'.repeat(1024 * 1024);
+  const noop = applyTextEdits(source, [
+    { oldText: 'x', newText: 'x', replaceAll: true },
+    { oldText: 'x', newText: 'y', replaceAll: true },
+  ]);
+  assert.equal(noop.text, 'y'.repeat(source.length));
+  assert.deepEqual(noop.matches, [
+    { strategy: 'exact', occurrences: source.length },
+    { strategy: 'exact', occurrences: source.length },
+  ]);
+});
+
+test('replaceAll preserves non-overlapping literal edits when identical hits precede changed hits', () => {
+  for (const [source, oldText, newText] of [
+    ['aaaaa', 'aa', 'a'],
+    ['foo foo foo', 'foo', 'bar'],
+    ['😀😀😀', '😀😀', 'x'],
+    ['x\nx\nx', 'x', ''],
+    ['aba aba', 'aba', 'aba'],
+  ]) {
+    const result = applyTextEdits(source, [{ oldText, newText, replaceAll: true }]);
+    assert.equal(result.text, source.split(oldText).join(newText));
+    assert.deepEqual(result.matches, [{ strategy: 'exact', occurrences: source.split(oldText).length - 1 }]);
+  }
+  const source = 'foo\tbar foo  bar';
+  const tolerant = applyTextEdits(source, [{
+    oldText: 'foo bar', newText: 'foo\tbar', replaceAll: true,
+  }], 'tolerant');
+  assert.equal(tolerant.text, 'foo\tbar foo\tbar');
+  assert.deepEqual(tolerant.matches, [{ strategy: 'whitespace-normalized', occurrences: 2 }]);
+});
+
+test('replaceAll handles repeated tolerant and non-overlapping line-window matches', () => {
+  const lines = 'foo  \r\nbar  \r\n'.repeat(4000);
+  const result = applyTextEdits(lines, [
+    { oldText: 'foo\nbar', newText: 'baz\nqux', replaceAll: true },
+    { oldText: 'baz qux', newText: 'updated', replaceAll: true },
+  ], 'tolerant');
+  assert.equal(result.text, 'updated\r\n'.repeat(4000));
+  assert.deepEqual(result.matches, [
+    { strategy: 'line-trimmed', occurrences: 4000 },
+    { strategy: 'whitespace-normalized', occurrences: 4000 },
+  ]);
+});
+
 test('replaceAll rejects oversized intermediate output before constructing it', () => {
   assert.throws(
     () => applyTextEdits('x'.repeat(1_000_000), [

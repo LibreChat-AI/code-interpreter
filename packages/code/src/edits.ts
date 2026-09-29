@@ -16,6 +16,7 @@ const MAX_REPORTED_LINES = 5;
 const MAX_SNIPPET_CHARS = 120;
 /** A highly repetitive indentation candidate must not monopolize the worker. */
 const MAX_LINE_WINDOW_VERIFICATIONS = 100_000;
+const MAX_REPLACEMENT_CHUNK_CHARS = 16 * 1024;
 
 interface MatchedRange {
   start: number;
@@ -25,18 +26,19 @@ interface MatchedRange {
 }
 
 type MatchOutcome =
-  | { status: 'matched'; strategy: WorkspaceEditMatchStrategy; ranges: MatchedRange[] }
+  | { status: 'matched'; strategy: WorkspaceEditMatchStrategy; ranges: MatchedRange[]; occurrences: number; updated?: string }
   | { status: 'ambiguous'; strategy: WorkspaceEditMatchStrategy; count: number; starts: number[] }
   | { status: 'limit' }
   | { status: 'none' };
 
 interface CollectedMatches {
   count: number;
-  sourceLength: number;
+  source: string;
   projectedLength: number;
-  /** Keep every range only when the caller will actually replace every occurrence. */
+  /** Only the first range is needed for a unique edit or an exact-mode hint. */
   ranges: MatchedRange[];
   starts: number[];
+  output?: { chunks: string[]; pending: string; cursor: number };
 }
 
 export interface EditFailure {
@@ -86,9 +88,9 @@ export function applyTextEdits(
   edits.forEach((edit, index) => {
     const outcome = findEditMatch(working, edit, matching, lines);
     if (outcome.status === 'matched') {
-      working = replaceRanges(working, outcome.ranges);
+      working = outcome.updated ?? replaceRanges(working, outcome.ranges);
       lineIndex = undefined;
-      matches.push({ strategy: outcome.strategy, occurrences: outcome.ranges.length });
+      matches.push({ strategy: outcome.strategy, occurrences: outcome.occurrences });
       return;
     }
     failures.push({
@@ -121,8 +123,27 @@ function findEditMatch(
   return { status: 'none' };
 }
 
-function collectedMatches(text: string): CollectedMatches {
-  return { count: 0, sourceLength: text.length, projectedLength: text.length, starts: [], ranges: [] };
+function collectedMatches(text: string, replaceAll?: boolean): CollectedMatches {
+  return {
+    count: 0, source: text, projectedLength: text.length, starts: [], ranges: [],
+    ...(replaceAll === true ? { output: { chunks: [], pending: '', cursor: 0 } } : {}),
+  };
+}
+
+function appendReplacement(output: NonNullable<CollectedMatches['output']>, part: string): void {
+  if (!part) return;
+  output.pending += part;
+  if (output.pending.length >= MAX_REPLACEMENT_CHUNK_CHARS) {
+    output.chunks.push(output.pending);
+    output.pending = '';
+  }
+}
+
+function finishReplacement(matches: CollectedMatches): string {
+  const output = matches.output!;
+  if (output.cursor === 0) return matches.source;
+  appendReplacement(output, matches.source.slice(output.cursor));
+  return output.chunks.join('') + output.pending;
 }
 
 function collectMatch(
@@ -135,14 +156,22 @@ function collectMatch(
   if (replaceAll === true) {
     matches.projectedLength += replacement.length - (end - start);
     // Even deleting every remaining source character cannot bring this
-    // intermediate below the 1 MiB limit. Do not retain more ranges.
-    if (matches.projectedLength - (matches.sourceLength - end) > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
+    // intermediate below the 1 MiB limit. Do not retain more matches.
+    if (matches.projectedLength - (matches.source.length - end) > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
       throw new WorkspaceEditOutputLimitError();
+    }
+    // Leave unchanged ranges in the source suffix rather than constructing a
+    // million identical output pieces for a no-op replaceAll edit.
+    if (replacement !== matches.source.slice(start, end)) {
+      const output = matches.output!;
+      appendReplacement(output, matches.source.slice(output.cursor, start));
+      appendReplacement(output, replacement);
+      output.cursor = end;
     }
   }
   matches.count++;
   if (matches.starts.length < MAX_REPORTED_LINES) matches.starts.push(start);
-  if (replaceAll === true || matches.count === 1) matches.ranges.push({ start, end, replacement });
+  if (matches.count === 1) matches.ranges.push({ start, end, replacement });
 }
 
 function resolve(
@@ -152,7 +181,10 @@ function resolve(
 ): MatchOutcome {
   if (matches.count === 0) return { status: 'none' };
   if (matches.count === 1 || replaceAll === true) {
-    return { status: 'matched', strategy, ranges: matches.ranges };
+    return {
+      status: 'matched', strategy, ranges: matches.ranges, occurrences: matches.count,
+      ...(replaceAll === true ? { updated: finishReplacement(matches) } : {}),
+    };
   }
   return { status: 'ambiguous', strategy, count: matches.count, starts: matches.starts };
 }
@@ -163,7 +195,7 @@ function resolve(
  */
 function findExact(text: string, edit: WorkspaceTextEdit): MatchOutcome {
   if (edit.oldText.length === 0) return { status: 'none' };
-  const matches = collectedMatches(text);
+  const matches = collectedMatches(text, edit.replaceAll);
   const prefix = prefixTable(edit.oldText);
   let matched = 0;
   for (let index = 0; index < text.length; index++) {
@@ -311,7 +343,7 @@ function findLineWindows(
     ? normalizedNeedle
     : normalizedNeedle.map((line) => line.trimStart());
   const prefix = prefixTable(sought);
-  const collected = collectedMatches(text);
+  const collected = collectedMatches(text, edit.replaceAll);
   let matched = 0;
   let verifications = 0;
   for (let index = 0; index < lines.length; index++) {
@@ -448,7 +480,7 @@ function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchO
   // linear without compiling user-provided text as a regular expression.
   const prefix = prefixTable(tokens);
   const tokenStarts = new Uint32Array(tokens.length);
-  const collected = collectedMatches(text);
+  const collected = collectedMatches(text, edit.replaceAll);
   const words = /\S+/g;
   let matched = 0;
   let tokenIndex = 0;
