@@ -428,6 +428,43 @@ function hasBoundaryWhitespace(
   return false;
 }
 
+/** A token-only match leaves the source's outer whitespace untouched. */
+function peelBoundaryWhitespace(
+  text: string,
+  boundary: string,
+  side: 'leading' | 'trailing',
+): string | undefined {
+  if (!boundary) return text;
+  if (side === 'leading' && text.startsWith(boundary)) return text.slice(boundary.length);
+  if (side === 'trailing' && text.endsWith(boundary)) return text.slice(0, -boundary.length);
+
+  const requiredNewlines = newlineCount(boundary);
+  if (!requiredNewlines) return undefined;
+  const whitespace = (side === 'leading' ? /^\s*/ : /\s*$/).exec(text)?.[0] ?? '';
+  if (newlineCount(whitespace) < requiredNewlines) return undefined;
+
+  if (side === 'leading') {
+    let end = 0;
+    for (let count = 0; count < requiredNewlines; count++) {
+      end = whitespace.indexOf('\n', end) + 1;
+    }
+    // Consume the equivalent indentation, stopping before the first extra
+    // newline. Extra blank lines belong to the replacement, not the wrapper.
+    while (end < whitespace.length && whitespace[end] !== '\n') end++;
+    return text.slice(end);
+  }
+
+  if (newlineCount(whitespace) === requiredNewlines) {
+    return text.slice(0, text.length - whitespace.length);
+  }
+  let start = whitespace.length;
+  for (let count = 0; count < requiredNewlines; count++) {
+    start = whitespace.lastIndexOf('\n', start - 1);
+  }
+  // Indentation before this newline belongs to the extra blank line.
+  return text.slice(0, text.length - (whitespace.length - start));
+}
+
 /**
  * Tolerates any run of whitespace, including line breaks, between tokens. The
  * match starts and ends on a token, so whitespace the caller wrapped around
@@ -444,35 +481,11 @@ function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchO
   const trailing = /\s*$/.exec(oldText)?.[0] ?? '';
   const leadingNewlines = newlineCount(leading);
   const trailingNewlines = newlineCount(trailing);
-  let newText = edit.newText.replace(/\r\n/g, '\n');
-  if (leading.length > 0 && newText.startsWith(leading)) {
-    newText = newText.slice(leading.length);
-  } else if (leadingNewlines > 0) {
-    const newLeading = /^\s*/.exec(newText)?.[0] ?? '';
-    if (newlineCount(newLeading) !== leadingNewlines) return { status: 'none' };
-    // The source's whole newline-and-indent prefix remains outside the token
-    // match. Discard its equivalent from newText, not just the line break.
-    newText = newText.slice(newLeading.length);
-  } else if (leading.length > 0) {
-    // A token-only replacement cannot remove the source's leading whitespace.
-    return { status: 'none' };
-  }
-  if (trailing.length > 0 && newText.endsWith(trailing)) {
-    newText = newText.slice(0, -trailing.length);
-  } else if (trailingNewlines > 0) {
-    const newTrailing = /\s*$/.exec(newText)?.[0] ?? '';
-    if (newlineCount(newTrailing) === trailingNewlines) {
-      newText = newText.slice(0, -newTrailing.length);
-    } else if (trailingNewlines === 1 && newTrailing === '\n\n') {
-      // An extra, intentional blank line remains before the source newline.
-      newText = newText.slice(0, -1);
-    } else {
-      return { status: 'none' };
-    }
-  } else if (trailing.length > 0) {
-    // Likewise do not claim success if the caller meant to remove an ending.
-    return { status: 'none' };
-  }
+  const normalizedNewText = edit.newText.replace(/\r\n/g, '\n');
+  const withoutLeading = peelBoundaryWhitespace(normalizedNewText, leading, 'leading');
+  if (withoutLeading === undefined) return { status: 'none' };
+  const newText = peelBoundaryWhitespace(withoutLeading, trailing, 'trailing');
+  if (newText === undefined) return { status: 'none' };
   const lfReplacement = newText;
   const crlfReplacement = withLineEnding(newText, '\r\n');
   // Match entire whitespace-delimited tokens, never an identifier prefix or

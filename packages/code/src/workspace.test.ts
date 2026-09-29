@@ -1495,6 +1495,41 @@ test('tolerant previews and edits keep source indentation when newText uses a di
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'header\n  baz qux\n');
 });
 
+test('tolerant previews and edits retain an extra leading blank line across a fenced batch', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-extra-line-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = '\uFEFFheader\r\n  foo   bar\r\nend\r\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const request = {
+    protocolVersion: 1 as const, workspaceId: 'primary', path: 'notes.txt',
+    matching: 'tolerant' as const,
+    edits: [
+      { oldText: '\n  foo bar', newText: '\r\n\t\r\n\tbaz qux' },
+      { oldText: 'end', newText: 'done' },
+    ],
+  };
+  const previewRequest = { ...request, operation: 'preview_edit' as const };
+  const preview = await tools.execute(previewRequest);
+  if (preview.operation !== 'preview_edit') assert.fail('expected preview result');
+  assert.equal(preview.content, 'header\r\n  \r\n\tbaz qux\r\ndone\r\n');
+  assert.equal(preview.hasUtf8Bom, true);
+  assert.equal(isWorkspaceToolResult(previewRequest, preview), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const editRequest = { ...request, operation: 'edit_file' as const,
+    expectedBaseSha256: preview.baseSha256 };
+  const edited = await tools.execute(editRequest);
+  if (edited.operation !== 'edit_file') assert.fail('expected edit result');
+  assert.deepEqual(edited.matches, [
+    { strategy: 'whitespace-normalized', occurrences: 1 },
+    { strategy: 'exact', occurrences: 1 },
+  ]);
+  assert.equal(isWorkspaceToolResult(editRequest, edited), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), `\uFEFF${preview.content}`);
+});
+
 test('tolerant previews and edits reject missing source boundary newlines without changing the file', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-missing-newline-'));
   t.after(() => rm(root, { recursive: true, force: true }));

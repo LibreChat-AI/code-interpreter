@@ -217,6 +217,57 @@ test('whitespace-normalized matching does not prepend new indentation beside pre
   assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
 });
 
+test('whitespace-normalized matching preserves extra leading blank lines when indentation changes', () => {
+  const source = 'header\n  foo   bar\n';
+  const result = applyTextEdits(source, [{
+    oldText: '\n  foo bar', newText: '\n\t\n\tbaz qux',
+  }], 'tolerant');
+  assert.equal(result.text, 'header\n  \n\tbaz qux\n');
+  assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+});
+
+test('whitespace-normalized replaceAll preserves extra leading blank lines independently', () => {
+  const source = 'one\n  foo   bar\ntwo\n  foo   bar\n';
+  const result = applyTextEdits(source, [{
+    oldText: '\n  foo bar', newText: '\n\t\n\tbaz qux', replaceAll: true,
+  }], 'tolerant');
+  assert.equal(result.text, 'one\n  \n\tbaz qux\ntwo\n  \n\tbaz qux\n');
+  assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 2 }]);
+});
+
+test('whitespace-normalized matching preserves extra lines after an identical leading wrapper', () => {
+  const result = applyTextEdits('header\r\n  foo   bar', [{
+    oldText: '\r\n  foo bar', newText: '\r\n  \r\n\tbaz qux',
+  }], 'tolerant');
+  assert.equal(result.text, 'header\r\n  \r\n\tbaz qux');
+  assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+});
+
+test('whitespace-normalized matching preserves multiple extra leading blank lines', () => {
+  const source = 'header\r\n \r\n  foo   bar\r\n';
+  const result = applyTextEdits(source, [{
+    oldText: '\n  \n  foo bar', newText: '\r\n\t\r\n\t\r\n\t\r\n\tbaz qux',
+  }], 'tolerant');
+  assert.equal(result.text, 'header\r\n \r\n  \r\n\t\r\n\tbaz qux\r\n');
+  assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+});
+
+test('whitespace-normalized matching preserves extra trailing blank lines when boundary indentation changes', () => {
+  const source = 'foo   bar\r\n  next';
+  const result = applyTextEdits(source, [{
+    oldText: 'foo bar\n  ', newText: 'baz qux\n\t\n\t',
+  }], 'tolerant');
+  assert.equal(result.text, 'baz qux\r\n\t\r\n  next');
+  assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+});
+
+test('whitespace-normalized matching leaves intentional indentation on an extra blank line', () => {
+  const result = applyTextEdits('foo   bar\r\nnext', [{
+    oldText: 'foo bar\n', newText: 'baz qux\n\t\n',
+  }], 'tolerant');
+  assert.equal(result.text, 'baz qux\r\n\t\r\nnext');
+});
+
 test('whitespace-normalized matching does not duplicate differing trailing spaces', () => {
   const result = applyTextEdits('foo   bar  \nnext', [{
     oldText: 'foo bar  \n', newText: 'baz qux\t\n',
@@ -240,6 +291,7 @@ test('whitespace-normalized matching rejects absent required boundary whitespace
     { source: 'foo   bar', oldText: 'foo bar ', newText: 'baz qux ' },
     { source: 'foo   bar\nnext', oldText: 'foo bar\n\n', newText: 'baz qux\n\n' },
     { source: 'header\nfoo   bar\nnext', oldText: '\n\nfoo bar', newText: '\n\nbaz qux' },
+    { source: 'header\n \n  foo   bar', oldText: '\n \n  foo bar', newText: '\n\tbaz qux' },
   ];
   for (const edit of cases) {
     const { source, ...request } = edit;
