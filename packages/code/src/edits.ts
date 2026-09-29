@@ -208,9 +208,13 @@ function neededLines(oldText: string): { lines: string[]; throughTerminator: boo
   };
 }
 
-/** Tolerant replacements adopt the file's line endings instead of mixing them. */
+/** Fallback when neither the matched line nor its neighbors have a terminator. */
 function fileLineEnding(text: string): '\r\n' | '\n' {
   return text.includes('\r\n') ? '\r\n' : '\n';
+}
+
+function lineEndingAt(text: string, newline: number): '\r\n' | '\n' {
+  return newline > 0 && text[newline - 1] === '\r' ? '\r\n' : '\n';
 }
 
 function leadingWhitespace(line: string): string {
@@ -302,7 +306,9 @@ function findLineWindows(
       const replacement = strategy === 'indentation-flexible'
         ? reindent(edit.newText, needleIndent, windowIndent)
         : edit.newText;
-      collectMatch(collected, lines[first].start, end!, withLineEnding(replacement, ending), edit.replaceAll);
+      const lineFeed = lines[first].next ?? lines[first - 1]?.next;
+      const localEnding = lineFeed === undefined ? ending : lineEndingAt(text, lineFeed - 1);
+      collectMatch(collected, lines[first].start, end!, withLineEnding(replacement, localEnding), edit.replaceAll);
     }
     // A replacement cannot consume overlapping lines; ambiguity still counts them.
     matched = valid && edit.replaceAll === true ? 0 : prefix[matched - 1];
@@ -343,14 +349,30 @@ function findIndentationFlexible(text: string, edit: WorkspaceTextEdit): MatchOu
  * `old_text` is also peeled off `new_text` rather than inserted twice.
  */
 function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchOutcome {
-  const tokens = edit.oldText.trim().split(/\s+/).filter(Boolean);
+  const oldText = edit.oldText.replace(/\r\n/g, '\n');
+  const tokens = oldText.trim().split(/\s+/).filter(Boolean);
   if (tokens.length < 2) return { status: 'none' };
-  const leading = /^\s*/.exec(edit.oldText)?.[0] ?? '';
-  const trailing = /\s*$/.exec(edit.oldText)?.[0] ?? '';
-  let newText = edit.newText;
-  if (leading.length > 0 && newText.startsWith(leading)) newText = newText.slice(leading.length);
-  if (trailing.length > 0 && newText.endsWith(trailing)) newText = newText.slice(0, -trailing.length);
-  const replacement = withLineEnding(newText, fileLineEnding(text));
+  // The matched range contains tokens only; leave the file's boundary whitespace
+  // outside it. Normalize the caller's line endings *before* peeling equivalent
+  // wrappers, otherwise CRLF/LF differences insert a second line break.
+  const leading = /^\s*/.exec(oldText)?.[0] ?? '';
+  const trailing = /\s*$/.exec(oldText)?.[0] ?? '';
+  let newText = edit.newText.replace(/\r\n/g, '\n');
+  if (leading.length > 0 && newText.startsWith(leading)) {
+    newText = newText.slice(leading.length);
+  } else if (leading.includes('\n') && newText.startsWith('\n')) {
+    // Keep the source's indentation when the caller used different spaces.
+    newText = newText.slice(1);
+  }
+  if (trailing.length > 0 && newText.endsWith(trailing)) {
+    newText = newText.slice(0, -trailing.length);
+  } else if (trailing.includes('\n') && newText.endsWith('\n')) {
+    // The source terminator is outside the token range. Preserve any extra
+    // caller-requested line breaks by peeling only the shared one.
+    newText = newText.slice(0, -1);
+  }
+  const lfReplacement = newText;
+  const crlfReplacement = withLineEnding(newText, '\r\n');
   // Match entire whitespace-delimited tokens, never an identifier prefix or
   // suffix. A fixed-size regex tokenizes the file; KMP keeps repetitive input
   // linear without compiling user-provided text as a regular expression.
@@ -360,13 +382,26 @@ function findWhitespaceNormalized(text: string, edit: WorkspaceTextEdit): MatchO
   const words = /\S+/g;
   let matched = 0;
   let tokenIndex = 0;
+  // Advance the newline cursor only forwards. replaceAll may encounter many
+  // matches on one long line, so searching from each match would be quadratic.
+  let nextNewline = text.indexOf('\n');
+  let previousNewline = -1;
   for (let word = words.exec(text); word != null; word = words.exec(text)) {
     tokenStarts[tokenIndex % tokens.length] = word.index;
     while (matched > 0 && word[0] !== tokens[matched]) matched = prefix[matched - 1];
     if (word[0] === tokens[matched]) matched++;
     if (matched === tokens.length) {
-      collectMatch(collected, tokenStarts[(tokenIndex + 1) % tokens.length],
-        word.index + word[0].length, replacement, edit.replaceAll);
+      const start = tokenStarts[(tokenIndex + 1) % tokens.length];
+      while (nextNewline >= 0 && nextNewline < start) {
+        previousNewline = nextNewline;
+        nextNewline = text.indexOf('\n', nextNewline + 1);
+      }
+      const nearestNewline = nextNewline >= 0 ? nextNewline : previousNewline;
+      const replacement = nearestNewline >= 0 && lineEndingAt(text, nearestNewline) === '\r\n'
+        ? crlfReplacement
+        : lfReplacement;
+      collectMatch(collected, start, word.index + word[0].length,
+        replacement, edit.replaceAll);
       matched = edit.replaceAll === true ? 0 : prefix[matched - 1];
     }
     tokenIndex++;

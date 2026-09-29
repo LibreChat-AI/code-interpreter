@@ -1432,6 +1432,49 @@ test('tolerant edits and replaceAll report how each edit matched', async (t) => 
   );
 });
 
+test('preview and edit peel equivalent newline wrappers without doubling line breaks or losing BOM', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-newlines-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = '\uFEFFheader\r\n \tfoo   bar\r\nnext\r\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const request = {
+    protocolVersion: 1 as const,
+    operation: 'preview_edit' as const,
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    matching: 'tolerant' as const,
+    edits: [
+      { oldText: '\n  foo bar\r\n', newText: '\r\n  baz qux\n' },
+      { oldText: 'next', newText: 'done' },
+    ],
+  };
+  const preview = await tools.execute(request);
+  assert.equal(preview.operation, 'preview_edit');
+  if (preview.operation !== 'preview_edit') assert.fail('expected preview result');
+  assert.equal(preview.content, 'header\r\n \tbaz qux\r\ndone\r\n');
+  assert.equal(preview.hasUtf8Bom, true);
+  assert.equal(preview.bytesWritten, Buffer.byteLength(`\uFEFF${preview.content}`));
+  assert.equal(isWorkspaceToolResult(request, preview), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const editRequest = {
+    ...request,
+    operation: 'edit_file' as const,
+    expectedBaseSha256: preview.baseSha256,
+  };
+  const edited = await tools.execute(editRequest);
+  assert.equal(edited.operation, 'edit_file');
+  if (edited.operation !== 'edit_file') assert.fail('expected edit result');
+  assert.deepEqual(edited.matches, [
+    { strategy: 'whitespace-normalized', occurrences: 1 },
+    { strategy: 'exact', occurrences: 1 },
+  ]);
+  assert.equal(isWorkspaceToolResult(editRequest, edited), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), `\uFEFF${preview.content}`);
+});
+
 test('tolerant previews and edits refuse partial tokens without changing the file', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-boundary-'));
   t.after(() => rm(root, { recursive: true, force: true }));

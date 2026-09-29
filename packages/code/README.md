@@ -608,9 +608,12 @@ before Code API dispatches it:
   moved to the file's indentation) and `whitespace-normalized` (any whitespace
   run between complete whitespace-delimited tokens, never a prefix or suffix
   of another token). Without `replaceAll`, a match must still be unique;
-  replacements keep the file's line endings. Excessively repetitive
-  indentation candidates fail closed with a request for more context rather
-  than scanning every long window.
+  replacements use the matched line's ending even in mixed-ending files. The
+  whitespace-normalized tier peels a shared boundary newline from `newText`
+  even when CRLF/LF or nearby spaces differ, without removing intentional
+  extra line breaks or duplicating the source line ending.
+  Excessively repetitive indentation candidates fail closed with a request
+  for more context rather than scanning every long window.
 - `replace_all`: a batch edit's `replaceAll: true` replaces every
   non-overlapping match instead of requiring exactly one, and still fails when
   nothing matches.

@@ -175,6 +175,123 @@ test('whitespace-normalized matches count overlapping token sequences but replac
   assert.deepEqual(replaced.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
 });
 
+for (const fileEnding of ['\n', '\r\n'] as const) {
+  for (const [oldEnding, newEnding] of [['\r\n', '\n'], ['\n', '\r\n']] as const) {
+    test(`whitespace-normalized matching peels ${JSON.stringify(oldEnding)} to ${JSON.stringify(newEnding)} in ${JSON.stringify(fileEnding)} files`, () => {
+      const source = `foo   bar${fileEnding}next`;
+      const result = applyTextEdits(source, [{
+        oldText: `foo bar${oldEnding}`,
+        newText: `baz qux${newEnding}`,
+      }], 'tolerant');
+      assert.equal(result.text, `baz qux${fileEnding}next`);
+      assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+    });
+  }
+}
+
+test('whitespace-normalized matching peels leading and trailing CRLF/LF wrappers in a batch', () => {
+  const result = applyTextEdits('header\r\n \tfoo   bar\r\nnext\r\n', [
+    { oldText: '\n  foo bar\r\n', newText: '\r\n  baz qux\n' },
+    { oldText: 'next', newText: 'done' },
+  ], 'tolerant');
+  assert.equal(result.text, 'header\r\n \tbaz qux\r\ndone\r\n');
+  assert.deepEqual(result.matches, [
+    { strategy: 'whitespace-normalized', occurrences: 1 },
+    { strategy: 'exact', occurrences: 1 },
+  ]);
+});
+
+test('whitespace-normalized matching peels a trailing newline even if adjacent spaces differ', () => {
+  const result = applyTextEdits('foo   bar  \r\nnext', [{
+    oldText: 'foo bar  \r\n', newText: 'baz qux\n',
+  }], 'tolerant');
+  assert.equal(result.text, 'baz qux  \r\nnext');
+});
+
+test('whitespace-normalized matching peels a leading newline even if adjacent spaces differ', () => {
+  const result = applyTextEdits('header\r\n  foo   bar\r\nnext', [{
+    oldText: '\n  foo bar', newText: '\nchanged',
+  }], 'tolerant');
+  assert.equal(result.text, 'header\r\n  changed\r\nnext');
+});
+
+test('whitespace-normalized matching preserves an intentional extra line break', () => {
+  const result = applyTextEdits('foo   bar\r\nnext', [{
+    oldText: 'foo bar\r\n', newText: 'baz qux\n\n',
+  }], 'tolerant');
+  assert.equal(result.text, 'baz qux\r\n\r\nnext');
+});
+
+test('line-trimmed replacements adopt the matched line ending in mixed files', () => {
+  const source = 'header\r\nfoo  \nbar  \nnext\n';
+  const result = applyTextEdits(source, [{ oldText: 'foo\nbar', newText: 'baz\nqux' }], 'tolerant');
+  assert.equal(result.text, 'header\r\nbaz\nqux\nnext\n');
+  assert.deepEqual(result.matches, [{ strategy: 'line-trimmed', occurrences: 1 }]);
+});
+
+test('indentation-flexible replacements keep the selected line ending in mixed files', () => {
+  const source = 'header\r\n    method() {\n        return 1;\n    }\nend\n';
+  const result = applyTextEdits(source, [{
+    oldText: 'method() {\n    return 1;\n}',
+    newText: 'method() {\r\n    return 2;\r\n}',
+  }], 'tolerant');
+  assert.equal(result.text, 'header\r\n    method() {\n        return 2;\n    }\nend\n');
+  assert.deepEqual(result.matches, [{ strategy: 'indentation-flexible', occurrences: 1 }]);
+});
+
+test('line-trimmed replaceAll keeps each local ending in mixed files', () => {
+  const source = 'foo  \r\nbar  \r\nfoo  \nbar  \nend';
+  const result = applyTextEdits(source, [{
+    oldText: 'foo\nbar', newText: 'baz\nqux', replaceAll: true,
+  }], 'tolerant');
+  assert.equal(result.text, 'baz\r\nqux\r\nbaz\nqux\nend');
+  assert.deepEqual(result.matches, [{ strategy: 'line-trimmed', occurrences: 2 }]);
+});
+
+test('exact replacements preserve caller line endings rather than normalizing them', () => {
+  const source = 'foo bar\r\nnext\r\n';
+  const result = applyTextEdits(source, [{ oldText: 'foo bar\r\n', newText: 'baz qux\n' }], 'tolerant');
+  assert.equal(result.text, 'baz qux\nnext\r\n');
+  assert.deepEqual(result.matches, [{ strategy: 'exact', occurrences: 1 }]);
+});
+
+test('whitespace-normalized replacement adopts the matched line ending in mixed files', () => {
+  const original = 'header\r\nfoo   bar\nnext\n';
+  const result = applyTextEdits(original, [{
+    oldText: 'foo bar\n', newText: 'baz\nqux\n',
+  }], 'tolerant');
+  assert.equal(result.text, 'header\r\nbaz\nqux\nnext\n');
+});
+
+test('whitespace-normalized replaceAll peels boundary newlines on every mixed-ending match', () => {
+  const source = 'foo   bar\r\nfoo   bar\nend';
+  const result = applyTextEdits(source, [{
+    oldText: 'foo bar\r\n', newText: 'baz qux\n', replaceAll: true,
+  }], 'tolerant');
+  assert.equal(result.text, 'baz qux\r\nbaz qux\nend');
+  assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 2 }]);
+});
+
+test('whitespace-normalized replaceAll uses each matched line ending in mixed files', () => {
+  const source = 'foo   bar\r\nfoo   bar\nend';
+  const result = applyTextEdits(source, [{
+    oldText: 'foo bar', newText: 'baz\nqux', replaceAll: true,
+  }], 'tolerant');
+  assert.equal(result.text, 'baz\r\nqux\r\nbaz\nqux\nend');
+  assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 2 }]);
+});
+
+test('whitespace-normalized replaceAll finds many same-line matches without rescanning newline tails', () => {
+  const source = 'foo   bar '.repeat(16_000);
+  const start = performance.now();
+  const result = applyTextEdits(source, [{
+    oldText: 'foo bar', newText: 'baz\nqux', replaceAll: true,
+  }], 'tolerant');
+  assert.equal(result.text, 'baz\nqux '.repeat(16_000));
+  assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 16_000 }]);
+  assert.ok(performance.now() - start < 2_000, 'line endings must not be searched from each match');
+});
+
 test('whitespace-normalized matches do not indent new_text twice', () => {
   const text = '    total =   price *\n        quantity;\n';
   const applied = applyTextEdits(
