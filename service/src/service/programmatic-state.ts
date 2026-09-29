@@ -40,6 +40,7 @@ export interface BuildReplayExecutionStateParams {
   bridgeWorkerId?: string;
   workspaceId?: string;
   workspaceInstanceId?: string;
+  workspaceWorktree?: string;
   sandboxBackend?: SandboxBackendName;
   executionProfile: ExecutionProfile;
   executionProfileSource: ExecutionProfileSource;
@@ -70,6 +71,7 @@ export function buildReplayExecutionState(
     bridgeWorkerId: params.bridgeWorkerId,
     workspaceId: params.workspaceId,
     workspaceInstanceId: params.workspaceInstanceId,
+    workspaceWorktree: params.workspaceWorktree,
     sandboxBackend: params.sandboxBackend,
     executionProfile: params.executionProfile,
     executionProfileSource: params.executionProfileSource,
@@ -86,12 +88,21 @@ export function buildReplayExecutionState(
   };
 }
 
-/** Bind the authenticated conversation checkout to every replay iteration. */
+/** Bind the authenticated conversation checkout and linked-worktree lane to every replay iteration. */
 export function bindReplayWorkspaceInstance(
   payload: t.PayloadBody,
-  state: Pick<ExecutionState, 'workspaceInstanceId'>,
+  state: Pick<ExecutionState, 'workspaceInstanceId' | 'workspaceWorktree'>,
 ): t.PayloadBody {
-  return state.workspaceInstanceId == null
-    ? payload
-    : { ...payload, workspace_instance_id: state.workspaceInstanceId };
+  if (state.workspaceInstanceId == null && state.workspaceWorktree == null) {
+    return payload;
+  }
+  return {
+    ...payload,
+    ...(state.workspaceInstanceId == null
+      ? {}
+      : { workspace_instance_id: state.workspaceInstanceId }),
+    ...(state.workspaceWorktree == null
+      ? {}
+      : { workspace_worktree: state.workspaceWorktree }),
+  };
 }

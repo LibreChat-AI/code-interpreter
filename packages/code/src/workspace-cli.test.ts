@@ -147,6 +147,47 @@ test('CLI requires concurrent native slots for conversation worktrees', async (t
   assert.match(result.stderr, /at least two workspace lease slots/i);
 });
 
+test('CLI requires concurrent native slots and no conversation worktrees for linked worktree lanes', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-lanes-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const run = (...extra: string[]) =>
+    spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('./cli.js', import.meta.url)),
+        'run',
+        '--worker-dir',
+        workspaceRoot,
+        '--allow-workspace-writes',
+        '--allow-workspace-commands',
+        '--linked-worktree-lanes',
+        ...extra,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+          LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+          LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+        },
+      },
+    );
+  const serial = run();
+  assert.notEqual(serial.status, 0);
+  assert.match(serial.stderr, /Linked worktree lanes require .*at least two workspace lease slots/i);
+  const combined = run(
+    '--workspace-lease-slots',
+    '2',
+    '--conversation-worktree-root',
+    join(root, 'conversations'),
+  );
+  assert.notEqual(combined.status, 0);
+  assert.match(combined.stderr, /cannot be combined with conversation worktrees/i);
+});
+
 test('CLI advertises explicitly enabled writes without exposing the workspace root', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-cli-'));
   const workspaceRoot = join(root, '   ');

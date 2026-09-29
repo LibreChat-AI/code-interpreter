@@ -791,6 +791,46 @@ Legacy requests without a conversation identity continue to use the selected
 source root. Older Code API deployments do not negotiate the capability, so the
 worker omits it until every request path understands the isolation boundary.
 
+#### Linked worktree lanes
+
+Agents that keep one checkout and give each task its own linked worktree
+(`git worktree add .worktrees/<task>`) can run those tasks concurrently:
+
+```sh
+librechat-code run \
+  --worker-dir /projects/LibreChat \
+  --workspace-lease-slots 4 \
+  --linked-worktree-lanes \
+  --allow-workspace-writes \
+  --allow-workspace-commands
+```
+
+`LIBRECHAT_CODE_LINKED_WORKTREE_LANES=true` is the environment equivalent. The
+worker then advertises `workspaceScopes: ['git_linked_worktree']` for each
+registered root, and a request that names `worktree: <name>` runs in its own
+lane at `<root>/.worktrees/<name>`, with `cwd` and file paths relative to that
+worktree. Sibling lanes run concurrently up to the negotiated slot count. A
+lane and its checkout never run at the same time: requests without a
+`worktree`, including `git worktree add` or `remove` run at the root, wait for
+every lane beneath the checkout, and a waiting root request holds back newer
+lanes so it cannot be starved.
+
+Before admission the worker verifies, without running Git, that the directory
+is a real linked worktree of that checkout: no symlinks on the path, a `.git`
+file pointing at `<root>/.git/worktrees/<name>`, and metadata whose `commondir`
+and `gitdir` point back. A lane's sandbox can write only its worktree and the
+shared Git directory; `.git/hooks`, `.git/config`, `.git/info` and every sibling's
+`.git/worktrees/<other>` metadata stay read-only, and automatic `gc` and
+maintenance are disabled so one lane cannot repack storage under another. Each
+lane has its own durable quarantine guard, and a lane cannot start while its
+checkout is quarantined.
+
+Lanes require native-srt commands and at least two lease slots, and cannot yet
+be combined with conversation worktrees. Code API must advertise
+`supportedWorkspaceScopes`; older deployments do not, and the worker omits the
+scope for them. Deploy consumers that read worker status (such as LibreChat)
+with support for `workspaceScopes` before enabling lanes on a worker.
+
 On an updated Code API, admission waits up to 30 seconds without the
 `X-LibreChat-Workspace-Queue-Wait-Ms` request header. A caller may advertise a
 positive integer millisecond allowance up to five minutes, capped by any server

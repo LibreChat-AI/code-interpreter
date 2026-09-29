@@ -6,6 +6,12 @@ export const MAX_WORKSPACE_LEASE_SLOTS = 8;
 /** Reservations share the legacy admission queue and aggregate worker lock.
  * Thus a serial dispatcher or replacement incarnation cannot race active slots.
  * Workspace mutation uncertainty is fenced separately by the assignment store.
+ *
+ * Keys are hierarchical: a linked-worktree lane (`\0linked-worktree\0<parent>\0<name>`)
+ * conflicts with itself and with its parent checkout, and a checkout conflicts
+ * with every lane beneath it. Sibling lanes run concurrently. A waiting checkout
+ * request also holds back newer lanes beneath it, so root operations such as
+ * `git worktree add` cannot be starved by a steady stream of lane work.
  */
 export class BridgeWorkspaceSlots {
   constructor(private readonly redis: Redis) {}
@@ -47,10 +53,26 @@ export class BridgeWorkspaceSlots {
         [
           "if redis.call('GET', KEYS[4]) ~= ARGV[1] then return -2 end",
           "if (redis.call('GET', KEYS[8]) or '1') ~= ARGV[4] then return -2 end",
+          // Parent of a linked-worktree lane key; nil for a checkout key.
+          'local lanePrefix = "\\0linked-worktree\\0"',
+          'local function parentOf(key)',
+          '  if string.sub(key, 1, #lanePrefix) ~= lanePrefix then return nil end',
+          '  local last = nil',
+          '  local cursor = #lanePrefix + 1',
+          '  while true do',
+          '    local found = string.find(key, "\\0", cursor, true)',
+          '    if not found then break end',
+          '    last = found',
+          '    cursor = found + 1',
+          '  end',
+          '  if last == nil or last <= #lanePrefix + 1 then return nil end',
+          '  return string.sub(key, #lanePrefix + 1, last - 1)',
+          'end',
           "local lock = redis.call('GET', KEYS[2])",
           "local owner = 'workspace-slots:' .. ARGV[1]",
           'if lock and lock ~= owner then return -1 end',
           'local busy = {}',
+          'local busyChildren = {}',
           'local free = nil',
           'local latest = tonumber(ARGV[5])',
           `for slot = 0, ${MAX_WORKSPACE_LEASE_SLOTS - 1} do`,
@@ -63,12 +85,20 @@ export class BridgeWorkspaceSlots {
           '    else',
           '      if entry[1] == ARGV[2] then return slot end',
           '      busy[entry[3]] = true',
+          '      local busyParent = parentOf(entry[3])',
+          '      if busyParent then busyChildren[busyParent] = true end',
           '      latest = math.max(latest, tonumber(entry[4]))',
           '    end',
           '  end',
           '  if not occupied and free == nil and slot < tonumber(ARGV[4]) then free = slot end',
           'end',
-          'if free == nil or busy[ARGV[3]] then return -1 end',
+          'local function conflicts(key)',
+          '  if busy[key] then return true end',
+          '  local parent = parentOf(key)',
+          '  if parent then return busy[parent] == true end',
+          '  return busyChildren[key] == true',
+          'end',
+          'if free == nil or conflicts(ARGV[3]) then return -1 end',
           // Expiry removes queue metadata, never a workspace uncertainty fence.
           "local expired = redis.call('ZRANGEBYSCORE', KEYS[6], '-inf', ARGV[6])",
           'for _, id in ipairs(expired) do',
@@ -78,11 +108,15 @@ export class BridgeWorkspaceSlots {
           'end',
           "local pending = redis.call('ZRANGE', KEYS[5], 0, 31)",
           'local selected = nil',
+          'local waitingCheckouts = {}',
           'for _, id in ipairs(pending) do',
           "  local workspace = redis.call('HGET', KEYS[7], id)",
           // An older serial request remains a barrier until its dispatcher finishes.
           '  if not workspace then return -1 end',
-          '  if not busy[workspace] then selected = id; break end',
+          '  local parent = parentOf(workspace)',
+          '  local held = conflicts(workspace) or (parent ~= nil and waitingCheckouts[parent] == true)',
+          '  if not held then selected = id; break end',
+          '  if parent == nil then waitingCheckouts[workspace] = true end',
           'end',
           'if selected ~= ARGV[2] then return -1 end',
           "redis.call('HSET', KEYS[1], 'a:' .. free, ARGV[2], 'i:' .. free, ARGV[1], 'w:' .. free, ARGV[3], 'e:' .. free, ARGV[5])",

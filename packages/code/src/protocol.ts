@@ -259,14 +259,51 @@ export function bridgeArtifactMediaType(name: string): string {
 
 export type BridgeProtocolVersion = typeof BRIDGE_PROTOCOL_VERSION;
 
-/** Collision-free identity shared by scheduling and worker quarantine state. */
+/** One path segment naming a linked worktree at `<root>/.worktrees/<name>`. */
+export const BRIDGE_LINKED_WORKTREE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+export function isValidLinkedWorktreeName(value: unknown): value is string {
+    return (
+        typeof value === 'string' &&
+        BRIDGE_LINKED_WORKTREE_NAME_PATTERN.test(value) &&
+        !value.endsWith('.lock')
+    );
+}
+
+const LINKED_WORKTREE_KEY_PREFIX = '\0linked-worktree\0';
+
+/** Collision-free identity shared by scheduling and worker quarantine state.
+ * A linked worktree lane nests beneath the key of the checkout that owns it. */
 export function workspaceIsolationKey(
     workspaceId: string,
     instanceId?: string,
+    worktree?: string,
 ): string {
-    return instanceId === undefined
+    const base = instanceId === undefined
         ? workspaceId
         : `\0git-worktree\0${workspaceId}\0${instanceId}`;
+    return worktree === undefined
+        ? base
+        : `${LINKED_WORKTREE_KEY_PREFIX}${base}\0${worktree}`;
+}
+
+/** The checkout key a linked-worktree lane nests beneath, or undefined for a root key.
+ * Scheduling treats a lane and its parent as conflicting; sibling lanes do not. */
+export function workspaceIsolationParent(key: string): string | undefined {
+    if (!key.startsWith(LINKED_WORKTREE_KEY_PREFIX)) return undefined;
+    const separator = key.lastIndexOf('\0');
+    return separator <= LINKED_WORKTREE_KEY_PREFIX.length
+        ? undefined
+        : key.slice(LINKED_WORKTREE_KEY_PREFIX.length, separator);
+}
+
+/** Two isolation keys may not execute concurrently when either nests the other. */
+export function workspaceIsolationKeysConflict(left: string, right: string): boolean {
+    return (
+        left === right ||
+        workspaceIsolationParent(left) === right ||
+        workspaceIsolationParent(right) === left
+    );
 }
 
 export type BridgeWorkspaceToolOperation =
@@ -292,6 +329,9 @@ export interface BridgeWorkspaceDescriptor {
   operations?: BridgeWorkspaceToolOperation[];
   /** Worker-owned isolation schemes available beneath this selected root. */
   workspaceInstances?: ['git_worktree'];
+  /** Scheduling scopes available beneath this root. `git_linked_worktree` gives each
+   * verified `.worktrees/<name>` linked worktree its own lane. */
+  workspaceScopes?: ['git_linked_worktree'];
     environment?: {
         fingerprint: string;
         repo?: string;
@@ -321,6 +361,8 @@ export interface WorkspaceReadFileRequest {
   operation: 'read_file';
   workspaceId: string;
   workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   path: string;
   startLine?: number;
   maxLines?: number;
@@ -364,6 +406,8 @@ export interface WorkspaceSearchTextRequest {
   operation: 'search_text';
   workspaceId: string;
   workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   query: string;
   path?: string;
   maxResults?: number;
@@ -389,6 +433,8 @@ export interface WorkspaceListFilesRequest {
   operation: 'list_files';
   workspaceId: string;
   workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   path?: string;
   maxResults?: number;
   /** Continue strictly after this canonical path from a previous page. */
@@ -410,6 +456,8 @@ export interface WorkspaceWriteFileRequest {
   operation: 'write_file';
   workspaceId: string;
   workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   path: string;
   content: string;
   /** False requires an atomic create and refuses to replace an existing file. */
@@ -430,6 +478,8 @@ interface WorkspaceEditFileRequestBase {
   operation: 'edit_file';
   workspaceId: string;
   workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   path: string;
   /** Refuses the mutation unless current file bytes match this preview revision. */
   expectedBaseSha256?: string;
@@ -475,6 +525,8 @@ interface WorkspacePreviewEditRequestBase {
   operation: 'preview_edit';
   workspaceId: string;
   workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   path: string;
 }
 
@@ -513,6 +565,8 @@ export interface WorkspaceExecuteCommandRequest {
   operation: 'execute_command';
   workspaceId: string;
   workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   /** Shell source evaluated only inside the selected sandbox runtime. */
   command: string;
   /** Portable path relative to the workspace root; defaults to '.'. */
@@ -558,6 +612,7 @@ const WORKSPACE_READ_REQUEST_KEYS = new Set([
   'operation',
   'workspaceId',
   'workspaceInstanceId',
+  'worktree',
   'path',
   'startLine',
   'maxLines',
@@ -567,6 +622,7 @@ const WORKSPACE_SEARCH_REQUEST_KEYS = new Set([
   'operation',
   'workspaceId',
   'workspaceInstanceId',
+  'worktree',
   'query',
   'path',
   'maxResults',
@@ -576,6 +632,7 @@ const WORKSPACE_LIST_REQUEST_KEYS = new Set([
   'operation',
   'workspaceId',
   'workspaceInstanceId',
+  'worktree',
   'path',
   'maxResults',
   'afterPath',
@@ -585,6 +642,7 @@ const WORKSPACE_WRITE_REQUEST_KEYS = new Set([
   'operation',
   'workspaceId',
   'workspaceInstanceId',
+  'worktree',
   'path',
   'content',
   'overwrite',
@@ -594,6 +652,7 @@ const WORKSPACE_EDIT_REQUEST_KEYS = new Set([
   'operation',
   'workspaceId',
   'workspaceInstanceId',
+  'worktree',
   'path',
   'oldText',
   'newText',
@@ -605,6 +664,7 @@ const WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS = new Set([
   'operation',
   'workspaceId',
   'workspaceInstanceId',
+  'worktree',
   'path',
   'oldText',
   'newText',
@@ -617,6 +677,7 @@ const WORKSPACE_COMMAND_REQUEST_KEYS = new Set([
   'operation',
   'workspaceId',
   'workspaceInstanceId',
+  'worktree',
   'command',
   'cwd',
   'timeoutMs',
@@ -730,6 +791,8 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceProgrammaticLanguages?: WorkspaceProgrammaticLanguage[];
   /** Workspace isolation schemes this Code API understands and can route. */
   supportedWorkspaceInstanceTypes?: ['git_worktree'];
+  /** Scheduling scopes this Code API can admit as independent lanes. */
+  supportedWorkspaceScopes?: ['git_linked_worktree'];
 }
 
 /** Administrator-visible liveness for a configured worker. Credentials,
@@ -803,6 +866,8 @@ export interface BridgeWorkspaceProgrammaticBody {
   language: 'bash';
   version: string;
   workspace_instance_id?: string;
+  /** Linked worktree lane at `.worktrees/<name>` beneath the selected checkout. */
+  workspace_worktree?: string;
     /** Stable identity shared by every replay iteration of one execution. */
     execution_id?: string;
     /** Declared replay tools; zero allows the worker to skip the probe pass. */
@@ -970,6 +1035,8 @@ export function isBridgeWorkspaceProgrammaticRequest(
     (body.workspace_instance_id !== undefined &&
       (typeof body.workspace_instance_id !== 'string' ||
         !/^[a-f0-9]{64}$/.test(body.workspace_instance_id))) ||
+    (body.workspace_worktree !== undefined &&
+      !isValidLinkedWorktreeName(body.workspace_worktree)) ||
         (body.execution_id !== undefined &&
             (typeof body.execution_id !== 'string' ||
                 !/^[A-Za-z0-9_-]{1,128}$/.test(body.execution_id))) ||
@@ -1222,7 +1289,8 @@ export function isWorkspaceToolRequest(
     !isValidBridgeWorkerId(request.workspaceId) ||
     (request.workspaceInstanceId !== undefined &&
       (typeof request.workspaceInstanceId !== 'string' ||
-        !/^[a-f0-9]{64}$/.test(request.workspaceInstanceId)))
+        !/^[a-f0-9]{64}$/.test(request.workspaceInstanceId))) ||
+    (request.worktree !== undefined && !isValidLinkedWorktreeName(request.worktree))
   ) {
     return false;
   }
@@ -1676,6 +1744,7 @@ export function isValidBridgeWorkspaceToolCapabilities(
                     key !== 'name' &&
                     key !== 'operations' &&
                     key !== 'workspaceInstances' &&
+                    key !== 'workspaceScopes' &&
                     key !== 'instructions' &&
                     key !== 'environment',
       ) ||
@@ -1686,6 +1755,10 @@ export function isValidBridgeWorkspaceToolCapabilities(
         (!Array.isArray(descriptor.workspaceInstances) ||
           descriptor.workspaceInstances.length !== 1 ||
           descriptor.workspaceInstances[0] !== 'git_worktree')) ||
+      (descriptor.workspaceScopes !== undefined &&
+        (!Array.isArray(descriptor.workspaceScopes) ||
+          descriptor.workspaceScopes.length !== 1 ||
+          descriptor.workspaceScopes[0] !== 'git_linked_worktree')) ||
       (descriptor.instructions !== undefined && (!Array.isArray(descriptor.instructions) || descriptor.instructions.length > 1 || !descriptor.instructions.every(isRepositoryInstructionDescriptor))) ||
             (descriptor.environment !== undefined &&
                 !isValidCodeEnvironmentDescriptor(descriptor.environment)) ||

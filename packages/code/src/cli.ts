@@ -2,7 +2,7 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
-import { basename, resolve, relative, isAbsolute, sep } from 'node:path';
+import { basename, join, resolve, relative, isAbsolute, sep } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
 import { discoverProjects } from './projects.js';
@@ -37,6 +37,7 @@ import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { NativeWorkspaceCommandPool } from './native-pool.js';
 import { GitWorktreeWorkspaceTools, internalWorkspaceId } from './workspace-instances.js';
+import { LINKED_WORKTREE_DIRECTORY, LinkedWorktreeWorkspaceTools } from './linked-worktrees.js';
 import { GitWorktreeManager } from './worktrees.js';
 import { captureWorkspaceRootIdentity } from './root-identity.js';
 import {
@@ -514,6 +515,11 @@ async function run(
     (args.includes('--allow-workspace-commands') ||
       process.env.LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS?.trim().toLowerCase() ===
         'true');
+  const linkedWorktreeLanes =
+    runtimeSessionId == null &&
+    (args.includes('--linked-worktree-lanes') ||
+      process.env.LIBRECHAT_CODE_LINKED_WORKTREE_LANES?.trim().toLowerCase() ===
+        'true');
   const commandSandboxMode =
     option(args, '--command-sandbox') ??
     process.env.LIBRECHAT_CODE_COMMAND_SANDBOX?.trim().toLowerCase() ??
@@ -781,6 +787,21 @@ async function run(
   ) {
     throw new Error(
       'Conversation worktrees require native-srt commands and at least two workspace lease slots',
+    );
+  }
+  if (
+    linkedWorktreeLanes &&
+    (!allowWorkspaceCommands ||
+      commandSandboxMode !== 'native-srt' ||
+      workspaceLeaseSlots < 2)
+  ) {
+    throw new Error(
+      'Linked worktree lanes require native-srt commands and at least two workspace lease slots',
+    );
+  }
+  if (linkedWorktreeLanes && conversationWorktreeRoot) {
+    throw new Error(
+      'Linked worktree lanes cannot be combined with conversation worktrees',
     );
   }
   if (
@@ -1073,7 +1094,7 @@ async function run(
   };
   const nativeCommandSandbox =
     allowWorkspaceCommands && commandSandboxMode === 'native-srt'
-      ? roots.length > 1 || workspaceLeaseSlots > 1 || conversationWorktreeRoot
+      ? roots.length > 1 || workspaceLeaseSlots > 1 || conversationWorktreeRoot || linkedWorktreeLanes
         ? new NativeWorkspaceCommandPool(
             new Map(
                           roots.map(root => [
@@ -1200,6 +1221,38 @@ async function run(
     });
     workspaceTools = conversationWorkspaceTools;
   }
+  let linkedWorktreeTools: LinkedWorktreeWorkspaceTools | undefined;
+  if (linkedWorktreeLanes && workspaceTools) {
+    if (!(nativeCommandSandbox instanceof NativeWorkspaceCommandPool)) {
+      throw new Error('Linked worktree lanes require a native command pool');
+    }
+    linkedWorktreeTools = new LinkedWorktreeWorkspaceTools({
+      commandPool: nativeCommandSandbox,
+      delegate: workspaceTools,
+      programmaticDelegate: conversationWorkspaceTools ?? nativeCommandSandbox,
+      onResolve(workspaceId, root) {
+        if (admittedGitHubRepositories) {
+          admittedGitHubRepositories.set(
+            root,
+            repositoriesByWorkspace?.get(workspaceId),
+          );
+        }
+      },
+      sources: new Map(
+        roots.map((root) => [
+          root.id,
+          {
+            root: root.root,
+            identity: root.identity,
+            command: nativeOptions,
+            repositoryInstructions: args.includes('--repository-instructions'),
+            writable: root.writable ?? false,
+          },
+        ]),
+      ),
+    });
+    workspaceTools = linkedWorktreeTools;
+  }
     if (workspaceTools && environments.length) {
         workspaceTools = new EnvironmentWorkspaceTools(
             workspaceTools,
@@ -1304,7 +1357,7 @@ async function run(
       ...(nativeProgrammaticEnabled && nativeCommandSandbox
         ? {
             workspaceProgrammatic:
-              conversationWorkspaceTools ?? nativeCommandSandbox,
+              linkedWorktreeTools ?? conversationWorkspaceTools ?? nativeCommandSandbox,
           }
         : {}),
       ...(conversationWorktrees
@@ -1329,6 +1382,29 @@ async function run(
                 ),
                 incarnationId,
               ),
+          }
+        : {}),
+      ...(linkedWorktreeTools
+        ? {
+            linkedWorktreeQuarantineResolver: (
+              selectedWorkspaceId: string,
+              worktree: string,
+            ) => {
+              const source = roots.find((root) => root.id === selectedWorkspaceId);
+              if (!source) {
+                throw new BridgeProtocolError('Linked worktree source is not registered');
+              }
+              return workspaceMutationGuard(
+                defaultWorkspaceQuarantinePath({
+                  codeApiUrl,
+                  workerId,
+                  workspaceRoot: join(source.root, LINKED_WORKTREE_DIRECTORY, worktree),
+                }),
+                workerId,
+                workspaceIsolationKey(selectedWorkspaceId, undefined, worktree),
+                incarnationId,
+              );
+            },
           }
         : {}),
       ...(workspaceLeaseSlots > 1 || roots.length > 1

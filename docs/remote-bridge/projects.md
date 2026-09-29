@@ -41,7 +41,11 @@ workspace registration remains available for independent project directories.
     filesystem boundary and coordination for the common Git directory.
 -   A worktree beneath its parent checkout overlaps that checkout. Either use
     disjoint execution roots under a discovery grant or explicitly exclude and
-    coordinate descendant worktrees before relaxing root exclusion.
+    coordinate descendant worktrees before relaxing root exclusion. Linked
+    worktree lanes (`--linked-worktree-lanes`) take the second approach for
+    `.worktrees/<name>`: hierarchical admission keeps a lane and its checkout
+    exclusive, and each lane's sandbox keeps shared Git configuration, hooks and
+    sibling metadata read-only.
 -   Setup and dependency links must remain within the execution policy. Sharing
     writable dependency directories between supposedly isolated worktrees
     reintroduces overlap and requires an explicit operator decision.

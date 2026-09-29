@@ -377,3 +377,71 @@ test('programmatic work on an independent workspace bypasses another root cleanu
     'previous',
   );
 });
+
+test('sibling linked-worktree lanes run past each other, but a lane and its checkout wait for one another', async () => {
+  const worker = new BridgeWorker({
+    codeApiUrl: 'http://localhost:1',
+    token: 'fixture',
+    workerId: 'worker',
+    sandboxEndpoint: 'http://localhost:2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'fixture',
+      runtimes: [],
+    },
+  });
+  const internals = worker as unknown as {
+    activeWorkspaceAssignments: Map<string, { id: string; done: Promise<void> }>;
+    executeOwned: (assignment: BridgeAssignment) => Promise<void>;
+  };
+  const executed: string[] = [];
+  internals.executeOwned = async (assignment) => {
+    executed.push(assignment.assignmentId);
+  };
+  const assignment = (assignmentId: string, worktree?: string) =>
+    ({
+      assignmentId,
+      executionKind: 'workspace_tool',
+      remainingMs: 1_000,
+      request: {
+        protocolVersion: 1,
+        workspaceId: 'repo',
+        operation: 'read_file',
+        path: 'README.md',
+        ...(worktree ? { worktree } : {}),
+      },
+    }) as BridgeAssignment;
+  let releaseLane!: () => void;
+  internals.activeWorkspaceAssignments.set(workspaceIsolationKey('repo', undefined, 'task-a'), {
+    id: 'lane-a',
+    done: new Promise<void>((resolve) => {
+      releaseLane = resolve;
+    }),
+  });
+
+  await worker.executeAndSettle(assignment('lane-b', 'task-b'));
+  assert.deepEqual(executed, ['lane-b']);
+
+  const checkout = worker.executeAndSettle(assignment('checkout'));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(executed, ['lane-b']);
+  internals.activeWorkspaceAssignments.delete(workspaceIsolationKey('repo', undefined, 'task-a'));
+  releaseLane();
+  await checkout;
+  assert.deepEqual(executed, ['lane-b', 'checkout']);
+
+  let releaseCheckout!: () => void;
+  internals.activeWorkspaceAssignments.set(workspaceIsolationKey('repo'), {
+    id: 'root',
+    done: new Promise<void>((resolve) => {
+      releaseCheckout = resolve;
+    }),
+  });
+  const lane = worker.executeAndSettle(assignment('lane-c', 'task-c'));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(executed, ['lane-b', 'checkout']);
+  internals.activeWorkspaceAssignments.delete(workspaceIsolationKey('repo'));
+  releaseCheckout();
+  await lane;
+  assert.deepEqual(executed, ['lane-b', 'checkout', 'lane-c']);
+});

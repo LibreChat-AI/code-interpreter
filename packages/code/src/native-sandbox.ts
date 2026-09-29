@@ -106,10 +106,15 @@ const TRUSTED_GIT_ENVIRONMENT = {
   GIT_CONFIG_KEY_3: 'filter.lfs.required',
   GIT_CONFIG_VALUE_3: 'true',
 } as const;
-const {
-  GIT_CONFIG_COUNT: TRUSTED_GIT_CONFIG_COUNT,
-  ...TRUSTED_GIT_CONFIG_ENTRIES
-} = TRUSTED_GIT_ENVIRONMENT;
+/** Sibling lanes share object storage, so a lane never starts automatic gc or maintenance. */
+const LINKED_WORKTREE_GIT_ENVIRONMENT = {
+  ...TRUSTED_GIT_ENVIRONMENT,
+  GIT_CONFIG_COUNT: '6',
+  GIT_CONFIG_KEY_4: 'gc.auto',
+  GIT_CONFIG_VALUE_4: '0',
+  GIT_CONFIG_KEY_5: 'maintenance.auto',
+  GIT_CONFIG_VALUE_5: 'false',
+} as const;
 
 const NATIVE_SANDBOX_SCRATCH_PREFIX = 'librechat-code-srt-';
 // SRT grants these shared compatibility paths by default. A worker-specific
@@ -162,6 +167,15 @@ type SpawnCommand = (
 export interface NativeSrtWorkspaceCommandSandboxOptions {
   workspaceIdentity?: WorkspaceRootIdentity;
   workspaceRoot: string;
+  /** Present when `workspaceRoot` is a verified linked worktree lane of a checkout. */
+  linkedWorktree?: {
+    /** The checkout that owns the worktree; trusted as a Git safe directory. */
+    checkoutRoot: string;
+    /** `<checkout>/.git`: shared objects and refs the lane must be able to write. */
+    commonGitDir: string;
+    /** Paths beneath the shared Git directory that stay read-only: hooks, config, sibling metadata. */
+    readOnlyGitPaths: string[];
+  };
   commandPolicy?: NativeSrtCommandPolicy;
   /** Trusted worker files that must never become workspace-readable or writable. */
   protectedPaths?: string[];
@@ -298,6 +312,13 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private runtimeConfig?: SandboxRuntimeConfig;
     private denyReadPaths: string[] = [];
     private denyWritePaths: string[] = [];
+    private get gitEnvironment():
+        | typeof TRUSTED_GIT_ENVIRONMENT
+        | typeof LINKED_WORKTREE_GIT_ENVIRONMENT {
+        return this.options.linkedWorktree
+            ? LINKED_WORKTREE_GIT_ENVIRONMENT
+            : TRUSTED_GIT_ENVIRONMENT;
+    }
   private scratchDirectory?: string;
   private scratchHandle?: FileHandle;
   private execution?: Promise<WorkspaceExecuteCommandResult>;
@@ -424,6 +445,28 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         );
       }
     }
+    const lane = this.options.linkedWorktree;
+    const commonGitDir = lane ? await canonicalPath(lane.commonGitDir) : undefined;
+    const checkoutRoot = lane ? await canonicalPath(lane.checkoutRoot) : undefined;
+    const readOnlyGitPaths = lane
+      ? await Promise.all(lane.readOnlyGitPaths.map(canonicalPath))
+      : [];
+    if (
+      lane &&
+      (commonGitDir == null ||
+        checkoutRoot == null ||
+        !isWithin(checkoutRoot, commonGitDir) ||
+        !isWithin(checkoutRoot, root) ||
+        isWithin(commonGitDir, home) ||
+        protectedPaths.some(path => isWithin(commonGitDir, path)) ||
+        readOnlyGitPaths.some(path => !isWithin(commonGitDir, path)))
+    ) {
+      throw new WorkspaceToolError(
+        'Linked worktree Git storage is outside its checkout',
+        'REGISTRATION_INVALID',
+      );
+    }
+    const laneGitPaths = commonGitDir ? [commonGitDir] : [];
     const canonicalScratchDirectory =
       await this.createScratchDirectory(sharedScratchPaths);
     if (
@@ -459,17 +502,23 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         ],
         allowRead: [
           root,
+          ...laneGitPaths,
                     ...(canonicalScratchDirectory
                         ? [canonicalScratchDirectory]
                         : []),
         ],
         allowWrite: [
           root,
+          ...laneGitPaths,
                     ...(canonicalScratchDirectory
                         ? [canonicalScratchDirectory]
                         : []),
         ],
-        denyWrite: [...protectedPaths, ...deniedInheritedWritablePaths],
+        denyWrite: [
+          ...protectedPaths,
+          ...deniedInheritedWritablePaths,
+          ...readOnlyGitPaths,
+        ],
         allowGitConfig: false,
       },
       credentials: {
@@ -520,7 +569,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       allowAppleEvents: false,
       enableWeakerNestedSandbox: false,
       enableWeakerNetworkIsolation: false,
-      git: { safeDirectories: [root] },
+      git: { safeDirectories: checkoutRoot ? [root, checkoutRoot] : [root] },
     };
     await this.manager.initialize(
       config,
@@ -537,6 +586,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         this.denyWritePaths = [
             ...protectedPaths,
             ...deniedInheritedWritablePaths,
+            ...readOnlyGitPaths,
         ];
   }
 
@@ -894,7 +944,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         : request.command;
       wrapped = await this.withTemporaryHostEnvironment(
         {
-          ...TRUSTED_GIT_ENVIRONMENT,
+          ...this.gitEnvironment,
           ...(credentialEnvironment ?? {}),
           ...this.scratchSelectorEnvironment(sandboxScratchDirectory),
         },
@@ -999,10 +1049,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
               ...wrapped.env,
               ...this.scratchEnvironment(),
               ...trustedEnvironment,
-              ...TRUSTED_GIT_CONFIG_ENTRIES,
+              ...this.gitEnvironment,
               GIT_CONFIG_COUNT:
                                     wrapped.env.GIT_CONFIG_COUNT ??
-                                    TRUSTED_GIT_CONFIG_COUNT,
+                                    this.gitEnvironment.GIT_CONFIG_COUNT,
               GIT_CONFIG_GLOBAL:
                                     this.platform === 'win32'
                                         ? 'NUL'

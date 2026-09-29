@@ -307,7 +307,10 @@ execution.
 - Code API negotiates a bounded number of active workspace assignments per
   worker. The lower API or worker slot ceiling wins, and assignments sharing
   the same workspace isolation key remain serialized while independent
-  conversation worktrees may run concurrently.
+  conversation worktrees may run concurrently. A linked-worktree lane
+  (`worktree: <name>`) nests beneath its checkout's key: sibling lanes run
+  concurrently, while a lane and its checkout exclude each other, and a lane
+  cannot start while its checkout is quarantined.
 - Workspace tool admission waits for capacity up to 30 seconds without a
   `X-LibreChat-Workspace-Queue-Wait-Ms` header. A caller can advertise a longer
   per-request allowance, bounded by five minutes and any server queue ceiling.

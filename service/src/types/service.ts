@@ -206,6 +206,8 @@ export interface PayloadBody {
   version: string;
   /** Opaque conversation checkout selected and authenticated by the API. */
   workspace_instance_id?: string;
+  /** Linked worktree lane at `.worktrees/<name>` beneath the selected checkout. */
+  workspace_worktree?: string;
     /** Stable identity shared by all replay iterations of one execution. */
     execution_id?: string;
     replay_tool_count?: number;
@@ -397,6 +399,8 @@ export interface ProgrammaticRequestBody {
   lang?: 'python' | 'bash';
   /** Opaque conversation checkout binding for a selected native workspace. */
   workspace_instance_id?: string;
+  /** Linked worktree lane at `.worktrees/<name>` beneath the selected checkout. */
+  workspace_worktree?: string;
 }
 
 export interface ProgrammaticToolCall {

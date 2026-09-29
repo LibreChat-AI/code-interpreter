@@ -11,6 +11,8 @@ import {
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
   workspaceIsolationKey,
+  workspaceIsolationKeysConflict,
+  workspaceIsolationParent,
 } from './protocol.js';
 import type {
   WorkspaceEditFileRequest,
@@ -815,4 +817,63 @@ test('bridge artifact policy and media types match the hardened gateway contract
   assert.equal(bridgeArtifactMediaType('preview.png'), 'image/png');
   assert.equal(bridgeArtifactMediaType('reports/result.json'), 'application/json');
   assert.equal(bridgeArtifactMediaType('Dockerfile'), 'application/octet-stream');
+});
+
+test('linked-worktree lanes nest beneath their checkout key and conflict only with it', () => {
+  const instanceId = 'a'.repeat(64);
+  const lane = workspaceIsolationKey('repo', undefined, 'task-a');
+  const sibling = workspaceIsolationKey('repo', undefined, 'task-b');
+  const nested = workspaceIsolationKey('repo', instanceId, 'task-a');
+  assert.notEqual(lane, workspaceIsolationKey('repo'));
+  assert.notEqual(lane, workspaceIsolationKey('repo\0task-a'));
+  assert.notEqual(nested, lane);
+  assert.equal(workspaceIsolationParent(lane), 'repo');
+  assert.equal(workspaceIsolationParent(nested), workspaceIsolationKey('repo', instanceId));
+  assert.equal(workspaceIsolationParent('repo'), undefined);
+  assert.equal(workspaceIsolationParent(workspaceIsolationKey('repo', instanceId)), undefined);
+  assert.equal(workspaceIsolationKeysConflict(lane, 'repo'), true);
+  assert.equal(workspaceIsolationKeysConflict('repo', lane), true);
+  assert.equal(workspaceIsolationKeysConflict(lane, lane), true);
+  assert.equal(workspaceIsolationKeysConflict(lane, sibling), false);
+  assert.equal(workspaceIsolationKeysConflict(nested, 'repo'), false);
+  assert.equal(workspaceIsolationKeysConflict(nested, workspaceIsolationKey('repo', instanceId)), true);
+});
+
+test('workspace requests accept only a single safe worktree name', () => {
+  const base = { protocolVersion: 1, operation: 'read_file', workspaceId: 'repo', path: 'README.md' };
+  for (const worktree of ['task-a', 'fix_16464', 'v2.0']) {
+    assert.equal(isWorkspaceToolRequest({ ...base, worktree }), true, worktree);
+  }
+  for (const worktree of ['', '.hidden', '..', 'a/b', 'a\\b', 'task.lock', 'x'.repeat(129), 7, null]) {
+    assert.equal(isWorkspaceToolRequest({ ...base, worktree }), false, String(worktree));
+  }
+  const programmatic = (workspace_worktree: string) => ({
+    headers: {},
+    body: {
+      language: 'bash',
+      version: '5.2.0',
+      session_id: 'session',
+      files: [{ name: 'main.sh', content: 'true' }],
+      workspace_worktree,
+    },
+  });
+  assert.equal(isBridgeWorkspaceProgrammaticRequest(programmatic('task-a')), true);
+  assert.equal(isBridgeWorkspaceProgrammaticRequest(programmatic('../x')), false);
+});
+
+test('workspace capabilities advertise linked-worktree scopes exactly', () => {
+  const capabilities = (workspaceScopes: unknown) => ({
+    statefulWorkspace: false,
+    sandboxProfile: 'anthropic-srt',
+    runtimes: [],
+    workspaceTools: {
+      protocolVersion: 1,
+      operations: ['read_file'],
+      workspaces: [{ id: 'repo', workspaceScopes }],
+    },
+  });
+  assert.equal(isValidBridgeWorkerCapabilities(capabilities(['git_linked_worktree'])), true);
+  assert.equal(isValidBridgeWorkerCapabilities(capabilities(['git_worktree'])), false);
+  assert.equal(isValidBridgeWorkerCapabilities(capabilities([])), false);
+  assert.equal(isValidBridgeWorkerCapabilities(capabilities('git_linked_worktree')), false);
 });

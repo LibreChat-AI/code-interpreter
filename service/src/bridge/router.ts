@@ -539,6 +539,7 @@ router.post(
         supportedWorkspaceListFileFeatures: ['after_path'],
         supportedWorkspaceProgrammaticLanguages: ['bash'],
         supportedWorkspaceInstanceTypes: ['git_worktree'],
+        supportedWorkspaceScopes: ['git_linked_worktree'],
       });
     } catch (error) {
       if (error instanceof BridgeStoreError) {
