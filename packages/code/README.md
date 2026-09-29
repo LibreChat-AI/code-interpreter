@@ -826,13 +826,18 @@ shared object and ref storage (`.git/objects`, `.git/refs`, `.git/logs/refs`,
 `.git` stays read-only: configuration, hooks and `info`, the checkout's own
 `HEAD`, index and merge or rebase state, and sibling metadata. Automatic `gc`
 and maintenance are disabled, and `git gc` itself cannot run in a lane (it
-needs to write `.git/gc.pid` and `packed-refs`); run storage maintenance from
-the checkout. Explicit `git prune --expire now`, `git repack -ad`, or LFS
-pruning can still delete objects another lane is writing; the sandbox does
-**not** prevent this race. Do not enable lanes for agents that run destructive
-maintenance until those commands are blocked or serialized. Deleting a branch
-or tag also needs the checkout, because Git locks `packed-refs` for every ref
-deletion. Each lane has its own durable quarantine guard. A lane
+needs to write `.git/gc.pid` and `packed-refs`). A lane's `PATH` starts with
+a read-only Git wrapper that refuses `prune`, `gc`, `repack`, `prune-packed`,
+`maintenance`, `multi-pack-index` and `git lfs prune`, including after Git
+options such as `-C` or `-c`. Run storage maintenance from the checkout.
+This is a guardrail against accidental commands, **not** a filesystem
+boundary: invoking Git by an absolute path, resetting `PATH`, or using a
+script that does either bypasses it. Such commands can still delete a sibling
+lane's unpublished objects. Do not enable concurrent lanes for agents or
+scripts that deliberately bypass the wrapper. The POSIX-only guard must be
+available or lane commands are not admitted. Deleting a branch or tag also
+needs the checkout, because Git locks `packed-refs` for every ref deletion.
+Each lane has its own durable quarantine guard. A lane
 cannot start while its checkout is quarantined, and a checkout cannot start
 while any lane beneath it is.
 

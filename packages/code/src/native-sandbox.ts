@@ -32,6 +32,7 @@ import {
 } from './private-storage.js';
 import { WorkspaceToolError } from './workspace.js';
 import { restoreScratchTraversal } from './native-scratch.js';
+import { writeLinkedWorktreeGitGuard } from './linked-worktree-git-guard.js';
 
 import type {
   ChildProcessWithoutNullStreams,
@@ -323,6 +324,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     }
   private scratchDirectory?: string;
   private scratchHandle?: FileHandle;
+  /** A private sibling of scratch, readable but never writable by lane commands. */
+  private gitGuardDirectory?: string;
   private execution?: Promise<WorkspaceExecuteCommandResult>;
   private closing?: Promise<void>;
   private resetFailed = false;
@@ -361,6 +364,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       await this.manager.reset().catch(() => {
         this.resetFailed = true;
       });
+      await this.removeLinkedWorktreeGitGuard().catch(() => undefined);
       await this.removeScratchDirectory().catch(() => undefined);
       if (!this.resetFailed) managerOwners.delete(this.manager);
       this.initialized = undefined;
@@ -448,6 +452,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       }
     }
     const lane = this.options.linkedWorktree;
+    if (lane && this.platform === 'win32') {
+      throw new WorkspaceToolError('Linked worktree Git guard requires a POSIX host', 'COMMAND_UNAVAILABLE');
+    }
     const commonGitDir = lane ? await canonicalPath(lane.commonGitDir) : undefined;
     const checkoutRoot = lane ? await canonicalPath(lane.checkoutRoot) : undefined;
     const writableGitPaths = lane
@@ -485,6 +492,12 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         'REGISTRATION_INVALID',
       );
     }
+    if (lane && !canonicalScratchDirectory) {
+      throw new WorkspaceToolError('Linked worktree Git guard requires private scratch storage', 'COMMAND_UNAVAILABLE');
+    }
+    const gitGuardDirectory = lane
+      ? await this.createLinkedWorktreeGitGuard(canonicalScratchDirectory!)
+      : undefined;
     const commandPolicy = normalizeNativeSrtCommandPolicy(
       this.options.commandPolicy,
     );
@@ -510,6 +523,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         allowRead: [
           root,
           ...laneGitPaths,
+          ...(gitGuardDirectory ? [gitGuardDirectory] : []),
                     ...(canonicalScratchDirectory
                         ? [canonicalScratchDirectory]
                         : []),
@@ -524,6 +538,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         denyWrite: [
           ...protectedPaths,
           ...deniedInheritedWritablePaths,
+          ...(gitGuardDirectory ? [gitGuardDirectory] : []),
         ],
         allowGitConfig: false,
       },
@@ -593,6 +608,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         this.denyWritePaths = [
             ...protectedPaths,
             ...deniedInheritedWritablePaths,
+            ...(gitGuardDirectory ? [gitGuardDirectory] : []),
         ];
   }
 
@@ -816,6 +832,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                               canonicalDataDirectory,
                               ...(this.canonicalCommonGitDir
                                   ? [this.canonicalCommonGitDir]
+                                  : []),
+                              ...(this.gitGuardDirectory
+                                  ? [this.gitGuardDirectory]
                                   : []),
                           ],
                           allowWrite: [
@@ -1067,6 +1086,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                                         ? 'NUL'
                                         : '/dev/null',
               GIT_CONFIG_NOSYSTEM: '1',
+              ...(this.gitGuardDirectory ? {
+                PATH: `${this.gitGuardDirectory}:${wrapped.env.PATH || this.environment.PATH || '/usr/bin:/bin'}`,
+              } : {}),
             },
             detached: this.platform !== 'win32',
             shell: false,
@@ -1297,6 +1319,24 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     );
   }
 
+  private async createLinkedWorktreeGitGuard(scratchDirectory: string): Promise<string> {
+    if (this.gitGuardDirectory) {
+      throw new Error('Linked worktree Git guard cleanup is still pending');
+    }
+    // Unlike scratch, this sibling directory is not in filesystem.allowWrite.
+    const directory = await mkdtemp(join(dirname(scratchDirectory), 'librechat-code-git-'));
+    this.gitGuardDirectory = directory;
+    await assertPrivateStorageAncestors(directory);
+    await writeLinkedWorktreeGitGuard(directory);
+    return directory;
+  }
+
+  private async removeLinkedWorktreeGitGuard(): Promise<void> {
+    if (!this.gitGuardDirectory) return;
+    await rm(this.gitGuardDirectory, { recursive: true, force: true });
+    this.gitGuardDirectory = undefined;
+  }
+
   private async removeScratchDirectory(): Promise<void> {
     const scratchDirectory = this.scratchDirectory;
     if (!scratchDirectory) return;
@@ -1340,6 +1380,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     }
     this.initialized = undefined;
     this.canonicalRoot = undefined;
-    await this.removeScratchDirectory();
+    try {
+      await this.removeLinkedWorktreeGitGuard();
+    } finally {
+      await this.removeScratchDirectory();
+    }
   }
 }

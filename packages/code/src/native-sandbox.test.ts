@@ -1629,6 +1629,11 @@ test('a linked worktree lane may write only shared Git storage and its own metad
   assert.deepEqual(config.filesystem.allowWrite.slice(0, 4), [lane, ...writableGitPaths]);
   assert.ok(!config.filesystem.allowWrite.includes(commonGitDir));
   assert.ok(config.filesystem.allowRead?.includes(commonGitDir));
+  const gitGuard = config.filesystem.allowRead?.find(path => path.includes('librechat-code-git-'));
+  assert.ok(gitGuard, 'lane Git guard must be readable');
+  assert.ok(!config.filesystem.allowWrite.includes(gitGuard));
+  assert.ok(config.filesystem.denyWrite.includes(gitGuard));
+  assert.equal((await stat(join(gitGuard, 'git'))).mode & 0o222, 0);
 
   const probed = fakeManager();
   const prober = new NativeSrtWorkspaceCommandSandbox({
@@ -1642,6 +1647,10 @@ test('a linked worktree lane may write only shared Git storage and its own metad
   await prober.executeProgrammatic(request, dataDirectory, undefined, { probe: true });
   assert.ok(probed.customConfigSeenDuringWrap?.filesystem?.allowRead?.includes(commonGitDir));
   assert.ok(!probed.customConfigSeenDuringWrap?.filesystem?.allowWrite?.includes(commonGitDir));
+  const probeGuard = probed.config?.filesystem.allowRead?.find(path => path.includes('librechat-code-git-'));
+  assert.ok(probeGuard);
+  assert.ok(probed.customConfigSeenDuringWrap?.filesystem?.allowRead?.includes(probeGuard));
+  assert.ok(probed.customConfigSeenDuringWrap?.filesystem?.denyWrite?.includes(probeGuard));
 
   await assert.rejects(
     prepare([commonGitDir]),
@@ -1658,4 +1667,76 @@ test('a linked worktree lane may write only shared Git storage and its own metad
     (error: unknown) =>
       error instanceof WorkspaceToolError && error.code === 'REGISTRATION_INVALID',
   );
+});
+
+test('lane commands put the read-only Git guard ahead of the ordinary PATH', async t => {
+  if (process.platform === 'win32') return t.skip('lane Git guard requires POSIX');
+  const checkoutRoot = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-guard-')));
+  t.after(() => rm(checkoutRoot, { recursive: true, force: true }));
+  const commonGitDir = join(checkoutRoot, '.git');
+  const lane = join(checkoutRoot, '.worktrees', 'task-a');
+  const writableGitPaths = [join(commonGitDir, 'objects'), join(commonGitDir, 'worktrees', 'task-a')];
+  await Promise.all([lane, ...writableGitPaths].map(path => mkdir(path, { recursive: true })));
+  const fake = fakeManager();
+  let commandPath: string | undefined;
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: lane,
+    linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths },
+    environment: { PATH: '/usr/bin:/bin' },
+    manager: fake.manager,
+    spawnCommand(command, args, options) {
+      commandPath = options.env?.PATH;
+      return spawn(command, args, options);
+    },
+  });
+  t.after(() => sandbox.close());
+  const result = await sandbox.execute({ ...request, command: 'git --version' });
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /git version/);
+  const guard = fake.config?.filesystem.allowRead?.find(path => path.includes('librechat-code-git-'));
+  assert.ok(guard);
+  assert.ok(commandPath?.startsWith(`${guard}:`));
+  await sandbox.close();
+  await assert.rejects(stat(guard), { code: 'ENOENT' });
+});
+
+test('linked worktree Git guard is removed when sandbox initialization fails', async t => {
+  if (process.platform === 'win32') return t.skip('lane Git guard requires POSIX');
+  const checkoutRoot = await mkdtemp(join(tmpdir(), 'librechat-code-failed-guard-'));
+  t.after(() => rm(checkoutRoot, { recursive: true, force: true }));
+  const commonGitDir = join(checkoutRoot, '.git');
+  const lane = join(checkoutRoot, '.worktrees', 'task-a');
+  const objects = join(commonGitDir, 'objects');
+  await Promise.all([lane, objects].map(path => mkdir(path, { recursive: true })));
+  const fake = fakeManager({ initializeError: new Error('init failed') });
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: lane,
+    linkedWorktree: { checkoutRoot, commonGitDir, writableGitPaths: [objects] },
+    manager: fake.manager,
+  });
+  await assert.rejects(sandbox.prepare(), /init failed/);
+  const guard = fake.config?.filesystem.allowRead?.find(path => path.includes('librechat-code-git-'));
+  assert.ok(guard);
+  await assert.rejects(stat(guard), { code: 'ENOENT' });
+  await sandbox.close();
+});
+
+test('linked worktree Git guard refuses Windows rather than admitting an unguarded lane', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-win-guard-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    linkedWorktree: {
+      checkoutRoot: root,
+      commonGitDir: join(root, '.git'),
+      writableGitPaths: [join(root, '.git', 'objects')],
+    },
+    platform: 'win32',
+    manager: fakeManager().manager,
+  });
+  await assert.rejects(sandbox.prepare(), (error: unknown) =>
+    error instanceof WorkspaceToolError && error.code === 'COMMAND_UNAVAILABLE' &&
+    /POSIX host/.test(error.message),
+  );
+  await sandbox.close();
 });

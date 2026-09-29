@@ -805,6 +805,9 @@ async function run(
       'Linked worktree lanes cannot be combined with conversation worktrees',
     );
   }
+  if (linkedWorktreeLanes && process.platform === 'win32') {
+    throw new Error('Linked worktree Git guard requires a POSIX host');
+  }
   if (
     roots.length > 1 &&
     process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim()
