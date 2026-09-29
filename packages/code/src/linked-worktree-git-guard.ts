@@ -72,7 +72,7 @@ export async function writeLinkedWorktreeGitGuard(directory: string): Promise<vo
     '    esac',
     '  done',
     '  case "${1:-}" in',
-    '    prune|gc|repack|prune-packed|maintenance|multi-pack-index)',
+    '    prune|gc|repack|prune-packed|maintenance|multi-pack-index|for-each-repo)',
     '      echo "git: run storage maintenance from the checkout, not a linked worktree lane" >&2',
     '      return 1 ;;',
     '    fetch|pull)',

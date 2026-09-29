@@ -828,8 +828,10 @@ shared object and ref storage (`.git/objects`, `.git/refs`, `.git/logs/refs`,
 and maintenance are disabled, and `git gc` itself cannot run in a lane (it
 needs to write `.git/gc.pid` and `packed-refs`). A lane's `PATH` starts with
 a read-only Git wrapper that refuses `prune`, `gc`, `repack`, `prune-packed`,
-`maintenance`, `multi-pack-index` and `git lfs prune`, including after Git
-options such as `-C` or `-c`. It rejects `git lfs fetch` or `pull` with
+`maintenance`, `multi-pack-index`, `for-each-repo` and `git lfs prune`,
+including after Git options such as `-C` or `-c`. `for-each-repo` is refused
+entirely because Git dispatches its child commands without re-entering the
+wrapper. It rejects `git lfs fetch` or `pull` with
 `--prune`/`-p`, and `git fetch` or `pull` with `--auto-maintenance`/`--auto-gc`.
 It enforces `maintenance.auto=false`, `gc.auto=0` and `help.autocorrect=0`
 after caller-supplied Git options, preventing those overrides from restoring

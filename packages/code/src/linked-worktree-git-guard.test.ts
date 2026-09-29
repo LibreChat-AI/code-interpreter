@@ -218,6 +218,35 @@ test('Git options cannot re-enable automatic maintenance for lane commands', asy
   assert.equal((await run(['cat-file', '-t', object])).stdout.trim(), 'blob');
 });
 
+test('for-each-repo cannot dispatch maintenance behind the lane Git guard', async t => {
+  if (process.platform === 'win32') return t.skip('lane Git guard requires POSIX');
+  const parent = await mkdtemp(join(tmpdir(), 'linked-worktree-for-each-repo-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const bin = join(parent, 'bin');
+  const repo = join(parent, 'repo');
+  await Promise.all([mkdir(bin), mkdir(repo)]);
+  await writeLinkedWorktreeGitGuard(bin);
+  const run = (args: string[]) => execFileAsync('git', args, {
+    cwd: repo,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}` },
+  });
+  await run(['init', '-q', '-b', 'main']);
+  await writeFile(join(repo, 'pending'), 'a sibling has not published this object yet\n');
+  const object = (await run(['hash-object', '-w', 'pending'])).stdout.trim();
+  const dispatcher = ['-c', `maintenance.repo=${repo}`, 'for-each-repo', '--config=maintenance.repo'];
+  for (const args of [
+    [...dispatcher, 'prune', '--expire', 'now'],
+    [...dispatcher, 'status', '--short'],
+  ]) {
+    await assert.rejects(run(args), (error: unknown) => {
+      const result = error as { code?: number; stderr?: string };
+      return result.code === 1 && /run storage maintenance from the checkout/.test(result.stderr ?? '');
+    }, 'Git dispatchers cannot be inspected safely inside a lane');
+    assert.equal((await run(['cat-file', '-t', object])).stdout.trim(), 'blob');
+  }
+  assert.match((await run(['status', '--short'])).stdout, /pending/);
+});
+
 test('Git LFS fetch and pull cannot request pruning in a lane', async t => {
   if (process.platform === 'win32') return t.skip('lane Git guard requires POSIX');
   const parent = await mkdtemp(join(tmpdir(), 'linked-worktree-lfs-'));
