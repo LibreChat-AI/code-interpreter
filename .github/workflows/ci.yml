@@ -235,6 +235,30 @@ jobs:
           LIBRECHAT_CODE_LIVE_SRT_TESTS: '1'
         run: node --test dist/environment-live.test.js
 
+  linux-native-sandbox-tests:
+    name: Linux Native Sandbox Tests
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: packages/code
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.16.0
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap socat ripgrep
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor; bwrap needs them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: npm ci
+      - run: npm run build
+      - name: Linked worktree lane containment
+        env:
+          LIBRECHAT_CODE_LIVE_SRT_TESTS: '1'
+        run: node --test dist/linked-worktrees-live.test.js
+
   lambda-microvm-provisioning:
     name: Lambda MicroVM Provisioning
     runs-on: ubuntu-latest

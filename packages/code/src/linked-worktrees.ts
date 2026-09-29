@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { lstat, open, realpath } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { lstat, open, readdir, realpath } from 'node:fs/promises';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 
 import { isValidLinkedWorktreeName } from './protocol.js';
 import {
@@ -48,6 +48,13 @@ export interface VerifiedLinkedWorktree {
   commonGitDir: string;
   /** Shared object and ref storage plus the lane's own metadata; nothing else in the common Git directory. */
   writableGitPaths: string[];
+  /**
+   * Every other entry of the common Git directory, read-only. Listed one by one
+   * rather than granting the whole directory: a read grant on an ancestor of a
+   * writable path masks that path's write bind when the checkout sits inside a
+   * read-denied directory such as the worker's home.
+   */
+  readableGitPaths: string[];
 }
 
 export interface LinkedWorktreeWorkspaceToolsOptions {
@@ -193,7 +200,26 @@ export async function verifyLinkedWorktree(
     ...LINKED_WORKTREE_SHARED_GIT_PATHS.map((path) => join(commonGitDir, path)),
     metadata,
   ];
-  return { root, identity, checkoutRoot: checkout, commonGitDir, writableGitPaths };
+  const readableGitPaths = (await gitPathsBeside(commonGitDir, writableGitPaths)).sort();
+  return { root, identity, checkoutRoot: checkout, commonGitDir, writableGitPaths, readableGitPaths };
+}
+
+/** Entries beneath `directory` off every writable path; symlinks are never granted. */
+async function gitPathsBeside(directory: string, writable: readonly string[]): Promise<string[]> {
+  const entries = await readdir(directory).catch(() => [] as string[]);
+  const nested = await Promise.all(
+    entries.map(async (entry): Promise<string[]> => {
+      const path = join(directory, entry);
+      if (writable.includes(path)) return [];
+      const status = await lstat(path).catch(() => undefined);
+      if (status == null || status.isSymbolicLink()) return [];
+      if (writable.some((candidate) => candidate.startsWith(`${path}${sep}`))) {
+        return status.isDirectory() ? await gitPathsBeside(path, writable) : [];
+      }
+      return [path];
+    }),
+  );
+  return nested.flat();
 }
 
 function publicResult(result: WorkspaceToolResult, workspaceId: string): WorkspaceToolResult {
@@ -303,7 +329,7 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     return await cached.value;
   }
 
-  /** Register the lane's command root, replacing it when its identity or writable Git paths changed. */
+  /** Register the lane's command root, replacing it when its identity or Git paths changed. */
   private async registerCommandRoot(
     internalId: string,
     lane: VerifiedLinkedWorktree,
@@ -318,6 +344,7 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
       lane.identity.dev,
       lane.identity.ino,
       lane.writableGitPaths,
+      lane.readableGitPaths,
     ]);
     const registered = this.commandRoots.get(internalId);
     if (registered !== fingerprint) {
@@ -330,6 +357,7 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
           checkoutRoot: lane.checkoutRoot,
           commonGitDir: lane.commonGitDir,
           writableGitPaths: lane.writableGitPaths,
+          readableGitPaths: lane.readableGitPaths,
         },
       });
       this.commandRoots.set(internalId, fingerprint);

@@ -172,10 +172,12 @@ export interface NativeSrtWorkspaceCommandSandboxOptions {
   linkedWorktree?: {
     /** The checkout that owns the worktree; trusted as a Git safe directory. */
     checkoutRoot: string;
-    /** `<checkout>/.git`: readable, but writable only at `writableGitPaths`. */
+    /** `<checkout>/.git`: readable only at the listed paths, writable only at `writableGitPaths`. */
     commonGitDir: string;
     /** Shared objects and refs plus the lane's own metadata beneath `commonGitDir`. */
     writableGitPaths: string[];
+    /** The remaining entries of `commonGitDir`, none an ancestor of a writable path. */
+    readableGitPaths: string[];
   };
   commandPolicy?: NativeSrtCommandPolicy;
   /** Trusted worker files that must never become workspace-readable or writable. */
@@ -310,8 +312,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private readonly platform: NodeJS.Platform;
   private initialized?: Promise<void>;
   private canonicalRoot?: string;
-  /** A lane's shared Git directory; replay probes of the lane must read it too. */
-  private canonicalCommonGitDir?: string;
+  /** A lane's granted Git paths; its replay probes read them all, writing none. */
+  private laneGitPaths: string[] = [];
   private runtimeConfig?: SandboxRuntimeConfig;
     private denyReadPaths: string[] = [];
     private denyWritePaths: string[] = [];
@@ -460,6 +462,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     const writableGitPaths = lane
       ? await Promise.all(lane.writableGitPaths.map(canonicalPath))
       : [];
+    const readableGitPaths = lane
+      ? await Promise.all(lane.readableGitPaths.map(canonicalPath))
+      : [];
     if (
       lane &&
       (commonGitDir == null ||
@@ -473,6 +478,13 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             path !== resolve(lane.writableGitPaths[index]!) ||
             path === commonGitDir ||
             !isWithin(commonGitDir, path),
+        ) ||
+        readableGitPaths.some(
+          (path, index) =>
+            path !== resolve(lane.readableGitPaths[index]!) ||
+            path === commonGitDir ||
+            !isWithin(commonGitDir, path) ||
+            writableGitPaths.some(writable => isWithin(path, writable)),
         ))
     ) {
       throw new WorkspaceToolError(
@@ -480,7 +492,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         'REGISTRATION_INVALID',
       );
     }
-    const laneGitPaths = commonGitDir ? [commonGitDir] : [];
+    /** Never the common directory itself: its read bind would mask the writable binds beneath it. */
+    const laneGitPaths = [...readableGitPaths, ...writableGitPaths];
     const canonicalScratchDirectory =
       await this.createScratchDirectory(sharedScratchPaths);
     if (
@@ -597,7 +610,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       unrestrictedNetwork ? async () => true : undefined,
     );
     this.canonicalRoot = root;
-    this.canonicalCommonGitDir = commonGitDir;
+    this.laneGitPaths = laneGitPaths;
     this.runtimeConfig = config;
         this.denyReadPaths = [
             home,
@@ -830,9 +843,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                           allowRead: [
                               canonicalWorkspaceRoot ?? this.canonicalRoot!,
                               canonicalDataDirectory,
-                              ...(this.canonicalCommonGitDir
-                                  ? [this.canonicalCommonGitDir]
-                                  : []),
+                              ...this.laneGitPaths,
                               ...(this.gitGuardDirectory
                                   ? [this.gitGuardDirectory]
                                   : []),
@@ -1380,6 +1391,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     }
     this.initialized = undefined;
     this.canonicalRoot = undefined;
+    this.laneGitPaths = [];
     try {
       await this.removeLinkedWorktreeGitGuard();
     } finally {
