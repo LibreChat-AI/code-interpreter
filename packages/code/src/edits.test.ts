@@ -105,6 +105,23 @@ test('exact mode says when only the whitespace differs', () => {
   assert.match(reflowed.message, /exists at line 1 with different whitespace \(whitespace-normalized\)/);
 });
 
+test('exact-mode diagnostics detect normalized whitespace with both boundary wrappers intact', () => {
+  for (const [source, oldText] of [
+    ['foo   bar\n', 'foo bar\n'],
+    ['header\n  foo   bar\n', '\nfoo bar'],
+    ['header\r\n  foo   bar\r\nnext', '\r\nfoo bar\r\n'],
+    ['  foo   bar  \n', '  foo bar  '],
+  ]) {
+    const error = rejection(() => applyTextEdits(source, [{ oldText, newText: '' }]));
+    assert.match(error.message, /exists at line \d+ with different whitespace \(whitespace-normalized\)/,
+      JSON.stringify({ source, oldText }));
+  }
+  const missingBoundary = rejection(() => applyTextEdits('foo   bar', [
+    { oldText: 'foo bar\n', newText: 'unchanged' },
+  ]));
+  assert.doesNotMatch(missingBoundary.message, /exists at.*different whitespace/);
+});
+
 test('tolerant matching ignores trailing whitespace and keeps CRLF line endings', () => {
   const text = 'first  \r\nsecond\t\r\nthird\r\n';
   const applied = applyTextEdits(
@@ -215,6 +232,45 @@ test('whitespace-normalized matching does not prepend new indentation beside pre
   }], 'tolerant');
   assert.equal(result.text, 'header\n  baz qux\n');
   assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+});
+
+test('newline-only boundary prefixes peel the complete equivalent indentation run', () => {
+  for (const newline of ['\n', '\r\n']) {
+    const result = applyTextEdits(`header${newline}  foo   bar${newline}next`, [{
+      oldText: '\nfoo bar\n', newText: '\n\tbaz qux\t\n',
+    }], 'tolerant');
+    assert.equal(result.text, `header${newline}  baz qux${newline}next`);
+    assert.deepEqual(result.matches, [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+  }
+});
+
+test('wrapper peeling preserves source whitespace across complete prefixes and extra-newline combinations', () => {
+  for (const newline of ['\n', '\r\n']) {
+    for (const oldIndent of ['', ' ', '\t']) {
+      for (const newIndent of ['', ' ', '\t']) {
+        for (let extra = 0; extra < 3; extra++) {
+          const extraLines = `${newline}${newIndent}`.repeat(extra);
+          const leading = applyTextEdits(`header${newline}  foo   bar${newline}`, [{
+            oldText: `${newline}${oldIndent}foo bar`,
+            newText: `${newline}${newIndent}${extraLines}baz qux`,
+          }], 'tolerant');
+          assert.equal(leading.text, `header${newline}  ${extraLines}baz qux${newline}`);
+          const trailing = applyTextEdits(`foo   bar${newline}  next`, [{
+            oldText: `foo bar${newline}${oldIndent}`,
+            newText: `baz qux${extraLines}${newline}${newIndent}`,
+          }], 'tolerant');
+          assert.equal(trailing.text, `baz qux${extraLines}${newline}  next`);
+        }
+      }
+    }
+  }
+});
+
+test('horizontal boundary prefixes do not silently duplicate mismatched spaces', () => {
+  const error = rejection(() => applyTextEdits('  foo   bar', [
+    { oldText: ' foo bar', newText: '  baz qux' },
+  ], 'tolerant'));
+  assert.match(error.message, /old_text was not found/);
 });
 
 test('whitespace-normalized matching preserves extra leading blank lines when indentation changes', () => {
@@ -561,6 +617,23 @@ test('first-line hints report bounded samples even when the line repeats through
     { oldText: 'a\nmissing', newText: 'replacement' },
   ]));
   assert.match(error.message, /its first line appears at lines 1, 2, 3, 4, 5 and 99995 more/);
+});
+
+test('one uniquely anchored indentation candidate is allowed on both sides of the verification threshold', () => {
+  for (const length of [100_000, 100_001]) {
+    const oldText = ['anchor', ...Array.from({ length: length - 2 }, () => 'x'), 'end'].join('\n');
+    const source = `  ${oldText.replaceAll('\n', '\n  ')}\n`;
+    const result = applyTextEdits(source, [{ oldText, newText: 'changed' }], 'tolerant');
+    assert.equal(result.text, '  changed\n');
+    assert.deepEqual(result.matches, [{ strategy: 'indentation-flexible', occurrences: 1 }]);
+  }
+});
+
+test('large indentation verification still bounds repeated candidates', () => {
+  const oldText = `${'x\n'.repeat(100_000)}x`;
+  const source = '  x\n'.repeat(100_002);
+  const error = rejection(() => applyTextEdits(source, [{ oldText, newText: 'changed' }], 'tolerant'));
+  assert.match(error.message, /too many repetitive line-window candidates/);
 });
 
 test('repetitive indentation candidates fail closed after a bounded comparison budget', () => {

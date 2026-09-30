@@ -283,7 +283,7 @@ function leadingWhitespace(line: string): string {
   return /^[ \t]*/.exec(line)?.[0] ?? '';
 }
 
-function commonIndent(lines: readonly string[]): string {
+function commonIndent(lines: Iterable<string>): string {
   let common: string | undefined;
   for (const line of lines) {
     if (line.trim().length === 0) continue;
@@ -346,6 +346,8 @@ function findLineWindows(
   const collected = collectedMatches(text, edit.replaceAll);
   let matched = 0;
   let verifications = 0;
+  // Allow one complete linear verification even for a large valid block.
+  const verificationBudget = Math.max(MAX_LINE_WINDOW_VERIFICATIONS, needle.length);
   for (let index = 0; index < lines.length; index++) {
     const value = strategy === 'line-trimmed' ? lines.text(index).trimEnd() : lines.text(index).trim();
     while (matched > 0 && value !== sought[matched]) matched = prefix[matched - 1];
@@ -357,12 +359,13 @@ function findLineWindows(
     let windowIndent = '';
     let valid = end !== undefined;
     if (valid && strategy === 'indentation-flexible') {
-      if (verifications + needle.length > MAX_LINE_WINDOW_VERIFICATIONS) return { status: 'limit' };
-      const window = Array.from({ length: needle.length }, (_, offset) => lines.at(first + offset));
+      if (verifications + needle.length > verificationBudget) return { status: 'limit' };
       verifications += needle.length;
-      windowIndent = commonIndent(window.map((line) => line.text));
-      valid = window.every((line, offset) =>
-        stripIndent(line.text, windowIndent).trimEnd() === normalizedNeedle[offset],
+      windowIndent = commonIndent((function* () {
+        for (let offset = 0; offset < needle.length; offset++) yield lines.text(first + offset);
+      })());
+      valid = normalizedNeedle.every((expected, offset) =>
+        stripIndent(lines.text(first + offset), windowIndent).trimEnd() === expected,
       );
     }
     if (valid) {
@@ -435,12 +438,13 @@ function peelBoundaryWhitespace(
   side: 'leading' | 'trailing',
 ): string | undefined {
   if (!boundary) return text;
-  if (side === 'leading' && text.startsWith(boundary)) return text.slice(boundary.length);
-  if (side === 'trailing' && text.endsWith(boundary)) return text.slice(0, -boundary.length);
+  const whitespace = (side === 'leading' ? /^\s*/ : /\s*$/).exec(text)?.[0] ?? '';
+  if (whitespace === boundary) {
+    return side === 'leading' ? text.slice(boundary.length) : text.slice(0, -boundary.length);
+  }
 
   const requiredNewlines = newlineCount(boundary);
   if (!requiredNewlines) return undefined;
-  const whitespace = (side === 'leading' ? /^\s*/ : /\s*$/).exec(text)?.[0] ?? '';
   if (newlineCount(whitespace) < requiredNewlines) return undefined;
 
   if (side === 'leading') {
@@ -612,7 +616,9 @@ function describeMissing(
   if (matching === 'exact') {
     let tolerant: MatchOutcome | undefined;
     for (const find of RELAXED_STRATEGIES) {
-      tolerant = find(text, { oldText, newText: '' }, lines);
+      // Diagnose match existence, not whether the requested replacement can
+      // preserve its out-of-range wrappers. A no-op keeps those wrappers valid.
+      tolerant = find(text, { oldText, newText: oldText }, lines);
       if (tolerant.status !== 'none') break;
     }
     if (tolerant?.status === 'matched') {
