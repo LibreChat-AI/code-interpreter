@@ -1752,7 +1752,7 @@ test('linked worktree Git guard refuses Windows rather than admitting an unguard
   await sandbox.close();
 });
 
-test('non-lane roots deny their own executable Git metadata regardless of the worker cwd', async t => {
+test('non-lane roots deny their own executable Git metadata at initialization', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-gitmeta-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const gitDir = join(root, '.git');
@@ -1801,4 +1801,75 @@ test('non-lane roots deny their own executable Git metadata regardless of the wo
   // bind would make Git read a broken redirect or config from every command.
   assert.ok(!denyWrite.includes(join(gitDir, 'commondir')));
   assert.ok(!denyWrite.includes(join(gitDir, 'modules', 'sub', 'config.worktree')));
+});
+
+test('ordinary root commands deny Git metadata created after initialization', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-gitmeta-late-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    environment: { PATH: '/usr/bin', LANG: 'C.UTF-8' },
+    manager: fake.manager,
+  });
+  t.after(() => sandbox.close());
+  await sandbox.prepare();
+  const session = fake.config!.filesystem;
+  const gitDir = join(root, '.git');
+  assert.ok(!session.denyWrite.some(path => path.startsWith(gitDir)));
+
+  // The host initializes the repository and adds a submodule and a linked
+  // worktree while the worker keeps running.
+  await mkdir(join(gitDir, 'hooks'), { recursive: true });
+  await writeFile(join(gitDir, 'config'), '[core]\n');
+  await mkdir(join(gitDir, 'modules', 'late'), { recursive: true });
+  await writeFile(join(gitDir, 'modules', 'late', 'HEAD'), 'ref: refs/heads/main\n');
+  await mkdir(join(gitDir, 'worktrees', 'late'), { recursive: true });
+  await writeFile(join(gitDir, 'worktrees', 'late', 'commondir'), '../..\n');
+
+  const result = await sandbox.execute(request);
+  assert.equal(result.exitCode, 0);
+  const filesystem = fake.customConfigSeenDuringWrap?.filesystem;
+  for (const relativePath of [
+    '.git/hooks',
+    '.git/config',
+    '.git/modules/late/hooks',
+    '.git/modules/late/config',
+    '.git/worktrees/late/commondir',
+  ]) {
+    assert.ok(filesystem?.denyWrite.includes(join(root, relativePath)), relativePath);
+  }
+  // Only denyWrite differs from the session filesystem policy.
+  assert.deepEqual({ ...filesystem, denyWrite: session.denyWrite }, session);
+});
+
+test('a root command fails closed when its Git metadata cannot be inspected', async t => {
+  if (process.getuid?.() === 0) {
+    t.skip('directory permissions do not restrict root');
+    return;
+  }
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-gitmeta-denied-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const modules = join(root, '.git', 'modules');
+  await mkdir(modules, { recursive: true });
+  await writeFile(join(root, '.git', 'config'), '[core]\n');
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    environment: { PATH: '/usr/bin', LANG: 'C.UTF-8' },
+    manager: fake.manager,
+  });
+  t.after(() => sandbox.close());
+  await sandbox.prepare();
+
+  await chmod(modules, 0o000);
+  try {
+    await assert.rejects(
+      sandbox.execute(request),
+      (error: unknown) =>
+        error instanceof WorkspaceToolError && error.code === 'COMMAND_UNAVAILABLE',
+    );
+  } finally {
+    await chmod(modules, 0o700);
+  }
 });

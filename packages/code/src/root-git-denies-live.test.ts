@@ -116,6 +116,15 @@ test('real SRT denies a non-lane root its own Git hooks and config even when the
   );
   assert.notEqual(plantHook.exitCode, 0);
 
+  // Metadata the host creates while the worker runs is covered from the next
+  // command, not only what existed when the sandbox initialized.
+  await git(root, 'worktree', 'add', '-q', '.worktrees/late', '-b', 'late');
+  const lateCommondir = join(gitDir, 'worktrees', 'late', 'commondir');
+  const lateBefore = await readFile(lateCommondir, 'utf8');
+  const lateAttempt = await run(`printf tampered > '${lateCommondir}'`);
+  assert.notEqual(lateAttempt.exitCode, 0, 'expected the new worktree metadata to be denied');
+  assert.equal(await readFile(lateCommondir, 'utf8'), lateBefore);
+
   // A benign commit in the workspace must still succeed: the guard makes Git
   // metadata read-only, not the checkout or the writable object store.
   const committed = await run(

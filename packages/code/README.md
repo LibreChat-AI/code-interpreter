@@ -230,14 +230,19 @@ than relying on SRT's Linux mandatory denies, which are derived from the
 worker process's own current directory — the worker home, not the workspace —
 and so never covered the registered root; macOS already enforced the
 equivalent through global Seatbelt patterns, and this keeps the guarantee
-identical on both platforms regardless of the worker's cwd. `.git/commondir`
-and `.git/config.worktree` are denied only where they already exist, because
-Git reads them strictly and SRT would otherwise mask an absent one with an
-empty bind Git cannot parse. Because the whole workspace stays writable, a
-sandboxed command can still stage Git configuration Git will honor later by
-other means — for example replacing the entire `.git` directory, writing a
-new top-level `.git/commondir` that redirects the common directory, or
-initializing a fresh nested repository. Denying those safely would require
+identical on both platforms regardless of the worker's cwd. The set is
+recomputed before every command, so a repository, submodule, or linked
+worktree created on the host after the worker starts is covered from the next
+command, and metadata the worker cannot inspect fails the command closed.
+`.git/commondir` and `.git/config.worktree` are denied only where they already
+exist, because Git reads them strictly and SRT would otherwise mask an absent
+one with a stub Git cannot open, failing every Git command. Because the whole
+workspace stays writable, a sandboxed command can still stage Git
+configuration Git will honor later by other means — for example replacing
+the entire `.git` directory, writing a new `commondir` that redirects the
+common directory, creating a missing `config.worktree` in a repository that
+already enables the `worktreeConfig` extension, or initializing a fresh
+nested repository. Denying those safely would require
 making the workspace's Git storage structurally read-only, which the
 personal-machine SRT trust model does not; use the Docker/NsJail backend or a
 dedicated VM boundary when a workspace command must be treated as adversarial.
