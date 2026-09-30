@@ -1751,3 +1751,54 @@ test('linked worktree Git guard refuses Windows rather than admitting an unguard
   );
   await sandbox.close();
 });
+
+test('non-lane roots deny their own executable Git metadata regardless of the worker cwd', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-gitmeta-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const gitDir = join(root, '.git');
+  await mkdir(join(gitDir, 'hooks'), { recursive: true });
+  await writeFile(join(gitDir, 'config'), '[core]\n');
+  await writeFile(join(gitDir, 'config.worktree'), '[core]\n');
+  // A submodule Git directory (identified by its HEAD file) and a nested one.
+  // This submodule has no config.worktree, so it is not denied one.
+  await mkdir(join(gitDir, 'modules', 'sub', 'modules', 'inner'), { recursive: true });
+  await writeFile(join(gitDir, 'modules', 'sub', 'HEAD'), 'ref: refs/heads/main\n');
+  await writeFile(join(gitDir, 'modules', 'sub', 'config'), '[core]\n');
+  await writeFile(
+    join(gitDir, 'modules', 'sub', 'modules', 'inner', 'HEAD'),
+    'ref: refs/heads/main\n',
+  );
+  // A linked worktree's per-worktree metadata: an existing commondir and
+  // config.worktree are both denied.
+  await mkdir(join(gitDir, 'worktrees', 'wt'), { recursive: true });
+  await writeFile(join(gitDir, 'worktrees', 'wt', 'commondir'), '../..\n');
+  await writeFile(join(gitDir, 'worktrees', 'wt', 'config.worktree'), '[core]\n');
+
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    environment: { PATH: '/usr/bin', LANG: 'C.UTF-8' },
+    manager: fake.manager,
+  });
+  t.after(() => sandbox.close());
+  await sandbox.prepare();
+
+  const denyWrite = fake.config?.filesystem.denyWrite ?? [];
+  for (const relativePath of [
+    '.git/hooks',
+    '.git/config',
+    '.git/config.worktree',
+    '.git/modules/sub/hooks',
+    '.git/modules/sub/config',
+    '.git/modules/sub/modules/inner/hooks',
+    '.git/modules/sub/modules/inner/config',
+    '.git/worktrees/wt/config.worktree',
+    '.git/worktrees/wt/commondir',
+  ]) {
+    assert.ok(denyWrite.includes(join(root, relativePath)), relativePath);
+  }
+  // Deny-if-exists paths are skipped when absent: masking them with an empty
+  // bind would make Git read a broken redirect or config from every command.
+  assert.ok(!denyWrite.includes(join(gitDir, 'commondir')));
+  assert.ok(!denyWrite.includes(join(gitDir, 'modules', 'sub', 'config.worktree')));
+});

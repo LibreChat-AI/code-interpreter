@@ -11,7 +11,7 @@ import {
   sep,
 } from 'node:path';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdtemp, open, realpath, rm, stat } from 'node:fs/promises';
+import { access, mkdtemp, open, readdir, realpath, rm, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { matchesWorkspaceRoot } from './root-identity.js';
 import type { WorkspaceRootIdentity } from './root-identity.js';
@@ -232,6 +232,98 @@ async function canonicalPath(path: string): Promise<string> {
       cursor = parent;
     }
   }
+}
+
+/**
+ * Paths inside a repository's own Git directory that Git treats as executable
+ * configuration: hooks run on the next Git invocation, and `config` /
+ * an existing `config.worktree` can define filter, diff, or fsmonitor commands
+ * that later run unsandboxed. An existing `commondir` is denied too, since it
+ * redirects the whole common Git directory to attacker-controlled config.
+ *
+ * A sandboxed command may write anywhere in the workspace root, so these are
+ * denied explicitly for the registered root's `.git`. SRT's Linux mandatory
+ * denies derive equivalents from the worker process's current directory, which
+ * is not the registered root, so they never cover it; macOS instead applies
+ * global `.git/hooks` and `.git/config` Seatbelt patterns. Denying the root's
+ * own metadata directly keeps the guarantee identical on both platforms and
+ * independent of the worker's cwd. Lane workspaces keep the whole common Git
+ * directory read-only already, so this augments only the non-lane root.
+ *
+ * Only submodule and linked-worktree Git directories that already exist are
+ * enumerated: masking a non-existent `.git/modules` would block a later
+ * `git submodule add` from creating it during the same command. `.git/info`
+ * is intentionally omitted — its attributes reference filter/diff drivers by
+ * name, but the commands those names resolve to live in the denied config, so
+ * `info` alone cannot introduce a new executable.
+ */
+async function collectGitMetadataDenies(gitDir: string): Promise<string[]> {
+  const denies = [join(gitDir, 'hooks'), join(gitDir, 'config')];
+  await pushExistingDeny(denies, join(gitDir, 'config.worktree'));
+  await pushExistingDeny(denies, join(gitDir, 'commondir'));
+  for (const submoduleGitDir of await collectSubmoduleGitDirs(
+    join(gitDir, 'modules'),
+  )) {
+    denies.push(join(submoduleGitDir, 'hooks'), join(submoduleGitDir, 'config'));
+    await pushExistingDeny(denies, join(submoduleGitDir, 'config.worktree'));
+    await pushExistingDeny(denies, join(submoduleGitDir, 'commondir'));
+  }
+  const worktreesDir = join(gitDir, 'worktrees');
+  const worktreeEntries = await readdir(worktreesDir, {
+    withFileTypes: true,
+  }).catch(() => []);
+  for (const entry of worktreeEntries) {
+    if (!entry.isDirectory()) continue;
+    const worktreeGitDir = join(worktreesDir, entry.name);
+    await pushExistingDeny(denies, join(worktreeGitDir, 'config.worktree'));
+    await pushExistingDeny(denies, join(worktreeGitDir, 'commondir'));
+  }
+  return denies;
+}
+
+/**
+ * `commondir` and `config.worktree` are read strictly by Git when present —
+ * `commondir` at every startup, `config.worktree` whenever `worktreeConfig`
+ * is enabled — and SRT masks a non-existent deny target with an empty
+ * `/dev/null` bind that Git then fails to read. Denying them only where they
+ * already exist keeps the mask a read-only bind of the real file. `config`
+ * and `hooks` stay unconditional: they always exist in a real repository,
+ * and blocking their creation stops an attacker planting them. An attacker
+ * cannot make Git honor a freshly planted `config.worktree` without first
+ * enabling the extension in the denied `.git/config`.
+ */
+async function pushExistingDeny(paths: string[], candidate: string): Promise<void> {
+  if (await access(candidate).then(() => true, () => false)) {
+    paths.push(candidate);
+  }
+}
+
+/**
+ * Enumerate every submodule Git directory beneath `.git/modules`, following the
+ * `<gitdir>/modules/<name>` nesting Git uses for recursive submodules. A
+ * directory holding a `HEAD` file is a Git directory; any other directory is an
+ * intermediate segment of a submodule path that itself contains slashes.
+ */
+async function collectSubmoduleGitDirs(modulesDir: string): Promise<string[]> {
+  const found: string[] = [];
+  const stack = [modulesDir];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    if (entries.some(entry => entry.isFile() && entry.name === 'HEAD')) {
+      found.push(dir);
+      if (
+        entries.some(entry => entry.isDirectory() && entry.name === 'modules')
+      ) {
+        stack.push(join(dir, 'modules'));
+      }
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) stack.push(join(dir, entry.name));
+    }
+  }
+  return found;
 }
 
 function boundedUtf8(buffer: Buffer, budget: number): string {
@@ -517,6 +609,18 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     const gitGuardDirectory = lane
       ? await this.createLinkedWorktreeGitGuard(canonicalScratchDirectory!)
       : undefined;
+    // A lane already keeps the shared common Git directory read-only; only
+    // the non-lane root exposes a writable `.git` whose executable metadata
+    // SRT's cwd-derived mandatory denies do not reach.
+    const rootGitDir = join(root, '.git');
+    const rootGitMetadataDenies =
+      lane ||
+      !(await stat(rootGitDir).then(
+        entry => entry.isDirectory(),
+        () => false,
+      ))
+        ? []
+        : await collectGitMetadataDenies(rootGitDir);
     const commandPolicy = normalizeNativeSrtCommandPolicy(
       this.options.commandPolicy,
     );
@@ -558,6 +662,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         denyWrite: [
           ...protectedPaths,
           ...deniedInheritedWritablePaths,
+          ...rootGitMetadataDenies,
           ...(gitGuardDirectory ? [gitGuardDirectory] : []),
         ],
         allowGitConfig: false,
@@ -628,6 +733,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         this.denyWritePaths = [
             ...protectedPaths,
             ...deniedInheritedWritablePaths,
+            ...rootGitMetadataDenies,
             ...(gitGuardDirectory ? [gitGuardDirectory] : []),
         ];
   }

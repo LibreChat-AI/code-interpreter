@@ -213,11 +213,34 @@ SRT with:
   worker's private scratch directory;
 - read access denied to the worker's home directory except for that workspace;
 - paired identity and mutation-quarantine files explicitly denied;
+- the registered workspace's own Git metadata denied writes — `.git/hooks`
+  and `.git/config` always, plus `.git/config.worktree`, `.git/commondir`,
+  and the equivalent files under `.git/modules/*` and `.git/worktrees/*`
+  where they already exist — so a sandboxed command cannot plant a hook or a
+  `filter`/`fsmonitor`/`diff` config entry that would run unsandboxed the
+  next time Git runs in the checkout;
 - `LIBRECHAT_CODE_*` and nonessential inherited environment variables removed;
 - network egress denied by default, local binding denied, and Unix sockets
   denied; and
 - bounded time and aggregate output, with best-effort process-group termination
   on cancellation, timeout, and completion.
+
+The Git-metadata denies are applied to the registered root directly rather
+than relying on SRT's Linux mandatory denies, which are derived from the
+worker process's own current directory — the worker home, not the workspace —
+and so never covered the registered root; macOS already enforced the
+equivalent through global Seatbelt patterns, and this keeps the guarantee
+identical on both platforms regardless of the worker's cwd. `.git/commondir`
+and `.git/config.worktree` are denied only where they already exist, because
+Git reads them strictly and SRT would otherwise mask an absent one with an
+empty bind Git cannot parse. Because the whole workspace stays writable, a
+sandboxed command can still stage Git configuration Git will honor later by
+other means — for example replacing the entire `.git` directory, writing a
+new top-level `.git/commondir` that redirects the common directory, or
+initializing a fresh nested repository. Denying those safely would require
+making the workspace's Git storage structurally read-only, which the
+personal-machine SRT trust model does not; use the Docker/NsJail backend or a
+dedicated VM boundary when a workspace command must be treated as adversarial.
 
 SRT restrictions remain inherited by descendants. Windows additionally uses a
 kill-on-close Job Object. Native macOS does not provide an equivalent hard

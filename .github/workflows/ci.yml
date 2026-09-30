@@ -254,10 +254,13 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: npm ci
       - run: npm run build
-      - name: Linked worktree lane containment
+      - name: Linked worktree lane and root Git metadata containment
         env:
           LIBRECHAT_CODE_LIVE_SRT_TESTS: '1'
-        run: node --test dist/linked-worktrees-live.test.js
+        run: >-
+          node --test
+          dist/linked-worktrees-live.test.js
+          dist/root-git-denies-live.test.js
 
   lambda-microvm-provisioning:
     name: Lambda MicroVM Provisioning
