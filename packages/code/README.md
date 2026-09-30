@@ -593,9 +593,11 @@ Revision-fenced edits likewise require the negotiated
 
 Edits apply in order, each to the text the earlier ones produced. When any edit
 fails, the worker still checks the rest and rejects the whole batch with one
-`EDIT_CONFLICT` whose message lists every failing edit by position. A
-missing edit names the nearest candidate line and flags elided (`...`) or
-line-numbered `oldText`, a whitespace-only difference, or CRLF line endings.
+`EDIT_CONFLICT` whose message lists every failing edit by position. Large
+batch messages shorten reasons and source excerpts to stay within the bound,
+but never omit failing edit positions. A missing edit names the nearest
+candidate line and flags elided (`...`) or line-numbered `oldText`, a
+whitespace-only difference, or CRLF line endings.
 An ambiguous edit gives its match count and line numbers. Overlapping
 occurrences count as separate locations. Detailed source-line excerpts require
 `read_file` or `preview_edit` on the same workspace; edit-only workers return a

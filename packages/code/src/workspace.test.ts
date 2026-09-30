@@ -1382,6 +1382,33 @@ test('a failed edit batch reports every failing edit and writes nothing', async 
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
 });
 
+test('long preview and edit batch errors expose every failing edit position without writing', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-batch-positions-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = `KEEP\nconst shared = '${'x'.repeat(180)}';\n`;
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({ workspaces: [{ id: 'primary', root, writable: true }] });
+  const edits = Array.from({ length: 60 }, (_, index) => index % 2 === 0
+    ? { oldText: `const shared missing_${index}`, newText: 'replacement' }
+    : { oldText: 'KEEP', newText: 'KEEP' });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1, operation, workspaceId: 'primary', path: 'notes.txt', edits,
+    }), (error: unknown) => {
+      assert.ok(error instanceof WorkspaceToolError);
+      assert.equal(error.code, 'EDIT_CONFLICT');
+      assert.equal(error.mutationMayHaveCommitted, false);
+      assert.ok(error.message.length <= 3_000);
+      assert.deepEqual(
+        [...error.message.matchAll(/\nEdit (\d+):/g)].map((match) => Number(match[1])),
+        Array.from({ length: 30 }, (_, index) => 2 * index + 1),
+      );
+      return true;
+    });
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
+});
+
 test('tolerant edits and replaceAll report how each edit matched', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));

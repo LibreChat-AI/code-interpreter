@@ -671,5 +671,51 @@ test('diagnostics for a hundred failing edits stay within the settlement bound',
   const error = rejection(() => applyTextEdits('content\n'.repeat(1000), edits));
   assert.ok(error.message.length <= EDIT_DIAGNOSTIC_MAX_CHARS);
   assert.match(error.message, /^100 of 100 workspace edits did not apply/);
-  assert.match(error.message, /more failing edits not shown/);
+  assert.deepEqual(
+    [...error.message.matchAll(/\nEdit (\d+):/g)].map((match) => Number(match[1])),
+    Array.from({ length: 100 }, (_, index) => index + 1),
+  );
+  assert.doesNotMatch(error.message, /failing edits not shown/);
+});
+
+test('bounded batch diagnostics preserve sparse failing positions rather than only their count', () => {
+  const source = `KEEP\nconst shared = '${'x'.repeat(180)}';\n`;
+  const edits = Array.from({ length: 60 }, (_, index) => index % 2 === 0
+    ? { oldText: `const shared missing_${index}`, newText: 'replacement' }
+    : { oldText: 'KEEP', newText: 'KEEP' });
+  const error = rejection(() => applyTextEdits(source, edits));
+  assert.equal(error.failures.length, 30);
+  assert.match(error.message, /^30 of 60 workspace edits did not apply/);
+  assert.ok(error.message.length <= EDIT_DIAGNOSTIC_MAX_CHARS);
+  assert.deepEqual(
+    [...error.message.matchAll(/\nEdit (\d+):/g)].map((match) => Number(match[1])),
+    Array.from({ length: 30 }, (_, index) => 2 * index + 1),
+  );
+  assert.doesNotMatch(error.message, /failing edits not shown/);
+});
+
+test('bounded diagnostics keep all positions and well-formed Unicode with mixed reason lengths', () => {
+  for (const count of [2, 30, 100]) {
+    const failures = Array.from({ length: count }, (_, index) => ({
+      index,
+      reason: index % 3 === 0 ? 'missing' : `source excerpt ${'😀'.repeat(300)}`,
+    }));
+    const error = new WorkspaceEditMatchError(failures, count);
+    assert.ok(error.message.length <= EDIT_DIAGNOSTIC_MAX_CHARS);
+    assert.equal(Buffer.from(error.message).toString('utf8'), error.message);
+    assert.deepEqual(
+      [...error.message.matchAll(/\nEdit (\d+):/g)].map((match) => Number(match[1])),
+      Array.from({ length: count }, (_, index) => index + 1),
+    );
+  }
+});
+
+test('short batch diagnostic reasons remain complete when the message fits', () => {
+  const error = rejection(() => applyTextEdits('a\nb\nb\n', [
+    { oldText: 'missing', newText: 'x' },
+    { oldText: 'b', newText: 'B' },
+  ]));
+  for (const failure of error.failures) {
+    assert.ok(error.message.includes(`\nEdit ${failure.index + 1}: ${failure.reason}.`));
+  }
 });

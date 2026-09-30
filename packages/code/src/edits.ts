@@ -687,20 +687,26 @@ function formatEditFailures(failures: readonly EditFailure[], editCount: number)
       EDIT_DIAGNOSTIC_MAX_CHARS,
     );
   }
-  let message = `${failures.length} of ${editCount} workspace edits did not apply, so nothing was written. Every other edit matched.`;
-  let shown = 0;
-  for (const failure of failures) {
-    const line = `\nEdit ${failure.index + 1}: ${failure.reason}.`;
-    if (message.length + line.length > EDIT_DIAGNOSTIC_MAX_CHARS - 120) break;
-    message += line;
-    shown++;
-  }
-  const hidden = failures.length - shown;
-  if (hidden > 0) {
-    message += `\n${hidden} more failing edit${hidden === 1 ? '' : 's'} not shown.`;
-  }
-  if (failures.some((failure) => failure.index > 0)) {
-    message += '\nLine numbers account for the earlier edits in this batch.';
-  }
-  return message.slice(0, EDIT_DIAGNOSTIC_MAX_CHARS);
+  const header = `${failures.length} of ${editCount} workspace edits did not apply, so nothing was written. Every other edit matched.`;
+  const footer = failures.some((failure) => failure.index > 0)
+    ? '\nLine numbers account for the earlier edits in this batch.'
+    : '';
+  const prefixes = failures.map((failure) => `\nEdit ${failure.index + 1}: `);
+  // Labels and punctuation for every failing position take priority over long
+  // reasons or source excerpts. Never leave callers guessing which edits failed.
+  const available = EDIT_DIAGNOSTIC_MAX_CHARS - header.length - footer.length -
+    prefixes.reduce((total, prefix) => total + prefix.length + 1, 0);
+  const reasonLength = failures.reduce((total, failure) => total + failure.reason.length, 0);
+  const reasonLimit = reasonLength <= available ? Infinity : Math.floor(available / failures.length);
+  const details = failures.map((failure, index) => {
+    let reason = failure.reason;
+    if (reason.length > reasonLimit) {
+      let end = reasonLimit - 1;
+      // Do not split a surrogate pair in a shortened source excerpt.
+      if (end > 0 && /[\uD800-\uDBFF]/.test(reason[end - 1]) && /[\uDC00-\uDFFF]/.test(reason[end])) end--;
+      reason = `${reason.slice(0, end)}…`;
+    }
+    return `${prefixes[index]}${reason}.`;
+  });
+  return header + details.join('') + footer;
 }
