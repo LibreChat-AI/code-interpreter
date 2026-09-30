@@ -33,6 +33,7 @@ import {
 } from './native-sandbox.js';
 import { restoreScratchTraversal } from './native-scratch.js';
 import { WorkspaceToolError } from './workspace.js';
+import { isWorkspaceToolResult } from './protocol.js';
 
 const request = {
   protocolVersion: 1 as const,
@@ -1355,12 +1356,102 @@ test('executes in the canonical workspace and bounds aggregate output', async t 
       operation: 'execute_command',
       workspaceId: 'primary',
       exitCode: 0,
-      stdout: '1234567890',
-      stderr: 'ab',
+      stdout: '123890',
+      stderr: 'abchij',
       truncated: true,
       timedOut: false,
     },
   );
+});
+
+test('retains real command summaries on both streams under the legacy combined budget', async t => {
+    const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const sandbox = new NativeSrtWorkspaceCommandSandbox({
+        workspaceRoot: root,
+        manager: fakeManager().manager,
+    });
+    t.after(() => sandbox.close());
+    const commandRequest = {
+        ...request,
+        maxOutputBytes: 256,
+        command:
+            "printf 'OUT\\n'; printf '%20000d' 0; printf '\\n42 tests passed\\n'; printf 'ERR\\n' >&2; printf '%20000d' 0 >&2; printf '\\nlate stderr summary\\n' >&2",
+    };
+    const result = await sandbox.execute(commandRequest);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.truncated, true);
+    assert.ok(result.stdout.startsWith('OUT\n'));
+    assert.ok(result.stderr.startsWith('ERR\n'));
+    assert.ok(result.stdout.endsWith('\n42 tests passed\n'));
+    assert.ok(result.stderr.endsWith('\nlate stderr summary\n'));
+    assert.ok(result.stdout.includes('bytes omitted'));
+    assert.ok(result.stderr.includes('bytes omitted'));
+    assert.equal(isWorkspaceToolResult(commandRequest, result), true);
+});
+
+test('sandbox annotations survive full stdout and remain bounded when stderr is noisy', async t => {
+    const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const fake = fakeManager();
+    fake.manager.annotateStderrWithSandboxFailures = (_commandId, stderr) =>
+        stderr + '\n<sandbox_violations>\ndenied write\n</sandbox_violations>';
+    const sandbox = new NativeSrtWorkspaceCommandSandbox({
+        workspaceRoot: root,
+        manager: fake.manager,
+    });
+    t.after(() => sandbox.close());
+    for (const stderrCommand of ['', "printf '%20000d' 0 >&2;"]) {
+        const commandRequest = {
+            ...request,
+            maxOutputBytes: 512,
+            command: `printf '%20000d' 0; ${stderrCommand} true`,
+        };
+        const result = await sandbox.execute(commandRequest);
+        assert.ok(
+            result.stderr.endsWith(
+                '<sandbox_violations>\ndenied write\n</sandbox_violations>'
+            )
+        );
+        assert.equal(isWorkspaceToolResult(commandRequest, result), true);
+        assert.equal(result.truncated, true);
+    }
+    fake.manager.annotateStderrWithSandboxFailures = () => {
+        throw new Error('annotation unavailable');
+    };
+    const result = await sandbox.execute({
+        ...request,
+        maxOutputBytes: 128,
+        command: "printf '%20000d' 0; printf 'child failure' >&2",
+    });
+    assert.equal(result.stderr, 'child failure');
+});
+
+test('timeout settlement keeps late diagnostics, signal, and truncation without widening the result', async t => {
+    const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const sandbox = new NativeSrtWorkspaceCommandSandbox({
+        workspaceRoot: root,
+        manager: fakeManager().manager,
+    });
+    t.after(() => sandbox.close());
+    const commandRequest = {
+        ...request,
+        maxOutputBytes: 128,
+        timeoutMs: 100,
+        command:
+            "printf 'START\\n'; printf '%20000d' 0; printf '\\nlast progress\\n'; printf 'last failure' >&2; sleep 30",
+    };
+    const result = await sandbox.execute(commandRequest);
+    assert.ok(result.stdout.startsWith('START\n'));
+    assert.ok(result.stdout.endsWith('\nlast progress\n'));
+    assert.equal(result.stderr, 'last failure');
+    assert.equal(result.timedOut, true);
+    assert.equal(result.truncated, true);
+    assert.equal(result.exitCode, null);
+    assert.equal(result.signal, 'SIGKILL');
+    assert.equal(isWorkspaceToolResult(commandRequest, result), true);
 });
 
 test('rejects an escaping or unavailable command working directory', async t => {

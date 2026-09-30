@@ -219,6 +219,20 @@ SRT with:
 - bounded time and aggregate output, with best-effort process-group termination
   on cancellation, timeout, and completion.
 
+Native command output keeps a prefix and rolling suffix for each stream, so late
+summaries and errors survive truncation. Each stream stores at most
+`maxOutputBytes` of copied raw bytes while the command runs, independent of output
+volume or chunk count. When both streams are noisy they split the existing combined
+response budget equally, with the odd byte reserved for stderr; a quiet stream gives
+its unused allowance to the other. Sandbox violation annotations enter the same
+stderr window before rendering. UTF-8 boundaries and inline
+`[... N bytes omitted ...]` markers count toward the combined byte limit. The count
+reports omitted raw bytes for that stream, including annotation bytes. If a stream's
+allowance cannot fit its marker, only the retained text and the existing `truncated`
+flag are returned. Truncation does not stop execution. Exit codes, timeout/signal
+fields, and cancellation errors keep their existing semantics, and no new request,
+result, or capability keys are introduced.
+
 SRT restrictions remain inherited by descendants. Windows additionally uses a
 kill-on-close Job Object. Native macOS does not provide an equivalent hard
 process-lifetime boundary: a deliberately daemonized descendant can outlive
