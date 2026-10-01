@@ -62,6 +62,12 @@ Omitting the expected-profile header remains supported for older clients, but
 provides no wrong-endpoint protection. There is deliberately no silent
 fallback between profiles and no automatic workspace or file migration.
 
+## OpenShell evaluation
+
+An opt-in OpenShell backend is under [evaluation](docs/openshell/README.md).
+The initial track provides a pinned lifecycle probe and security/compatibility
+gates. It does not add a backend or change execution routing.
+
 ## Sandbox Isolation
 
 Two modes are supported:

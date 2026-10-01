@@ -46,6 +46,9 @@ jobs:
       - name: Compose bridge configuration
         run: node tests/compose-bridge-config.cjs
 
+      - name: OpenShell evaluation probe (no gateway)
+        run: node --test scripts/openshell/probe.test.mjs
+
       - name: Release versioning
         run: tests/release-versioning.sh
 
