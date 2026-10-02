@@ -545,6 +545,164 @@ test('workspace mutations accept bounded UTF-8 requests and exact result shapes'
   );
 });
 
+test('edit matching and replaceAll are opt-in and reported only when requested', () => {
+  const tolerant = {
+    protocolVersion: 1 as const,
+    operation: 'edit_file' as const,
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    matching: 'tolerant' as const,
+    edits: [
+      { oldText: 'hello', newText: 'goodbye' },
+      { oldText: 'world', newText: 'BYOM', replaceAll: true },
+    ],
+  };
+  const result = {
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    replacements: 2,
+    bytesWritten: 12,
+  };
+  const matches = [
+    { strategy: 'line-trimmed', occurrences: 1 },
+    { strategy: 'exact', occurrences: 3 },
+  ];
+  assert.equal(isWorkspaceToolRequest(tolerant), true);
+  assert.equal(isWorkspaceToolRequest({ ...tolerant, operation: 'preview_edit' }), true);
+  assert.equal(isWorkspaceToolRequest({ ...tolerant, matching: 'fuzzy' }), false);
+  assert.equal(
+    isWorkspaceToolRequest({
+      ...tolerant,
+      edits: [{ oldText: 'a', newText: 'b', replaceAll: 'yes' }],
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolRequest({
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      oldText: 'a',
+      newText: 'b',
+      replaceAll: true,
+    }),
+    false,
+    'replaceAll is only accepted per batch edit',
+  );
+
+  assert.equal(isWorkspaceToolResult(tolerant, { ...result, matches }), true);
+  assert.equal(isWorkspaceToolResult(tolerant, result), false, 'an opted-in request must report matches');
+  assert.equal(
+    isWorkspaceToolResult(tolerant, { ...result, matches: matches.slice(0, 1) }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(tolerant, {
+      ...result,
+      matches: [matches[0], { strategy: 'exact', occurrences: 0 }],
+    }),
+    false,
+  );
+  assert.equal(
+    isWorkspaceToolResult(tolerant, {
+      ...result,
+      matches: [{ strategy: 'exact', occurrences: 2 }, matches[1]],
+    }),
+    false,
+    'only replaceAll edits may replace more than one location',
+  );
+
+  const exactReplaceAll = {
+    ...tolerant,
+    matching: undefined,
+    edits: [{ oldText: 'a', newText: 'b', replaceAll: true }],
+  };
+  delete exactReplaceAll.matching;
+  assert.equal(
+    isWorkspaceToolResult(exactReplaceAll, {
+      ...result,
+      replacements: 1,
+      matches: [{ strategy: 'line-trimmed', occurrences: 2 }],
+    }),
+    false,
+    'without tolerant matching every edit matches exactly',
+  );
+
+  const legacy = { ...tolerant, edits: [{ oldText: 'a', newText: 'b' }] };
+  delete (legacy as { matching?: string }).matching;
+  assert.equal(
+    isWorkspaceToolResult(legacy, {
+      ...result,
+      replacements: 1,
+      matches: [{ strategy: 'exact', occurrences: 1 }],
+    }),
+    false,
+    'legacy requests never receive a matches field',
+  );
+});
+
+test('edit features advertise any unique subset of the known features', () => {
+  const valid = {
+    statefulWorkspace: true,
+    sandboxProfile: 'nsjail',
+    runtimes: ['bash'],
+    workspaceTools: {
+      protocolVersion: 1,
+      operations: ['read_file', 'edit_file'],
+      workspaces: [{ id: 'primary' }],
+      editFileModes: ['single', 'batch'],
+    },
+  };
+  const withFeatures = (editFileFeatures: unknown) => ({
+    ...valid,
+    workspaceTools: { ...valid.workspaceTools, editFileFeatures },
+  });
+  for (const features of [
+    ['expected_base_sha256'],
+    ['tolerant_match'],
+    ['expected_base_sha256', 'tolerant_match', 'replace_all'],
+  ]) {
+    assert.equal(isValidBridgeWorkerCapabilities(withFeatures(features)), true, features.join(','));
+  }
+  for (const features of [[], ['fuzzy'], ['replace_all', 'replace_all']]) {
+    assert.equal(isValidBridgeWorkerCapabilities(withFeatures(features)), false, features.join(','));
+  }
+});
+
+test('preview-only workers may advertise tolerant matching and replace-all, but not edit-only hashes', () => {
+  const previewOnly = {
+    statefulWorkspace: false,
+    sandboxProfile: 'native-srt',
+    runtimes: [],
+    workspaceTools: {
+      protocolVersion: 1,
+      operations: ['read_file', 'preview_edit'],
+      workspaces: [{ id: 'primary' }],
+      editFileModes: ['single', 'batch'],
+    },
+  };
+  for (const features of [
+    ['tolerant_match'],
+    ['replace_all'],
+    ['tolerant_match', 'replace_all'],
+  ]) {
+    assert.equal(isValidBridgeWorkerCapabilities({
+      ...previewOnly,
+      workspaceTools: { ...previewOnly.workspaceTools, editFileFeatures: features },
+    }), true, features.join(','));
+  }
+  assert.equal(isValidBridgeWorkerCapabilities({
+    ...previewOnly,
+    workspaceTools: {
+      ...previewOnly.workspaceTools,
+      editFileFeatures: ['expected_base_sha256', 'tolerant_match'],
+    },
+  }), false);
+});
+
 test('workspace commands require bounded sandbox inputs and outputs', () => {
   const request = {
     protocolVersion: 1 as const,

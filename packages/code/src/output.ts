@@ -158,27 +158,11 @@ export function renderCommandOutput(
     stderr: string;
     truncated: boolean;
 } {
-    if (stdout.bytes + stderr.bytes <= budget) {
-        const out = stdout.render(budget);
-        const err = stderr.render(budget);
-        if (
-            Buffer.byteLength(out.text) + Buffer.byteLength(err.text) <=
-            budget
-        ) {
-            return {
-                stdout: out.text,
-                stderr: err.text,
-                truncated: out.truncated || err.truncated,
-            };
-        }
+    let err = stderr.render(Math.ceil(budget / 2));
+    const out = stdout.render(budget - Buffer.byteLength(err.text));
+    if (!out.truncated) {
+        err = stderr.render(budget - Buffer.byteLength(out.text));
     }
-    const stderrReserve = Math.ceil(budget / 2);
-    const stdoutBudget = Math.min(
-        stdout.bytes,
-        budget - stderrReserve + Math.max(0, stderrReserve - stderr.bytes)
-    );
-    const out = stdout.render(stdoutBudget);
-    const err = stderr.render(budget - stdoutBudget);
     return {
         stdout: out.text,
         stderr: err.text,

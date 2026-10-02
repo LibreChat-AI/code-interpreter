@@ -213,6 +213,12 @@ SRT with:
   worker's private scratch directory;
 - read access denied to the worker's home directory except for that workspace;
 - paired identity and mutation-quarantine files explicitly denied;
+- the registered workspace's own Git metadata denied writes — `.git/hooks`
+  and `.git/config` always, plus `.git/config.worktree`, `.git/commondir`,
+  and the equivalent files under `.git/modules/*` and `.git/worktrees/*`
+  where they already exist — so a sandboxed command cannot plant a hook or a
+  `filter`/`fsmonitor`/`diff` config entry that would run unsandboxed the
+  next time Git runs in the checkout;
 - `LIBRECHAT_CODE_*` and nonessential inherited environment variables removed;
 - network egress denied by default, local binding denied, and Unix sockets
   denied; and
@@ -224,7 +230,8 @@ summaries and errors survive truncation. Each stream stores at most
 `maxOutputBytes` of copied raw bytes while the command runs, independent of output
 volume or chunk count. When both streams are noisy they split the existing combined
 response budget equally, with the odd byte reserved for stderr; a quiet stream gives
-its unused allowance to the other. Sandbox violation annotations enter the same
+its unused allowance to the other based on rendered UTF-8 bytes, including replacement
+characters for malformed input. Sandbox violation annotations enter the same
 stderr window before rendering. UTF-8 boundaries and inline
 `[... N bytes omitted ...]` markers count toward the combined byte limit. The count
 reports omitted raw bytes for that stream, including annotation bytes. If a stream's
@@ -232,6 +239,28 @@ allowance cannot fit its marker, only the retained text and the existing `trunca
 flag are returned. Truncation does not stop execution. Exit codes, timeout/signal
 fields, and cancellation errors keep their existing semantics, and no new request,
 result, or capability keys are introduced.
+
+The Git-metadata denies are applied to the registered root directly rather
+than relying on SRT's Linux mandatory denies, which are derived from the
+worker process's own current directory — the worker home, not the workspace —
+and so never covered the registered root; macOS already enforced the
+equivalent through global Seatbelt patterns, and this keeps the guarantee
+identical on both platforms regardless of the worker's cwd. The set is
+recomputed before every command, so a repository, submodule, or linked
+worktree created on the host after the worker starts is covered from the next
+command, and metadata the worker cannot inspect fails the command closed.
+`.git/commondir` and `.git/config.worktree` are denied only where they already
+exist, because Git reads them strictly and SRT would otherwise mask an absent
+one with a stub Git cannot open, failing every Git command. Because the whole
+workspace stays writable, a sandboxed command can still stage Git
+configuration Git will honor later by other means — for example replacing
+the entire `.git` directory, writing a new `commondir` that redirects the
+common directory, creating a missing `config.worktree` in a repository that
+already enables the `worktreeConfig` extension, or initializing a fresh
+nested repository. Denying those safely would require
+making the workspace's Git storage structurally read-only, which the
+personal-machine SRT trust model does not; use the Docker/NsJail backend or a
+dedicated VM boundary when a workspace command must be treated as adversarial.
 
 SRT restrictions remain inherited by descendants. Windows additionally uses a
 kill-on-close Job Object. Native macOS does not provide an equivalent hard
@@ -604,6 +633,48 @@ installed as one atomic mutation. Code API dispatches the batch form only after
 the worker and server negotiate `batch` in `editFileModes`.
 Revision-fenced edits likewise require the negotiated
 `expected_base_sha256` entry in `editFileFeatures`.
+
+Edits apply in order, each to the text the earlier ones produced. When any edit
+fails, the worker still checks the rest and rejects the whole batch with one
+`EDIT_CONFLICT` whose message lists every failing edit by position. Large
+batch messages shorten reasons and source excerpts to stay within the bound,
+but never omit failing edit positions. A missing edit names the nearest
+candidate line and flags elided (`...`) or line-numbered `oldText`, a
+whitespace-only difference, or CRLF line endings.
+An ambiguous edit gives its match count and line numbers. Overlapping
+occurrences count as separate locations. Detailed source-line excerpts require
+`read_file` or `preview_edit` on the same workspace; edit-only workers return a
+generic failure and its error code without revealing file contents. A preview
+itself exposes the resulting file text, so it is read-capable.
+
+Two optional features change matching, each negotiated in `editFileFeatures`
+before Code API dispatches it:
+
+- `tolerant_match`: a request-level `matching: 'tolerant'` falls back from an
+  exact match to, in order, `line-trimmed` (ignores trailing whitespace and
+  CRLF), `indentation-flexible` (a uniformly shifted block, with `newText`
+  moved to the file's indentation) and `whitespace-normalized` (any whitespace
+  run between complete whitespace-delimited tokens, never a prefix or suffix
+  of another token). Without `replaceAll`, a match must still be unique;
+  replacements use the matched line's ending even in mixed-ending files. The
+  whitespace-normalized tier peels the complete shared newline-and-indentation
+  wrapper from `newText` even when CRLF/LF or nearby spaces differ, without
+  removing intentional extra line breaks or duplicating the source line ending.
+  Boundary whitespace claimed by `oldText`, including the number of line breaks,
+  must exist beside the matched tokens in the source; an attempt to remove it
+  with a token-only fallback fails rather than silently preserving it. Exact and
+  line-window matches can still replace terminators.
+  Excessively repetitive indentation candidates fail closed with a request
+  for more context rather than scanning every long window. Dense files reuse a
+  compact newline index for matching and diagnostics; overlapping exact matches
+  are counted without restarting a scan at each offset.
+- `replace_all`: a batch edit's `replaceAll: true` replaces every
+  non-overlapping match instead of requiring exactly one, and still fails when
+  nothing matches.
+
+A request that sets `matching` or any `replaceAll` receives `matches`, one
+`{ strategy, occurrences }` entry per edit. Requests that set neither receive
+exactly the legacy result.
 Only IDs, names, protocol version, supported operations, and negotiated write
 modes appear in worker capabilities; absolute host paths remain local to the
 worker process.
@@ -669,8 +740,10 @@ non-regular files, and commit through an owner-only temporary file followed by
 an atomic rename. The worker syncs the containing directory and verifies that
 the installed inode still contains the requested bytes before reporting
 success. Edits replace text only when the requested old text occurs exactly
-once and reject if the file changes before commit. These operations do not
-create directories or execute commands.
+once (unless negotiated `replaceAll` selects every non-overlapping match) and
+reject if the file changes before commit. Intermediate replacements are bounded
+before construction, including `replaceAll`; these operations do not create
+directories or execute commands.
 
 Register one directory already present on the worker machine with the
 worker-directory option:

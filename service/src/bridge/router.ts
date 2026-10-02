@@ -12,6 +12,7 @@ import {
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
   isWorkspaceToolErrorCode,
+  WORKSPACE_EDIT_FILE_FEATURES,
 } from '../../../packages/code/src/protocol';
 import { BridgePairingError, RedisBridgePairingStore } from './pairing';
 import { BridgeStoreError, RedisBridgeStore } from './store';
@@ -535,7 +536,7 @@ router.post(
         ],
         supportedWorkspaceWriteFileModes: ['replace', 'create'],
         supportedWorkspaceEditFileModes: ['single', 'batch'],
-        supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
+        supportedWorkspaceEditFileFeatures: [...WORKSPACE_EDIT_FILE_FEATURES],
         supportedWorkspaceListFileFeatures: ['after_path'],
         supportedWorkspaceProgrammaticLanguages: ['bash'],
         supportedWorkspaceInstanceTypes: ['git_worktree'],

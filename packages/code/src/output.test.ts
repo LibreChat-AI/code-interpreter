@@ -164,6 +164,34 @@ test('short decoded output is preserved when replacement characters fit the comb
     );
 });
 
+test('quiet-stream donation counts decoded bytes beside noisy output', () => {
+    for (const bytes of [
+        Buffer.from([0xff, 0xff]),
+        Buffer.from([0x80, 0x80]),
+        Buffer.from([0xf0, 0x9f]),
+        Buffer.from([0x61, 0xff, 0x62]),
+    ]) {
+        const decoded = bytes.toString('utf8');
+        for (const budget of [16, 31, 32, 63, 64, 128]) {
+            const quiet = collect(bytes, budget, 1);
+            const noisy = collect(Buffer.alloc(budget * 4, 'x'), budget, 7);
+            for (const [stdout, stderr, stream] of [
+                [noisy, quiet, 'stderr'],
+                [quiet, noisy, 'stdout'],
+            ] as const) {
+                const result = renderCommandOutput(stdout, stderr, budget);
+                assert.equal(result[stream], decoded);
+                assert.equal(result.truncated, true);
+                assert.ok(
+                    Buffer.byteLength(result.stdout) +
+                        Buffer.byteLength(result.stderr) <=
+                        budget
+                );
+            }
+        }
+    }
+});
+
 test('tiny budgets still flag truncation and give stderr the odd byte', () => {
     for (let budget = 1; budget < 32; budget += 1) {
         const result = renderCommandOutput(

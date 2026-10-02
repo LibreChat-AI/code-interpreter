@@ -939,7 +939,7 @@ test('writable workspaces create, replace, and exactly edit files', async (t) =>
     ],
     writeFileModes: ['replace', 'create'],
     editFileModes: ['single', 'batch'],
-    editFileFeatures: ['expected_base_sha256'],
+    editFileFeatures: ['expected_base_sha256', 'tolerant_match', 'replace_all'],
     listFileFeatures: ['after_path'],
   });
   await tools.execute({
@@ -1349,6 +1349,392 @@ test('exact edits reject missing or repeated text without changing the file', as
       error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT',
   );
   assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'aaa');
+});
+
+test('a failed edit batch reports every failing edit and writes nothing', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'alpha\nbeta\nbeta\ngamma\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'edit_file',
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      edits: [
+        { oldText: 'alpha', newText: 'ALPHA' },
+        { oldText: 'beta', newText: 'BETA' },
+        { oldText: 'delta', newText: 'DELTA' },
+      ],
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'EDIT_CONFLICT' &&
+      /^2 of 3 workspace edits did not apply/.test(error.message) &&
+      /Edit 2: old_text matched 2 locations at lines 2, 3/.test(error.message) &&
+      /Edit 3: old_text was not found/.test(error.message),
+  );
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+});
+
+test('long preview and edit batch errors expose every failing edit position without writing', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-batch-positions-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = `KEEP\nconst shared = '${'x'.repeat(180)}';\n`;
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({ workspaces: [{ id: 'primary', root, writable: true }] });
+  const edits = Array.from({ length: 60 }, (_, index) => index % 2 === 0
+    ? { oldText: `const shared missing_${index}`, newText: 'replacement' }
+    : { oldText: 'KEEP', newText: 'KEEP' });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1, operation, workspaceId: 'primary', path: 'notes.txt', edits,
+    }), (error: unknown) => {
+      assert.ok(error instanceof WorkspaceToolError);
+      assert.equal(error.code, 'EDIT_CONFLICT');
+      assert.equal(error.mutationMayHaveCommitted, false);
+      assert.ok(error.message.length <= 3_000);
+      assert.deepEqual(
+        [...error.message.matchAll(/\nEdit (\d+):/g)].map((match) => Number(match[1])),
+        Array.from({ length: 30 }, (_, index) => 2 * index + 1),
+      );
+      return true;
+    });
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
+});
+
+test('tolerant edits and replaceAll report how each edit matched', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'app.ts'), 'if (ok) {  \r\n  run();\r\n}\r\nrun();\r\n');
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  const preview = await tools.execute({
+    protocolVersion: 1,
+    operation: 'preview_edit',
+    workspaceId: 'primary',
+    path: 'app.ts',
+    matching: 'tolerant',
+    edits: [{ oldText: 'if (ok) {\n  run();\n}', newText: 'if (ok) {\n  go();\n}' }],
+  });
+  assert.equal(preview.operation, 'preview_edit');
+  assert.deepEqual(preview.operation === 'preview_edit' && preview.matches, [
+    { strategy: 'line-trimmed', occurrences: 1 },
+  ]);
+
+  const edit = await tools.execute({
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'app.ts',
+    matching: 'tolerant',
+    edits: [
+      { oldText: 'if (ok) {\n  run();\n}', newText: 'if (ok) {\n  go();\n}' },
+      { oldText: 'run();', newText: 'stop();', replaceAll: true },
+    ],
+  });
+  assert.deepEqual(edit, {
+    protocolVersion: 1,
+    operation: 'edit_file',
+    workspaceId: 'primary',
+    path: 'app.ts',
+    replacements: 2,
+    bytesWritten: 32,
+    matches: [
+      { strategy: 'line-trimmed', occurrences: 1 },
+      { strategy: 'exact', occurrences: 1 },
+    ],
+  });
+  assert.equal(
+    await readFile(join(root, 'app.ts'), 'utf8'),
+    'if (ok) {\r\n  go();\r\n}\r\nstop();\r\n',
+  );
+});
+
+test('preview and edit peel equivalent newline wrappers without doubling line breaks or losing BOM', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-newlines-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = '\uFEFFheader\r\n \tfoo   bar\r\nnext\r\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const request = {
+    protocolVersion: 1 as const,
+    operation: 'preview_edit' as const,
+    workspaceId: 'primary',
+    path: 'notes.txt',
+    matching: 'tolerant' as const,
+    edits: [
+      { oldText: '\n  foo bar\r\n', newText: '\r\n  baz qux\n' },
+      { oldText: 'next', newText: 'done' },
+    ],
+  };
+  const preview = await tools.execute(request);
+  assert.equal(preview.operation, 'preview_edit');
+  if (preview.operation !== 'preview_edit') assert.fail('expected preview result');
+  assert.equal(preview.content, 'header\r\n \tbaz qux\r\ndone\r\n');
+  assert.equal(preview.hasUtf8Bom, true);
+  assert.equal(preview.bytesWritten, Buffer.byteLength(`\uFEFF${preview.content}`));
+  assert.equal(isWorkspaceToolResult(request, preview), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const editRequest = {
+    ...request,
+    operation: 'edit_file' as const,
+    expectedBaseSha256: preview.baseSha256,
+  };
+  const edited = await tools.execute(editRequest);
+  assert.equal(edited.operation, 'edit_file');
+  if (edited.operation !== 'edit_file') assert.fail('expected edit result');
+  assert.deepEqual(edited.matches, [
+    { strategy: 'whitespace-normalized', occurrences: 1 },
+    { strategy: 'exact', occurrences: 1 },
+  ]);
+  assert.equal(isWorkspaceToolResult(editRequest, edited), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), `\uFEFF${preview.content}`);
+});
+
+test('tolerant previews and edits keep source indentation when newText uses a different indent', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-indent-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'header\n  foo   bar\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const edit = {
+    protocolVersion: 1 as const, workspaceId: 'primary', path: 'notes.txt',
+    matching: 'tolerant' as const, oldText: '\n  foo bar', newText: '\n\tbaz qux',
+  };
+  const preview = await tools.execute({ ...edit, operation: 'preview_edit' });
+  assert.equal(preview.operation === 'preview_edit' && preview.content, 'header\n  baz qux\n');
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const result = await tools.execute({ ...edit, operation: 'edit_file' });
+  assert.equal(result.operation === 'edit_file' && result.matches?.[0]?.strategy, 'whitespace-normalized');
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'header\n  baz qux\n');
+});
+
+test('tolerant previews and edits retain an extra leading blank line across a fenced batch', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-extra-line-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = '\uFEFFheader\r\n  foo   bar\r\nend\r\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const request = {
+    protocolVersion: 1 as const, workspaceId: 'primary', path: 'notes.txt',
+    matching: 'tolerant' as const,
+    edits: [
+      { oldText: '\n  foo bar', newText: '\r\n\t\r\n\tbaz qux' },
+      { oldText: 'end', newText: 'done' },
+    ],
+  };
+  const previewRequest = { ...request, operation: 'preview_edit' as const };
+  const preview = await tools.execute(previewRequest);
+  if (preview.operation !== 'preview_edit') assert.fail('expected preview result');
+  assert.equal(preview.content, 'header\r\n  \r\n\tbaz qux\r\ndone\r\n');
+  assert.equal(preview.hasUtf8Bom, true);
+  assert.equal(isWorkspaceToolResult(previewRequest, preview), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const editRequest = { ...request, operation: 'edit_file' as const,
+    expectedBaseSha256: preview.baseSha256 };
+  const edited = await tools.execute(editRequest);
+  if (edited.operation !== 'edit_file') assert.fail('expected edit result');
+  assert.deepEqual(edited.matches, [
+    { strategy: 'whitespace-normalized', occurrences: 1 },
+    { strategy: 'exact', occurrences: 1 },
+  ]);
+  assert.equal(isWorkspaceToolResult(editRequest, edited), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), `\uFEFF${preview.content}`);
+});
+
+test('exact preview and edit failures retain whitespace hints without writing the file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-probe-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = '\uFEFFfoo   bar\r\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({ workspaces: [{ id: 'primary', root, writable: true }] });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1, operation, workspaceId: 'primary', path: 'notes.txt',
+      oldText: 'foo bar\n', newText: '',
+    }), (error: unknown) => error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT' &&
+      /different whitespace \(whitespace-normalized\)/.test(error.message) && !error.mutationMayHaveCommitted);
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
+});
+
+test('tolerant preview and edit peel newline-only wrappers and preserve source indentation', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-newline-only-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = '\uFEFFheader\r\n  foo   bar\r\nnext\r\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({ workspaces: [{ id: 'primary', root, writable: true }] });
+  const request = { protocolVersion: 1 as const, workspaceId: 'primary', path: 'notes.txt',
+    matching: 'tolerant' as const, oldText: '\nfoo bar\n', newText: '\n\tbaz qux\t\n' };
+  const previewRequest = { ...request, operation: 'preview_edit' as const };
+  const preview = await tools.execute(previewRequest);
+  if (preview.operation !== 'preview_edit') assert.fail('expected preview result');
+  assert.equal(preview.content, 'header\r\n  baz qux\r\nnext\r\n');
+  assert.equal(preview.hasUtf8Bom, true);
+  assert.equal(isWorkspaceToolResult(previewRequest, preview), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const editRequest = { ...request, operation: 'edit_file' as const, expectedBaseSha256: preview.baseSha256 };
+  const edited = await tools.execute(editRequest);
+  assert.equal(isWorkspaceToolResult(editRequest, edited), true);
+  assert.deepEqual(edited.operation === 'edit_file' && edited.matches,
+    [{ strategy: 'whitespace-normalized', occurrences: 1 }]);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), `\uFEFF${preview.content}`);
+});
+
+test('preview and edit verify a uniquely anchored indentation block larger than the repeat budget', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-large-indent-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const oldText = ['anchor', ...Array.from({ length: 99_999 }, () => 'x'), 'end'].join('\n');
+  const original = `  ${oldText.replaceAll('\n', '\n  ')}\n`;
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({ workspaces: [{ id: 'primary', root, writable: true }] });
+  const request = { protocolVersion: 1 as const, workspaceId: 'primary', path: 'notes.txt',
+    matching: 'tolerant' as const, oldText, newText: 'changed' };
+  const previewRequest = { ...request, operation: 'preview_edit' as const };
+  const preview = await tools.execute(previewRequest);
+  if (preview.operation !== 'preview_edit') assert.fail('expected preview result');
+  assert.equal(preview.content, '  changed\n');
+  assert.equal(isWorkspaceToolResult(previewRequest, preview), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const editRequest = { ...request, operation: 'edit_file' as const, expectedBaseSha256: preview.baseSha256 };
+  const edited = await tools.execute(editRequest);
+  assert.equal(isWorkspaceToolResult(editRequest, edited), true);
+  assert.deepEqual(edited.operation === 'edit_file' && edited.matches,
+    [{ strategy: 'indentation-flexible', occurrences: 1 }]);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), preview.content);
+});
+
+test('tolerant previews and edits reject missing source boundary newlines without changing the file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-missing-newline-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'foo   bar';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1, operation, workspaceId: 'primary', path: 'notes.txt',
+      matching: 'tolerant', oldText: 'foo bar\r\n', newText: 'baz qux\n',
+    }), (error: unknown) => error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT');
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
+});
+
+test('tolerant previews and edits reject boundary removal outside the token match', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-remove-newline-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'foo   bar\r\nnext';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1, operation, workspaceId: 'primary', path: 'notes.txt',
+      matching: 'tolerant', oldText: 'foo bar\r\n', newText: 'baz qux',
+    }), (error: unknown) => error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT');
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
+});
+
+test('tolerant previews and edits refuse partial tokens without changing the file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-boundary-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'prereturn   value;\n';
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1, operation, workspaceId: 'primary', path: 'notes.txt',
+      matching: 'tolerant', oldText: 'return value;', newText: 'return changed;',
+    }), (error: unknown) => error instanceof WorkspaceToolError && error.code === 'EDIT_CONFLICT');
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
+});
+
+test('large whitespace-only differences work for preview and edit_file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-large-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const oldText = `head ${'part '.repeat(16_000)}tail`;
+  const original = `before ${oldText.replace(/ /g, '\t')} after`;
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const base = { protocolVersion: 1 as const, workspaceId: 'primary', path: 'notes.txt',
+    matching: 'tolerant' as const, oldText, newText: 'result' };
+  const preview = await tools.execute({ ...base, operation: 'preview_edit' });
+  assert.equal(preview.operation === 'preview_edit' && preview.content, 'before result after');
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const edited = await tools.execute({ ...base, operation: 'edit_file' });
+  assert.equal(edited.operation === 'edit_file' && edited.matches?.[0]?.strategy, 'whitespace-normalized');
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'before result after');
+});
+
+test('large replaceAll previews and edits return bounded content and accurate match counts', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-stream-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'x'.repeat(256 * 1024);
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const request = { protocolVersion: 1 as const, workspaceId: 'primary', path: 'notes.txt',
+    edits: [{ oldText: 'x', newText: 'y', replaceAll: true }] };
+  const previewRequest = { ...request, operation: 'preview_edit' as const };
+  const preview = await tools.execute(previewRequest);
+  if (preview.operation !== 'preview_edit') assert.fail('expected preview result');
+  assert.equal(preview.content, 'y'.repeat(original.length));
+  assert.equal(preview.bytesWritten, original.length);
+  assert.deepEqual(preview.matches, [{ strategy: 'exact', occurrences: original.length }]);
+  assert.equal(isWorkspaceToolResult(previewRequest, preview), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  const editRequest = { ...request, operation: 'edit_file' as const,
+    expectedBaseSha256: preview.baseSha256 };
+  const edited = await tools.execute(editRequest);
+  assert.equal(edited.operation === 'edit_file' && edited.bytesWritten, original.length);
+  assert.deepEqual(edited.operation === 'edit_file' && edited.matches, preview.matches);
+  assert.equal(isWorkspaceToolResult(editRequest, edited), true);
+  assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), preview.content);
+});
+
+test('oversized replaceAll previews and edits fail before writing the source file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-edit-limit-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = 'x'.repeat(10_000);
+  await writeFile(join(root, 'notes.txt'), original);
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  for (const operation of ['preview_edit', 'edit_file'] as const) {
+    await assert.rejects(tools.execute({
+      protocolVersion: 1,
+      operation,
+      workspaceId: 'primary',
+      path: 'notes.txt',
+      edits: [{ oldText: 'x', newText: 'y'.repeat(100_000), replaceAll: true }],
+    }), (error: unknown) => error instanceof WorkspaceToolError &&
+      error.code === 'WRITE_LIMIT_EXCEEDED' && !error.mutationMayHaveCommitted);
+    assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), original);
+  }
 });
 
 test('writes reject symlink targets and missing parent directories', async (t) => {
@@ -1930,6 +2316,8 @@ test('composes sandboxed commands without exposing them on unconfigured workspac
   assert.deepEqual(tools.capabilities.editFileModes, ['single', 'batch']);
   assert.deepEqual(tools.capabilities.editFileFeatures, [
     'expected_base_sha256',
+    'tolerant_match',
+    'replace_all',
   ]);
   assert.deepEqual(tools.capabilities.listFileFeatures, ['after_path']);
   assert.deepEqual(

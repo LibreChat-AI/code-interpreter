@@ -11,7 +11,8 @@ import {
   sep,
 } from 'node:path';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdtemp, open, realpath, rm, stat } from 'node:fs/promises';
+import type { Dirent, Stats } from 'node:fs';
+import { access, mkdtemp, open, readdir, realpath, rm, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { matchesWorkspaceRoot } from './root-identity.js';
 import type { WorkspaceRootIdentity } from './root-identity.js';
@@ -235,6 +236,130 @@ async function canonicalPath(path: string): Promise<string> {
   }
 }
 
+/**
+ * Paths inside a repository's own Git directory that Git treats as executable
+ * configuration: hooks run on the next Git invocation, and `config` /
+ * an existing `config.worktree` can define filter, diff, or fsmonitor commands
+ * that later run unsandboxed. An existing `commondir` is denied too, since it
+ * redirects the whole common Git directory to attacker-controlled config.
+ *
+ * A sandboxed command may write anywhere in the workspace root, so these are
+ * denied explicitly for the registered root's `.git`. SRT's Linux mandatory
+ * denies derive equivalents from the worker process's current directory, which
+ * is not the registered root, so they never cover it; macOS instead applies
+ * global `.git/hooks` and `.git/config` Seatbelt patterns. Denying the root's
+ * own metadata directly keeps the guarantee identical on both platforms and
+ * independent of the worker's cwd. Lane workspaces keep the whole common Git
+ * directory read-only already, so this augments only the non-lane root.
+ *
+ * The set is recomputed before every ordinary root command, so a repository,
+ * submodule, or linked worktree created after initialization is covered from
+ * the next command on. Only submodule and linked-worktree Git directories
+ * that exist at that moment are enumerated: masking a non-existent
+ * `.git/modules` would block a later `git submodule add` from creating it
+ * during the same command. `.git/info`
+ * is intentionally omitted — its attributes reference filter/diff drivers by
+ * name, but the commands those names resolve to live in the denied config, so
+ * `info` alone cannot introduce a new executable.
+ */
+async function collectGitMetadataDenies(root: string): Promise<string[]> {
+  const gitDir = join(root, '.git');
+  if (!(await statIfPresent(gitDir))?.isDirectory()) return [];
+  const denies = [join(gitDir, 'hooks'), join(gitDir, 'config')];
+  await pushExistingDenies(denies, gitDir);
+  for (const submoduleGitDir of await collectSubmoduleGitDirs(
+    join(gitDir, 'modules'),
+  )) {
+    denies.push(join(submoduleGitDir, 'hooks'), join(submoduleGitDir, 'config'));
+    await pushExistingDenies(denies, submoduleGitDir);
+  }
+  const worktreesDir = join(gitDir, 'worktrees');
+  for (const entry of await readdirIfPresent(worktreesDir)) {
+    if (entry.isDirectory()) {
+      await pushExistingDenies(denies, join(worktreesDir, entry.name));
+    }
+  }
+  return denies;
+}
+
+/**
+ * `commondir` and `config.worktree` are read strictly by Git when present —
+ * `commondir` at every startup, `config.worktree` whenever `worktreeConfig`
+ * is enabled — and SRT masks a non-existent deny target with an empty
+ * `/dev/null` bind that Git cannot open, failing every Git command. Denying
+ * them only where they already exist keeps the mask a read-only bind of the
+ * real file. `config` and `hooks` stay unconditional: they always exist in a
+ * real repository. In a repository that already enables `worktreeConfig`, a
+ * missing `config.worktree` therefore stays creatable, like a new
+ * `commondir`; the package README lists both with the other residuals of a
+ * writable workspace.
+ */
+async function pushExistingDenies(paths: string[], gitDir: string): Promise<void> {
+  for (const name of ['config.worktree', 'commondir']) {
+    const candidate = join(gitDir, name);
+    if (await statIfPresent(candidate)) paths.push(candidate);
+  }
+}
+
+/**
+ * Enumerate every submodule Git directory beneath `.git/modules`, following the
+ * `<gitdir>/modules/<name>` nesting Git uses for recursive submodules. A
+ * directory holding a `HEAD` file is a Git directory; any other directory is an
+ * intermediate segment of a submodule path that itself contains slashes.
+ */
+async function collectSubmoduleGitDirs(modulesDir: string): Promise<string[]> {
+  const found: string[] = [];
+  const stack = [modulesDir];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    const entries = await readdirIfPresent(dir);
+    if (entries.some(entry => entry.isFile() && entry.name === 'HEAD')) {
+      found.push(dir);
+      if (
+        entries.some(entry => entry.isDirectory() && entry.name === 'modules')
+      ) {
+        stack.push(join(dir, 'modules'));
+      }
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) stack.push(join(dir, entry.name));
+    }
+  }
+  return found;
+}
+
+/**
+ * Absence is an expected answer while inspecting Git metadata. Any other
+ * failure (for example `EACCES`) propagates, so metadata that cannot be
+ * inspected fails the command closed instead of silently dropping a deny.
+ */
+function isMissing(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+  );
+}
+
+async function statIfPresent(path: string): Promise<Stats | undefined> {
+  try {
+    return await stat(path);
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw error;
+  }
+}
+
+async function readdirIfPresent(path: string): Promise<Dirent[]> {
+  try {
+    return await readdir(path, { withFileTypes: true });
+  } catch (error) {
+    if (isMissing(error)) return [];
+    throw error;
+  }
+}
+
 function boundedUtf8(buffer: Buffer, budget: number): string {
   let end = Math.min(buffer.byteLength, budget);
   while (end > 0) {
@@ -316,6 +441,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
   private runtimeConfig?: SandboxRuntimeConfig;
     private denyReadPaths: string[] = [];
     private denyWritePaths: string[] = [];
+    /** Worker-owned write denies that precede each command's live Git metadata denies. */
+    private baseDenyWritePaths: string[] = [];
     private get gitEnvironment():
         | typeof TRUSTED_GIT_ENVIRONMENT
         | typeof LINKED_WORKTREE_GIT_ENVIRONMENT {
@@ -518,6 +645,12 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     const gitGuardDirectory = lane
       ? await this.createLinkedWorktreeGitGuard(canonicalScratchDirectory!)
       : undefined;
+    // A lane already keeps the shared common Git directory read-only; only
+    // the non-lane root exposes a writable `.git` whose executable metadata
+    // SRT's cwd-derived mandatory denies do not reach.
+    const rootGitMetadataDenies = lane
+      ? []
+      : await collectGitMetadataDenies(root);
     const commandPolicy = normalizeNativeSrtCommandPolicy(
       this.options.commandPolicy,
     );
@@ -559,6 +692,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         denyWrite: [
           ...protectedPaths,
           ...deniedInheritedWritablePaths,
+          ...rootGitMetadataDenies,
           ...(gitGuardDirectory ? [gitGuardDirectory] : []),
         ],
         allowGitConfig: false,
@@ -626,9 +760,14 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                 deniedInheritedWritablePaths.includes(path),
             ),
         ];
+        this.baseDenyWritePaths = [
+            ...protectedPaths,
+            ...deniedInheritedWritablePaths,
+        ];
         this.denyWritePaths = [
             ...protectedPaths,
             ...deniedInheritedWritablePaths,
+            ...rootGitMetadataDenies,
             ...(gitGuardDirectory ? [gitGuardDirectory] : []),
         ];
   }
@@ -938,6 +1077,40 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     }
   }
 
+  /**
+   * The session policy snapshots the root's Git metadata at initialization, but
+   * the worker outlives that snapshot: a repository, submodule, or linked
+   * worktree created on the host afterwards must be protected without a
+   * restart, the way SRT recomputes its own mandatory denies on every wrap.
+   * Only `denyWrite` differs from the session filesystem policy. Lanes keep
+   * the whole common Git directory read-only already. Native Windows keeps the
+   * initialization snapshot, because `srt-win` rejects the per-command
+   * `allowRead`/`allowWrite` a full filesystem override carries.
+   */
+  private async rootCommandConfig(): Promise<
+    Partial<SandboxRuntimeConfig> | undefined
+  > {
+    const config = this.runtimeConfig;
+    const root = this.canonicalRoot;
+    if (
+      !config ||
+      !root ||
+      this.options.linkedWorktree ||
+      this.platform === 'win32'
+    ) {
+      return undefined;
+    }
+    return {
+      filesystem: {
+        ...config.filesystem,
+        denyWrite: [
+          ...this.baseDenyWritePaths,
+          ...(await collectGitMetadataDenies(root)),
+        ],
+      },
+    };
+  }
+
   private async executeBound(
     request: WorkspaceExecuteCommandRequest,
     signal?: AbortSignal,
@@ -982,6 +1155,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       ReturnType<NativeSandboxManager['wrapWithSandboxArgv']>
     >;
     try {
+      const commandConfig = customConfig ?? (await this.rootCommandConfig());
       const credentialEnvironment =
         await this.options.maskedEnvironment?.resolve(signal, cwd);
       const sandboxedCommand = this.options.maskedEnvironment?.wrapCommand
@@ -1003,7 +1177,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             this.platform === 'win32'
               ? undefined
               : (this.options.shellPath ?? '/bin/bash'),
-                        customConfig,
+            commandConfig,
             signal,
             cwd,
             { commandId, commandText: request.command },

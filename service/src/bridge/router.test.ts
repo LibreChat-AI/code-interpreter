@@ -432,7 +432,11 @@ describe('paired bridge HTTP API', () => {
       ],
       supportedWorkspaceWriteFileModes: ['replace', 'create'],
       supportedWorkspaceEditFileModes: ['single', 'batch'],
-      supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
+      supportedWorkspaceEditFileFeatures: [
+        'expected_base_sha256',
+        'tolerant_match',
+        'replace_all',
+      ],
       supportedWorkspaceListFileFeatures: ['after_path'],
     });
 
