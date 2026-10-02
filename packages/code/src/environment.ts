@@ -10,6 +10,7 @@ import {
 import {
     BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
     BRIDGE_WORKSPACE_COMMAND_MAX_BYTES,
+    isSafePortableRelativePath,
 } from './protocol.js';
 import type { LocalWorkspaceConfig } from './workspace.js';
 import { WorkspaceToolError } from './workspace.js';
@@ -25,7 +26,12 @@ export interface CodeEnvironmentDefinition {
     root: string;
     repo?: string;
     ref?: string;
-    setup?: { command: string; timeoutMs: number };
+    setup?: {
+        command: string;
+        timeoutMs: number;
+        /** Explicit readiness contract; absent preserves startup setup behavior. */
+        reuse?: { inputs: string[]; checkCommand: string; checkTimeoutMs: number };
+    };
     actions?: { name: string; command: string; timeoutMs: number }[];
 }
 
@@ -89,7 +95,7 @@ export function parseCodeEnvironment(
         if (
             !record(value.setup) ||
             Object.keys(value.setup).some(
-                key => !['command', 'timeoutMs'].includes(key),
+                key => !['command', 'timeoutMs', 'reuse'].includes(key),
             ) ||
             !text(value.setup.command, 16_384) ||
             Buffer.byteLength(value.setup.command) >
@@ -109,7 +115,25 @@ export function parseCodeEnvironment(
                 `Environment setup timeout must be between 1 and ${BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS} ms`,
             );
         }
-        setup = { command: value.setup.command, timeoutMs };
+        let reuse: NonNullable<CodeEnvironmentDefinition['setup']>['reuse'];
+        if (value.setup.reuse !== undefined) {
+            const candidate = value.setup.reuse;
+            if (
+                !record(candidate) ||
+                Object.keys(candidate).some(key => !['inputs', 'checkCommand', 'checkTimeoutMs'].includes(key)) ||
+                !Array.isArray(candidate.inputs) ||
+                candidate.inputs.length < 1 || candidate.inputs.length > 32 ||
+                candidate.inputs.some(path => typeof path !== 'string' || !isSafePortableRelativePath(path) || path === '.') ||
+                new Set(candidate.inputs).size !== candidate.inputs.length ||
+                !text(candidate.checkCommand, 16_384) ||
+                Buffer.byteLength(candidate.checkCommand) > BRIDGE_WORKSPACE_COMMAND_MAX_BYTES
+            ) throw new Error('Invalid environment setup reuse');
+            const checkTimeoutMs = candidate.checkTimeoutMs ?? 10_000;
+            if (typeof checkTimeoutMs !== 'number' || !Number.isSafeInteger(checkTimeoutMs) || checkTimeoutMs < 1 || checkTimeoutMs > BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS)
+                throw new Error('Invalid environment readiness check timeout');
+            reuse = { inputs: candidate.inputs as string[], checkCommand: candidate.checkCommand, checkTimeoutMs };
+        }
+        setup = { command: value.setup.command, timeoutMs, ...(reuse ? { reuse } : {}) };
     }
     let actions: CodeEnvironmentDefinition['actions'];
     if (value.actions !== undefined) {

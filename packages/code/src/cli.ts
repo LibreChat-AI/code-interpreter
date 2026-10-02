@@ -2,7 +2,7 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { readdir, realpath, stat } from 'node:fs/promises';
-import { basename, join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { basename, dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
 import { discoverProjects } from './projects.js';
@@ -12,6 +12,7 @@ import {
     assertEnvironmentDefinitionsOutsideRoots,
     EnvironmentWorkspaceTools,
 } from './environment.js';
+import { prepareCodeEnvironment } from './environment-preparation.js';
 import { startFileRelay } from './relay.js';
 import { DockerFileRelaySupervisor } from './relay-runtime.js';
 import {
@@ -26,6 +27,7 @@ import {
   loadWorkspaceMutationQuarantine,
   saveBridgeIdentity,
   saveWorkspaceMutationQuarantine,
+  prepareEnvironmentPreparationDirectory,
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
 import { LocalWorkspaceTools, SandboxWorkspaceTools } from './workspace.js';
@@ -826,6 +828,17 @@ async function run(
       }),
     ]),
   );
+  const preparationDirectory = join(dirname(identityPath ?? defaultBridgeIdentityPath(workerId)), 'environment-preparation');
+  if (environments.some(environment => environment.definition.setup?.reuse)) {
+    const sourceParents = await prepareEnvironmentPreparationDirectory(preparationDirectory);
+    // Reuse the mount/ancestor isolation checks for this worker-owned state directory.
+    await assertEnvironmentDefinitionsOutsideRoots([{
+      path: preparationDirectory, sourceParents,
+      definition: { name: 'preparation-state', root: preparationDirectory }, fingerprint: '',
+    }], roots);
+  }
+  const preparationReceipt = (root: string) => join(preparationDirectory,
+    `${createHash('sha256').update(JSON.stringify([codeApiUrl, workerId, root])).digest('hex')}.json`);
   // Keep an admission boundary even when trusted-VM checkout routing uses a
   // nested repository's remote for the current command.
   const admittedGitHubRepositories = github.provider && github.repositoryRouting
@@ -1048,6 +1061,7 @@ async function run(
     commandPolicy,
     protectedPaths: [
       identityPath,
+      ...(environments.some(environment => environment.definition.setup?.reuse) ? [preparationDirectory] : []),
             ...environments.map(environment => environment.path),
       ...rootQuarantinePaths.values(),
       github.privateKeyPath,
@@ -1151,22 +1165,20 @@ async function run(
                   workspaceIdentity: instance.identity,
                   workspaceRoot: instance.root,
                 });
-                const result = await nativeCommandSandbox.execute(
-                  {
+                await prepareCodeEnvironment({
+                  root: instance.root, identity: instance.identity, setup,
+                  receiptPath: preparationReceipt(instance.root),
+                  context: JSON.stringify([serializeNativeSrtCommandPolicy(commandPolicy), commandAllowedDomains, github.policyIdentity]),
+                  signal,
+                  execute: (command, timeoutMs) => nativeCommandSandbox.execute({
                     protocolVersion: 1,
                     operation: 'execute_command',
                     workspaceId: id,
-                    command: setup.command,
-                    timeoutMs: setup.timeoutMs,
+                    command,
+                    timeoutMs,
                     maxOutputBytes: 8192,
-                  },
-                  signal,
-                );
-                if (result.exitCode !== 0 || result.timedOut) {
-                  throw new Error(
-                    `Environment ${instance.sourceWorkspaceId} setup failed for its conversation worktree`,
-                  );
-                }
+                  }, signal),
+                });
               },
               discardInstance: async (instance) => {
                 await nativeCommandSandbox.unregisterRoot(
@@ -1323,26 +1335,31 @@ async function run(
                 incarnationId,
             );
             await guard.assertAvailable();
-            await guard.arm('Environment setup did not settle', 'setup');
-            const result = await nativeCommandSandbox.execute(
-                {
+            let armed = false;
+            const preparation = await prepareCodeEnvironment({
+                root: environment.definition.root,
+                identity: roots.find(root => root.id === id)!.identity!,
+                setup, receiptPath: preparationReceipt(environment.definition.root),
+                context: JSON.stringify([serializeNativeSrtCommandPolicy(commandPolicy), commandAllowedDomains, github.policyIdentity]),
+                signal: controller.signal,
+                execute: async (command, timeoutMs) => {
+                  if (!armed) {
+                    await guard.arm('Environment preparation did not settle', 'setup');
+                    armed = true;
+                  }
+                  return nativeCommandSandbox.execute({
                     protocolVersion: 1,
                     operation: 'execute_command',
                     workspaceId: id,
-                    command: setup.command,
-                    timeoutMs: setup.timeoutMs,
+                    command,
+                    timeoutMs,
                     maxOutputBytes: 8192,
+                  }, controller.signal);
                 },
-                controller.signal,
-            );
-            if (result.exitCode !== 0 || result.timedOut) {
-                throw new Error(
-                    `Environment ${id} setup failed; inspect the workspace and use clear-workspace-quarantine with its root and workspace ID before restarting`,
-                );
-            }
+            });
             await guard.clear('setup');
             process.stdout.write(
-                `librechat-code: environment ${id} prepared\n`,
+                `librechat-code: environment ${id} ${preparation}\n`,
             );
         }
   } catch (error) {

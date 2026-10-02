@@ -255,7 +255,10 @@ Important semantics:
     existing ID such as `primary` to preserve agent/conversation bindings.
 -   `repo` and `ref` are labels. They do not clone, fetch, or check out anything.
 -   `root` must already exist. Relative roots resolve from the definition file.
--   Setup runs before registration on every worker start. It must be idempotent.
+-   Setup runs before registration on every worker start by default. It must be
+    idempotent. Optional `setup.reuse` declares fingerprint inputs and a sandboxed
+    readiness check to avoid reinstalling an unchanged, still-ready checkout. See
+    [preparation reuse](../../packages/code/README.md#reusing-a-prepared-checkout).
 -   A setup failure or timeout prevents registration and leaves a durable
     quarantine marker for operator inspection.
 -   Actions are fixed operator commands. The model selects only the action name

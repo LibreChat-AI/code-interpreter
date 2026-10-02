@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { constants } from 'node:fs';
 import {
   chmod,
   lstat,
@@ -201,11 +202,15 @@ async function assertOwnedByWorker(path: string): Promise<void> {
 async function readGuardedFile(
   path: string,
   exposed: (mode: string) => string,
+  maxBytes = Infinity,
 ): Promise<string> {
   await assertReadPathPrivate(path);
   const handle = await open(path, 'r');
   try {
     const stats = await handle.stat();
+    if (!stats.isFile() || stats.size > maxBytes) {
+      throw new BridgeProtocolError('Invalid private storage file size or type');
+    }
     const self = process.getuid?.();
     if (self !== undefined && !isTrustedOwner(stats.uid, self)) {
       throw new BridgeProtocolError(
@@ -423,6 +428,44 @@ export async function saveBridgeIdentity(
   path: string,
   identity: PairedBridgeWorkerIdentity,
 ): Promise<void> {
+  return savePrivateJson(path, identity);
+}
+
+/** Preparation receipts are worker state, never a workspace-authored success marker. */
+export async function prepareEnvironmentPreparationDirectory(path: string): Promise<string[]> {
+  await assertPrivateStorageAncestors(path, true);
+  await ensureDurableDirectory(path);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isDirectory() || (metadata.mode & 0o077) !== 0)
+      throw new BridgeProtocolError('Environment preparation directory must be owner-only');
+    await assertPrivateStorageAcl(handle, path, true);
+  } finally { await handle.close(); }
+  return assertPrivateStorageAncestors(path);
+}
+
+export async function loadEnvironmentPreparationKey(path: string): Promise<string | undefined> {
+  let content: string;
+  try {
+    content = await readGuardedFile(path, () => 'Environment preparation receipt must be owner-only', 256);
+  } catch (error) {
+    if (isMissingPathError(error)) return undefined;
+    throw error;
+  }
+  try {
+    const value: unknown = JSON.parse(content);
+    if (isRecord(value) && value.version === 1 && typeof value.key === 'string' && /^[a-f0-9]{64}$/.test(value.key)) return value.key;
+  } catch { /* Invalid receipts are cache misses, not readiness evidence. */ }
+  return undefined;
+}
+
+export async function saveEnvironmentPreparationKey(path: string, key: string): Promise<void> {
+  if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Invalid environment preparation key');
+  await savePrivateJson(path, { version: 1, key });
+}
+
+async function savePrivateJson(path: string, value: unknown): Promise<void> {
   assertPrivateStorageSupported();
   await assertWriteContainerPrivate(path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -435,13 +478,14 @@ export async function saveBridgeIdentity(
       await removePrivateStorageAcl(file, path);
       await file.chmod(0o600);
       await assertOwnerOnlyFile(file, path);
-      await file.writeFile(`${JSON.stringify(identity, null, 2)}\n`, 'utf8');
+      await file.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
       await file.sync();
     } finally {
       await file.close();
     }
     await rename(temporaryPath, path);
     await chmod(path, 0o600);
+    await syncParentDirectory(path);
   } catch (error) {
     await rm(temporaryPath, { force: true });
     throw error;

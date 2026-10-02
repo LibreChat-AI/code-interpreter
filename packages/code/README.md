@@ -1035,7 +1035,7 @@ worker runs. This inspection happens at startup, not on the command hot path.
 
 Setup is an operator-authorized startup command under the configured native sandbox
 policy. It requires commands to be enabled, runs once per worker startup before
-registration, and must be idempotent for restarts. Its timeout is bounded to five
+registration by default, and must be idempotent for restarts. Its timeout is bounded to five
 minutes and captured output to 8 KiB. Setup failure prevents registration. A nonzero
 exit, timeout, crash or uncertain termination retains the workspace quarantine marker;
 inspect the workspace before running `librechat-code clear-workspace-quarantine
@@ -1043,6 +1043,55 @@ inspect the workspace before running `librechat-code clear-workspace-quarantine
 deployment and identity configuration. Only use the separate
 `--reset-workspace-quarantine <environment-name>` run option afterward if a server
 fence also needs clearing. Only successful setup automatically clears its marker.
+
+## Reusing a prepared checkout
+
+Opt in to checkout-local preparation reuse when setup is an installation rather
+than work that must run on every startup:
+
+```yaml
+setup:
+  command: npm ci
+  timeoutMs: 300000
+  reuse:
+    inputs:
+      - package.json
+      - package-lock.json
+      - packages/api/package.json
+      - packages/data-provider/package.json
+    checkCommand: test -f node_modules/.package-lock.json && test -x node_modules/.bin/tsc
+    checkTimeoutMs: 10000
+```
+
+Declare **all** relevant manifests, installation configuration and lifecycle-script
+inputs. There is no globbing or automatic monorepo discovery. Inputs must be
+existing root-confined regular files: at most 32, 8 MiB per file and 32 MiB total.
+Include an operator-maintained toolchain/version file if installation uses tools
+other than the worker's Node runtime. Lockfile equality alone does not prove that
+arbitrary postinstall scripts are reusable.
+
+The worker fingerprints declared file bytes, the setup recipe, checkout inode,
+Node version/ABI, platform/architecture and native command policy. A matching
+worker-owned receipt runs the readiness check instead of setup. A nonzero check
+reruns setup; a timed-out, signalled or aborted check fails without starting a
+replacement command. After successful setup, the check must pass and inputs must
+remain unchanged before the worker publishes a receipt. Receipts are bounded,
+owner-only files alongside the identity, outside all registered roots and denied
+to native commands. Deleting one causes setup to run again; it never clears a
+quarantine. Checks are operator commands under the same sandbox and mutation guard
+as setup, not unsandboxed host scripts. Keep them cheap and non-mutating.
+
+Existing definitions without `reuse` retain the startup behavior. Fresh conversation
+instances use the same preparation contract, with independent checkout receipts.
+This does not attach another checkout's `node_modules`, provision linked lanes on
+command admission, or recheck existing instances on every command. It does not
+deduplicate installed dependencies between worktrees or enforce disk quotas.
+
+The next resource-store slice must explicitly grant shared cache paths under SRT,
+keep monorepo links and mutable outputs checkout-local, and bound retention. Do not
+work around that missing grant by broadening the sandbox root or symlinking another
+branch's full installation. Shared download caches alone do not reduce installed
+`node_modules` copies.
 No setup output is sent to the model.
 
 Named actions are fixed commands without model-supplied substitution. The bridge
