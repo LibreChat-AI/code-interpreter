@@ -1356,6 +1356,11 @@ async function run(
                     maxOutputBytes: 8192,
                   }, controller.signal);
                 },
+            }).catch(error => {
+                throw new Error(
+                    `Environment ${id} setup failed; inspect the workspace and use clear-workspace-quarantine with its root and workspace ID before restarting`,
+                    { cause: error },
+                );
             });
             await guard.clear('setup');
             process.stdout.write(
