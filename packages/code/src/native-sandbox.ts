@@ -15,6 +15,7 @@ import type { Dirent, Stats } from 'node:fs';
 import { access, mkdtemp, open, readdir, realpath, rm, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { matchesWorkspaceRoot } from './root-identity.js';
+import { assertEnvironmentResourcesStable, environmentResourceVariables } from './environment-resources.js';
 import type { WorkspaceRootIdentity } from './root-identity.js';
 import { withWorkspaceRoot, WorkspaceRootAccessError, spawnWithinWorkspace, realpath as rootedRealpath, stat as rootedStat } from './root-access.js';
 
@@ -168,6 +169,8 @@ type SpawnCommand = (
 ) => ChildProcessWithoutNullStreams;
 
 export interface NativeSrtWorkspaceCommandSandboxOptions {
+  /** Explicit operator-approved stores, never inferred from process environment. */
+  resources?: import('./environment-resources.js').LoadedEnvironmentResource[];
   workspaceIdentity?: WorkspaceRootIdentity;
   workspaceRoot: string;
   /** Present when `workspaceRoot` is a verified linked worktree lane of a checkout. */
@@ -530,6 +533,14 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     const protectedPaths = await Promise.all(
       (this.options.protectedPaths ?? []).map(canonicalPath),
     );
+    const resources = this.options.resources ?? [];
+    await assertEnvironmentResourcesStable(resources);
+    for (const resource of resources) {
+      if (isWithin(root, resource.path) || isWithin(resource.path, root) ||
+          protectedPaths.some(path => isWithin(resource.path, path) || isWithin(path, resource.path))) {
+        throw new WorkspaceToolError('Environment resource overlaps a workspace or worker control path', 'REGISTRATION_INVALID');
+      }
+    }
         if (protectedPaths.some(path => isWithin(root, path))) {
       throw new WorkspaceToolError(
         'Native sandbox workspace cannot contain worker control files',
@@ -676,6 +687,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         ],
         allowRead: [
           root,
+          ...resources.map(resource => resource.path),
           ...laneGitPaths,
           ...(gitGuardDirectory ? [gitGuardDirectory] : []),
                     ...(canonicalScratchDirectory
@@ -684,6 +696,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         ],
         allowWrite: [
           root,
+          ...resources.filter(resource => resource.access === 'read-write').map(resource => resource.path),
           ...writableGitPaths,
                     ...(canonicalScratchDirectory
                         ? [canonicalScratchDirectory]
@@ -691,6 +704,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         ],
         denyWrite: [
           ...protectedPaths,
+          ...resources.filter(resource => resource.access === 'read-only').map(resource => resource.path),
           ...deniedInheritedWritablePaths,
           ...rootGitMetadataDenies,
           ...(gitGuardDirectory ? [gitGuardDirectory] : []),
@@ -762,10 +776,12 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         ];
         this.baseDenyWritePaths = [
             ...protectedPaths,
+            ...resources.filter(resource => resource.access === 'read-only').map(resource => resource.path),
             ...deniedInheritedWritablePaths,
         ];
         this.denyWritePaths = [
             ...protectedPaths,
+            ...resources.filter(resource => resource.access === 'read-only').map(resource => resource.path),
             ...deniedInheritedWritablePaths,
             ...rootGitMetadataDenies,
             ...(gitGuardDirectory ? [gitGuardDirectory] : []),
@@ -988,6 +1004,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                 ? {
                       filesystem: {
                           allowRead: [
+                              ...(this.options.resources ?? []).map(resource => resource.path),
                               canonicalWorkspaceRoot ?? this.canonicalRoot!,
                               canonicalDataDirectory,
                               ...(this.canonicalCommonGitDir
@@ -1005,6 +1022,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                           ],
                           denyRead: this.denyReadPaths,
                           denyWrite: [
+                              ...(this.options.resources ?? []).map(resource => resource.path),
                               this.canonicalRoot!,
                               ...this.denyWritePaths,
                           ],
@@ -1138,6 +1156,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       );
     }
     await this.initialize();
+    await assertEnvironmentResourcesStable(this.options.resources ?? []);
     const root = workspaceRoot ?? this.canonicalRoot!;
     let cwd: string;
     try {
@@ -1167,6 +1186,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         : request.command;
       wrapped = await this.withTemporaryHostEnvironment(
         {
+          ...environmentResourceVariables(this.options.resources ?? []),
           ...this.gitEnvironment,
           ...(credentialEnvironment ?? {}),
           ...this.scratchSelectorEnvironment(sandboxScratchDirectory),
@@ -1270,6 +1290,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
             cwd,
             env: {
               ...wrapped.env,
+              ...environmentResourceVariables(this.options.resources ?? []),
               ...this.scratchEnvironment(),
               ...trustedEnvironment,
               ...this.gitEnvironment,

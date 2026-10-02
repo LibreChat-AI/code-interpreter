@@ -3,6 +3,8 @@ import { constants } from 'node:fs';
 import { open, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { parseDocument } from 'yaml';
+import { parseEnvironmentResources, loadEnvironmentResource } from './environment-resources.js';
+import type { EnvironmentResource, LoadedEnvironmentResource } from './environment-resources.js';
 import {
     assertPrivateStorageAcl,
     assertPrivateStorageAncestors,
@@ -33,6 +35,7 @@ export interface CodeEnvironmentDefinition {
         reuse?: { inputs: string[]; checkCommand: string; checkTimeoutMs: number };
     };
     actions?: { name: string; command: string; timeoutMs: number }[];
+    resources?: EnvironmentResource[];
 }
 
 export interface LoadedCodeEnvironment {
@@ -41,6 +44,7 @@ export interface LoadedCodeEnvironment {
     rootPaths?: string[];
     definition: CodeEnvironmentDefinition;
     fingerprint: string;
+    resources?: LoadedEnvironmentResource[];
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -73,7 +77,7 @@ export function parseCodeEnvironment(
         !record(value) ||
         Object.keys(value).some(
             key =>
-                !['name', 'root', 'repo', 'ref', 'setup', 'actions'].includes(
+                !['name', 'root', 'repo', 'ref', 'setup', 'actions', 'resources'].includes(
                     key,
                 ),
         ) ||
@@ -173,6 +177,7 @@ export function parseCodeEnvironment(
         ...(typeof value.ref === 'string' ? { ref: value.ref } : {}),
         ...(setup ? { setup } : {}),
         ...(actions ? { actions } : {}),
+        ...(value.resources !== undefined ? { resources: parseEnvironmentResources(value.resources) } : {}),
     };
 }
 
@@ -328,6 +333,7 @@ export async function loadCodeEnvironment(
         sourceParents,
         rootPaths,
         definition,
+        ...(definition.resources ? { resources: await Promise.all(definition.resources.map(loadEnvironmentResource)) } : {}),
         fingerprint: createHash('sha256')
             .update(JSON.stringify(definition))
             .digest('hex'),

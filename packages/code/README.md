@@ -1102,11 +1102,47 @@ This does not attach another checkout's `node_modules`, provision linked lanes o
 command admission, or recheck existing instances on every command. It does not
 deduplicate installed dependencies between worktrees or enforce disk quotas.
 
-The next resource-store slice must explicitly grant shared cache paths under SRT,
-keep monorepo links and mutable outputs checkout-local, and bound retention. Do not
-work around that missing grant by broadening the sandbox root or symlinking another
-branch's full installation. Shared download caches alone do not reduce installed
-`node_modules` copies.
+Shared tool cache grants below do not attach another checkout's installed dependency
+tree. Keep monorepo links and mutable outputs checkout-local. Do not broaden the
+sandbox root or symlink another branch's full installation. Shared download caches
+alone do not reduce installed `node_modules` copies.
+
+## Shared tool and download resources
+
+Explicit operator-managed stores can live outside the checkouts:
+
+```yaml
+resources:
+  - kind: npm-cache
+    path: /srv/lia-resources/npm
+    access: read-write
+  - kind: uv-cache
+    path: /srv/lia-resources/uv
+    access: read-write
+  - kind: playwright-browsers
+    path: /srv/lia-resources/playwright
+    access: read-only
+```
+
+Create each directory as the worker service account with mode `0700`, then populate
+browser binaries using the matching Playwright version and `PLAYWRIGHT_BROWSERS_PATH`
+outside the coding session. Roots must exist and may not be symlinks or overlap any
+registered workspace or worker control state. Linux mount-alias checks cover both
+directions. Keep the mount namespace stable while the worker runs.
+
+The worker grants only these paths and injects `npm_config_cache`, `UV_CACHE_DIR`
+and `PLAYWRIGHT_BROWSERS_PATH` from the loaded definition, including in linked lanes
+and fresh conversation worktrees. An undeclared process environment variable never
+grants filesystem access. Each store root is inode-bound and revalidated before
+commands. Read-only stores stay read-only, and speculative programmatic probes
+cannot write any shared store.
+
+Sharing is explicit within one worker's trust domain. Do not share mutable caches
+between unrelated principals, store credentials in them, or treat their contents
+as trusted worker code. Separate package caches from browsers and mutable browser
+profiles, Redis data, build output and test state. Stores currently have no automatic
+eviction; the storage-lifecycle slice adds that separately. This shares downloads
+and browser binaries, not installed `node_modules` trees.
 No setup output is sent to the model.
 
 Named actions are fixed commands without model-supplied substitution. The bridge

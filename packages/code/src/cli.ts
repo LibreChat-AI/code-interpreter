@@ -13,6 +13,7 @@ import {
     EnvironmentWorkspaceTools,
 } from './environment.js';
 import { prepareCodeEnvironment } from './environment-preparation.js';
+import { assertEnvironmentResourceIsolation } from './environment-resources.js';
 import { startFileRelay } from './relay.js';
 import { DockerFileRelaySupervisor } from './relay-runtime.js';
 import {
@@ -837,6 +838,16 @@ async function run(
       definition: { name: 'preparation-state', root: preparationDirectory }, fingerprint: '',
     }], roots);
   }
+  // Cache contents may be shared explicitly; their grants must never authorize source or control state.
+  const resourceRoots = environments.flatMap(environment => (environment.resources ?? []).map(resource => ({
+    path: resource.path, sourceParents: resource.controlPaths,
+    definition: { name: 'shared-resource', root: resource.path }, fingerprint: '',
+  })));
+  await assertEnvironmentResourceIsolation(environments.flatMap(environment => environment.resources ?? []), roots.map(root => root.root), [
+    identityPath, preparationDirectory, github.privateKeyPath,
+    ...environments.map(environment => environment.path), ...rootQuarantinePaths.values(),
+  ].filter((path): path is string => path != null));
+  await assertEnvironmentDefinitionsOutsideRoots(resourceRoots, roots);
   const preparationReceipt = (root: string) => join(preparationDirectory,
     `${createHash('sha256').update(JSON.stringify([codeApiUrl, workerId, root])).digest('hex')}.json`);
   // Keep an admission boundary even when trusted-VM checkout routing uses a
@@ -1110,6 +1121,10 @@ async function run(
         }
       : {}),
   };
+  const nativeOptionsForWorkspace = (workspaceId: string): NativeProcessSandboxOptions => ({
+    ...nativeOptions,
+    resources: environments.find(environment => environment.definition.name === workspaceId)?.resources,
+  });
   const nativeCommandSandbox =
     allowWorkspaceCommands && commandSandboxMode === 'native-srt'
       ? roots.length > 1 || workspaceLeaseSlots > 1 || conversationWorktreeRoot || linkedWorktreeLanes
@@ -1117,12 +1132,12 @@ async function run(
             new Map(
                           roots.map(root => [
                 root.id,
-                { ...nativeOptions, workspaceRoot: root.root, workspaceIdentity: root.identity },
+                { ...nativeOptionsForWorkspace(root.id), workspaceRoot: root.root, workspaceIdentity: root.identity },
               ]),
             ),
             workspaceLeaseSlots,
           )
-        : new NativeProcessWorkspaceCommandSandbox(nativeOptions)
+        : new NativeProcessWorkspaceCommandSandbox(nativeOptionsForWorkspace(roots[0].id))
       : undefined;
   if (allowWorkspaceCommands && workspaceTools) {
     workspaceTools = new SandboxWorkspaceTools({
@@ -1161,14 +1176,15 @@ async function run(
                 }
                 const id = internalWorkspaceId(instance.sourceWorkspaceId, instance.id);
                 await nativeCommandSandbox.registerRoot(id, {
-                  ...nativeOptions,
+                  ...nativeOptionsForWorkspace(instance.sourceWorkspaceId),
                   workspaceIdentity: instance.identity,
                   workspaceRoot: instance.root,
                 });
                 await prepareCodeEnvironment({
                   root: instance.root, identity: instance.identity, setup,
                   receiptPath: preparationReceipt(instance.root),
-                  context: JSON.stringify([serializeNativeSrtCommandPolicy(commandPolicy), commandAllowedDomains, github.policyIdentity]),
+                  context: JSON.stringify([serializeNativeSrtCommandPolicy(commandPolicy), commandAllowedDomains, github.policyIdentity,
+                    nativeOptionsForWorkspace(instance.sourceWorkspaceId).resources]),
                   signal,
                   execute: (command, timeoutMs) => nativeCommandSandbox.execute({
                     protocolVersion: 1,
@@ -1225,7 +1241,7 @@ async function run(
           root.id,
           {
             command: {
-              ...nativeOptions,
+              ...nativeOptionsForWorkspace(root.id),
               workspaceIdentity: root.identity,
               workspaceRoot: root.root,
             },
@@ -1263,7 +1279,7 @@ async function run(
           {
             root: root.root,
             identity: root.identity,
-            command: nativeOptions,
+            command: nativeOptionsForWorkspace(root.id),
             repositoryInstructions: args.includes('--repository-instructions'),
             writable: root.writable ?? false,
           },
@@ -1340,7 +1356,8 @@ async function run(
                 root: environment.definition.root,
                 identity: roots.find(root => root.id === id)!.identity!,
                 setup, receiptPath: preparationReceipt(environment.definition.root),
-                context: JSON.stringify([serializeNativeSrtCommandPolicy(commandPolicy), commandAllowedDomains, github.policyIdentity]),
+                context: JSON.stringify([serializeNativeSrtCommandPolicy(commandPolicy), commandAllowedDomains, github.policyIdentity,
+                  nativeOptionsForWorkspace(id).resources]),
                 signal: controller.signal,
                 execute: async (command, timeoutMs) => {
                   if (!armed) {
