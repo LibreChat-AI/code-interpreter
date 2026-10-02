@@ -1156,7 +1156,9 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       );
     }
     await this.initialize();
-    await assertEnvironmentResourcesStable(this.options.resources ?? []);
+    await assertEnvironmentResourcesStable(this.options.resources ?? []).catch(() => {
+      throw new WorkspaceToolError('Environment resource changed before command dispatch', 'REGISTRATION_INVALID');
+    });
     const root = workspaceRoot ?? this.canonicalRoot!;
     let cwd: string;
     try {

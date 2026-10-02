@@ -190,5 +190,21 @@ test(
                 .exitCode,
             0,
         );
+        await rename(cache, join(directory, 'old-cache'));
+        await mkdir(cache, { mode: 0o700 });
+        await assert.rejects(
+            execute(0, 'printf not-started > side-effect'),
+            error => {
+                assert.equal(
+                    (error as { mutationMayHaveCommitted: boolean })
+                        .mutationMayHaveCommitted,
+                    false,
+                );
+                return /resource changed/.test((error as Error).message);
+            },
+        );
+        await assert.rejects(readFile(join(directory, 'a', 'side-effect')), {
+            code: 'ENOENT',
+        });
     },
 );
