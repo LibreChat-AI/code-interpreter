@@ -121,8 +121,15 @@ export class OutputBuffer {
     render(budget: number): { text: string; truncated: boolean } {
         const head = this.head?.subarray(0, this.headLength) ?? Buffer.alloc(0);
         const tail = this.suffix();
-        if (this.totalBytes <= budget) {
-            const text = Buffer.concat([head, tail]).toString('utf8');
+        // Before overflow the buffers are adjacent; either window may cross their boundary.
+        const contiguous =
+            this.totalBytes === head.length + tail.length
+                ? tail.length === 0
+                    ? head
+                    : Buffer.concat([head, tail])
+                : undefined;
+        if (contiguous && this.totalBytes <= budget) {
+            const text = contiguous.toString('utf8');
             if (Buffer.byteLength(text) <= budget)
                 return { text, truncated: false };
         }
@@ -132,11 +139,15 @@ export class OutputBuffer {
         const includeMarker = budget >= markerBytes;
         const contentBudget = includeMarker ? budget - markerBytes : budget;
         const prefix = boundedWindow(
-            head,
+            contiguous ?? head,
             Math.floor(contentBudget / 2),
             false
         );
-        const suffix = boundedWindow(tail, Math.ceil(contentBudget / 2), true);
+        const suffix = boundedWindow(
+            contiguous ?? tail,
+            Math.ceil(contentBudget / 2),
+            true
+        );
         const omitted = this.totalBytes - prefix.bytes - suffix.bytes;
         return {
             text:

@@ -1391,6 +1391,32 @@ test('retains real command summaries on both streams under the legacy combined b
     assert.equal(isWorkspaceToolResult(commandRequest, result), true);
 });
 
+test('partly filled command buffers retain final summaries regardless of stream order', async t => {
+    const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const sandbox = new NativeSrtWorkspaceCommandSandbox({
+        workspaceRoot: root,
+        manager: fakeManager().manager,
+    });
+    t.after(() => sandbox.close());
+    const summary = 'late stderr summary\n';
+    const quiet = `printf '%109d' 0; printf 'late stderr summary\\n'`;
+    const noisy = `printf '%20000d' 0`;
+    for (const [command, stream] of [
+        [`{ ${quiet}; } >&2; ${noisy}`, 'stderr'],
+        [`${noisy}; { ${quiet}; } >&2`, 'stderr'],
+        [`{ ${quiet}; }; ${noisy} >&2`, 'stdout'],
+        [`${noisy} >&2; { ${quiet}; }`, 'stdout'],
+    ] as const) {
+        const commandRequest = { ...request, command, maxOutputBytes: 256 };
+        const result = await sandbox.execute(commandRequest);
+        assert.ok(result[stream].endsWith(summary));
+        assert.equal(result.truncated, true);
+        assert.equal(result.exitCode, 0);
+        assert.equal(isWorkspaceToolResult(commandRequest, result), true);
+    }
+});
+
 test('quiet malformed command output is retained beside a noisy stream', async t => {
     const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
     t.after(() => rm(root, { recursive: true, force: true }));

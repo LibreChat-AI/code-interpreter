@@ -101,6 +101,132 @@ test('either quiet stream donates its budget, and stdout cannot starve stderr', 
     );
 });
 
+test('partly filled buffers retain final summaries on either stream', () => {
+    const capacity = 256;
+    const summary = 'late stderr summary\n';
+    const content = Buffer.from('y'.repeat(129 - summary.length) + summary);
+    for (const chunkSize of [1, 7, 128, content.length]) {
+        const quiet = collect(content, capacity, chunkSize);
+        const noisy = collect(Buffer.alloc(20_000, 'x'), capacity, chunkSize);
+        for (const [stdout, stderr, stream] of [
+            [noisy, quiet, 'stderr'],
+            [quiet, noisy, 'stdout'],
+        ] as const) {
+            const result = renderCommandOutput(stdout, stderr, capacity);
+            assert.ok(result[stream].endsWith(summary));
+            assert.ok(
+                Buffer.byteLength(result.stdout) +
+                    Buffer.byteLength(result.stderr) <=
+                    capacity
+            );
+        }
+    }
+});
+
+test('rendered windows match logical stream ends across capture and allowance boundaries', () => {
+    for (const capacity of [32, 63, 64, 127, 128, 255, 256, 257]) {
+        const half = Math.floor(capacity / 2);
+        for (const length of [
+            0,
+            1,
+            half - 1,
+            half,
+            half + 1,
+            capacity - 1,
+            capacity,
+            capacity + 1,
+            capacity * 4,
+        ]) {
+            const content = Buffer.from(
+                Array.from({ length }, (_, index) =>
+                    String.fromCharCode(65 + (index % 26))
+                ).join('')
+            );
+            for (const budget of [
+                0,
+                1,
+                Math.floor(half / 2),
+                half,
+                capacity - 1,
+                capacity,
+            ]) {
+                let expected = content.toString('utf8');
+                if (length > budget) {
+                    const marker = (bytes: number): string =>
+                        `\n[... ${bytes} bytes omitted ...]\n`;
+                    const markerBytes = Buffer.byteLength(marker(length));
+                    const includeMarker = budget >= markerBytes;
+                    const remaining = includeMarker
+                        ? budget - markerBytes
+                        : budget;
+                    const prefix = Math.floor(remaining / 2);
+                    const suffix = Math.ceil(remaining / 2);
+                    expected =
+                        content.subarray(0, prefix).toString('utf8') +
+                        (includeMarker
+                            ? marker(length - prefix - suffix)
+                            : '') +
+                        content.subarray(length - suffix).toString('utf8');
+                }
+                for (const chunkSize of [1, half, capacity + 7]) {
+                    assert.deepEqual(
+                        collect(content, capacity, chunkSize).render(budget),
+                        {
+                            text: expected,
+                            truncated: length > budget,
+                        },
+                        `capacity ${capacity}, length ${length}, budget ${budget}, chunk ${chunkSize}`
+                    );
+                }
+            }
+        }
+    }
+});
+
+test('UTF-8 summaries survive capture transitions and split code-point chunks', () => {
+    const summary = 'end 世界🌍\n';
+    for (const capacity of [128, 255, 256, 257]) {
+        const half = Math.floor(capacity / 2);
+        for (const length of [
+            half - 1,
+            half,
+            half + 1,
+            capacity - 1,
+            capacity,
+            capacity + 1,
+        ]) {
+            const content = Buffer.from(
+                'x'.repeat(length - Buffer.byteLength(summary)) + summary
+            );
+            for (const chunkSize of [1, 2, content.length]) {
+                const quiet = collect(content, capacity, chunkSize);
+                const noisy = collect(
+                    Buffer.alloc(capacity * 4, 'y'),
+                    capacity,
+                    chunkSize
+                );
+                for (const [stdout, stderr, stream] of [
+                    [noisy, quiet, 'stderr'],
+                    [quiet, noisy, 'stdout'],
+                ] as const) {
+                    const result = renderCommandOutput(
+                        stdout,
+                        stderr,
+                        capacity
+                    );
+                    assert.ok(result[stream].endsWith(summary));
+                    assert.ok(!result[stream].includes('\ufffd'));
+                    assert.ok(
+                        Buffer.byteLength(result.stdout) +
+                            Buffer.byteLength(result.stderr) <=
+                            capacity
+                    );
+                }
+            }
+        }
+    }
+});
+
 test('budgeting includes UTF-8 boundaries and marker overhead for every small limit', () => {
     const content = Buffer.from('世界🌍 café Ελληνικά\n'.repeat(100));
     for (let budget = 1; budget <= 256; budget += 1) {
