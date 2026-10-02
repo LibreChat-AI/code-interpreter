@@ -189,7 +189,10 @@ async function cloneTree(
             const before = await rooted.lstat(path);
             if (before.isDirectory()) {
                 await target(() => rooted.mkdir(out));
-                for (const name of await rooted.readdir(path, config.maxFiles - files))
+                for (const name of await rooted.readdir(
+                    path,
+                    config.maxFiles - files,
+                ))
                     await visit(
                         join(path, name),
                         join(out, name),
@@ -211,13 +214,20 @@ async function cloneTree(
                 if (
                     isAbsolute(link) ||
                     !inside(checkout, resolved) ||
-                    relative(checkout, resolved).split(sep).includes('.git')
+                    relative(checkout, resolved).split(sep).includes('.git') ||
+                    relative(checkout, resolved)
+                        .split(sep)
+                        .includes('.worktrees')
                 )
                     throw new Error(
                         'Dependency snapshot link must remain checkout-local',
                     );
                 await target(() => rooted.symlink(link, out));
             } else if (before.isFile()) {
+                if (before.nlink !== 1)
+                    throw new Error(
+                        'Dependency snapshots reject hard-linked files',
+                    );
                 bytes += Number(before.size);
                 if (bytes > config.maxBytes)
                     throw new Error('Dependency snapshot exceeds maxBytes');
@@ -231,6 +241,7 @@ async function cloneTree(
                     const opened = await handle.stat();
                     if (
                         !opened.isFile() ||
+                        opened.nlink !== 1 ||
                         opened.ino !== before.ino ||
                         opened.dev !== before.dev
                     )
@@ -252,6 +263,7 @@ async function cloneTree(
                     const after = await handle.stat();
                     if (
                         opened.size !== after.size ||
+                        after.nlink !== 1 ||
                         opened.mtimeMs !== after.mtimeMs ||
                         opened.ctimeMs !== after.ctimeMs
                     )

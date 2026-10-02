@@ -6,6 +6,7 @@ import {
     writeFile,
     readFile,
     lstat,
+    link,
     realpath,
     rm,
     symlink,
@@ -126,6 +127,19 @@ test('unsafe links and bounded traversal never publish a partial snapshot', asyn
     await assert.rejects(
         publishDependencySnapshot({ ...store, maxBytes: 1 }, key, a, ai),
         /maxBytes/,
+    );
+    assert.deepEqual(await readdir(store.store), []);
+});
+
+test('hardlinks cannot copy outside file contents into a readable dependency snapshot', async t => {
+    const { a, store, ai, key, directory } = await fixture(t);
+    await mkdir(join(a, 'node_modules'));
+    const outside = join(directory, 'private-input');
+    await writeFile(outside, 'private');
+    await link(outside, join(a, 'node_modules', 'alias'));
+    await assert.rejects(
+        publishDependencySnapshot(store, key, a, ai),
+        /hard-linked/,
     );
     assert.deepEqual(await readdir(store.store), []);
 });

@@ -1139,7 +1139,9 @@ Matching snapshots restore only when **every** declared `node_modules` directory
 is missing. The sandboxed readiness check must pass before accepting the restore.
 Existing directories are never replaced by restoration; ordinary setup handles
 repair. Include nested workspace installations explicitly. Relative checkout-local
-package links are preserved; absolute/escaping links and special files are rejected.
+package links are preserved; absolute/escaping links, hard-linked files, links into
+Git/worktree control paths and special files are rejected. Hardlink-based package
+manager layouts need a different adapter; this snapshot mode targets npm copies.
 Changing one restored installation cannot modify the snapshot or another checkout.
 
 This requires APFS clones or Linux reflinks (for example a suitably configured
