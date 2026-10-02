@@ -1100,12 +1100,56 @@ Existing definitions without `reuse` retain the startup behavior. Fresh conversa
 instances use the same preparation contract, with independent checkout receipts.
 This does not attach another checkout's `node_modules`, provision linked lanes on
 command admission, or recheck existing instances on every command. It does not
-deduplicate installed dependencies between worktrees or enforce disk quotas.
+deduplicate installed dependencies between worktrees unless snapshots below are
+configured, or enforce disk quotas.
 
 Shared tool cache grants below do not attach another checkout's installed dependency
 tree. Keep monorepo links and mutable outputs checkout-local. Do not broaden the
 sandbox root or symlink another branch's full installation. Shared download caches
 alone do not reduce installed `node_modules` copies.
+
+## Copy-on-write installed dependencies
+
+For matching fresh checkouts on the **same clone-capable filesystem**, add a
+private snapshot store to the readiness contract:
+
+```yaml
+setup:
+  command: npm ci
+  timeoutMs: 300000
+  reuse:
+    inputs: [package.json, package-lock.json]
+    checkCommand: test -x node_modules/.bin/tsc
+    snapshot:
+      store: /srv/lia-state/dependency-snapshots
+      paths: [node_modules]
+      maxBytes: 4294967296
+      maxFiles: 200000
+```
+
+Create the external store as the worker account with mode `0700`. It must not
+overlap any source root, definition, credential or shared tool cache. Commands
+cannot read or write it. Use a separate store per project/trust domain. The
+portable key includes project identity, declared input bytes, recipe, policy,
+Node ABI and platform, but not the checkout inode. Kernel locks serialize setup
+for one key; different keys remain independent. Incomplete clones are never
+published. Cancellation is checked during bounded traversal.
+
+Matching snapshots restore only when **every** declared `node_modules` directory
+is missing. The sandboxed readiness check must pass before accepting the restore.
+Existing directories are never replaced by restoration; ordinary setup handles
+repair. Include nested workspace installations explicitly. Relative checkout-local
+package links are preserved; absolute/escaping links and special files are rejected.
+Changing one restored installation cannot modify the snapshot or another checkout.
+
+This requires APFS clones or Linux reflinks (for example a suitably configured
+XFS/Btrfs volume). The worker verifies cloning before installation and rejects
+unsupported filesystems instead of silently making full copies or writable hard
+links. Ordinary ext4 workers should leave snapshots disabled and can still use
+checkout-local preparation receipts and shared downloads. This is **not** Python
+virtualenv relocation, automatic preparation of manually created linked lanes,
+or a hard quota on arbitrary commands. Validate all install/postinstall inputs
+and path-independent artifacts before opting in.
 
 ## Shared tool and download resources
 

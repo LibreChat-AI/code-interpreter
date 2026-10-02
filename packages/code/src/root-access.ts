@@ -62,10 +62,16 @@ const openAt = nativeOpenAt
 const renameAt = bind(
     'int renameat(int fromfd, const char *from, int tofd, const char *to)',
 );
+const renameExclusiveAt = bind(process.platform === 'darwin'
+    ? 'int renameatx_np(int fromfd, const char *from, int tofd, const char *to, unsigned int flags)'
+    : 'int renameat2(int fromfd, const char *from, int tofd, const char *to, unsigned int flags)');
 const linkAt = bind(
     'int linkat(int fromfd, const char *from, int tofd, const char *to, int flags)',
 );
 const unlinkAt = bind('int unlinkat(int dirfd, const char *path, int flags)');
+const mkdirAt = bind('int mkdirat(int dirfd, const char *path, unsigned int mode)');
+const symlinkAt = bind('int symlinkat(const char *target, int dirfd, const char *path)');
+const readlinkAt = bind('int readlinkat(int dirfd, const char *path, void *buffer, size_t size)');
 const getPath =
     process.platform === 'darwin'
         ? bind('int fcntl(int fd, int command, ...)')
@@ -328,13 +334,14 @@ export class WorkspaceRootAccess {
         }
     }
 
-    install(from: string, to: string, link: boolean): void {
+    install(from: string, to: string, link: boolean, exclusive = false): void {
         const source = this.parent(from);
         let target: ReturnType<WorkspaceRootAccess['parent']> | undefined;
         try {
             target = this.parent(to);
             const result = link
                 ? linkAt!(source.fd, source.name, target.fd, target.name, 0)
+                : exclusive ? renameExclusiveAt!(source.fd, source.name, target.fd, target.name, process.platform === 'darwin' ? 4 : 1)
                 : renameAt!(source.fd, source.name, target.fd, target.name);
             if (result !== 0) throw nativeError();
         } finally {
@@ -343,10 +350,27 @@ export class WorkspaceRootAccess {
         }
     }
 
-    unlink(path: string): void {
+    entry(path: string, operation: 'mkdir' | 'symlink' | 'readlink', target?: string): string | void {
         const parent = this.parent(path);
         try {
-            if (unlinkAt!(parent.fd, parent.name, 0) !== 0) throw nativeError();
+            if (operation === 'readlink') {
+                const buffer = Buffer.alloc(4097);
+                const length = readlinkAt!(parent.fd, parent.name, buffer, buffer.length);
+                if (length < 0) throw nativeError();
+                if (length === buffer.length) throw new Error('Workspace link exceeds its bounded contract');
+                return buffer.subarray(0, length).toString();
+            }
+            const result = operation === 'mkdir'
+                ? mkdirAt!(parent.fd, parent.name, 0o700)
+                : symlinkAt!(target!, parent.fd, parent.name);
+            if (result !== 0) throw nativeError();
+        } finally { closeSync(parent.fd); }
+    }
+
+    unlink(path: string, directory = false): void {
+        const parent = this.parent(path);
+        try {
+            if (unlinkAt!(parent.fd, parent.name, directory ? (process.platform === 'darwin' ? 0x80 : 0x200) : 0) !== 0) throw nativeError();
         } finally {
             closeSync(parent.fd);
         }
@@ -448,6 +472,11 @@ export const rename = async (from: string, to: string): Promise<void> => {
     if (access) access.install(from, to, false);
     else await fs.rename(from, to);
 };
+export const renameExclusive = async (from: string, to: string): Promise<void> => {
+    const access = context.getStore();
+    if (!access) throw new Error('Exclusive installation requires a selected root');
+    access.install(from, to, false, true);
+};
 export const link = async (from: string, to: string): Promise<void> => {
     const access = context.getStore();
     if (access) access.install(from, to, true);
@@ -457,4 +486,36 @@ export const unlink = async (path: string): Promise<void> => {
     const access = context.getStore();
     if (access) access.unlink(path);
     else await fs.unlink(path);
+};
+
+/** Enumeration and entry mutation retain the selected root descriptor. */
+export const readdir = async (path: string, maxEntries = 200_000): Promise<string[]> => {
+    const access = context.getStore();
+    const handle = access ? await access.openFile(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW) : undefined;
+    try {
+        const entries: string[] = [];
+        const directory = await fs.opendir(handle ? descriptorPath(handle.fd) : path);
+        for await (const entry of directory) {
+            if (entries.length >= maxEntries) throw new Error('Dependency directory exceeds maxFiles');
+            entries.push(entry.name);
+        }
+        return entries;
+    } finally { await handle?.close(); }
+};
+export const readlink = async (path: string): Promise<string> =>
+    context.getStore()?.entry(path, 'readlink') as string ?? fs.readlink(path);
+export const mkdir = async (path: string): Promise<void> => {
+    const access = context.getStore();
+    if (access) access.entry(path, 'mkdir');
+    else await fs.mkdir(path, { mode: 0o700 });
+};
+export const symlink = async (target: string, path: string): Promise<void> => {
+    const access = context.getStore();
+    if (access) access.entry(path, 'symlink', target);
+    else await fs.symlink(target, path);
+};
+export const rmdir = async (path: string): Promise<void> => {
+    const access = context.getStore();
+    if (access) access.unlink(path, true);
+    else await fs.rmdir(path);
 };

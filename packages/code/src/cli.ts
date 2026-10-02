@@ -848,6 +848,13 @@ async function run(
     ...environments.map(environment => environment.path), ...rootQuarantinePaths.values(),
   ].filter((path): path is string => path != null));
   await assertEnvironmentDefinitionsOutsideRoots(resourceRoots, roots);
+  const snapshotStores = environments.flatMap(environment => environment.snapshotStore ? [environment.snapshotStore] : []);
+  await assertEnvironmentResourceIsolation(snapshotStores.map(store => ({ kind: 'npm-cache' as const, path: store.store, access: 'read-only' as const })), roots.map(root => root.root), [
+    identityPath, preparationDirectory, github.privateKeyPath, ...environments.map(environment => environment.path),
+    ...rootQuarantinePaths.values(), ...environments.flatMap(environment => (environment.resources ?? []).map(resource => resource.path)),
+  ].filter((path): path is string => path != null));
+  await assertEnvironmentDefinitionsOutsideRoots(snapshotStores.map(store => ({ path: store.store, sourceParents: store.controlPaths,
+    definition: { name: 'dependency-store', root: store.store }, fingerprint: '' })), roots);
   const preparationReceipt = (root: string) => join(preparationDirectory,
     `${createHash('sha256').update(JSON.stringify([codeApiUrl, workerId, root])).digest('hex')}.json`);
   // Keep an admission boundary even when trusted-VM checkout routing uses a
@@ -1073,6 +1080,7 @@ async function run(
     protectedPaths: [
       identityPath,
       ...(environments.some(environment => environment.definition.setup?.reuse) ? [preparationDirectory] : []),
+      ...snapshotStores.map(store => store.store),
             ...environments.map(environment => environment.path),
       ...rootQuarantinePaths.values(),
       github.privateKeyPath,
@@ -1163,10 +1171,11 @@ async function run(
         ...(nativeCommandSandbox instanceof NativeWorkspaceCommandPool
           ? {
               prepareInstance: async (instance, signal) => {
-                const setup = environments.find(
+                const environment = environments.find(
                   (environment) =>
                     environment.definition.name === instance.sourceWorkspaceId,
-                )?.definition.setup;
+                );
+                const setup = environment?.definition.setup;
                 if (!setup) return;
                 if (admittedGitHubRepositories) {
                   admittedGitHubRepositories.set(
@@ -1181,6 +1190,8 @@ async function run(
                   workspaceRoot: instance.root,
                 });
                 await prepareCodeEnvironment({
+                  snapshotStore: environment!.snapshotStore,
+                  snapshotScope: environment!.definition.repo ?? environment!.definition.name,
                   root: instance.root, identity: instance.identity, setup,
                   receiptPath: preparationReceipt(instance.root),
                   context: JSON.stringify([serializeNativeSrtCommandPolicy(commandPolicy), commandAllowedDomains, github.policyIdentity,
@@ -1353,6 +1364,11 @@ async function run(
             await guard.assertAvailable();
             let armed = false;
             const preparation = await prepareCodeEnvironment({
+                snapshotStore: environment.snapshotStore,
+                snapshotScope: environment.definition.repo ?? environment.definition.name,
+                beforeMutation: async () => {
+                  if (!armed) { await guard.arm('Dependency restoration did not settle', 'setup'); armed = true; }
+                },
                 root: environment.definition.root,
                 identity: roots.find(root => root.id === id)!.identity!,
                 setup, receiptPath: preparationReceipt(environment.definition.root),
