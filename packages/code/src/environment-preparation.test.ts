@@ -25,7 +25,7 @@ async function fixture(t: test.TestContext) {
     t.after(() => rm(directory, { recursive: true, force: true }));
     const root = join(directory, 'checkout');
     const state = join(directory, 'private');
-    await mkdir(root);
+    await mkdir(root, { mode: 0o700 });
     await prepareEnvironmentPreparationDirectory(state);
     await writeFile(join(root, 'package-lock.json'), 'lock-v1');
     const commands: string[] = [];
@@ -316,9 +316,9 @@ test(
         });
         t.after(() => sandbox.close());
         await sandbox.prepare();
-        const execute: EnvironmentPreparationOptions['execute'] = (
-            command,
-            timeoutMs,
+        const execute = (
+            command: string,
+            timeoutMs: number,
         ) =>
             sandbox.execute({
                 protocolVersion: 1,
@@ -344,15 +344,13 @@ test(
         };
         assert.equal(await prepareCodeEnvironment(configured), 'prepared');
         assert.equal(await prepareCodeEnvironment(configured), 'reused');
-        assert.notEqual(
-            (await execute(`cat '${options.receiptPath}'`, 5000)).exitCode,
-            0,
-        );
-        assert.notEqual(
-            (await execute(`printf forged > '${options.receiptPath}'`, 5000))
-                .exitCode,
-            0,
-        );
+        const receipt = await readFile(options.receiptPath, 'utf8');
+        const protectedRead = await execute(`cat '${options.receiptPath}'`, 5000);
+        // Linux SRT may mask denied reads with an empty file. Exit status alone
+        // is not evidence that the protected receipt was exposed.
+        assert.ok(!protectedRead.stdout?.includes(receipt));
+        await execute(`printf forged > '${options.receiptPath}'`, 5000);
+        assert.equal(await readFile(options.receiptPath, 'utf8'), receipt);
         assert.equal(
             await readFile(join(options.root, 'installs.log'), 'utf8'),
             'install\n',

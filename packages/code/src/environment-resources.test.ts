@@ -59,7 +59,7 @@ test('resource roots must be stable private directories and outside source grant
     t.after(() => rm(directory, { recursive: true, force: true }));
     const root = join(directory, 'root');
     const cache = join(directory, 'cache');
-    await mkdir(root);
+    await mkdir(root, { mode: 0o700 });
     await mkdir(cache, { mode: 0o700 });
     const resource = {
         kind: 'npm-cache' as const,
