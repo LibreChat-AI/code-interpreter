@@ -17,25 +17,60 @@ test(
     const child = spawn(
       process.execPath,
       [
+        '--expose-gc',
         '--input-type=module',
         '-e',
         `
+    import { setTimeout as delay } from 'node:timers/promises';
     import { withProcessLock } from ${JSON.stringify(moduleUrl)};
     await withProcessLock(${JSON.stringify(path)}, async () => {
-      process.stdout.write('locked');
-      await new Promise(() => { setInterval(() => {}, 1000); });
+      setImmediate(() => {
+        global.gc();
+        setImmediate(() => process.send('locked'));
+      });
+      // The timer retains its resolver and the lock-owning async frame.
+      await delay(60_000);
     });
   `,
       ],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
+      { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }
     );
+    let stdout = '';
+    let stderr = '';
+    child.stdout!.setEncoding('utf8').on('data', (chunk: string) => {
+      stdout = (stdout + chunk).slice(-4096);
+    });
+    child.stderr!.setEncoding('utf8').on('data', (chunk: string) => {
+      stderr = (stderr + chunk).slice(-4096);
+    });
     const closed = once(child, 'close');
     t.after(async () => {
       child.kill('SIGKILL');
-      await closed;
-      await rm(directory, { recursive: true, force: true });
+      try {
+        await closed;
+      } finally {
+        t.diagnostic(
+          JSON.stringify({
+            stdout,
+            stderr,
+            exitCode: child.exitCode,
+            signal: child.signalCode,
+          })
+        );
+        await rm(directory, { recursive: true, force: true });
+      }
     });
-    await once(child.stdout!, 'data');
+    await Promise.race([
+      once(child, 'message', { signal: t.signal }).then(([marker]) => {
+        assert.equal(marker, 'locked');
+        t.diagnostic('Lock owner ready: locked (after GC)');
+      }),
+      closed.then(([code, signal]) => {
+        throw new Error(
+          `Lock owner exited before readiness: ${code}/${signal}`
+        );
+      }),
+    ]);
     let entered = false;
     await assert.rejects(
       withProcessLock(
@@ -47,8 +82,10 @@ test(
       )
     );
     assert.equal(entered, false);
+    assert.equal(child.exitCode, null);
+    assert.equal(child.signalCode, null);
     child.kill('SIGKILL');
-    await closed;
+    assert.deepEqual(await closed, [null, 'SIGKILL']);
     await withProcessLock(
       path,
       async () => {
