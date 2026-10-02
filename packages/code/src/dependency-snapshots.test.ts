@@ -188,6 +188,12 @@ test(
     },
     async t => {
         const { a, b, store, directory, ai, bi } = await fixture(t);
+        store.lifecycle = {
+            maxStoreBytes: 10000,
+            maxEntries: 1,
+            retentionMs: 5 * 24 * 60 * 60 * 1000,
+            scanLimit: 100,
+        };
         for (const root of [a, b])
             await writeFile(join(root, 'package-lock.json'), 'version-one');
         const commands: string[] = [];
@@ -204,6 +210,7 @@ test(
                     paths: store.paths,
                     maxBytes: store.maxBytes,
                     maxFiles: store.maxFiles,
+                    lifecycle: store.lifecycle,
                 },
             },
         };
@@ -254,6 +261,16 @@ test(
         assert.equal(
             commands.filter(command => command === setup.command).length,
             2,
+        );
+        assert.equal(
+            (await readdir(store.store)).filter(name =>
+                /^[a-f0-9]{64}$/.test(name),
+            ).length,
+            1,
+        );
+        assert.equal(
+            await readFile(join(a, 'node_modules', 'package.js'), 'utf8'),
+            'module.exports = 42',
         );
         const denied = await sandboxes[0].execute({
             protocolVersion: 1,

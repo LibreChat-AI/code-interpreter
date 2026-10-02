@@ -1187,9 +1187,73 @@ Sharing is explicit within one worker's trust domain. Do not share mutable cache
 between unrelated principals, store credentials in them, or treat their contents
 as trusted worker code. Separate package caches from browsers and mutable browser
 profiles, Redis data, build output and test state. Stores currently have no automatic
-eviction; the storage-lifecycle slice adds that separately. This shares downloads
+eviction. The snapshot lifecycle below does not delete these mutable stores. This shares downloads
 and browser binaries, not installed `node_modules` trees.
 No setup output is sent to the model.
+
+## Storage admission and snapshot lifecycle
+
+Use an explicit free-space floor before managed setup or restoration:
+
+```yaml
+storage:
+  minFreeBytes: 5368709120       # 5 GiB left for the worker and other activity
+  setupReserveBytes: 2147483648 # estimated installation headroom
+```
+
+This works without dependency snapshots. Absent `storage`, preparation retains
+today's behavior. A ready checkout can still pass its readiness check when disk
+is low. When installation is needed, low space rejects it **before** starting the
+setup command, with a specific remediation message. These are soft admission
+checks, not allocated reservations: concurrent processes and arbitrary shell
+writes can still consume space after admission. Put worker identity/quarantine
+state on a separate small volume and use filesystem/project quotas for hard
+containment. This option neither clears quarantine nor deletes source to recover.
+
+The private snapshot store can bound reproducible dependency versions:
+
+```yaml
+setup:
+  # command and reuse inputs/readiness omitted here; retain the full contract above
+  reuse:
+    snapshot:
+      store: /srv/lia-state/dependency-snapshots
+      paths: [node_modules]
+      lifecycle:
+        maxStoreBytes: 21474836480
+        maxEntries: 8
+        retentionMs: 432000000
+        scanLimit: 4096
+```
+
+Cleanup runs during managed preparation and publication. Oldest inactive snapshots
+are reclaimed by last-use age and logical payload/count budgets. Per-key kernel
+locks protect installs, restores and publishers; maintenance never waits on or
+deletes an active key. A short store-wide lock makes budget checks and publication
+atomic, without serializing installations for different keys. Abandoned staging
+directories require a worker ownership manifest and a free key lock before removal.
+Unknown/unmarked entries are reported and preserved. Lock files are kept to avoid
+splitting lock ownership. Scan limits fail closed instead of crawling unbounded data.
+
+The byte budget counts snapshot file lengths, not deduplicated physical blocks,
+metadata overhead or working checkout copies. An otherwise valid prepared checkout
+does not fail when the cache cannot fit another entry: publication is skipped with
+a worker diagnostic, and later low-space admission still applies.
+
+Preview or explicitly apply maintenance without restarting the worker:
+
+```sh
+librechat-code prune-environment-storage --environment /etc/librechat-code/app.yaml
+librechat-code prune-environment-storage --environment /etc/librechat-code/app.yaml --apply
+```
+
+Pass all relevant definitions with repeated `--environment` flags so their roots
+participate in isolation checks. Preview is the default and the JSON identifies
+`dryRun`, proposed removals, active keys, unknown data and retained logical usage.
+The command is host-operator-only, not an agent workspace action. It does not touch
+source worktrees (including dirty or unpushed branches), `.verification`, build
+outputs, arbitrary installations or mutable npm/uv caches. Source worktree archival
+requires the separate worktree ownership/binding lifecycle, not an mtime heuristic.
 
 Named actions are fixed commands without model-supplied substitution. The bridge
 advertises only their names and the definition fingerprint, never their shell source

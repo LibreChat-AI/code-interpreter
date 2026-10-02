@@ -14,6 +14,7 @@ import {
 } from './environment.js';
 import { prepareCodeEnvironment } from './environment-preparation.js';
 import { assertEnvironmentResourceIsolation } from './environment-resources.js';
+import { pruneDependencySnapshots } from './snapshot-lifecycle.js';
 import { startFileRelay } from './relay.js';
 import { DockerFileRelaySupervisor } from './relay-runtime.js';
 import {
@@ -1191,6 +1192,7 @@ async function run(
                 });
                 await prepareCodeEnvironment({
                   snapshotStore: environment!.snapshotStore,
+                  storage: environment!.definition.storage,
                   snapshotScope: environment!.definition.repo ?? environment!.definition.name,
                   root: instance.root, identity: instance.identity, setup,
                   receiptPath: preparationReceipt(instance.root),
@@ -1365,6 +1367,7 @@ async function run(
             let armed = false;
             const preparation = await prepareCodeEnvironment({
                 snapshotStore: environment.snapshotStore,
+                storage: environment.definition.storage,
                 snapshotScope: environment.definition.repo ?? environment.definition.name,
                 beforeMutation: async () => {
                   if (!armed) { await guard.arm('Dependency restoration did not settle', 'setup'); armed = true; }
@@ -1687,6 +1690,28 @@ async function clearMutationQuarantine(args: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (args[0] === 'prune-environment-storage') {
+    const paths: string[] = [];
+    for (let i = 1; i < args.length; i++) {
+      if (args[i] === '--apply') continue;
+      if (args[i] !== '--environment' || !args[i + 1] || args[i + 1].startsWith('--'))
+        throw new Error('Usage: librechat-code prune-environment-storage --environment <file> [--environment <file> ...] [--apply]');
+      paths.push(args[++i]);
+    }
+    if (!paths.length || paths.length > 32) throw new Error('Supply between one and 32 environment definitions');
+    const loaded = await Promise.all(paths.map(loadCodeEnvironment));
+    const roots = loaded.map(environment => ({ id: environment.definition.name, root: environment.definition.root }));
+    const stores = loaded.flatMap(environment => environment.snapshotStore ? [environment.snapshotStore] : []);
+    if (!stores.length) throw new Error('No dependency snapshot stores configured');
+    await assertEnvironmentDefinitionsOutsideRoots(loaded, roots);
+    await assertEnvironmentDefinitionsOutsideRoots(stores.map(store => ({ path: store.store, sourceParents: store.controlPaths,
+      definition: { name: 'dependency-store', root: store.store }, fingerprint: '' })), roots);
+    await assertEnvironmentResourceIsolation(stores.map(store => ({ kind: 'npm-cache' as const, path: store.store, access: 'read-only' as const })),
+      roots.map(root => root.root), [...loaded.map(environment => environment.path),
+        ...loaded.flatMap(environment => (environment.resources ?? []).map(resource => resource.path))]);
+    for (const store of stores) process.stdout.write(`${JSON.stringify(await pruneDependencySnapshots(store, { dryRun: !args.includes('--apply') }))}\n`);
+    return;
+  }
   if (args[0] === 'projects') {
     const root = option(args, '--root');
     if (!root || args.slice(1).some((arg, index, rest) =>

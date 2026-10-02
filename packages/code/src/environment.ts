@@ -6,6 +6,8 @@ import { parseDocument } from 'yaml';
 import { parseEnvironmentResources, loadEnvironmentResource } from './environment-resources.js';
 import { parseDependencySnapshot, loadDependencySnapshot } from './dependency-snapshots.js';
 import type { DependencySnapshotConfig, DependencySnapshotStore } from './dependency-snapshots.js';
+import { parseEnvironmentStorage } from './snapshot-lifecycle.js';
+import type { EnvironmentStoragePolicy } from './snapshot-lifecycle.js';
 import type { EnvironmentResource, LoadedEnvironmentResource } from './environment-resources.js';
 import {
     assertPrivateStorageAcl,
@@ -38,6 +40,7 @@ export interface CodeEnvironmentDefinition {
     };
     actions?: { name: string; command: string; timeoutMs: number }[];
     resources?: EnvironmentResource[];
+    storage?: EnvironmentStoragePolicy;
 }
 
 export interface LoadedCodeEnvironment {
@@ -80,7 +83,7 @@ export function parseCodeEnvironment(
         !record(value) ||
         Object.keys(value).some(
             key =>
-                !['name', 'root', 'repo', 'ref', 'setup', 'actions', 'resources'].includes(
+                !['name', 'root', 'repo', 'ref', 'setup', 'actions', 'resources', 'storage'].includes(
                     key,
                 ),
         ) ||
@@ -182,6 +185,7 @@ export function parseCodeEnvironment(
         ...(setup ? { setup } : {}),
         ...(actions ? { actions } : {}),
         ...(value.resources !== undefined ? { resources: parseEnvironmentResources(value.resources) } : {}),
+        ...(value.storage !== undefined ? { storage: parseEnvironmentStorage(value.storage) } : {}),
     };
 }
 

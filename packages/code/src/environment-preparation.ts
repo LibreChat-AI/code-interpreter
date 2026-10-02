@@ -14,6 +14,8 @@ import {
     publishDependencySnapshot,
 } from './dependency-snapshots.js';
 import type { DependencySnapshotStore } from './dependency-snapshots.js';
+import { assertPreparationSpace } from './snapshot-lifecycle.js';
+import type { EnvironmentStoragePolicy } from './snapshot-lifecycle.js';
 
 // Safety bounds on operator-declared hashing, not a dependency-store quota.
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
@@ -34,6 +36,7 @@ export interface EnvironmentPreparationOptions {
     snapshotStore?: DependencySnapshotStore;
     snapshotScope?: string;
     beforeMutation?(): Promise<void>;
+    storage?: EnvironmentStoragePolicy;
 }
 
 /** Checkout-local reuse. Never transfers mutable installations between worktrees. */
@@ -83,6 +86,8 @@ async function prepareInLock(
             return 'reused';
     }
     if (options.snapshotStore && portable) {
+        if (options.storage)
+            await assertPreparationSpace(options.root, options.storage);
         await options.beforeMutation?.();
         if (
             await restoreDependencySnapshot(
@@ -112,6 +117,8 @@ async function prepareInLock(
             }
         }
     }
+    if (options.storage)
+        await assertPreparationSpace(options.root, options.storage);
     const result = await options.execute(
         options.setup.command,
         options.setup.timeoutMs,

@@ -20,12 +20,21 @@ import {
 import { loadEnvironmentResource } from './environment-resources.js';
 import { isSafePortableRelativePath } from './protocol.js';
 import type { WorkspaceRootIdentity } from './root-identity.js';
+import {
+    parseSnapshotLifecycle,
+    pruneDependencySnapshots,
+    SNAPSHOT_MANIFEST,
+    STAGING_MANIFEST,
+    SnapshotBudgetFullError,
+} from './snapshot-lifecycle.js';
+import type { SnapshotLifecyclePolicy } from './snapshot-lifecycle.js';
 
 export interface DependencySnapshotConfig {
     store: string;
     paths: string[];
     maxBytes: number;
     maxFiles: number;
+    lifecycle?: SnapshotLifecyclePolicy;
 }
 export interface DependencySnapshotStore extends DependencySnapshotConfig {
     identity: WorkspaceRootIdentity;
@@ -41,7 +50,14 @@ export function parseDependencySnapshot(
     const maxFiles = v.maxFiles ?? 200_000;
     if (
         Object.keys(v).some(
-            k => !['store', 'paths', 'maxBytes', 'maxFiles'].includes(k),
+            k =>
+                ![
+                    'store',
+                    'paths',
+                    'maxBytes',
+                    'maxFiles',
+                    'lifecycle',
+                ].includes(k),
         ) ||
         typeof v.store !== 'string' ||
         !isAbsolute(v.store) ||
@@ -74,6 +90,9 @@ export function parseDependencySnapshot(
         paths: v.paths as string[],
         maxBytes: maxBytes as number,
         maxFiles: maxFiles as number,
+        ...(v.lifecycle !== undefined
+            ? { lifecycle: parseSnapshotLifecycle(v.lifecycle) }
+            : {}),
     };
 }
 export async function loadDependencySnapshot(
@@ -172,7 +191,7 @@ async function cloneTree(
     config: DependencySnapshotConfig,
     checkout: string,
     signal?: AbortSignal,
-): Promise<void> {
+): Promise<{ bytes: number; files: number }> {
     let bytes = 0,
         files = 0;
     const target = <T>(operation: () => Promise<T>) =>
@@ -285,6 +304,7 @@ async function cloneTree(
                 join(checkout, config.paths[i]),
             );
     });
+    return { bytes, files };
 }
 
 export async function withDependencySnapshot<T>(
@@ -306,6 +326,14 @@ export async function withDependencySnapshot<T>(
                     'Dependency snapshot store changed while waiting',
                 );
             signal?.throwIfAborted();
+            if (store.lifecycle)
+                await pruneDependencySnapshots(store, {
+                    currentKey: key,
+                    signal,
+                }).catch(error => {
+                    if (!(error instanceof SnapshotBudgetFullError))
+                        throw error;
+                });
             // Fail before installation, rather than discovering unsupported reflinks after npm ci.
             if (verifyCloneSupport) {
                 const probe = await fs.mkdtemp(join(store.store, '.probe-'));
@@ -331,7 +359,25 @@ export async function withDependencySnapshot<T>(
                 }
             }
             signal?.throwIfAborted();
-            return operation();
+            const result = await operation();
+            const manifest = await fs
+                .open(
+                    join(store.store, key, SNAPSHOT_MANIFEST),
+                    constants.O_RDONLY | constants.O_NOFOLLOW,
+                )
+                .catch((e: NodeJS.ErrnoException) => {
+                    if (e.code === 'ENOENT') return undefined;
+                    throw e;
+                });
+            if (manifest) {
+                try {
+                    const now = new Date();
+                    await manifest.utimes(now, now);
+                } finally {
+                    await manifest.close();
+                }
+            }
+            return result;
         },
         signal,
     );
@@ -437,9 +483,20 @@ export async function publishDependencySnapshot(
         )
     )
         return;
-    const staging = await fs.mkdtemp(join(store.store, '.staging-'));
+    const staging = await fs.mkdtemp(join(store.store, `.staging-${key}-`));
     try {
-        await cloneTree(
+        await fs.writeFile(
+            join(staging, STAGING_MANIFEST),
+            JSON.stringify({
+                version: 1,
+                key,
+                bytes: 0,
+                files: 1,
+                createdAt: Date.now(),
+            }),
+            { mode: 0o600 },
+        );
+        const measured = await cloneTree(
             checkout,
             identity,
             staging,
@@ -450,7 +507,31 @@ export async function publishDependencySnapshot(
             signal,
         );
         signal?.throwIfAborted();
-        await fs.rename(staging, destination);
+        await fs.writeFile(
+            join(staging, SNAPSHOT_MANIFEST),
+            JSON.stringify({
+                version: 1,
+                key,
+                ...measured,
+                createdAt: Date.now(),
+            }),
+            { mode: 0o600 },
+        );
+        const publish = () => fs.rename(staging, destination);
+        if (store.lifecycle)
+            await pruneDependencySnapshots(store, {
+                currentKey: key,
+                incomingBytes: measured.bytes,
+                incomingEntries: 1,
+                signal,
+                publish,
+            }).catch(error => {
+                if (!(error instanceof SnapshotBudgetFullError)) throw error;
+                process.stderr.write(
+                    'librechat-code: dependency snapshot not cached because the store budget is full; prepared checkout remains valid\n',
+                );
+            });
+        else await publish();
     } finally {
         await fs.rm(staging, { recursive: true, force: true });
     }

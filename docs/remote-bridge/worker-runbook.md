@@ -533,7 +533,21 @@ command, cancellation, or settlement whose effects may be incomplete.
 -   **Worker online but not ready:** check native sandbox preparation, definition
     validation, setup, quarantine, and readiness logs.
 -   **Setup repeats on restart:** setup is intentionally per-start; make it
-    idempotent or remove it.
+    idempotent, remove it, or opt in to the bounded `setup.reuse` readiness
+    contract in the [worker package guide](../../packages/code/README.md#reusing-a-prepared-checkout).
+-   **Dependency copies fill the disk:** declare shared npm/uv/browser resources
+    instead of per-worktree downloads. On a verified clone-capable filesystem,
+    configure private copy-on-write snapshots and their lifecycle budget. Do not
+    symlink another branch's mutable `node_modules` or hardlink writable installs.
+-   **Managed preparation deferred for low space:** `storage.minFreeBytes` plus
+    `setupReserveBytes` is a soft pre-setup floor, not a hard quota. Expand the
+    volume or clean reproducible artifacts; do not clear quarantine as a disk fix.
+-   **Snapshot maintenance:** preview with `prune-environment-storage
+    --environment <file>` and use `--apply` only after reviewing its JSON. Active,
+    unknown and unmarked data stays intact. Include all environment definitions
+    for root-isolation checks. This does not archive source worktrees or prune
+    mutable tool caches. Keep control state on separate storage when hard
+    protection from arbitrary build writes is required.
 -   **Git works on the host but not in tools:** verify the App installation,
     permissions, private-key mode/owner, and allowed GitHub domains.
 -   **Repository label is present but files are absent:** `repo`/`ref` are

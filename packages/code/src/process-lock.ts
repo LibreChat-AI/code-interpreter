@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const LOCK_EX = 2;
 const LOCK_NB = 4;
 const LOCK_UN = 8;
+export class ProcessLockBusyError extends Error {}
 let binding:
   | Promise<{
       flock: (fd: number, operation: number) => number;
@@ -26,7 +27,8 @@ async function lockBinding() {
 export async function withProcessLock<T>(
   path: string,
   operation: () => Promise<T>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  wait = true,
 ): Promise<T> {
   signal?.throwIfAborted();
   if (process.platform !== 'darwin' && process.platform !== 'linux') {
@@ -48,6 +50,7 @@ export async function withProcessLock<T>(
           `Conversation worktree lock failed with errno ${errno}`
         );
       }
+      if (!wait) throw new ProcessLockBusyError('Process lock is active');
       await delay(50, undefined, { signal });
     }
     signal?.throwIfAborted();
@@ -56,4 +59,10 @@ export async function withProcessLock<T>(
     native.flock(handle.fd, LOCK_UN);
     await handle.close();
   }
+}
+
+/** Non-blocking maintenance admission. Never masks operation errors as lock contention. */
+export async function tryWithProcessLock<T>(path: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<{ acquired: true; value: T } | { acquired: false }> {
+  try { return { acquired: true, value: await withProcessLock(path, operation, signal, false) }; }
+  catch (error) { if (error instanceof ProcessLockBusyError) return { acquired: false }; throw error; }
 }
