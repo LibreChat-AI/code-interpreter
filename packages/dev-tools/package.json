@@ -1,0 +1,75 @@
+{
+    "name": "@librechat/dev-tools",
+    "version": "0.1.0",
+    "description": "LLM-visible definitions (names, schemas, descriptions) of the harness-native coding tools for LibreChat Code API",
+    "license": "Apache-2.0",
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        },
+        "./constants": {
+            "types": "./dist/constants.d.ts",
+            "import": "./dist/constants.js"
+        },
+        "./types": {
+            "types": "./dist/types.d.ts",
+            "import": "./dist/types.js"
+        },
+        "./intent": {
+            "types": "./dist/intent.d.ts",
+            "import": "./dist/intent.js"
+        },
+        "./guidance": {
+            "types": "./dist/guidance.d.ts",
+            "import": "./dist/guidance.js"
+        },
+        "./timeout": {
+            "types": "./dist/timeout.d.ts",
+            "import": "./dist/timeout.js"
+        },
+        "./execute-code": {
+            "types": "./dist/execute-code.d.ts",
+            "import": "./dist/execute-code.js"
+        },
+        "./bash-tool": {
+            "types": "./dist/bash-tool.d.ts",
+            "import": "./dist/bash-tool.js"
+        },
+        "./read-file": {
+            "types": "./dist/read-file.d.ts",
+            "import": "./dist/read-file.js"
+        },
+        "./run-tools-with-code": {
+            "types": "./dist/run-tools-with-code.d.ts",
+            "import": "./dist/run-tools-with-code.js"
+        },
+        "./run-tools-with-bash": {
+            "types": "./dist/run-tools-with-bash.d.ts",
+            "import": "./dist/run-tools-with-bash.js"
+        },
+        "./local": {
+            "types": "./dist/local/index.d.ts",
+            "import": "./dist/local/index.js"
+        }
+    },
+    "files": [
+        "dist",
+        "!dist/*.test.*"
+    ],
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "test": "npm run build && node --test dist/*.test.js",
+        "prepack": "npm run build"
+    },
+    "devDependencies": {
+        "@types/node": "^22.5.5",
+        "typescript": "^5.5.4"
+    },
+    "engines": {
+        "node": ">=20.11"
+    }
+}
