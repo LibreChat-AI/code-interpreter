@@ -648,7 +648,10 @@ text differs) is "<rows>"`: a JSON string of at most 8 rows of the form
 `<line>|<mark><text>`, each line shortened to 160 characters, where the mark is
 a space for a line identical to `oldText` at that position, `~` when only its
 whitespace differs and `!` when its text differs. Excerpts are the first detail
-dropped to fit the message bound, and never shorten another edit's reason.
+dropped to fit the message bound, and never shorten another edit's reason. Both
+the excerpt (1,600 bytes) and the message that carries it (3,800 bytes) are
+measured as UTF-8 once JSON-encoded, so the Code API's error body stays within
+the 4,096 bytes hosts such as LibreChat read.
 An ambiguous edit gives its match count and line numbers. Overlapping
 occurrences count as separate locations. Detailed source-line excerpts require
 `read_file` or `preview_edit` on the same workspace; edit-only workers return a

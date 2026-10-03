@@ -12,12 +12,19 @@ import type {
  * callers prefix their own context, so diagnostics stay well below that.
  */
 export const EDIT_DIAGNOSTIC_MAX_CHARS = 3000;
+/**
+ * Code API returns the message inside a JSON error body, and hosts read that
+ * body through a bounded buffer (4096 bytes in LibreChat). Optional excerpts
+ * are granted only while the JSON-encoded UTF-8 message stays within this size.
+ */
+export const EDIT_DIAGNOSTIC_MAX_BODY_BYTES = 3_800;
 const MAX_REPORTED_LINES = 5;
 const MAX_SNIPPET_CHARS = 120;
 /** A missing edit's current-text excerpt: a few lines, each shortened, in one bounded hint. */
 const MAX_EXCERPT_LINES = 8;
 const MAX_EXCERPT_LINE_CHARS = 160;
-const MAX_EXCERPT_CHARS = 1_600;
+/** Measured like the message bound: UTF-8 bytes once JSON-encoded into the error body. */
+const MAX_EXCERPT_BYTES = 1_600;
 /** Alignment votes cast while locating the region a missing edit most likely meant. */
 const MAX_REGION_VOTES = 200_000;
 /** Lines too generic to anchor a region on their own (`}`, `);`, blank lines). */
@@ -722,7 +729,7 @@ function currentTextExcerpt(needle: readonly string[], lines: LineIndex, start: 
   for (; rows.length > 0; rows.pop()) {
     const where = rows.length === 1 ? `line ${first + 1}` : `lines ${first + 1}-${first + rows.length}`;
     const excerpt = `the current text at ${where} (~ whitespace differs, ! text differs) is ${quote(rows.join('\n'))}`;
-    if (excerpt.length <= MAX_EXCERPT_CHARS) return excerpt;
+    if (encodedBytes(excerpt) <= MAX_EXCERPT_BYTES) return excerpt;
   }
   return undefined;
 }
@@ -816,6 +823,11 @@ function nearestLine(
     : undefined;
 }
 
+/** UTF-8 bytes `value` occupies once JSON-encoded as a string in an error body. */
+function encodedBytes(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value)) - 2;
+}
+
 /** A failure's reason, followed by its excerpt when the excerpt was granted room. */
 function failureText(failure: EditFailure, withExcerpt: boolean): string {
   return withExcerpt && failure.excerpt ? `${failure.reason}; ${failure.excerpt}` : failure.reason;
@@ -825,14 +837,26 @@ function failureText(failure: EditFailure, withExcerpt: boolean): string {
  * Grants excerpts in edit order while the message still fits. Excerpts are the
  * most expendable detail, so granting one never shortens another reason.
  */
-function grantExcerpts(failures: readonly EditFailure[], available: number): boolean[] {
-  let remaining = available - failures.reduce((total, failure) => total + failure.reason.length, 0);
+function grantExcerpts(
+  failures: readonly EditFailure[],
+  availableChars: number,
+  availableBytes: number,
+): boolean[] {
+  let chars = availableChars - failures.reduce((total, failure) => total + failure.reason.length, 0);
+  let bytes = availableBytes - failures.reduce((total, failure) => total + encodedBytes(failure.reason), 0);
   return failures.map((failure) => {
-    const cost = failure.excerpt ? failure.excerpt.length + 2 : 0;
-    if (cost === 0 || cost > remaining) return false;
-    remaining -= cost;
+    if (!failure.excerpt) return false;
+    const addition = `; ${failure.excerpt}`;
+    const byteCost = encodedBytes(addition);
+    if (addition.length > chars || byteCost > bytes) return false;
+    chars -= addition.length;
+    bytes -= byteCost;
     return true;
   });
+}
+
+function fitsDiagnosticBounds(message: string): boolean {
+  return message.length <= EDIT_DIAGNOSTIC_MAX_CHARS && encodedBytes(message) <= EDIT_DIAGNOSTIC_MAX_BODY_BYTES;
 }
 
 function formatEditFailures(failures: readonly EditFailure[], editCount: number): string {
@@ -840,7 +864,7 @@ function formatEditFailures(failures: readonly EditFailure[], editCount: number)
     const single = (withExcerpt: boolean) =>
       `Workspace edit did not apply and nothing was written: ${failures[0] ? failureText(failures[0], withExcerpt) : 'no match'}.`;
     const detailed = single(true);
-    return (detailed.length <= EDIT_DIAGNOSTIC_MAX_CHARS ? detailed : single(false)).slice(
+    return (fitsDiagnosticBounds(detailed) ? detailed : single(false)).slice(
       0,
       EDIT_DIAGNOSTIC_MAX_CHARS,
     );
@@ -854,7 +878,8 @@ function formatEditFailures(failures: readonly EditFailure[], editCount: number)
   // reasons or source excerpts. Never leave callers guessing which edits failed.
   const available = EDIT_DIAGNOSTIC_MAX_CHARS - header.length - footer.length -
     prefixes.reduce((total, prefix) => total + prefix.length + 1, 0);
-  const granted = grantExcerpts(failures, available);
+  const frame = header + footer + prefixes.join('') + '.'.repeat(failures.length);
+  const granted = grantExcerpts(failures, available, EDIT_DIAGNOSTIC_MAX_BODY_BYTES - encodedBytes(frame));
   const reasons = failures.map((failure, index) => failureText(failure, granted[index]));
   const reasonLength = reasons.reduce((total, reason) => total + reason.length, 0);
   const reasonLimit = reasonLength <= available ? Infinity : Math.floor(available / failures.length);

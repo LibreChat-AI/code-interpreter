@@ -906,3 +906,32 @@ test('quoted text escapes line separators so every batch edit stays on one line'
   assert.match(lines[2], /^Edit 2: /);
   assert.deepEqual(excerptOf(lines[1])?.rows, [`1|!const label = "first${separator}second";`]);
 });
+
+function errorBodyBytes(message: string): number {
+  return Buffer.byteLength(JSON.stringify({ error: message, code: 'EDIT_CONFLICT' }));
+}
+
+test('excerpts of multibyte source stay within the 4096-byte error body hosts read', () => {
+  const text = Array.from({ length: 12 }, (_, index) => `名前_${index} = "${'漢字'.repeat(80)}";`).join('\n');
+  const oldText = Array.from({ length: 12 }, (_, index) => `名前_${index} = "changed";`).join('\n');
+  const error = rejection(() => applyTextEdits(text, [{ oldText, newText: 'x' }]));
+  const excerpt = excerptOf(error.message);
+  assert.ok(excerpt != null && excerpt.rows.length >= 1 && excerpt.rows.length < 8);
+  assert.ok(Buffer.byteLength(JSON.stringify(EXCERPT.exec(error.message)![0])) - 2 <= 1_600);
+  assert.ok(errorBodyBytes(error.message) <= 4_096);
+});
+
+test('batch excerpts are granted by encoded size, so escapes cannot overflow the error body', () => {
+  const lines = Array.from({ length: 200 }, (_, index) => `path_${index} = "C:\\\\dir\\\\${'"q"'.repeat(48)}";`);
+  const edits = Array.from({ length: 6 }, (_, index) => ({
+    oldText: lines.slice(index * 20, index * 20 + 8).map((line, offset) => (offset === 3 ? 'changed();' : line)).join('\n'),
+    newText: 'x',
+  }));
+  const error = rejection(() => applyTextEdits(`${lines.join('\n')}\n`, edits));
+  assert.ok(errorBodyBytes(error.message) <= 4_096, String(errorBodyBytes(error.message)));
+  assert.match(error.message, /\nEdit 1: [^\n]*the current text at/);
+  assert.deepEqual(
+    [...error.message.matchAll(/\nEdit (\d+):/g)].map((match) => Number(match[1])),
+    [1, 2, 3, 4, 5, 6],
+  );
+});
