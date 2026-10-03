@@ -64,6 +64,40 @@ components:
               - $ref: '#/components/schemas/ExecutionProfileError'
 
   schemas:
+    WorkspaceToolRequest:
+      type: object
+      description: Workspace tool protocol v1 body; operation-specific fields follow the worker protocol.
+      required: [protocolVersion, operation, workspaceId]
+      properties:
+        protocolVersion: { type: integer, enum: [1] }
+        operation:
+          type: string
+          enum: [list_files, search_text, read_file, write_file, preview_edit, edit_file, execute_command]
+        workspaceId: { type: string }
+      additionalProperties: true
+
+    WorkspaceRequestStatus:
+      type: object
+      required: [requestId, state, workerId, workspaceId, queueWaitMs, cancelRequested]
+      properties:
+        requestId: { type: string }
+        state: { type: string, enum: [queued, admitted, completed, failed, cancelled] }
+        workerId: { type: string }
+        workspaceId: { type: string }
+        workspaceInstanceId: { type: string }
+        worktree: { type: string }
+        queuePosition: { type: integer, minimum: 1 }
+        queueWaitMs: { type: integer, minimum: 0 }
+        executionDeadlineAt: { type: string, format: date-time }
+        cancelRequested: { type: boolean }
+        result: { type: object, additionalProperties: true }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+
     FileRef:
       type: object
       properties:
@@ -312,6 +346,77 @@ components:
           type: string
 
 paths:
+  /workspace-tools/capabilities:
+    get:
+      summary: Discover opt-in durable workspace request support
+      responses:
+        '200':
+          description: All replicas must support version 1 before a client enables durable submission.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  durableWorkspaceRequests: { type: integer, enum: [0, 1] }
+
+  /workspace-tools/requests:
+    post:
+      summary: Submit an idempotent durable workspace request
+      description: >-
+        Disconnect does not cancel accepted work. IDs and results are retained for 24 hours
+        from acceptance. Never resubmit after that retention window or fall back to synchronous
+        execution after durable acceptance. The execution budget begins after admission.
+      parameters:
+        - $ref: '#/components/parameters/ExpectedExecutionProfile'
+        - in: header
+          name: X-LibreChat-Workspace-Request-Id
+          required: true
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{16,128}$' }
+        - in: header
+          name: X-LibreChat-Workspace-Queue-Wait-Ms
+          schema: { type: integer, minimum: 1, maximum: 300000, default: 30000 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkspaceToolRequest' }
+      responses:
+        '202':
+          description: Accepted, or an identical request with this principal-scoped ID already exists.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceRequestStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { description: Admission capacity or execution rate limit reached }
+        '503': { description: Code environment unavailable }
+
+  /workspace-tools/requests/{requestId}:
+    parameters:
+      - in: path
+        name: requestId
+        required: true
+        schema: { type: string, pattern: '^[A-Za-z0-9_-]{16,128}$' }
+      - $ref: '#/components/parameters/ExpectedExecutionProfile'
+    get:
+      summary: Read a retained workspace request and result without consuming it
+      responses:
+        '200':
+          description: Status scoped to the authenticated tenant and user. ASSIGNMENT_EXPIRED is not proof of non-execution.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceRequestStatus' }
+        '404': { description: Unknown, expired, or another principal's request }
+    delete:
+      summary: Request cancellation of the same logical call
+      responses:
+        '200':
+          description: Cancellation recorded, or terminal status returned. A committed result can win the race.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceRequestStatus' }
+        '404': { description: Unknown, expired, or another principal's request }
+
   /hosted-apps:
     post:
       summary: Start or reassert a resident hosted app

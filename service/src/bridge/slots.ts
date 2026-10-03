@@ -37,6 +37,7 @@ export class BridgeWorkspaceSlots {
     workspaceId: string;
     capacity: number;
     expiresAtMs: number;
+    refreshOwned?: boolean;
   }): Promise<number | undefined> {
     if (
       !Number.isSafeInteger(args.capacity) ||
@@ -83,7 +84,15 @@ export class BridgeWorkspaceSlots {
           "      redis.call('HDEL', KEYS[1], 'a:' .. slot, 'i:' .. slot, 'w:' .. slot, 'e:' .. slot)",
           '      occupied = false',
           '    else',
-          '      if entry[1] == ARGV[2] then return slot end',
+          '      if entry[1] == ARGV[2] then',
+          '        if ARGV[7] == \'1\' then',
+          '          redis.call(\'HSET\', KEYS[1], \'e:\' .. slot, ARGV[5])',
+          '          for _, key in ipairs({KEYS[1], KEYS[2], KEYS[3]}) do',
+          '            if redis.call(\'PTTL\', key) < tonumber(ARGV[5]) - tonumber(ARGV[6]) then redis.call(\'PEXPIREAT\', key, ARGV[5]) end',
+          '          end',
+          '        end',
+          '        return slot',
+          '      end',
           '      busy[entry[3]] = true',
           '      local busyParent = parentOf(entry[3])',
           '      if busyParent then busyChildren[busyParent] = true end',
@@ -133,6 +142,7 @@ export class BridgeWorkspaceSlots {
         args.capacity,
         args.expiresAtMs,
         Date.now(),
+        args.refreshOwned === true ? '1' : '0',
       ),
     );
     if (result === -2)

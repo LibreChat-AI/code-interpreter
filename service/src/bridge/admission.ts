@@ -57,6 +57,44 @@ export class BridgeAdmissionQueue {
     );
   }
 
+  async submit(args: {
+    workerId: string; id: string; deadlineAtMs: number; workspaceId?: string;
+    key: string; activeKey: string; fingerprint: string; record: string; retentionMs: number;
+  }): Promise<'accepted' | 'existing' | 'conflict' | 'full'> {
+    const result = Number(await this.redis.eval([
+      'local fingerprint = redis.call(\'HGET\', KEYS[5], \'fingerprint\')',
+      'if fingerprint then',
+      '  if fingerprint == ARGV[6] then return 2 end',
+      '  return -1',
+      'end',
+      'local expired = redis.call(\'ZRANGEBYSCORE\', KEYS[2], \'-inf\', ARGV[2])',
+      'for _, id in ipairs(expired) do',
+      '  redis.call(\'ZREM\', KEYS[1], id); redis.call(\'ZREM\', KEYS[2], id); redis.call(\'HDEL\', KEYS[4], id)',
+      'end',
+      'if redis.call(\'ZCARD\', KEYS[1]) >= tonumber(ARGV[4]) then return 0 end',
+      'local sequence = redis.call(\'INCR\', KEYS[3])',
+      'redis.call(\'ZADD\', KEYS[1], sequence, ARGV[1])',
+      'redis.call(\'ZADD\', KEYS[2], ARGV[3], ARGV[1])',
+      'if ARGV[5] ~= \'\' then redis.call(\'HSET\', KEYS[4], ARGV[1], ARGV[5]) end',
+      'local latest = redis.call(\'ZREVRANGE\', KEYS[2], 0, 0, \'WITHSCORES\')',
+      'for i = 1, 4 do redis.call(\'PEXPIREAT\', KEYS[i], tonumber(latest[2]) + 30000) end',
+      'redis.call(\'HSET\', KEYS[5], \'record\', ARGV[7], \'fingerprint\', ARGV[6], \'state\', \'queued\', \'queueDeadlineAtMs\', ARGV[3])',
+      'redis.call(\'PEXPIRE\', KEYS[5], ARGV[8])',
+      'redis.call(\'ZADD\', KEYS[6], ARGV[2], KEYS[5])',
+      'return 1',
+    ].join('\n'), 6, ...this.keys(args.workerId), args.key, args.activeKey,
+    args.id, Date.now(), args.deadlineAtMs, this.capacity, args.workspaceId ?? '',
+    args.fingerprint, args.record, args.retentionMs));
+    if (result === 2) return 'existing';
+    if (result === -1) return 'conflict';
+    return result === 1 ? 'accepted' : 'full';
+  }
+
+  async position(workerId: string, id: string): Promise<number | undefined> {
+    const rank = await this.redis.zrank(this.keys(workerId)[0], id);
+    return rank == null ? undefined : rank + 1;
+  }
+
   async isHead(workerId: string, id: string): Promise<boolean> {
     const [order, deadlines, , workspaces] = this.keys(workerId);
     return (

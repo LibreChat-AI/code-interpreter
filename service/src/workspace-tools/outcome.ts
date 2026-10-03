@@ -25,7 +25,7 @@ const earlyErrorCodes: Record<number, string> = {
   500: 'INTERNAL_ERROR',
 };
 
-export function getWorkspaceToolOutcome(res: Response): WorkspaceToolOutcome {
+export function getWorkspaceToolOutcome(res: Response, route = '/workspace-tools/execute'): WorkspaceToolOutcome {
   const existing = outcomes.get(res);
   if (existing != null) return existing;
   const startedAt = performance.now();
@@ -39,7 +39,7 @@ export function getWorkspaceToolOutcome(res: Response): WorkspaceToolOutcome {
       outcomes.delete(res);
       const finished = res.writableFinished;
       logger.log(finished && res.statusCode < 400 ? 'info' : 'warn', 'Workspace tool request completed', {
-        route: '/workspace-tools/execute',
+        route,
         operation: outcome.operation,
         workerId: outcome.workerId,
         status: finished ? res.statusCode : undefined,

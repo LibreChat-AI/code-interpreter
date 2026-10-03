@@ -384,3 +384,48 @@ capabilities.
 LibreChat's owner-scoped environment registry can issue these principal-bound
 pairings without changing the worker execution protocol or moving code tools
 into the Agents SDK.
+
+### Durable workspace requests
+
+New clients can probe authenticated `GET /v1/workspace-tools/capabilities` for
+`durableWorkspaceRequests: 1`. Older servers return 404 or advertise 0. Keep the
+legacy synchronous `/workspace-tools/execute` path for those servers. Do not
+fall back to synchronous execution after submitting durable work.
+
+Submit the same workspace-tool body to `POST /v1/workspace-tools/requests`, with
+`X-LibreChat-Workspace-Request-Id` set to a unique 16–128 character identifier
+(letters, digits, `_`, `-`). The queue-wait header and command timeout retain their
+existing limits. HTTP 202 acknowledges durable acceptance, not execution.
+Disconnecting does not cancel accepted work.
+
+- Repeat an identical submission with the same ID to recover a lost response.
+  An ID reused for different work returns 409 `REQUEST_CONFLICT`.
+- Poll `GET /v1/workspace-tools/requests/:requestId`. States are `queued`,
+  `admitted`, `completed`, `failed`, and `cancelled`. Lookup is tenant/user scoped;
+  unknown or another principal's IDs return 404. Results are non-consuming reads.
+- Cancel with `DELETE /v1/workspace-tools/requests/:requestId`. Cancellation is a
+  request, not proof of termination. A committed result can win the race.
+  `ASSIGNMENT_EXPIRED` means execution may have occurred. Never replay it.
+- Status includes worker/workspace/lane metadata, queue position when available,
+  measured queue wait, and the execution deadline after admission. Queue position
+  is advisory: negotiated independent roots may run concurrently.
+
+Requests and results are retained for 24 hours from acceptance. Idempotency is
+bounded by that retention window. A client must not resubmit an expired ID after
+404; its outcome is unknown. Automatic result claims and wake-ups remain the
+client's responsibility.
+
+API replicas reconcile accepted work from Redis. FIFO admission position survives
+API restarts. Assignment enqueue and the durable `admitted` transition are atomic.
+Recovery resumes only queued work and observes admitted assignments without
+creating another command. Worker identity/incarnation changes fail pending work
+rather than transferring it to another machine. Execution gets its full budget
+after admission. Existing lease fencing, cancellation and workspace quarantine
+continue to apply.
+
+This capability covers workspace tools, including `execute_command`, not
+programmatic `/execute` jobs. It requires Redis state to survive the API restart;
+Redis data loss is not recoverable. All API replicas behind an endpoint must
+support the capability before a client enables it. Roll back clients to the legacy
+path only for new work; drain durable requests before rolling back servers.
+Worker protocol, worker concurrency and deployed rate limits are unchanged.

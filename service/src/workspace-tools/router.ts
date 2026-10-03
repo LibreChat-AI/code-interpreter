@@ -19,6 +19,8 @@ import {
   resolveBridgeWorkerSelection,
 } from '../bridge/selection';
 import { principalWorkspaceInstanceId } from '../bridge/workspace-instance';
+import { WorkspaceRequestConflict } from './requests';
+import type { RedisWorkspaceRequests } from './requests';
 
 const MAX_WORKSPACE_QUEUE_WAIT_MS = 5 * 60_000;
 const DEFAULT_WORKSPACE_QUEUE_WAIT_MS = 30_000;
@@ -26,6 +28,7 @@ const WORKSPACE_QUEUE_WAIT_HEADER = 'X-LibreChat-Workspace-Queue-Wait-Ms';
 
 interface WorkspaceToolsRouterOptions {
   store: Pick<RedisBridgeStore, 'dispatchWorkspaceTool'>;
+  requests?: RedisWorkspaceRequests;
   backend: 'http' | 'lambda-microvm' | 'remote-bridge';
   configuredWorkerId: string;
   dynamicWorkers: boolean;
@@ -68,9 +71,9 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
   const router = Router();
 
   router.post(
-    '/workspace-tools/execute',
+    ['/workspace-tools/execute', '/workspace-tools/requests'],
     asyncRoute(async (req, res) => {
-      const outcome = getWorkspaceToolOutcome(res);
+      const outcome = getWorkspaceToolOutcome(res, req.path);
       const principal = getPrincipalOrReject(req, res);
       if (!principal) {
         outcome.errorCode = 'UNAUTHENTICATED';
@@ -151,6 +154,29 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
       }
       outcome.workerId = selection.workerId;
 
+      if (req.path === '/workspace-tools/requests') {
+        if (options.requests == null) {
+          res.status(404).json({ error: 'Durable workspace requests are unavailable' });
+          return;
+        }
+        try {
+          const status = await options.requests.submit({
+            owner: principal, requestId: req.header('X-LibreChat-Workspace-Request-Id') ?? '',
+            workerId: selection.workerId,
+            requireTenantBinding: selection.explicit && (options.dynamicWorkers || selection.workerId !== options.configuredWorkerId),
+            request, queueWaitMs: queueBudgetMs, executionTimeoutMs: executionBudgetMs,
+          });
+          res.status(202).json(status);
+        } catch (error) {
+          if (error instanceof WorkspaceRequestConflict) {
+            res.status(409).json({ error: error.message, code: 'REQUEST_CONFLICT' });
+          } else if (error instanceof BridgeStoreError) {
+            res.status(bridgeStoreStatus(error)).json({ error: error.message, code: error.code });
+          } else throw error;
+        }
+        return;
+      }
+
       const controller = new AbortController();
       const abort = (): void => controller.abort();
       req.once('aborted', abort);
@@ -222,6 +248,23 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
       }
     }),
   );
+
+  router.get('/workspace-tools/capabilities', asyncRoute(async (req, res) => {
+    if (!getPrincipalOrReject(req, res)) return;
+    res.json({ durableWorkspaceRequests: options.requests != null ? 1 : 0 });
+  }));
+
+  const requestStatus = (cancel: boolean): RequestHandler => asyncRoute(async (req, res) => {
+    const principal = getPrincipalOrReject(req, res);
+    if (!principal) return;
+    const status = cancel
+      ? await options.requests?.cancel(principal, req.params.requestId)
+      : await options.requests?.get(principal, req.params.requestId);
+    if (status == null) { res.status(404).json({ error: 'Workspace request not found' }); return; }
+    res.json(status);
+  });
+  router.get('/workspace-tools/requests/:requestId', requestStatus(false));
+  router.delete('/workspace-tools/requests/:requestId', requestStatus(true));
 
   return router;
 }
