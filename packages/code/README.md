@@ -729,9 +729,10 @@ native SRT command backend. This operator switch controls availability;
 LibreChat tool approval hooks remain the user-facing allow/deny boundary for
 each invocation.
 
-Reads reject absolute paths, traversal, escaping symlinks, non-regular files,
-and files larger than 1 MiB. The opened file is checked against its canonical
-in-workspace inode before it is read. Text search uses `rg` only to enumerate a
+Reads reject absolute paths, traversal, escaping symlinks, and non-regular files.
+The opened file is checked against its canonical in-workspace inode before it is
+read. Ordinary reads stream bounded line windows even from files larger than 1 MiB;
+see the [read contract](WORKSPACE-READS.md). Text search uses `rg` only to enumerate a
 bounded set of ignored-aware candidates with configuration and symlink following
 disabled. It then opens and verifies each candidate through the same confined
 1 MiB read boundary before matching locally. File listing invokes `rg` without

@@ -133,6 +133,8 @@ const MAX_SEARCH_CANDIDATE_BYTES = 1024 * 1024;
 const MAX_SEARCH_CANDIDATES = 20_000;
 const SEARCH_TIMEOUT_MS = 10_000;
 const LIST_TIMEOUT_MS = 10_000;
+const READ_TIMEOUT_MS = 10_000;
+const READ_CHUNK_BYTES = 64 * 1024;
 
 const READ_OPERATIONS = [
   'read_file',
@@ -273,10 +275,11 @@ function resolveWorkspacePath(root: string, requestedPath: string): string {
   return candidate;
 }
 
-async function readConfinedFileBuffer(
+async function withConfinedFile<T>(
   root: string,
   requestedPath: string,
-): Promise<Buffer> {
+  read: (handle: FileHandle, size: number) => Promise<T>,
+): Promise<T> {
   const candidate = resolveWorkspacePath(root, requestedPath);
   let handle: FileHandle | undefined;
   try {
@@ -297,7 +300,24 @@ async function readConfinedFileBuffer(
     ) {
       throw new Error('Invalid workspace path');
     }
-    if (openedFile.size > BRIDGE_WORKSPACE_READ_MAX_BYTES) {
+    return await read(handle, openedFile.size);
+  } catch (error) {
+    if (error instanceof WorkspaceToolError) throw error;
+    if (isMissingEntry(error)) {
+      throw await classifyMissingWorkspacePath(root, candidate);
+    }
+    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function readConfinedFileBuffer(
+  root: string,
+  requestedPath: string,
+): Promise<Buffer> {
+  return withConfinedFile(root, requestedPath, async (handle, size) => {
+    if (size > BRIDGE_WORKSPACE_READ_MAX_BYTES) {
       throw new WorkspaceToolError(
         'Workspace file exceeds read limit',
         'READ_LIMIT_EXCEEDED',
@@ -322,31 +342,199 @@ async function readConfinedFileBuffer(
       );
     }
     return buffer.subarray(0, bytesRead);
-  } catch (error) {
-    if (error instanceof WorkspaceToolError) throw error;
-    if (isMissingEntry(error)) {
-      throw await classifyMissingWorkspacePath(root, candidate);
-    }
-    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  });
+}
+
+function checkReadDeadline(
+  signal: AbortSignal | undefined,
+  deadline: number,
+): void {
+  throwIfAborted(signal);
+  if (performance.now() >= deadline) {
+    throw new WorkspaceToolError(
+      'Workspace read exceeded its scan time limit; request an earlier startLine or use search_text to locate content',
+      'READ_LIMIT_EXCEEDED',
+    );
+  }
+}
+
+async function readWorkspaceChunk(
+  handle: FileHandle,
+  buffer: Buffer,
+  length: number,
+  position: number,
+  signal: AbortSignal | undefined,
+  deadline: number,
+): Promise<number> {
+  checkReadDeadline(signal, deadline);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      handle
+        .read(buffer, 0, length, position)
+        .then((result) => result.bytesRead),
+      new Promise<never>((_, reject) => {
+        abort = () =>
+          reject(
+            new WorkspaceToolError(
+              'Workspace tool execution aborted',
+              'EXECUTION_ABORTED',
+            ),
+          );
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) abort();
+        timer = setTimeout(
+          () =>
+            reject(
+              new WorkspaceToolError(
+                'Workspace read exceeded its scan time limit; retry with an earlier startLine',
+                'READ_LIMIT_EXCEEDED',
+              ),
+            ),
+          Math.max(0, deadline - performance.now()),
+        );
+      }),
+    ]);
   } finally {
-    await handle?.close();
+    if (timer !== undefined) clearTimeout(timer);
+    if (abort) signal?.removeEventListener('abort', abort);
   }
 }
 
 async function readConfinedFile(
   root: string,
-  requestedPath: string,
-): Promise<string> {
-  const decoded = decodeWorkspaceText(
-    await readConfinedFileBuffer(root, requestedPath),
-  );
-  if (Buffer.byteLength(decoded, 'utf8') > BRIDGE_WORKSPACE_READ_MAX_BYTES) {
-    throw new WorkspaceToolError(
-      'Workspace file exceeds read limit',
-      'READ_LIMIT_EXCEEDED',
+  request: WorkspaceReadFileRequest,
+  signal?: AbortSignal,
+): Promise<WorkspaceReadFileResult> {
+  const startLine = request.startLine ?? 1;
+  const maxLines = request.maxLines ?? 200;
+  const deadline = performance.now() + READ_TIMEOUT_MS;
+  return withConfinedFile(root, request.path, async (handle, size) => {
+    const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+    // Fix the read extent at admission so an appending writer cannot extend the scan.
+    let position = 0;
+    const header = Buffer.alloc(3);
+    let headerBytes = 0;
+    while (headerBytes < header.length && position < size) {
+      const bytes = await readWorkspaceChunk(
+        handle,
+        buffer,
+        Math.min(header.length - headerBytes, size - position),
+        position,
+        signal,
+        deadline,
+      );
+      checkReadDeadline(signal, deadline);
+      if (bytes === 0) break;
+      buffer.copy(header, headerBytes, 0, bytes);
+      headerBytes += bytes;
+      position += bytes;
+    }
+    const utf16le =
+      headerBytes >= 2 && header[0] === 0xff && header[1] === 0xfe;
+    const utf16be =
+      headerBytes >= 2 && header[0] === 0xfe && header[1] === 0xff;
+    const bomBytes =
+      utf16le || utf16be
+        ? 2
+        : headerBytes === 3 &&
+          header[0] === 0xef &&
+          header[1] === 0xbb &&
+          header[2] === 0xbf
+        ? 3
+        : 0;
+    // Preserve ordinary reads' replacement decoding and BOM-marked UTF-16 support.
+    const decoder = new TextDecoder(
+      utf16le ? 'utf-16le' : utf16be ? 'utf-16be' : 'utf-8',
+      { ignoreBOM: true },
     );
-  }
-  return decoded;
+    const lines: string[] = [];
+    let fragments: string[] = [];
+    let line = 1;
+    let lineBytes = 0;
+    let returnedBytes = 0;
+    let hasText = false;
+    let truncated = false;
+    const consume = (text: string): void => {
+      let offset = 0;
+      while (offset < text.length) {
+        checkReadDeadline(signal, deadline);
+        const newline = text.indexOf('\n', offset);
+        const end = newline < 0 ? text.length : newline;
+        if (line >= startLine) {
+          if (lines.length === maxLines) {
+            truncated = true;
+            return;
+          }
+          const fragment = text.slice(offset, end);
+          const bytes = Buffer.byteLength(fragment, 'utf8');
+          if (
+            returnedBytes + (lines.length > 0 ? 1 : 0) + lineBytes + bytes >
+            BRIDGE_WORKSPACE_READ_MAX_BYTES
+          ) {
+            if (lines.length === 0) {
+              throw new WorkspaceToolError(
+                `Workspace file exceeds read limit: line ${line} cannot fit within ${BRIDGE_WORKSPACE_READ_MAX_BYTES} UTF-8 bytes; request a later startLine or use search_text`,
+                'READ_LIMIT_EXCEEDED',
+              );
+            }
+            truncated = true;
+            return;
+          }
+          if (fragment.length > 0) fragments.push(fragment);
+          lineBytes += bytes;
+        }
+        hasText ||= end > offset;
+        if (newline < 0) return;
+        if (line >= startLine) {
+          lines.push(fragments.join(''));
+          returnedBytes += (lines.length > 1 ? 1 : 0) + lineBytes;
+          fragments = [];
+          lineBytes = 0;
+        }
+        line += 1;
+        hasText = false;
+        offset = newline + 1;
+      }
+    };
+    consume(
+      decoder.decode(header.subarray(bomBytes, headerBytes), { stream: true }),
+    );
+    while (!truncated && position < size) {
+      const bytes = await readWorkspaceChunk(
+        handle,
+        buffer,
+        Math.min(buffer.length, size - position),
+        position,
+        signal,
+        deadline,
+      );
+      checkReadDeadline(signal, deadline);
+      if (bytes === 0) break;
+      position += bytes;
+      consume(decoder.decode(buffer.subarray(0, bytes), { stream: true }));
+    }
+    if (!truncated) {
+      consume(decoder.decode());
+      if (!truncated && line >= startLine && (hasText || line === 1)) {
+        lines.push(fragments.join(''));
+      }
+    }
+    checkReadDeadline(signal, deadline);
+    const endLine = startLine + lines.length - 1;
+    return {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'read_file',
+      workspaceId: request.workspaceId,
+      path: request.path,
+      content: lines.join('\n'),
+      startLine,
+      endLine,
+      truncated,
+      ...(truncated ? { nextStartLine: endLine + 1 } : {}),
+    };
+  });
 }
 
 interface WorkspaceRoot {
@@ -1831,31 +2019,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     ) {
       throw new WorkspaceToolError('Invalid workspace read', 'INVALID_REQUEST');
     }
-    const content = await readConfinedFile(root, request.path);
-    if (signal?.aborted) {
-      throw new WorkspaceToolError(
-        'Workspace tool execution aborted',
-        'EXECUTION_ABORTED',
-      );
-    }
-    const lines = content.endsWith('\n')
-      ? content.slice(0, -1).split('\n')
-      : content.split('\n');
-    const selected = lines.slice(startLine - 1, startLine - 1 + maxLines);
-    const endLine = startLine + selected.length - 1;
-    const truncated = endLine < lines.length;
-
-    return {
-      protocolVersion: BRIDGE_PROTOCOL_VERSION,
-      operation: 'read_file',
-      workspaceId: request.workspaceId,
-      path: request.path,
-      content: selected.join('\n'),
-      startLine,
-      endLine,
-      truncated,
-      ...(truncated ? { nextStartLine: endLine + 1 } : {}),
-    };
+    return readConfinedFile(root, request, signal);
   }
 }
 
