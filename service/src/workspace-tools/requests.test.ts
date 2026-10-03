@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import RedisMock from 'ioredis-mock';
 import Redis from 'ioredis';
 import { RedisBridgeStore } from '../bridge/store';
+import { BridgeAdmissionQueue } from '../bridge/admission';
 import type { CodeBridgeAssignment } from '../bridge/store';
 import { RedisWorkspaceRequests } from './requests';
 import { workspaceRequestCoordinationScope } from './coordination';
@@ -82,16 +83,20 @@ test('submission is idempotent across replicas, scoped by principal, and conflic
 test('restart before dispatch preserves the queue and starts a full execution budget after sixty seconds waiting', async () => {
   const requests = await setup();
   await submit(requests);
-  const clock = spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+  const key = (await redis.zrange(activeKey, 0, -1))[0];
+  await mutateRecord(record => {
+    record.createdAtMs = Number(record.createdAtMs) - 60_000;
+    record.queueDeadlineAtMs = Number(record.queueDeadlineAtMs) - 60_000;
+  });
+  const record = JSON.parse((await redis.hget(key, 'record'))!);
+  await redis.hset(key, 'queueDeadlineAtMs', record.queueDeadlineAtMs);
   const restarted = new RedisWorkspaceRequests(redis, new RedisBridgeStore(redis));
-  let assignment: CodeBridgeAssignment | undefined;
-  try {
-    await tick(restarted);
-    assignment = await bridge.lease(workerId, incarnationId, 0);
-    expect(assignment).toBeDefined();
-    expect(assignment!.remainingMs).toBeGreaterThan(29_000);
-    expect((await restarted.get(owner, requestId))?.queueWaitMs).toBeGreaterThanOrEqual(60_000);
-  } finally { clock.mockRestore(); }
+  await tick(restarted);
+  const assignment = await bridge.lease(workerId, incarnationId, 0);
+  expect(assignment).toBeDefined();
+  expect(assignment!.remainingMs).toBeGreaterThan(29_000);
+  // Mock Redis TIME has subsecond clock skew. Execution still receives its full budget.
+  expect((await restarted.get(owner, requestId))?.queueWaitMs).toBeGreaterThan(59_000);
   await settle(assignment!);
   await tick(restarted);
   expect(await restarted.get(owner, requestId)).toMatchObject({ state: 'completed', result: { content: 'hello' } });
@@ -205,14 +210,16 @@ test.each([1, 2])('restart after capacity reservation refreshes its own reservat
   expect(await redis.pttl(`codeapi:bridge:v1:worker:${workerId}:lock`)).toBeGreaterThan(30_000);
 });
 
-test('a stale coordinator cannot dispatch or overwrite a newer claim', async () => {
-  const requests = await setup(); await submit(requests);
+test.each([1, 2])('a stale coordinator cannot acquire capacity or dispatch (slots=%s)', async slots => {
+  const requests = await setup(slots); await submit(requests);
   const key = (await redis.zrange(activeKey, 0, -1))[0];
   const record = JSON.parse((await redis.hget(key, 'record'))!);
   await redis.set(`${key}:claim`, 'new-owner', 'PX', 10000);
   await bridge.advanceDurableWorkspaceTool(record, { key, claimKey: `${key}:claim`, token: 'old-owner' });
   expect(await bridge.lease(workerId, incarnationId, 0)).toBeUndefined();
   expect((await requests.get(owner, requestId))?.state).toBe('queued');
+  expect(await redis.get(`codeapi:bridge:v1:worker:${workerId}:lock`)).toBeNull();
+  expect(await redis.hlen(`codeapi:bridge:v1:worker:${workerId}:workspace-slots`)).toBe(0);
 });
 
 test('a queued deadline expires as definitely unstarted work', async () => {
@@ -382,4 +389,112 @@ test('a different policy cannot claim or fail work accepted by a two-slot bridge
   await restarted.reconcile();
   const assignment = await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0);
   expect(assignment).toBeDefined();
+});
+
+test('a late FIFO response cannot relock a cancelled request after the coordinator timed out', async () => {
+  const requests = await setup(); await submit(requests);
+  let release!: () => void;
+  let entered!: () => void;
+  let finished!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const drained = new Promise<void>(resolve => { finished = resolve; });
+  const originalHead = BridgeAdmissionQueue.prototype.isHead;
+  const originalAdvance = bridge.advanceDurableWorkspaceTool.bind(bridge);
+  const head = spyOn(BridgeAdmissionQueue.prototype, 'isHead').mockImplementation(async (worker, id) => {
+    const result = await originalHead.call(new BridgeAdmissionQueue(redis), worker, id);
+    entered(); await gate; return result;
+  });
+  const advance = spyOn(bridge, 'advanceDurableWorkspaceTool').mockImplementation(async (...args) => {
+    try { return await originalAdvance(...args); } finally { finished(); }
+  });
+  const pending = tick(requests);
+  void pending.catch(() => undefined);
+  try {
+    await started;
+    await expect(pending).rejects.toThrow('Durable workspace transition timed out');
+    head.mockRestore(); advance.mockRestore();
+    const key = (await redis.zrange(activeKey, 0, -1))[0];
+    const claimDeadline = Date.now() + 1000;
+    while (await redis.get(`${key}:claim`) != null) {
+      if (Date.now() >= claimDeadline) throw new Error('Timed-out coordinator did not release its claim');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    await requests.cancel(owner, requestId);
+    await tick(new RedisWorkspaceRequests(redis, bridge));
+    expect((await requests.get(owner, requestId))?.state).toBe('cancelled');
+    expect(await redis.zcard(activeKey)).toBe(0);
+    release(); await drained;
+    expect(await redis.get(`codeapi:bridge:v1:worker:${workerId}:lock`)).toBeNull();
+    await submit(requests, 'request-00000000002'); await tick(requests);
+    expect(await bridge.lease(workerId, incarnationId, 0)).toBeDefined();
+  } finally { release(); head.mockRestore(); advance.mockRestore(); await drained; }
+}, 15_000);
+
+test.each([1, 2])('Redis capacity writes delayed past cancellation cannot strand a reservation (slots=%s)', async slots => {
+  const requests = await setup(slots); await submit(requests);
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const original = redis.eval.bind(redis);
+  let held = false;
+  const delay = spyOn(redis, 'eval').mockImplementation((async (...args: Parameters<Redis['eval']>) => {
+    const script = String(args[0]);
+    if (!held && script.includes('local admissionTime') && !script.includes('local keyCount')) {
+      held = true; entered(); await gate;
+    }
+    return original(...args);
+  }) as Redis['eval']);
+  const pending = tick(requests);
+  void pending.catch(() => undefined);
+  try {
+    await started;
+    const key = (await redis.zrange(activeKey, 0, -1))[0];
+    // Expire this claim while its Redis command is still undelivered.
+    await redis.del(`${key}:claim`);
+    await requests.cancel(owner, requestId);
+    await tick(new RedisWorkspaceRequests(redis, bridge));
+    expect((await requests.get(owner, requestId))?.state).toBe('cancelled');
+    release(); await pending;
+    expect(await redis.get(`codeapi:bridge:v1:worker:${workerId}:lock`)).toBeNull();
+    expect(await redis.hlen(`codeapi:bridge:v1:worker:${workerId}:workspace-slots`)).toBe(0);
+    expect(await redis.zcard(activeKey)).toBe(0);
+  } finally { release(); delay.mockRestore(); await pending.catch(() => undefined); }
+});
+
+test.each([1, 2])('a durable enqueue refuses lost capacity ownership (slots=%s)', async slots => {
+  const requests = await setup(slots); await submit(requests);
+  const original = redis.eval.bind(redis);
+  const loss = spyOn(redis, 'eval').mockImplementation((async (...args: Parameters<Redis['eval']>) => {
+    if (String(args[0]).includes('local keyCount')) {
+      await redis.del(`codeapi:bridge:v1:worker:${workerId}:lock`,
+        `codeapi:bridge:v1:worker:${workerId}:workspace-slots`);
+    }
+    return original(...args);
+  }) as Redis['eval']);
+  try { await tick(requests); } finally { loss.mockRestore(); }
+  expect((await requests.get(owner, requestId))?.state).toBe('queued');
+  expect(await bridge.lease(workerId, incarnationId, 0, undefined, undefined, slots === 1 ? undefined : 0)).toBeUndefined();
+  await tick(requests);
+  expect(await bridge.lease(workerId, incarnationId, 0, undefined, undefined, slots === 1 ? undefined : 0)).toBeDefined();
+});
+
+test.each([1, 2])('capacity acquisition rejects terminal, cancelled, expired, and unclaimed requests (slots=%s)', async slots => {
+  for (const denial of ['terminal', 'cancelled', 'expired', 'unclaimed']) {
+    await redis.flushall();
+    const requests = await setup(slots); await submit(requests);
+    const key = (await redis.zrange(activeKey, 0, -1))[0];
+    const record = JSON.parse((await redis.hget(key, 'record'))!);
+    const token = 'current-coordinator';
+    await redis.set(`${key}:claim`, token, 'PX', 10000);
+    if (denial === 'terminal') await redis.hset(key, 'state', 'cancelled');
+    if (denial === 'cancelled') await redis.hset(key, 'cancelRequested', '1');
+    if (denial === 'expired') await redis.hset(key, 'queueDeadlineAtMs', Date.now() - 2000);
+    if (denial === 'unclaimed') await redis.del(`${key}:claim`);
+    await bridge.advanceDurableWorkspaceTool(record, { key, claimKey: `${key}:claim`, token });
+    expect(await redis.get(`codeapi:bridge:v1:worker:${workerId}:lock`)).toBeNull();
+    expect(await redis.hlen(`codeapi:bridge:v1:worker:${workerId}:workspace-slots`)).toBe(0);
+    expect(await bridge.lease(workerId, incarnationId, 0, undefined, undefined, slots === 1 ? undefined : 0)).toBeUndefined();
+  }
 });

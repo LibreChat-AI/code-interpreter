@@ -21,7 +21,7 @@ import {
     workspaceIsolationParent,
 } from '../../../packages/code/src/protocol';
 import type { BridgeWorkerBinding } from './pairing';
-import { BridgeAdmissionQueue } from './admission';
+import { BridgeAdmissionQueue, durableAdmissionFence } from './admission';
 import { BridgeWorkspaceSlots } from './slots';
 import type { StoredWorkspaceRequest } from '../workspace-tools/requests';
 
@@ -843,10 +843,10 @@ export class RedisBridgeStore {
         slot = await new BridgeWorkspaceSlots(this.redis).reserve({
           workerId: record.workerId, incarnationId: registration.incarnationId,
           assignmentId: record.id, workspaceId: workspace, capacity,
-          expiresAtMs: Date.now() + ttlSeconds * 1000, refreshOwned: true,
+          expiresAtMs: Date.now() + ttlSeconds * 1000, refreshOwned: true, guard,
         });
         if (slot === undefined) return;
-      } else if (!await this.acquireLock(record.workerId, record.id, registration.incarnationId, ttlSeconds, true)) return;
+      } else if (!await this.acquireLock(record.workerId, record.id, registration.incarnationId, ttlSeconds, true, guard)) return;
       if (Date.now() >= record.queueDeadlineAtMs) return {
         state: 'failed', error: { code: 'WORKSPACE_QUEUE_TIMEOUT', message: 'Workspace admission deadline expired. The operation was not started.' },
       };
@@ -2382,10 +2382,13 @@ export class RedisBridgeStore {
     const script = [
       'local keyCount = tonumber(ARGV[10])',
       ...(guard == null ? [] : [
-        'if redis.call(\'GET\', KEYS[keyCount + 2]) ~= ARGV[11] then return -2 end',
-        'if redis.call(\'HGET\', KEYS[keyCount + 1], \'state\') ~= \'queued\' then return -2 end',
-        'if redis.call(\'HGET\', KEYS[keyCount + 1], \'cancelRequested\') == \'1\' then return -2 end',
-        'if tonumber(redis.call(\'HGET\', KEYS[keyCount + 1], \'queueDeadlineAtMs\')) <= tonumber(ARGV[12]) then return -2 end',
+        ...durableAdmissionFence('KEYS[keyCount + 1]', 'KEYS[keyCount + 2]', 'ARGV[11]', -2),
+        ...(assignment.workspaceLeaseSlot === undefined
+          ? ['if redis.call(\'GET\', KEYS[keyCount + 3]) ~= ARGV[4] or redis.call(\'GET\', KEYS[4]) ~= ARGV[1] then return -2 end']
+          : [
+            `if redis.call('HGET', KEYS[keyCount + 3], 'a:${assignment.workspaceLeaseSlot}') ~= ARGV[4] then return -2 end`,
+            `if redis.call('HGET', KEYS[keyCount + 3], 'i:${assignment.workspaceLeaseSlot}') ~= ARGV[1] then return -2 end`,
+          ]),
       ]),
       "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
       'if ARGV[7] ~= "" and redis.call(\'GET\', KEYS[6]) ~= ARGV[7] then return 0 end',
@@ -2408,13 +2411,13 @@ export class RedisBridgeStore {
       "if ARGV[9] == 'lane' then redis.call('SADD', KEYS[11], KEYS[7]) end",
       'if keyCount >= 9 then',
       "  local epoch = redis.call('GET', KEYS[9])",
-      '  if type(epoch) ~= \'string\' then epoch = \'0\'; redis.call(\'SET\', KEYS[9], epoch, \'EX\', ARGV[13]) end',
-      '  if redis.call(\'PTTL\', KEYS[9]) < tonumber(ARGV[13]) * 1000 then redis.call(\'EXPIRE\', KEYS[9], ARGV[13]) end',
+      '  if type(epoch) ~= \'string\' then epoch = \'0\'; redis.call(\'SET\', KEYS[9], epoch, \'EX\', ARGV[12]) end',
+      '  if redis.call(\'PTTL\', KEYS[9]) < tonumber(ARGV[12]) * 1000 then redis.call(\'EXPIRE\', KEYS[9], ARGV[12]) end',
       "  redis.call('HSET', KEYS[8], 'metadata', ARGV[8], 'epoch', epoch)",
-      '  redis.call(\'EXPIRE\', KEYS[8], ARGV[13])',
+      '  redis.call(\'EXPIRE\', KEYS[8], ARGV[12])',
       'end',
       ...(guard == null ? [] : [
-        'redis.call(\'HSET\', KEYS[keyCount + 1], \'state\', \'admitted\', \'assignment\', ARGV[2], \'admittedAtMs\', ARGV[12])',
+        'redis.call(\'HSET\', KEYS[keyCount + 1], \'state\', \'admitted\', \'assignment\', ARGV[2], \'admittedAtMs\', admissionNowMs)',
       ]),
       'return 1',
     ].join('\n');
@@ -2474,7 +2477,9 @@ export class RedisBridgeStore {
       }
     }
     const keyCount = keys.length;
-    if (guard != null) keys.push(guard.key, guard.claimKey);
+    if (guard != null) keys.push(guard.key, guard.claimKey,
+      assignment.workspaceLeaseSlot === undefined ? lockKey(assignment.workerId)
+        : `${workerKey(assignment.workerId)}:workspace-slots`);
     const result = await this.redis.eval(
       script,
       keys.length,
@@ -2490,7 +2495,6 @@ export class RedisBridgeStore {
       fenceScope,
       keyCount,
       guard?.token ?? '',
-      Date.now(),
       guard == null ? ttlSeconds : 86400,
     );
     if (Number(result) === -1) {
@@ -2508,23 +2512,30 @@ export class RedisBridgeStore {
     incarnationId: string,
     ttlSeconds: number,
     reuseOwned = false,
+    guard?: DurableWorkspaceGuard,
   ): Promise<boolean> {
     const script = [
+      ...(guard == null ? [] : [
+        ...durableAdmissionFence('KEYS[3]', 'KEYS[4]', 'ARGV[5]', 0),
+        'if redis.call(\'GET\', KEYS[5]) ~= ARGV[2] then return 0 end',
+      ]),
       'if ARGV[4] == \'1\' and redis.call(\'GET\', KEYS[1]) == ARGV[1] and redis.call(\'GET\', KEYS[2]) == ARGV[2] then redis.call(\'PEXPIRE\', KEYS[1], ARGV[3]); redis.call(\'PEXPIRE\', KEYS[2], ARGV[3]); return 1 end',
       'if redis.call(\'EXISTS\', KEYS[1]) == 1 then return 0 end',
       'redis.call(\'SET\', KEYS[1], ARGV[1], \"PX\", ARGV[3])',
       'redis.call(\'SET\', KEYS[2], ARGV[2], \"PX\", ARGV[3])',
       'return 1',
     ].join('\n');
+    const keys = [lockKey(workerId), lockIncarnationKey(workerId)];
+    if (guard != null) keys.push(guard.key, guard.claimKey, workerIncarnationKey(workerId));
     const result = await this.redis.eval(
       script,
-      2,
-      lockKey(workerId),
-      lockIncarnationKey(workerId),
+      keys.length,
+      ...keys,
       assignmentId,
       incarnationId,
       String(ttlSeconds * 1000),
       reuseOwned ? '1' : '0',
+      guard?.token ?? '',
     );
     return Number(result) === 1;
   }

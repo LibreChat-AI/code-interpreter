@@ -1,5 +1,22 @@
 import type Redis from 'ioredis';
 
+/** Redis time and claim ownership gate every durable admission mutation. */
+export function durableAdmissionFence(
+  requestKey: string,
+  claimKey: string,
+  token: string,
+  rejected: number,
+): string[] {
+  return [
+    `if redis.call('GET', ${claimKey}) ~= ${token} then return ${rejected} end`,
+    `if redis.call('HGET', ${requestKey}, 'state') ~= 'queued' then return ${rejected} end`,
+    `if redis.call('HGET', ${requestKey}, 'cancelRequested') == '1' then return ${rejected} end`,
+    'local admissionTime = redis.call(\'TIME\')',
+    'local admissionNowMs = tonumber(admissionTime[1]) * 1000.0 + math.floor(tonumber(admissionTime[2]) / 1000)',
+    `if tonumber(redis.call('HGET', ${requestKey}, 'queueDeadlineAtMs')) <= admissionNowMs then return ${rejected} end`,
+  ];
+}
+
 /** Bounded FIFO admission shared by API replicas. Entries expire after caller deadlines. */
 export class BridgeAdmissionQueue {
   constructor(

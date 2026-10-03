@@ -1,4 +1,5 @@
 import type Redis from 'ioredis';
+import { durableAdmissionFence } from './admission';
 
 /** Hard bound keeps every atomic scheduling scan constant-sized. */
 export const MAX_WORKSPACE_LEASE_SLOTS = 8;
@@ -38,6 +39,7 @@ export class BridgeWorkspaceSlots {
     capacity: number;
     expiresAtMs: number;
     refreshOwned?: boolean;
+    guard?: { key: string; claimKey: string; token: string };
   }): Promise<number | undefined> {
     if (
       !Number.isSafeInteger(args.capacity) ||
@@ -49,9 +51,12 @@ export class BridgeWorkspaceSlots {
     ) {
       throw new Error('Invalid workspace slot reservation');
     }
+    const keys = this.keys(args.workerId);
+    if (args.guard != null) keys.push(args.guard.key, args.guard.claimKey);
     const result = Number(
       await this.redis.eval(
         [
+          ...(args.guard == null ? [] : durableAdmissionFence('KEYS[9]', 'KEYS[10]', 'ARGV[8]', -3)),
           "if redis.call('GET', KEYS[4]) ~= ARGV[1] then return -2 end",
           "if (redis.call('GET', KEYS[8]) or '1') ~= ARGV[4] then return -2 end",
           // Parent of a linked-worktree lane key; nil for a checkout key.
@@ -134,8 +139,8 @@ export class BridgeWorkspaceSlots {
           "redis.call('SET', KEYS[3], ARGV[1], 'PXAT', latest)",
           'return free',
         ].join('\n'),
-        8,
-        ...this.keys(args.workerId),
+        keys.length,
+        ...keys,
         args.incarnationId,
         args.assignmentId,
         args.workspaceId,
@@ -143,6 +148,7 @@ export class BridgeWorkspaceSlots {
         args.expiresAtMs,
         Date.now(),
         args.refreshOwned === true ? '1' : '0',
+        args.guard?.token ?? '',
       ),
     );
     if (result === -2)

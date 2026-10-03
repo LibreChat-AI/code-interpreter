@@ -421,7 +421,10 @@ claim that work. Keep backend/profile, bridge auth mode, worker selection, slot
 ceiling and command-timeout policy identical on replicas behind one endpoint.
 Drain durable requests before changing those settings. FIFO admission position
 survives API restarts and temporary worker registration/readiness loss until the
-queue deadline. Assignment enqueue and the durable `admitted` transition are atomic.
+queue deadline. Capacity acquisition and assignment enqueue atomically check the coordinator
+claim, queued state, cancellation and admission deadline. Delayed callbacks
+cannot reserve capacity after their claim ends. Assignment enqueue also checks
+capacity ownership and atomically commits the durable `admitted` transition.
 Recovery resumes only queued work and observes admitted assignments without
 creating another command. Worker identity/incarnation changes fail pending work
 rather than transferring it to another machine. Execution gets its full budget
