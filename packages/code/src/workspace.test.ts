@@ -15,6 +15,7 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
@@ -28,6 +29,7 @@ import {
   SandboxWorkspaceTools,
   WorkspaceToolError,
 } from './workspace.js';
+import { captureWorkspaceRootIdentity } from './root-identity.js';
 
 import {
   BRIDGE_WORKSPACE_COMMAND_MAX_BYTES,
@@ -1771,13 +1773,19 @@ test('writes reject symlink targets and symlinked parent directories', async (t)
   assert.deepEqual(await readdir(join(root, 'real-directory')), []);
 });
 
-test('writes create missing parent directories inside the workspace', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+async function heldRootTools(root: string): Promise<LocalWorkspaceTools> {
+  return LocalWorkspaceTools.create({
+    workspaces: [
+      { id: 'primary', root, identity: await captureWorkspaceRootIdentity(root), writable: true },
+    ],
+  });
+}
+
+test('writes create missing parent directories inside a held workspace root', async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-workspace-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'src'));
-  const tools = await LocalWorkspaceTools.create({
-    workspaces: [{ id: 'primary', root, writable: true }],
-  });
+  const tools = await heldRootTools(root);
 
   for (const [path, overwrite] of [
     ['src/feature/deep/new.ts', undefined],
@@ -1805,21 +1813,23 @@ test('writes create missing parent directories inside the workspace', async (t) 
 });
 
 test('parent creation never follows symlinks, crosses files, or leaves the workspace', async (t) => {
-  const parent = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-parent-'));
+  const parent = await realpath(
+    await mkdtemp(join(tmpdir(), 'librechat-code-workspace-parent-')),
+  );
   t.after(() => rm(parent, { recursive: true, force: true }));
   const root = join(parent, 'root');
   const outside = join(parent, 'outside');
-  await mkdir(root);
+  await mkdir(join(root, 'src'), { recursive: true });
   await mkdir(outside);
   await writeFile(join(root, 'file.txt'), 'file');
   await symlink(outside, join(root, 'linked-outside'));
+  await symlink(join(root, 'src'), join(root, 'alias'));
   await symlink(join(parent, 'missing-target'), join(root, 'dangling'));
-  const tools = await LocalWorkspaceTools.create({
-    workspaces: [{ id: 'primary', root, writable: true }],
-  });
+  const tools = await heldRootTools(root);
 
   for (const [path, code] of [
     ['linked-outside/new/notes.txt', 'INVALID_PATH'],
+    ['alias/new/notes.txt', 'INVALID_PATH'],
     ['dangling/new/notes.txt', 'INVALID_PATH'],
     ['file.txt/new/notes.txt', 'INVALID_PATH'],
     ['../outside/new/notes.txt', 'INVALID_REQUEST'],
@@ -1841,8 +1851,68 @@ test('parent creation never follows symlinks, crosses files, or leaves the works
     );
   }
   assert.deepEqual(await readdir(outside), []);
-  assert.deepEqual((await readdir(root)).sort(), ['dangling', 'file.txt', 'linked-outside']);
+  assert.deepEqual(await readdir(join(root, 'src')), []);
+  assert.deepEqual((await readdir(root)).sort(), [
+    'alias',
+    'dangling',
+    'file.txt',
+    'linked-outside',
+    'src',
+  ]);
   await assert.rejects(stat(join(parent, 'missing-target')));
+});
+
+test('a rejected write removes the parent directories it created', async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-workspace-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await heldRootTools(root);
+  /** Aborts only once both parents exist, after creation and before the file is installed. */
+  const signal = {
+    get aborted() {
+      return existsSync(join(root, 'fresh', 'nested'));
+    },
+  } as AbortSignal;
+
+  await assert.rejects(
+    tools.execute(
+      {
+        protocolVersion: 1,
+        operation: 'write_file',
+        workspaceId: 'primary',
+        path: 'fresh/nested/file.txt',
+        content: 'never installed',
+      },
+      signal,
+    ),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'EXECUTION_ABORTED' &&
+      !error.mutationMayHaveCommitted,
+  );
+  assert.deepEqual(await readdir(root), []);
+});
+
+test('a pathname-only workspace root reports a missing parent instead of creating it', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  await assert.rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'missing/notes.txt',
+      content: 'blocked',
+    }),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'NOT_FOUND' &&
+      error.message === 'Workspace path does not exist',
+  );
+  assert.deepEqual(await readdir(root), []);
 });
 
 test('a missing workspace path is NOT_FOUND only when reached through the workspace', async (t) => {

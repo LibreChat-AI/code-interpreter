@@ -378,6 +378,8 @@ export class WorkspaceRootAccess {
 }
 
 const context = new AsyncLocalStorage<WorkspaceRootAccess>();
+/** Whether filesystem adapters in this call are anchored to a held root descriptor. */
+export const holdsWorkspaceRoot = (): boolean => context.getStore() != null;
 export async function withWorkspaceRoot<T>(
     root: string,
     identity: WorkspaceRootIdentity | undefined,

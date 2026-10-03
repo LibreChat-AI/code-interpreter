@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, realpath, rename, rmdir, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
+import { holdsWorkspaceRoot, link, lstat, mkdir, open, realpath, rename, rmdir, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
@@ -380,10 +380,12 @@ function isMissingEntry(error: unknown): boolean {
  * Reports an absent target as `NOT_FOUND` only when every existing ancestor
  * resolves to a directory inside the workspace. Anything else stays a
  * path-safety rejection, so the distinction reveals nothing beyond the root.
+ * Writes never pass through a symlink, so they report one as `INVALID_PATH`.
  */
 async function classifyMissingWorkspacePath(
   root: string,
   candidate: string,
+  followDirectorySymlinks = true,
 ): Promise<WorkspaceToolError> {
   const invalid = new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   const segments = relative(root, candidate).split(sep).filter(Boolean);
@@ -403,6 +405,7 @@ async function classifyMissingWorkspacePath(
       if (!entry.isDirectory()) return invalid;
       continue;
     }
+    if (!followDirectorySymlinks) return invalid;
     try {
       current = await realpath(current);
       if (!isWithinRoot(root, current) || !(await stat(current)).isDirectory()) {
@@ -417,8 +420,10 @@ async function classifyMissingWorkspacePath(
 
 /**
  * Creates each missing ancestor of a write target as a real directory beneath
- * the root, one verified level at a time. An existing symlink or file stops the
- * walk, and a created directory that resolves outside the root is rejected.
+ * the root, one verified level at a time, and syncs each new entry into its
+ * parent. Creation needs a held root descriptor, so `mkdirat` cannot follow a
+ * swapped path out of the root; a pathname-only root creates nothing and its
+ * write reports the missing parent. An existing symlink or file stops the walk.
  */
 async function createMissingParentDirectories(
   root: string,
@@ -426,6 +431,7 @@ async function createMissingParentDirectories(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const created: string[] = [];
+  if (!holdsWorkspaceRoot()) return created;
   const segments = relative(root, dirname(candidate)).split(sep).filter(Boolean);
   let current = root;
   try {
@@ -448,6 +454,7 @@ async function createMissingParentDirectories(
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         }
         entry = await lstat(current);
+        if (createdHere) await syncWorkspaceDirectory(dirname(current));
       }
       if (
         entry.isSymbolicLink() ||
@@ -459,16 +466,37 @@ async function createMissingParentDirectories(
     }
     return created;
   } catch (error) {
-    await removeCreatedDirectories(created);
-    throw classifyWritePathValidationError(error);
+    throw await withCreatedDirectoriesRemoved(
+      created,
+      classifyWritePathValidationError(error),
+    );
   }
 }
 
-/** Best effort: `rmdir` removes a directory only while it is still empty. */
-async function removeCreatedDirectories(created: readonly string[]): Promise<void> {
+/**
+ * Removes directories a rejected write created, deepest first. `rmdir` only
+ * removes an empty directory, so content is never touched. A directory that is
+ * already gone or that another writer has filled is no longer this write's to
+ * remove; any other failure leaves the rejection uncertain, so the worker
+ * quarantines the workspace instead of reporting an atomic failure.
+ */
+async function withCreatedDirectoriesRemoved(
+  created: readonly string[],
+  error: WorkspaceToolError,
+): Promise<WorkspaceToolError> {
+  let removed = true;
   for (let index = created.length - 1; index >= 0; index -= 1) {
-    await rmdir(created[index]).catch(() => undefined);
+    try {
+      await rmdir(created[index]);
+    } catch (cleanupError) {
+      const code = (cleanupError as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTEMPTY' && code !== 'EEXIST') {
+        removed = false;
+      }
+    }
   }
+  if (removed || error.mutationMayHaveCommitted) return error;
+  return new WorkspaceToolError(error.message, error.code, true);
 }
 
 function assertWithinWriteLimit(content: Buffer): void {
@@ -604,6 +632,9 @@ async function atomicWriteConfinedFile(
       throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
     }
   } catch (error) {
+    if (isMissingEntry(error)) {
+      throw await classifyMissingWorkspacePath(root, parent, false);
+    }
     throw classifyWritePathValidationError(error);
   }
 
@@ -795,8 +826,11 @@ async function writeWorkspaceFile(
       request.overwrite !== false,
     ));
   } catch (error) {
-    await removeCreatedDirectories(directories);
-    throw error;
+    if (directories.length === 0) throw error;
+    throw await withCreatedDirectoriesRemoved(
+      directories,
+      classifyWritePathValidationError(error),
+    );
   }
   return {
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
