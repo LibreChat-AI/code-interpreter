@@ -15,7 +15,7 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
@@ -1892,6 +1892,38 @@ test('a rejected write removes the parent directories it created', async (t) => 
   assert.deepEqual(await readdir(root), []);
 });
 
+test('a rejected write that cannot remove its parents reports a possible mutation', async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-workspace-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await heldRootTools(root);
+  const nested = join(root, 'fresh', 'nested');
+  /** Leaves a file behind in the created directory, as a leaked staging file would. */
+  const signal = {
+    get aborted() {
+      if (!existsSync(nested)) return false;
+      writeFileSync(join(nested, '.librechat-code-leaked.tmp'), '');
+      return true;
+    },
+  } as AbortSignal;
+
+  await assert.rejects(
+    tools.execute(
+      {
+        protocolVersion: 1,
+        operation: 'write_file',
+        workspaceId: 'primary',
+        path: 'fresh/nested/file.txt',
+        content: 'never installed',
+      },
+      signal,
+    ),
+    (error: unknown) =>
+      error instanceof WorkspaceToolError &&
+      error.code === 'EXECUTION_ABORTED' &&
+      error.mutationMayHaveCommitted,
+  );
+});
+
 test('a pathname-only workspace root reports a missing parent instead of creating it', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -1942,7 +1974,7 @@ test('a missing workspace path is NOT_FOUND only when reached through the worksp
     ['missing.log', 'NOT_FOUND'],
     ['src/missing.ts', 'NOT_FOUND'],
     ['not-yet/created/output.log', 'NOT_FOUND'],
-    ['alias/missing.ts', 'NOT_FOUND'],
+    ['alias/missing.ts', 'INVALID_PATH'],
     ['linked-outside/missing.txt', 'INVALID_PATH'],
     ['dangling', 'INVALID_PATH'],
     ['file.txt/missing.txt', 'INVALID_PATH'],

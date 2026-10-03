@@ -376,19 +376,46 @@ function isMissingEntry(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
 }
 
+interface DirectoryIdentity {
+  path: string;
+  dev: bigint | number;
+  ino: bigint | number;
+}
+
+/** Whether each ancestor observed before a miss is still the same real directory. */
+async function ancestorsUnchanged(ancestors: readonly DirectoryIdentity[]): Promise<boolean> {
+  for (const ancestor of ancestors) {
+    try {
+      const current = await lstat(ancestor.path);
+      if (
+        current.isSymbolicLink() ||
+        !current.isDirectory() ||
+        current.dev !== ancestor.dev ||
+        current.ino !== ancestor.ino
+      ) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
- * Reports an absent target as `NOT_FOUND` only when every existing ancestor
- * resolves to a directory inside the workspace. Anything else stays a
- * path-safety rejection, so the distinction reveals nothing beyond the root.
- * Writes never pass through a symlink, so they report one as `INVALID_PATH`.
+ * Reports an absent target as `NOT_FOUND` only when the walk from the root
+ * reaches the missing entry through real directories that are unchanged after
+ * the miss. A symlink, a file used as a directory, or an ancestor replaced
+ * during the walk stays a path-safety rejection, so the distinction never
+ * describes a path beyond the root.
  */
 async function classifyMissingWorkspacePath(
   root: string,
   candidate: string,
-  followDirectorySymlinks = true,
 ): Promise<WorkspaceToolError> {
   const invalid = new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   const segments = relative(root, candidate).split(sep).filter(Boolean);
+  const ancestors: DirectoryIdentity[] = [];
   let current = root;
   for (const [index, segment] of segments.entries()) {
     current = resolve(current, segment);
@@ -396,24 +423,13 @@ async function classifyMissingWorkspacePath(
     try {
       entry = await lstat(current);
     } catch (error) {
-      return isMissingEntry(error)
+      return isMissingEntry(error) && (await ancestorsUnchanged(ancestors))
         ? new WorkspaceToolError('Workspace path does not exist', 'NOT_FOUND')
         : invalid;
     }
     if (index === segments.length - 1) return invalid;
-    if (!entry.isSymbolicLink()) {
-      if (!entry.isDirectory()) return invalid;
-      continue;
-    }
-    if (!followDirectorySymlinks) return invalid;
-    try {
-      current = await realpath(current);
-      if (!isWithinRoot(root, current) || !(await stat(current)).isDirectory()) {
-        return invalid;
-      }
-    } catch {
-      return invalid;
-    }
+    if (entry.isSymbolicLink() || !entry.isDirectory()) return invalid;
+    ancestors.push({ path: current, dev: entry.dev, ino: entry.ino });
   }
   return invalid;
 }
@@ -474,11 +490,12 @@ async function createMissingParentDirectories(
 }
 
 /**
- * Removes directories a rejected write created, deepest first. `rmdir` only
- * removes an empty directory, so content is never touched. A directory that is
- * already gone or that another writer has filled is no longer this write's to
- * remove; any other failure leaves the rejection uncertain, so the worker
- * quarantines the workspace instead of reporting an atomic failure.
+ * Removes directories a rejected write created, deepest first, syncing each
+ * removal into its parent. `rmdir` only removes an empty directory, so content
+ * is never touched. Unless every created directory is durably gone, the
+ * rejection is uncertain and the worker quarantines the workspace instead of
+ * reporting an atomic failure: a directory left non-empty may hold this
+ * write's own staged file.
  */
 async function withCreatedDirectoriesRemoved(
   created: readonly string[],
@@ -488,11 +505,9 @@ async function withCreatedDirectoriesRemoved(
   for (let index = created.length - 1; index >= 0; index -= 1) {
     try {
       await rmdir(created[index]);
+      await syncWorkspaceDirectory(dirname(created[index]));
     } catch (cleanupError) {
-      const code = (cleanupError as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ENOTEMPTY' && code !== 'EEXIST') {
-        removed = false;
-      }
+      if (!isMissingEntry(cleanupError)) removed = false;
     }
   }
   if (removed || error.mutationMayHaveCommitted) return error;
@@ -633,7 +648,7 @@ async function atomicWriteConfinedFile(
     }
   } catch (error) {
     if (isMissingEntry(error)) {
-      throw await classifyMissingWorkspacePath(root, parent, false);
+      throw await classifyMissingWorkspacePath(root, parent);
     }
     throw classifyWritePathValidationError(error);
   }
