@@ -855,19 +855,40 @@ function grantExcerpts(
   });
 }
 
+/**
+ * The longest prefix of `reason` within both limits, ending in an ellipsis. It
+ * never splits a surrogate pair in a shortened source excerpt.
+ */
+function shortenReason(reason: string, charLimit: number, byteLimit: number): string {
+  if (reason.length <= charLimit && encodedBytes(reason) <= byteLimit) return reason;
+  const budget = byteLimit - encodedBytes('…');
+  let end = 0;
+  let bytes = 0;
+  while (end < reason.length) {
+    const width = /[\uD800-\uDBFF]/.test(reason[end]) && /[\uDC00-\uDFFF]/.test(reason[end + 1] ?? '') ? 2 : 1;
+    const cost = encodedBytes(reason.slice(end, end + width));
+    if (end + width > charLimit - 1 || bytes + cost > budget) break;
+    bytes += cost;
+    end += width;
+  }
+  return `${reason.slice(0, end)}…`;
+}
+
 function fitsDiagnosticBounds(message: string): boolean {
   return message.length <= EDIT_DIAGNOSTIC_MAX_CHARS && encodedBytes(message) <= EDIT_DIAGNOSTIC_MAX_BODY_BYTES;
 }
 
 function formatEditFailures(failures: readonly EditFailure[], editCount: number): string {
   if (editCount === 1) {
-    const single = (withExcerpt: boolean) =>
-      `Workspace edit did not apply and nothing was written: ${failures[0] ? failureText(failures[0], withExcerpt) : 'no match'}.`;
-    const detailed = single(true);
-    return (fitsDiagnosticBounds(detailed) ? detailed : single(false)).slice(
-      0,
-      EDIT_DIAGNOSTIC_MAX_CHARS,
+    const prefix = 'Workspace edit did not apply and nothing was written: ';
+    const detailed = `${prefix}${failures[0] ? failureText(failures[0], true) : 'no match'}.`;
+    if (fitsDiagnosticBounds(detailed)) return detailed;
+    const reason = shortenReason(
+      failures[0]?.reason ?? 'no match',
+      EDIT_DIAGNOSTIC_MAX_CHARS - prefix.length - 1,
+      EDIT_DIAGNOSTIC_MAX_BODY_BYTES - encodedBytes(prefix) - 1,
     );
+    return `${prefix}${reason}.`;
   }
   const header = `${failures.length} of ${editCount} workspace edits did not apply, so nothing was written. Every other edit matched.`;
   const footer = failures.some((failure) => failure.index > 0)
@@ -879,19 +900,15 @@ function formatEditFailures(failures: readonly EditFailure[], editCount: number)
   const available = EDIT_DIAGNOSTIC_MAX_CHARS - header.length - footer.length -
     prefixes.reduce((total, prefix) => total + prefix.length + 1, 0);
   const frame = header + footer + prefixes.join('') + '.'.repeat(failures.length);
-  const granted = grantExcerpts(failures, available, EDIT_DIAGNOSTIC_MAX_BODY_BYTES - encodedBytes(frame));
+  const availableBytes = EDIT_DIAGNOSTIC_MAX_BODY_BYTES - encodedBytes(frame);
+  const granted = grantExcerpts(failures, available, availableBytes);
   const reasons = failures.map((failure, index) => failureText(failure, granted[index]));
   const reasonLength = reasons.reduce((total, reason) => total + reason.length, 0);
-  const reasonLimit = reasonLength <= available ? Infinity : Math.floor(available / failures.length);
-  const details = reasons.map((full, index) => {
-    let reason = full;
-    if (reason.length > reasonLimit) {
-      let end = reasonLimit - 1;
-      // Do not split a surrogate pair in a shortened source excerpt.
-      if (end > 0 && /[\uD800-\uDBFF]/.test(reason[end - 1]) && /[\uDC00-\uDFFF]/.test(reason[end])) end--;
-      reason = `${reason.slice(0, end)}…`;
-    }
-    return `${prefixes[index]}${reason}.`;
-  });
+  const reasonBytes = reasons.reduce((total, reason) => total + encodedBytes(reason), 0);
+  const charLimit = reasonLength <= available ? Infinity : Math.floor(available / failures.length);
+  const byteLimit = reasonBytes <= availableBytes ? Infinity : Math.floor(availableBytes / failures.length);
+  const details = reasons.map((reason, index) =>
+    `${prefixes[index]}${shortenReason(reason, charLimit, byteLimit)}.`,
+  );
   return header + details.join('') + footer;
 }

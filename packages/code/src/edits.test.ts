@@ -935,3 +935,30 @@ test('batch excerpts are granted by encoded size, so escapes cannot overflow the
     [1, 2, 3, 4, 5, 6],
   );
 });
+
+test('shortened batch reasons also respect the encoded error-body size', () => {
+  const emojis = '😀'.repeat(200);
+  const text = Array.from({ length: 20 }, (_, index) => `item_${index} emoji_${index} = "${emojis}";`).join('\n');
+  const edits = Array.from({ length: 20 }, (_, index) => ({
+    oldText: `item_${index} emoji_${index} = "plain";`,
+    newText: 'x',
+  }));
+  const error = rejection(() => applyTextEdits(text, edits));
+  assert.ok(error.message.length <= EDIT_DIAGNOSTIC_MAX_CHARS);
+  assert.ok(errorBodyBytes(error.message) <= 4_096, String(errorBodyBytes(error.message)));
+  assert.equal(Buffer.from(error.message).toString('utf8'), error.message);
+  assert.deepEqual(
+    [...error.message.matchAll(/\nEdit (\d+):/g)].map((match) => Number(match[1])),
+    Array.from({ length: 20 }, (_, index) => index + 1),
+  );
+});
+
+test('a single edit with a long multibyte reason stays within both bounds', () => {
+  const error = new WorkspaceEditMatchError([
+    { index: 0, reason: `old_text was not found; the closest line is line 1: "${'😀'.repeat(1_400)}"` },
+  ], 1);
+  assert.ok(error.message.length <= EDIT_DIAGNOSTIC_MAX_CHARS);
+  assert.ok(errorBodyBytes(error.message) <= 4_096);
+  assert.equal(Buffer.from(error.message).toString('utf8'), error.message);
+  assert.match(error.message, /…\.$/);
+});
