@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { holdsWorkspaceRoot, link, lstat, mkdir, open, realpath, rename, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
+import { deferWorkspaceRootCleanup, holdsWorkspaceRoot, link, lstat, mkdir, open, realpath, rename, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
@@ -279,6 +279,7 @@ async function withConfinedFile<T>(
   root: string,
   requestedPath: string,
   read: (handle: FileHandle, size: number) => Promise<T>,
+  readDeadline?: { signal?: AbortSignal; deadline: number },
 ): Promise<T> {
   const candidate = resolveWorkspacePath(root, requestedPath);
   let handle: FileHandle | undefined;
@@ -308,7 +309,18 @@ async function withConfinedFile<T>(
     }
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   } finally {
-    await handle?.close();
+    if (handle) {
+      const closing = handle.close();
+      if (
+        readDeadline &&
+        (readDeadline.signal?.aborted ||
+          performance.now() >= readDeadline.deadline)
+      ) {
+        // Node retains the descriptor and buffer until outstanding I/O drains.
+        deferWorkspaceRootCleanup();
+        void closing.catch(() => {});
+      } else await closing;
+    }
   }
 }
 
@@ -410,7 +422,10 @@ async function readConfinedFile(
   const startLine = request.startLine ?? 1;
   const maxLines = request.maxLines ?? 200;
   const deadline = performance.now() + READ_TIMEOUT_MS;
-  return withConfinedFile(root, request.path, async (handle, size) => {
+  const read = async (
+    handle: FileHandle,
+    size: number,
+  ): Promise<WorkspaceReadFileResult> => {
     const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
     // Fix the read extent at admission so an appending writer cannot extend the scan.
     let position = 0;
@@ -499,7 +514,9 @@ async function readConfinedFile(
       }
     };
     consume(
-      decoder.decode(header.subarray(bomBytes, headerBytes), { stream: true }),
+      decoder.decode(header.subarray(bomBytes, headerBytes), {
+        stream: true,
+      }),
     );
     while (!truncated && position < size) {
       const bytes = await readWorkspaceChunk(
@@ -534,7 +551,8 @@ async function readConfinedFile(
       truncated,
       ...(truncated ? { nextStartLine: endLine + 1 } : {}),
     };
-  });
+  };
+  return withConfinedFile(root, request.path, read, { signal, deadline });
 }
 
 interface WorkspaceRoot {

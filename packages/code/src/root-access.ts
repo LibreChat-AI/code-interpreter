@@ -378,6 +378,12 @@ export class WorkspaceRootAccess {
 }
 
 const context = new AsyncLocalStorage<WorkspaceRootAccess>();
+const deferredCleanup = new WeakSet<WorkspaceRootAccess>();
+/** Interrupted I/O must not hold a request open while Node drains its handles. */
+export function deferWorkspaceRootCleanup(): void {
+    const access = context.getStore();
+    if (access) deferredCleanup.add(access);
+}
 /** Whether filesystem adapters in this call are anchored to a held root descriptor. */
 export const holdsWorkspaceRoot = (): boolean => context.getStore() != null;
 export async function withWorkspaceRoot<T>(
@@ -390,7 +396,9 @@ export async function withWorkspaceRoot<T>(
     try {
         return await context.run(access, action);
     } finally {
-        await access.close();
+        const closing = access.close();
+        if (deferredCleanup.delete(access)) void closing.catch(() => {});
+        else await closing;
     }
 }
 

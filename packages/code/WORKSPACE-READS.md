@@ -11,6 +11,10 @@ Byte-limited windows stop before the first line that cannot fit and return
 fails with `READ_LIMIT_EXCEEDED`, without a repeating continuation. Scanning and
 collection check cancellation and share a 10-second deadline. Far-away starts
 can fail with `READ_LIMIT_EXCEEDED`; use an earlier start or `search_text`.
+Cancellation and timeout settle the request without waiting for queued I/O.
+Node retains an interrupted read's descriptor and chunk until that I/O drains;
+file and held-root cleanup are initiated immediately and finish asynchronously.
+This releases the request lane, but does not cancel kernel I/O.
 
 Memory is bounded by 64 KiB chunks and the returned window. Reads stop at the
 opened file's initial size, so concurrent growth cannot extend the scan. Truncation

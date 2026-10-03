@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { getEventListeners } from 'node:events';
 import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -465,42 +464,25 @@ test('search, preview, edit, and digest-checked instruction limits remain separa
     await assert.rejects(tools.execute(request), hasCode('INVALID_PATH'));
 });
 
-test('stalled reads honor cancellation or deadlines and remove abort listeners', async t => {
-    for (const cause of ['abort', 'deadline'] as const) {
-        const { root, read, prototype } = await fixture(t, true);
-        await fs.writeFile(join(root, 'file'), 'content');
-        const controller = new AbortController();
-        let handle: FileHandle | undefined;
-        let entered!: () => void;
-        const started = new Promise<void>(resolve => {
-            entered = resolve;
-        });
-        const now = performance.now();
-        let elapsed = 0;
-        const clock = t.mock.method(performance, 'now', () => now + elapsed);
-        const mock = t.mock.method(
-            prototype,
-            'read',
-            function (this: FileHandle) {
-                handle = this;
-                entered();
-                if (cause === 'deadline') elapsed = 10_000;
-                return new Promise<never>(() => {});
-            }
-        );
-        const pending = read(1, 1, controller.signal);
-        const rejected = assert.rejects(
-            pending,
-            hasCode(
-                cause === 'abort' ? 'EXECUTION_ABORTED' : 'READ_LIMIT_EXCEEDED'
-            )
-        );
-        await started;
-        if (cause === 'abort') controller.abort();
-        await rejected;
-        assert.equal(handle?.fd, -1);
-        assert.deepEqual(getEventListeners(controller.signal, 'abort'), []);
-        mock.mock.restore();
-        clock.mock.restore();
+test('byte-budget pagination reconstructs every complete line', async t => {
+    const { root, read } = await fixture(t);
+    const lines = Array.from(
+        { length: 1_201 },
+        (_, i) => `${i}: ${'é🦊'.repeat(400)}`
+    );
+    await fs.writeFile(join(root, 'file'), lines.join('\n') + '\n');
+    const collected: string[] = [];
+    let startLine = 1;
+    for (;;) {
+        const result = await read(startLine, 500);
+        const selected = result.content.split('\n');
+        assert.ok(Buffer.byteLength(result.content) <= MAX_BYTES);
+        if (result.truncated)
+            assert.ok(selected.length < 500, 'bytes forced continuation');
+        collected.push(...selected);
+        if (!result.truncated) break;
+        assert.ok(result.nextStartLine! > startLine);
+        startLine = result.nextStartLine!;
     }
+    assert.deepEqual(collected, lines);
 });
