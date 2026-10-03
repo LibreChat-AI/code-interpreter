@@ -948,6 +948,56 @@ be combined with conversation worktrees. Code API must advertise
 scope for them. Deploy consumers that read worker status (such as LibreChat)
 with support for `workspaceScopes` before enabling lanes on a worker.
 
+##### Retiring stale linked worktrees
+
+Nothing else removes a task's worktree once its work is pushed, and each one
+keeps its own dependencies and build output. A worker with lanes therefore
+retires stale ones itself, with no configuration: a pass runs two minutes after
+startup and every six hours after that, sooner while a backlog remains, and
+also before managed environment setup would be deferred for low disk space.
+Passes run in the background, never overlap, and never hold back requests.
+
+A worktree in a writable registered root is retired only when **all** of these
+hold; otherwise it is kept and the reason is counted:
+
+- It verifies as a linked worktree of the checkout under `.worktrees/`, as for
+  lane admission. The checkout itself and worktrees elsewhere are never
+  touched.
+- Neither the lane nor its checkout has a request in flight, and both this
+  worker's last use of the lane and the newest on-disk activity (the worktree
+  directory and its Git `HEAD`, `index`, `logs/HEAD`, `ORIG_HEAD` and
+  `FETCH_HEAD`) are older than the idle threshold, seven days by default.
+- It has no modified tracked files and no untracked files the repository does
+  not ignore; no merge, rebase, cherry-pick, revert or bisect in progress; no
+  `git worktree lock`; and no quarantine on the lane or its checkout.
+- Its `HEAD` commit, including a detached one, is contained in at least one
+  remote-tracking ref (`refs/remotes/*`), or its work is already in the
+  remote's default branch by content, as after a squash or rebase merge whose
+  remote branch was deleted. Content counts only when `HEAD` has no live
+  upstream (it is detached, never pushed, or its upstream ref is gone) and
+  either every commit beyond the default branch is patch-equivalent to one in
+  it (`git cherry` shows only `-`, with no merge commits), or the default
+  branch has identical content at every path the branch changed since their
+  merge base. The default branch is the remote's `HEAD`, else `main` or
+  `master`, as last fetched; the worker never fetches or calls a hosting API.
+  Commits beyond a live upstream are never treated as merged.
+
+Removal is `git worktree remove` **without** `--force`, so Git re-checks for
+changes itself, followed by `git worktree prune`. Ignored files such as
+`node_modules`, build output and ignored `.env` files go with the worktree;
+that is the space being reclaimed. The branch is kept, so
+`git worktree add .worktrees/<name> <branch>` restores the worktree. A lane
+request that arrives during removal waits for it and then fails as an unknown
+worktree. Each pass inspects at most 128 idle worktrees and removes at most 32,
+oldest first. Each pass logs one summary line, for example
+`worktree retirement: retired 3, kept 12 (dirty 2, recent 8, unpushed 2), freed
+about 4.1 GiB`; set `LIBRECHAT_CODE_LOG_LEVEL=debug` to log every kept worktree
+and its reason.
+
+Pass `--no-worktree-retirement` or set `LIBRECHAT_CODE_WORKTREE_RETIREMENT=false`
+to disable retirement. Change the idle threshold with `--worktree-idle-days <n>`
+or `LIBRECHAT_CODE_WORKTREE_IDLE_DAYS=<n>` (1 to 3650 days).
+
 On an updated Code API, admission waits up to 30 seconds without the
 `X-LibreChat-Workspace-Queue-Wait-Ms` request header. A caller may advertise a
 positive integer millisecond allowance up to five minutes, capped by any server

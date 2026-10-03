@@ -43,6 +43,10 @@ import { NativeWorkspaceCommandPool } from './native-pool.js';
 import { GitWorktreeWorkspaceTools, internalWorkspaceId } from './workspace-instances.js';
 import { LINKED_WORKTREE_DIRECTORY, LinkedWorktreeWorkspaceTools } from './linked-worktrees.js';
 import { GitWorktreeManager } from './worktrees.js';
+import {
+  WorktreeRetirementScheduler,
+  worktreeRetirementSettings,
+} from './worktree-retirement.js';
 import { captureWorkspaceRootIdentity } from './root-identity.js';
 import {
   resolveNativeSrtCommandPolicy,
@@ -812,6 +816,13 @@ async function run(
   if (linkedWorktreeLanes && process.platform === 'win32') {
     throw new Error('Linked worktree Git guard requires a POSIX host');
   }
+  const worktreeRetirement = worktreeRetirementSettings({
+    optOut: args.includes('--no-worktree-retirement'),
+    enabled: process.env.LIBRECHAT_CODE_WORKTREE_RETIREMENT,
+    idleDays:
+      option(args, '--worktree-idle-days') ??
+      process.env.LIBRECHAT_CODE_WORKTREE_IDLE_DAYS,
+  });
   if (
     roots.length > 1 &&
     process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim()
@@ -1301,6 +1312,41 @@ async function run(
     });
     workspaceTools = linkedWorktreeTools;
   }
+  const retirementSources = roots.filter((root) => root.writable);
+  const debugLogs =
+    process.env.LIBRECHAT_CODE_LOG_LEVEL?.trim().toLowerCase() === 'debug';
+  const worktreeRetirementScheduler =
+    linkedWorktreeTools &&
+    worktreeRetirement.enabled &&
+    retirementSources.length > 0 &&
+    option(args, '--reset-workspace-quarantine') == null
+      ? new WorktreeRetirementScheduler({
+          activity: linkedWorktreeTools,
+          idleMs: worktreeRetirement.idleMs,
+          sources: retirementSources.map((root) => ({
+            workspaceId: root.id,
+            root: root.root,
+            identity: root.identity,
+          })),
+          async isQuarantined(selectedWorkspaceId, worktree) {
+            const source = roots.find((root) => root.id === selectedWorkspaceId);
+            if (!source) return true;
+            const path =
+              worktree == null
+                ? rootQuarantinePaths.get(selectedWorkspaceId)!
+                : defaultWorkspaceQuarantinePath({
+                    codeApiUrl,
+                    workerId,
+                    workspaceRoot: join(source.root, LINKED_WORKTREE_DIRECTORY, worktree),
+                  });
+            return (await loadWorkspaceMutationQuarantine(path)) != null;
+          },
+          log(level, message) {
+            if (level === 'debug' && !debugLogs) return;
+            process.stdout.write(`librechat-code: ${message}\n`);
+          },
+        })
+      : undefined;
     if (workspaceTools && environments.length) {
         workspaceTools = new EnvironmentWorkspaceTools(
             workspaceTools,
@@ -1375,6 +1421,9 @@ async function run(
                 root: environment.definition.root,
                 identity: roots.find(root => root.id === id)!.identity!,
                 setup, receiptPath: preparationReceipt(environment.definition.root),
+                reclaimSpace: worktreeRetirementScheduler
+                  ? () => worktreeRetirementScheduler.runNow()
+                  : undefined,
                 context: JSON.stringify([serializeNativeSrtCommandPolicy(commandPolicy), commandAllowedDomains, github.policyIdentity,
                   nativeOptionsForWorkspace(id).resources]),
                 signal: controller.signal,
@@ -1404,10 +1453,12 @@ async function run(
             );
         }
   } catch (error) {
+    await worktreeRetirementScheduler?.stop().catch(() => undefined);
     await nativeCommandSandbox?.close().catch(() => undefined);
     await fileRelaySupervisor?.stop().catch(() => undefined);
     throw error;
   }
+  worktreeRetirementScheduler?.start();
   try {
     const worker = new BridgeWorker({
       instructionDescriptors: () => localWorkspaceTools?.instructionDescriptors() ?? Promise.resolve(undefined),
@@ -1617,6 +1668,7 @@ async function run(
     await worker.run(controller.signal);
   } finally {
     try {
+      await worktreeRetirementScheduler?.stop();
       await nativeCommandSandbox?.close();
     } finally {
       await fileRelaySupervisor?.stop();

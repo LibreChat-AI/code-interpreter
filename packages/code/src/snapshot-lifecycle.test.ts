@@ -116,6 +116,54 @@ test('storage policy is opt-in, bounded and fails before a setup command', async
     assert.equal(executions, 0);
 });
 
+test('low space reclaims once before deferring setup', async t => {
+    const policy = { minFreeBytes: 5, setupReserveBytes: 2 };
+    let free = 6n;
+    let reclaims = 0;
+    await assertPreparationSpace('/', policy, async () => free, async () => {
+        reclaims++;
+        free = 7n;
+    });
+    assert.equal(reclaims, 1);
+    await assertPreparationSpace('/', policy, async () => free, async () => {
+        reclaims++;
+    });
+    assert.equal(reclaims, 1, 'enough space never triggers reclamation');
+    await assert.rejects(
+        assertPreparationSpace('/', policy, async () => 6n, async () => {
+            reclaims++;
+        }),
+        /no setup command was started/,
+    );
+    assert.equal(reclaims, 2);
+
+    const { root } = await fixture(t);
+    const checkout = join(root, 'checkout');
+    await mkdir(checkout);
+    let executions = 0;
+    let reclaimed = 0;
+    await assert.rejects(
+        prepareCodeEnvironment({
+            root: checkout,
+            identity: await captureWorkspaceRootIdentity(checkout),
+            setup: { command: 'install', timeoutMs: 1000 },
+            receiptPath: join(root, 'receipt'),
+            context: '',
+            storage: { minFreeBytes: Number.MAX_SAFE_INTEGER, setupReserveBytes: 0 },
+            reclaimSpace: async () => {
+                reclaimed++;
+            },
+            execute: async () => {
+                executions++;
+                return { exitCode: 0, timedOut: false };
+            },
+        }),
+        /deferred/,
+    );
+    assert.equal(reclaimed, 1);
+    assert.equal(executions, 0);
+});
+
 test('dry-run is non-destructive; cleanup removes only expired owned entries and retains unknown or linked data', async t => {
     const { store, add, a, b, c, root } = await fixture(t);
     const old = await add(a, 4, 10_000);

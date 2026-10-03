@@ -32,6 +32,24 @@ const LINKED_WORKTREE_SHARED_GIT_PATHS = ['objects', 'refs', join('logs', 'refs'
 const LINKED_WORKTREE_LANE_LIMIT = 32;
 /** Git pointer files are a single line; anything larger is not one. */
 const GIT_POINTER_MAX_BYTES = 4096;
+/** Last-use timestamps kept per worker; the oldest are forgotten first. */
+const LINKED_WORKTREE_ACTIVITY_LIMIT = 4096;
+
+/** What this worker knows about lane use, for deciding when a worktree may be retired. */
+export interface LinkedWorktreeActivity {
+  /** When a request for the lane last started or finished in this process. */
+  lastUsed(workspaceId: string, worktree: string): number | undefined;
+  /**
+   * Run `task` only while neither the lane nor its checkout has a request in
+   * flight. Lane requests that arrive meanwhile wait for it to finish, then
+   * verify the lane again; checkout requests are never held back.
+   */
+  whileIdle<T>(
+    workspaceId: string,
+    worktree: string,
+    task: () => Promise<T>,
+  ): Promise<{ ran: true; value: T } | { ran: false }>;
+}
 
 export interface LinkedWorktreeSource {
   root: string;
@@ -206,7 +224,7 @@ function publicResult(result: WorkspaceToolResult, workspaceId: string): Workspa
  * checkout, so file tools and commands here run confined to that worktree while
  * sibling lanes run concurrently. Requests without a worktree pass through.
  */
-export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
+export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, LinkedWorktreeActivity {
   readonly mutationFailuresAreAtomic?: true;
   readonly capabilities: WorkspaceToolExecutor['capabilities'];
   private readonly executors = new Map<
@@ -216,6 +234,14 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
   private readonly commandRoots = new Map<string, string>();
   /** Verified lane roots by internal ID, least recently used first. */
   private readonly lanes = new Map<string, string>();
+  /** Requests in flight by lane internal ID. */
+  private readonly laneRequests = new Map<string, number>();
+  /** Requests in flight by checkout workspace ID, outside any lane. */
+  private readonly checkoutRequests = new Map<string, number>();
+  /** Last request start or finish by lane internal ID, oldest first. */
+  private readonly used = new Map<string, number>();
+  /** Lanes being retired; their requests wait for retirement to settle. */
+  private readonly retiring = new Map<string, Promise<void>>();
 
   constructor(private readonly options: LinkedWorktreeWorkspaceToolsOptions) {
     this.mutationFailuresAreAtomic = options.delegate.mutationFailuresAreAtomic;
@@ -337,29 +363,99 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
     return pool;
   }
 
+  lastUsed(workspaceId: string, worktree: string): number | undefined {
+    return this.used.get(linkedWorktreeWorkspaceId(workspaceId, worktree));
+  }
+
+  async whileIdle<T>(
+    workspaceId: string,
+    worktree: string,
+    task: () => Promise<T>,
+  ): Promise<{ ran: true; value: T } | { ran: false }> {
+    const internalId = linkedWorktreeWorkspaceId(workspaceId, worktree);
+    if (
+      this.laneRequests.has(internalId) ||
+      this.checkoutRequests.has(workspaceId) ||
+      this.retiring.has(internalId)
+    ) {
+      return { ran: false };
+    }
+    let settle!: () => void;
+    this.retiring.set(internalId, new Promise<void>((resolve) => { settle = resolve; }));
+    try {
+      return { ran: true, value: await task() };
+    } finally {
+      await this.release(internalId);
+      this.retiring.delete(internalId);
+      settle();
+    }
+  }
+
+  private touch(internalId: string): void {
+    this.used.delete(internalId);
+    this.used.set(internalId, Date.now());
+    if (this.used.size <= LINKED_WORKTREE_ACTIVITY_LIMIT) return;
+    const oldest = this.used.keys().next().value;
+    if (oldest != null) this.used.delete(oldest);
+  }
+
+  /** Count a request from its first synchronous step, so `whileIdle` never races its admission. */
+  private async tracked<T>(
+    requests: Map<string, number>,
+    key: string,
+    task: () => Promise<T>,
+    lane: boolean,
+  ): Promise<T> {
+    requests.set(key, (requests.get(key) ?? 0) + 1);
+    if (lane) this.touch(key);
+    try {
+      return await task();
+    } finally {
+      const remaining = (requests.get(key) ?? 1) - 1;
+      if (remaining > 0) requests.set(key, remaining);
+      else requests.delete(key);
+      if (lane) this.touch(key);
+    }
+  }
+
+  private async inLane<T>(workspaceId: string, worktree: string, task: () => Promise<T>): Promise<T> {
+    const internalId = linkedWorktreeWorkspaceId(workspaceId, worktree);
+    return await this.tracked(this.laneRequests, internalId, async () => {
+      await this.retiring.get(internalId);
+      return await task();
+    }, true);
+  }
+
   async execute(request: WorkspaceToolRequest, signal?: AbortSignal): Promise<WorkspaceToolResult> {
     if (request.worktree == null) {
-      return await this.options.delegate.execute(request, signal);
+      return await this.tracked(
+        this.checkoutRequests,
+        request.workspaceId,
+        () => this.options.delegate.execute(request, signal),
+        false,
+      );
     }
     if (request.operation === 'execute_command' && request.environmentAction) {
       throw rejected('Environment action was not resolved by this worker');
     }
     const { worktree, ...baseRequest } = request;
-    const { lane, source, internalId } = await this.resolveLane(
-      request.workspaceId,
-      worktree,
-      request.workspaceInstanceId,
-    );
-    const laneRequest = { ...baseRequest, workspaceId: internalId } as WorkspaceToolRequest;
-    if (request.operation === 'execute_command') {
-      const pool = await this.registerCommandRoot(internalId, lane, source);
-      return publicResult(
-        await pool.execute(laneRequest as WorkspaceExecuteCommandRequest, signal),
+    return await this.inLane(request.workspaceId, worktree, async () => {
+      const { lane, source, internalId } = await this.resolveLane(
         request.workspaceId,
+        worktree,
+        request.workspaceInstanceId,
       );
-    }
-    const executor = await this.fileExecutor(internalId, lane, source);
-    return publicResult(await executor.execute(laneRequest, signal), request.workspaceId);
+      const laneRequest = { ...baseRequest, workspaceId: internalId } as WorkspaceToolRequest;
+      if (request.operation === 'execute_command') {
+        const pool = await this.registerCommandRoot(internalId, lane, source);
+        return publicResult(
+          await pool.execute(laneRequest as WorkspaceExecuteCommandRequest, signal),
+          request.workspaceId,
+        );
+      }
+      const executor = await this.fileExecutor(internalId, lane, source);
+      return publicResult(await executor.execute(laneRequest, signal), request.workspaceId);
+    });
   }
 
   async executeProgrammatic(
@@ -369,18 +465,26 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor {
   ): Promise<object> {
     const worktree = request.body.workspace_worktree;
     if (worktree == null) {
-      if (!this.options.programmaticDelegate) {
+      const delegate = this.options.programmaticDelegate;
+      if (!delegate) {
         throw new WorkspaceToolError('Workspace programmatic execution is unavailable', 'COMMAND_DISABLED');
       }
-      return await this.options.programmaticDelegate.executeProgrammatic(workspaceId, request, signal);
+      return await this.tracked(
+        this.checkoutRequests,
+        workspaceId,
+        () => delegate.executeProgrammatic(workspaceId, request, signal),
+        false,
+      );
     }
-    const { lane, source, internalId } = await this.resolveLane(
-      workspaceId,
-      worktree,
-      request.body.workspace_instance_id,
-    );
-    const pool = await this.registerCommandRoot(internalId, lane, source);
-    const { workspace_worktree: _worktree, ...body } = request.body;
-    return await pool.executeProgrammatic(internalId, { ...request, body }, signal);
+    return await this.inLane(workspaceId, worktree, async () => {
+      const { lane, source, internalId } = await this.resolveLane(
+        workspaceId,
+        worktree,
+        request.body.workspace_instance_id,
+      );
+      const pool = await this.registerCommandRoot(internalId, lane, source);
+      const { workspace_worktree: _worktree, ...body } = request.body;
+      return await pool.executeProgrammatic(internalId, { ...request, body }, signal);
+    });
   }
 }

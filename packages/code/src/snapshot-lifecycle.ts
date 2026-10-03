@@ -63,7 +63,11 @@ export function parseEnvironmentStorage(
         throw new Error('Invalid environment storage policy');
     return policy as EnvironmentStoragePolicy;
 }
-/** Soft admission for managed preparation, not a reservation or arbitrary-write quota. */
+/**
+ * Soft admission for managed preparation, not a reservation or arbitrary-write
+ * quota. Below the floor, `reclaim` (when supplied) may free reproducible
+ * storage once before the space is measured again.
+ */
 export async function assertPreparationSpace(
     root: string,
     policy: EnvironmentStoragePolicy,
@@ -71,14 +75,18 @@ export async function assertPreparationSpace(
         const status = await statfs(path, { bigint: true });
         return status.bavail * status.bsize;
     },
+    reclaim?: () => Promise<unknown>,
 ): Promise<void> {
-    if (
-        (await available(root)) <
-        BigInt(policy.minFreeBytes) + BigInt(policy.setupReserveBytes)
-    )
-        throw new Error(
-            'Managed environment preparation deferred: free disk is below the configured floor plus setup reserve. Clean reproducible artifacts or expand storage; no setup command was started.',
-        );
+    const floor =
+        BigInt(policy.minFreeBytes) + BigInt(policy.setupReserveBytes);
+    if ((await available(root)) >= floor) return;
+    if (reclaim) {
+        await reclaim();
+        if ((await available(root)) >= floor) return;
+    }
+    throw new Error(
+        'Managed environment preparation deferred: free disk is below the configured floor plus setup reserve. Clean reproducible artifacts or expand storage; no setup command was started.',
+    );
 }
 
 export const SNAPSHOT_MANIFEST = '.snapshot.json';

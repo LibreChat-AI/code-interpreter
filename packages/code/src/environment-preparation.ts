@@ -37,6 +37,8 @@ export interface EnvironmentPreparationOptions {
     snapshotScope?: string;
     beforeMutation?(): Promise<void>;
     storage?: EnvironmentStoragePolicy;
+    /** Frees reproducible storage when the storage floor would defer setup. */
+    reclaimSpace?(): Promise<unknown>;
 }
 
 /** Checkout-local reuse. Never transfers mutable installations between worktrees. */
@@ -87,7 +89,12 @@ async function prepareInLock(
     }
     if (options.snapshotStore && portable) {
         if (options.storage)
-            await assertPreparationSpace(options.root, options.storage);
+            await assertPreparationSpace(
+                options.root,
+                options.storage,
+                undefined,
+                options.reclaimSpace,
+            );
         await options.beforeMutation?.();
         if (
             await restoreDependencySnapshot(
@@ -118,7 +125,12 @@ async function prepareInLock(
         }
     }
     if (options.storage)
-        await assertPreparationSpace(options.root, options.storage);
+        await assertPreparationSpace(
+            options.root,
+            options.storage,
+            undefined,
+            options.reclaimSpace,
+        );
     const result = await options.execute(
         options.setup.command,
         options.setup.timeoutMs,
