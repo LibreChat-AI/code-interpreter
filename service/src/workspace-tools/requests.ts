@@ -75,17 +75,21 @@ async function deadline<T>(operation: Promise<T>): Promise<T> {
   } finally { clearTimeout(timer); }
 }
 
-function requestKey(owner: WorkspaceRequestOwner, requestId: string): string {
-  return `${PREFIX}:${createHash('sha256').update(canonical([owner.tenantId, owner.userId, requestId])).digest('hex')}`;
+function requestKey(owner: WorkspaceRequestOwner, requestId: string, scope: string): string {
+  return `${PREFIX}:${createHash('sha256').update(canonical([scope, owner.tenantId, owner.userId, requestId])).digest('hex')}`;
 }
 
 /** Redis owns requests; API replicas only advance bounded, fenced transitions. */
 export class RedisWorkspaceRequests {
+  private readonly activeKey: string;
   constructor(
     private readonly redis: Redis,
     private readonly bridge: RedisBridgeStore,
     private readonly transition?: (record: StoredWorkspaceRequest) => void,
-  ) {}
+    private readonly scope = '',
+  ) {
+    this.activeKey = scope.length === 0 ? ACTIVE : `${PREFIX}:${scope}:active`;
+  }
 
   async submit(args: {
     owner: WorkspaceRequestOwner;
@@ -99,7 +103,7 @@ export class RedisWorkspaceRequests {
     if (!WORKSPACE_REQUEST_ID_PATTERN.test(args.requestId)) {
       throw new BridgeStoreError('ASSIGNMENT_INVALID', 'Invalid durable workspace request ID');
     }
-    const key = requestKey(args.owner, args.requestId);
+    const key = requestKey(args.owner, args.requestId, this.scope);
     const fingerprint = createHash('sha256').update(canonical({
       workerId: args.workerId, request: args.request,
       queueWaitMs: args.queueWaitMs, executionTimeoutMs: args.executionTimeoutMs,
@@ -128,7 +132,7 @@ export class RedisWorkspaceRequests {
       workspaceId: (registration.capabilities.workspaceLeaseSlots ?? 1) > 1
         ? workspaceAdmissionId(record.request.workspaceId, record.request.workspaceInstanceId, record.request.worktree)
         : undefined,
-      key, activeKey: ACTIVE, fingerprint, record: JSON.stringify(record), retentionMs: RETENTION_MS,
+      key, activeKey: this.activeKey, fingerprint, record: JSON.stringify(record), retentionMs: RETENTION_MS,
     });
     if (accepted === 'conflict') throw new WorkspaceRequestConflict('Request ID was already used for different work');
     if (accepted === 'full') throw new BridgeStoreError('WORKER_QUEUE_FULL', 'Bridge worker pending request limit reached');
@@ -139,20 +143,20 @@ export class RedisWorkspaceRequests {
 
   async get(owner: WorkspaceRequestOwner, requestId: string): Promise<WorkspaceRequestStatus | undefined> {
     if (!WORKSPACE_REQUEST_ID_PATTERN.test(requestId)) return undefined;
-    const record = await this.read(requestKey(owner, requestId));
+    const record = await this.read(requestKey(owner, requestId, this.scope));
     return record == null ? undefined : this.status(record, requestId);
   }
 
   async cancel(owner: WorkspaceRequestOwner, requestId: string): Promise<WorkspaceRequestStatus | undefined> {
     if (!WORKSPACE_REQUEST_ID_PATTERN.test(requestId)) return undefined;
-    const key = requestKey(owner, requestId);
+    const key = requestKey(owner, requestId, this.scope);
     await this.redis.eval([
       'local state = redis.call(\'HGET\', KEYS[1], \'state\')',
       'if state ~= \'queued\' and state ~= \'admitted\' then return 0 end',
       'redis.call(\'HSET\', KEYS[1], \'cancelRequested\', \'1\')',
       'redis.call(\'ZADD\', KEYS[2], ARGV[1], KEYS[1])',
       'return 1',
-    ].join('\n'), 2, key, ACTIVE, Date.now());
+    ].join('\n'), 2, key, this.activeKey, Date.now());
     return this.get(owner, requestId);
   }
 
@@ -185,7 +189,7 @@ export class RedisWorkspaceRequests {
   }
 
   async reconcile(): Promise<void> {
-    const keys = await deadline(this.redis.zrangebyscore(ACTIVE, '-inf', Date.now(), 'LIMIT', 0, 32));
+    const keys = await deadline(this.redis.zrangebyscore(this.activeKey, '-inf', Date.now(), 'LIMIT', 0, 32));
     const results = await Promise.allSettled(keys.map(key => deadline(this.advance(key))));
     const failure = results.find(result => result.status === 'rejected');
     if (failure?.status === 'rejected') throw failure.reason;
@@ -198,11 +202,11 @@ export class RedisWorkspaceRequests {
       'if not redis.call(\'SET\', KEYS[1], ARGV[1], \'PX\', ARGV[2], \'NX\') then return 0 end',
       'redis.call(\'ZADD\', KEYS[2], ARGV[3], KEYS[3])',
       'return 1',
-    ].join('\n'), 3, claimKey, ACTIVE, key, token, CLAIM_MS, Date.now() + CLAIM_MS);
+    ].join('\n'), 3, claimKey, this.activeKey, key, token, CLAIM_MS, Date.now() + CLAIM_MS);
     if (Number(claimed) !== 1) return;
     try {
       let record = await this.read(key);
-      if (record == null) { await this.redis.zrem(ACTIVE, key); return; }
+      if (record == null) { await this.redis.zrem(this.activeKey, key); return; }
       if (record.state === 'queued' || record.state === 'admitted') {
         const previousState = record.state;
         try {
@@ -219,6 +223,11 @@ export class RedisWorkspaceRequests {
         } catch (error) {
           // Infrastructure uncertainty is reconciled, never retried as a new command.
           if (!(error instanceof BridgeStoreError)) throw error;
+          if (error.code === 'WORKER_OFFLINE') {
+            // The original worker may reconnect within the remaining admission budget.
+            await this.redis.zadd(this.activeKey, Date.now() + 250, key);
+            return;
+          }
           const current = await this.read(key);
           if (current?.state === 'admitted') throw error;
           await this.redis.eval([
@@ -233,9 +242,9 @@ export class RedisWorkspaceRequests {
       }
       if (record.state !== 'queued' && record.state !== 'admitted') {
         await deadline(this.bridge.finishDurableWorkspaceTool(record));
-        await this.redis.zrem(ACTIVE, key);
+        await this.redis.zrem(this.activeKey, key);
       } else {
-        await this.redis.zadd(ACTIVE, Date.now() + 250, key);
+        await this.redis.zadd(this.activeKey, Date.now() + 250, key);
       }
     } finally {
       await this.redis.eval('if redis.call(\'GET\', KEYS[1]) == ARGV[1] then return redis.call(\'DEL\', KEYS[1]) end return 0', 1, claimKey, token);

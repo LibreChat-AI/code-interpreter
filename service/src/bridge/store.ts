@@ -864,7 +864,8 @@ export class RedisBridgeStore {
         request: record.request,
       };
       const ready = await this.dispatchableRegistration(record.workerId);
-      if (ready == null || ready.registration.incarnationId !== registration.incarnationId ||
+      if (ready == null) throw new BridgeStoreError('WORKER_OFFLINE', 'Code environment is temporarily unavailable');
+      if (ready.registration.incarnationId !== registration.incarnationId ||
         ready.registration.identityId !== registration.identityId ||
         ready.registration.binding?.tenantId !== registration.binding?.tenantId ||
         !supportsWorkspaceTool(ready.registration, record.request)) {
@@ -2407,8 +2408,8 @@ export class RedisBridgeStore {
       "if ARGV[9] == 'lane' then redis.call('SADD', KEYS[11], KEYS[7]) end",
       'if keyCount >= 9 then',
       "  local epoch = redis.call('GET', KEYS[9])",
-      "  if type(epoch) ~= 'string' then epoch = '0'; redis.call('SET', KEYS[9], epoch, 'EX', ARGV[3]) end",
-      "  if redis.call('PTTL', KEYS[9]) < tonumber(ARGV[3]) * 1000 then redis.call('EXPIRE', KEYS[9], ARGV[3]) end",
+      '  if type(epoch) ~= \'string\' then epoch = \'0\'; redis.call(\'SET\', KEYS[9], epoch, \'EX\', ARGV[13]) end',
+      '  if redis.call(\'PTTL\', KEYS[9]) < tonumber(ARGV[13]) * 1000 then redis.call(\'EXPIRE\', KEYS[9], ARGV[13]) end',
       "  redis.call('HSET', KEYS[8], 'metadata', ARGV[8], 'epoch', epoch)",
       '  redis.call(\'EXPIRE\', KEYS[8], ARGV[13])',
       'end',
@@ -2614,9 +2615,13 @@ export class RedisBridgeStore {
         'if redis.call(\'EXISTS\', KEYS[2]) == 1 then return 1 end',
       ]),
       "if redis.call('GET', KEYS[1]) == ARGV[1] then",
-      '  redis.call(\'DEL\', KEYS[1])',
-      ...(durableKey == null ? [] : ['  redis.call(\'SET\', KEYS[2], \'1\', \'PX\', 86400000)']),
-      '  return 1',
+      ...(durableKey == null
+        ? ['  return redis.call(\'DEL\', KEYS[1])']
+        : [
+          '  redis.call(\'DEL\', KEYS[1])',
+          '  redis.call(\'SET\', KEYS[2], \'1\', \'PX\', 86400000)',
+          '  return 1',
+        ]),
       'end',
       'return 0',
     ].join('\n');

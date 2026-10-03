@@ -415,8 +415,13 @@ bounded by that retention window. A client must not resubmit an expired ID after
 404; its outcome is unknown. Automatic result claims and wake-ups remain the
 client's responsibility.
 
-API replicas reconcile accepted work from Redis. FIFO admission position survives
-API restarts. Assignment enqueue and the durable `admitted` transition are atomic.
+Bridge-enabled API replicas reconcile accepted work from Redis within a shared
+bridge-policy scope. Disabled bridges and different scheduling policies never
+claim that work. Keep backend/profile, bridge auth mode, worker selection, slot
+ceiling and command-timeout policy identical on replicas behind one endpoint.
+Drain durable requests before changing those settings. FIFO admission position
+survives API restarts and temporary worker registration/readiness loss until the
+queue deadline. Assignment enqueue and the durable `admitted` transition are atomic.
 Recovery resumes only queued work and observes admitted assignments without
 creating another command. Worker identity/incarnation changes fail pending work
 rather than transferring it to another machine. Execution gets its full budget

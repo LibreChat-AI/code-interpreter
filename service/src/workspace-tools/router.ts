@@ -70,184 +70,183 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
   }
   const router = Router();
 
-  router.post(
-    ['/workspace-tools/execute', '/workspace-tools/requests'],
-    asyncRoute(async (req, res) => {
-      const outcome = getWorkspaceToolOutcome(res, req.path);
-      const principal = getPrincipalOrReject(req, res);
-      if (!principal) {
-        outcome.errorCode = 'UNAUTHENTICATED';
-        return;
-      }
-      if ((options.isShuttingDown ?? checkServiceShutDown)()) {
-        outcome.errorCode = 'SERVICE_SHUTTING_DOWN';
-        res.status(503).json({ error: 'Service is shutting down' });
-        return;
-      }
-      if (!isWorkspaceToolRequest(req.body)) {
-        outcome.errorCode = 'INVALID_WORKSPACE_TOOL_REQUEST';
-        res.status(400).json({
-          error: 'Invalid workspace tool request',
-        });
-        return;
-      }
-      const advertisedQueueWait = req.header(WORKSPACE_QUEUE_WAIT_HEADER);
-      if (advertisedQueueWait !== undefined && !/^[1-9]\d*$/.test(advertisedQueueWait)) {
-        outcome.errorCode = 'INVALID_WORKSPACE_QUEUE_WAIT';
-        res.status(400).json({ error: 'Invalid workspace queue wait', code: 'INVALID_WORKSPACE_QUEUE_WAIT' });
-        return;
-      }
-      const requestedQueueWaitMs = advertisedQueueWait === undefined
-        ? DEFAULT_WORKSPACE_QUEUE_WAIT_MS
-        : Number(advertisedQueueWait);
-      if (!Number.isSafeInteger(requestedQueueWaitMs) || requestedQueueWaitMs > MAX_WORKSPACE_QUEUE_WAIT_MS) {
-        outcome.errorCode = 'INVALID_WORKSPACE_QUEUE_WAIT';
-        res.status(400).json({ error: 'Invalid workspace queue wait', code: 'INVALID_WORKSPACE_QUEUE_WAIT' });
-        return;
-      }
-      const queueBudgetMs = Math.min(requestedQueueWaitMs, queueCeilingMs);
-      outcome.operation = req.body.operation;
-      const principalRequest: WorkspaceToolRequest = req.body.workspaceInstanceId == null
-        ? req.body
-        : {
-          ...req.body,
-          workspaceInstanceId: principalWorkspaceInstanceId({
-            instanceId: req.body.workspaceInstanceId,
-            tenantId: principal.tenantId,
-            principalId: principal.userId,
-          }),
-        };
-      const request: WorkspaceToolRequest = principalRequest.operation === 'execute_command'
-        ? { ...principalRequest, timeoutMs: Math.min(
-          principalRequest.timeoutMs ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS,
-          options.timeoutMs ?? Number.MAX_SAFE_INTEGER,
-        ) }
-        : principalRequest;
-      const executionBudgetMs = request.operation === 'execute_command'
-        ? request.timeoutMs! + 5_000
-        : Math.min(options.timeoutMs ?? 30_000, 30_000);
-      outcome.deadlineBudgetMs = queueBudgetMs + executionBudgetMs;
-
-      let selection: { workerId: string; explicit: boolean } | undefined;
-      try {
-        selection = resolveBridgeWorkerSelection({
-          backend: options.backend,
-          configuredWorkerId: options.configuredWorkerId,
-          dynamicWorkers: options.dynamicWorkers,
-          requestedWorkerId: req.header(CODEAPI_BRIDGE_WORKER_HEADER),
-          trustedWorkerId: principal.codeWorkerId,
-        });
-      } catch (error) {
-        if (error instanceof BridgeWorkerSelectionError) {
-          outcome.errorCode = 'WORKER_SELECTION_REJECTED';
-          res.status(error.status).json({ error: error.message });
-          return;
-        }
-        throw error;
-      }
-      if (selection == null) {
-        outcome.errorCode = 'WORKSPACE_BACKEND_UNAVAILABLE';
-        res.status(503).json({
-          error: 'Workspace tools require the remote-bridge backend',
-        });
-        return;
-      }
-      outcome.workerId = selection.workerId;
-
-      if (req.path === '/workspace-tools/requests') {
-        if (options.requests == null) {
-          res.status(404).json({ error: 'Durable workspace requests are unavailable' });
-          return;
-        }
-        try {
-          const status = await options.requests.submit({
-            owner: principal, requestId: req.header('X-LibreChat-Workspace-Request-Id') ?? '',
-            workerId: selection.workerId,
-            requireTenantBinding: selection.explicit && (options.dynamicWorkers || selection.workerId !== options.configuredWorkerId),
-            request, queueWaitMs: queueBudgetMs, executionTimeoutMs: executionBudgetMs,
-          });
-          res.status(202).json(status);
-        } catch (error) {
-          if (error instanceof WorkspaceRequestConflict) {
-            res.status(409).json({ error: error.message, code: 'REQUEST_CONFLICT' });
-          } else if (error instanceof BridgeStoreError) {
-            res.status(bridgeStoreStatus(error)).json({ error: error.message, code: error.code });
-          } else throw error;
-        }
-        return;
-      }
-
-      const controller = new AbortController();
-      const abort = (): void => controller.abort();
-      req.once('aborted', abort);
-      const abortClosedResponse = (): void => {
-        if (!res.writableEnded) abort();
-      };
-      res.once('close', abortClosedResponse);
-      try {
-        outcome.dispatchPending = true;
-        const dispatchStartedAt = performance.now();
-        const settlement = await options.store.dispatchWorkspaceTool({
-          workerId: selection.workerId,
+  const execute = (durable: boolean): RequestHandler => asyncRoute(async (req, res) => {
+    const outcome = getWorkspaceToolOutcome(res, req.path);
+    const principal = getPrincipalOrReject(req, res);
+    if (!principal) {
+      outcome.errorCode = 'UNAUTHENTICATED';
+      return;
+    }
+    if ((options.isShuttingDown ?? checkServiceShutDown)()) {
+      outcome.errorCode = 'SERVICE_SHUTTING_DOWN';
+      res.status(503).json({ error: 'Service is shutting down' });
+      return;
+    }
+    if (!isWorkspaceToolRequest(req.body)) {
+      outcome.errorCode = 'INVALID_WORKSPACE_TOOL_REQUEST';
+      res.status(400).json({
+        error: 'Invalid workspace tool request',
+      });
+      return;
+    }
+    const advertisedQueueWait = req.header(WORKSPACE_QUEUE_WAIT_HEADER);
+    if (advertisedQueueWait !== undefined && !/^[1-9]\d*$/.test(advertisedQueueWait)) {
+      outcome.errorCode = 'INVALID_WORKSPACE_QUEUE_WAIT';
+      res.status(400).json({ error: 'Invalid workspace queue wait', code: 'INVALID_WORKSPACE_QUEUE_WAIT' });
+      return;
+    }
+    const requestedQueueWaitMs = advertisedQueueWait === undefined
+      ? DEFAULT_WORKSPACE_QUEUE_WAIT_MS
+      : Number(advertisedQueueWait);
+    if (!Number.isSafeInteger(requestedQueueWaitMs) || requestedQueueWaitMs > MAX_WORKSPACE_QUEUE_WAIT_MS) {
+      outcome.errorCode = 'INVALID_WORKSPACE_QUEUE_WAIT';
+      res.status(400).json({ error: 'Invalid workspace queue wait', code: 'INVALID_WORKSPACE_QUEUE_WAIT' });
+      return;
+    }
+    const queueBudgetMs = Math.min(requestedQueueWaitMs, queueCeilingMs);
+    outcome.operation = req.body.operation;
+    const principalRequest: WorkspaceToolRequest = req.body.workspaceInstanceId == null
+      ? req.body
+      : {
+        ...req.body,
+        workspaceInstanceId: principalWorkspaceInstanceId({
+          instanceId: req.body.workspaceInstanceId,
           tenantId: principal.tenantId,
-          requireTenantBinding:
-            selection.explicit && (options.dynamicWorkers || selection.workerId !== options.configuredWorkerId),
-          request,
-          deadlineAtMs: Date.now() + queueBudgetMs,
-          executionTimeoutMs: executionBudgetMs,
-          signal: controller.signal,
-        }).finally(() => {
-          outcome.dispatchDurationMs = Math.round(performance.now() - dispatchStartedAt);
+          principalId: principal.userId,
+        }),
+      };
+    const request: WorkspaceToolRequest = principalRequest.operation === 'execute_command'
+      ? { ...principalRequest, timeoutMs: Math.min(
+        principalRequest.timeoutMs ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS,
+        options.timeoutMs ?? Number.MAX_SAFE_INTEGER,
+      ) }
+      : principalRequest;
+    const executionBudgetMs = request.operation === 'execute_command'
+      ? request.timeoutMs! + 5_000
+      : Math.min(options.timeoutMs ?? 30_000, 30_000);
+    outcome.deadlineBudgetMs = queueBudgetMs + executionBudgetMs;
+
+    let selection: { workerId: string; explicit: boolean } | undefined;
+    try {
+      selection = resolveBridgeWorkerSelection({
+        backend: options.backend,
+        configuredWorkerId: options.configuredWorkerId,
+        dynamicWorkers: options.dynamicWorkers,
+        requestedWorkerId: req.header(CODEAPI_BRIDGE_WORKER_HEADER),
+        trustedWorkerId: principal.codeWorkerId,
+      });
+    } catch (error) {
+      if (error instanceof BridgeWorkerSelectionError) {
+        outcome.errorCode = 'WORKER_SELECTION_REJECTED';
+        res.status(error.status).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+    if (selection == null) {
+      outcome.errorCode = 'WORKSPACE_BACKEND_UNAVAILABLE';
+      res.status(503).json({
+        error: 'Workspace tools require the remote-bridge backend',
+      });
+      return;
+    }
+    outcome.workerId = selection.workerId;
+
+    if (durable) {
+      if (options.requests == null) {
+        res.status(404).json({ error: 'Durable workspace requests are unavailable' });
+        return;
+      }
+      try {
+        const status = await options.requests.submit({
+          owner: principal, requestId: req.header('X-LibreChat-Workspace-Request-Id') ?? '',
+          workerId: selection.workerId,
+          requireTenantBinding: selection.explicit && (options.dynamicWorkers || selection.workerId !== options.configuredWorkerId),
+          request, queueWaitMs: queueBudgetMs, executionTimeoutMs: executionBudgetMs,
         });
-        if (settlement.status === 'rejected') {
-          outcome.errorCode = settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED';
-          let status = 422;
-          if (
-            settlement.errorCode === 'SEARCH_TIMEOUT' ||
+        res.status(202).json(status);
+      } catch (error) {
+        if (error instanceof WorkspaceRequestConflict) {
+          res.status(409).json({ error: error.message, code: 'REQUEST_CONFLICT' });
+        } else if (error instanceof BridgeStoreError) {
+          res.status(bridgeStoreStatus(error)).json({ error: error.message, code: error.code });
+        } else throw error;
+      }
+      return;
+    }
+
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    req.once('aborted', abort);
+    const abortClosedResponse = (): void => {
+      if (!res.writableEnded) abort();
+    };
+    res.once('close', abortClosedResponse);
+    try {
+      outcome.dispatchPending = true;
+      const dispatchStartedAt = performance.now();
+      const settlement = await options.store.dispatchWorkspaceTool({
+        workerId: selection.workerId,
+        tenantId: principal.tenantId,
+        requireTenantBinding:
+            selection.explicit && (options.dynamicWorkers || selection.workerId !== options.configuredWorkerId),
+        request,
+        deadlineAtMs: Date.now() + queueBudgetMs,
+        executionTimeoutMs: executionBudgetMs,
+        signal: controller.signal,
+      }).finally(() => {
+        outcome.dispatchDurationMs = Math.round(performance.now() - dispatchStartedAt);
+      });
+      if (settlement.status === 'rejected') {
+        outcome.errorCode = settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED';
+        let status = 422;
+        if (
+          settlement.errorCode === 'SEARCH_TIMEOUT' ||
             settlement.errorCode === 'LIST_TIMEOUT' ||
             settlement.errorCode === 'COMMAND_TIMEOUT'
-          ) {
-            status = 504;
-          }
-          if (
-            settlement.errorCode === 'SEARCH_UNAVAILABLE' ||
+        ) {
+          status = 504;
+        }
+        if (
+          settlement.errorCode === 'SEARCH_UNAVAILABLE' ||
             settlement.errorCode === 'LIST_UNAVAILABLE' ||
             settlement.errorCode === 'COMMAND_UNAVAILABLE'
-          ) {
-            status = 503;
-          }
-          if (settlement.errorCode === 'WRITE_DISABLED') status = 403;
-          if (settlement.errorCode === 'COMMAND_DISABLED') status = 403;
-          if (settlement.errorCode === 'WRITE_LIMIT_EXCEEDED') status = 413;
-          if (settlement.errorCode === 'WRITE_UNAVAILABLE') status = 503;
-          if (settlement.errorCode === 'EDIT_CONFLICT') status = 409;
-          res.status(status).json({
-            error: settlement.error,
-            code: settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED',
-          });
-          return;
+        ) {
+          status = 503;
         }
-        res.status(200).json(settlement.result);
-      } catch (error) {
-        if (error instanceof BridgeStoreError) {
-          outcome.errorCode = error.code;
-          if (error.code === 'WORKSPACE_QUEUE_TIMEOUT') res.setHeader('Retry-After', '1');
-          res.status(bridgeStoreStatus(error)).json({
-            error: error.message,
-            code: error.code,
-          });
-          return;
-        }
-        outcome.errorCode = 'INTERNAL_ERROR';
-        throw error;
-      } finally {
-        outcome.dispatchPending = false;
-        outcome.flush();
-        req.removeListener('aborted', abort);
-        res.removeListener('close', abortClosedResponse);
+        if (settlement.errorCode === 'WRITE_DISABLED') status = 403;
+        if (settlement.errorCode === 'COMMAND_DISABLED') status = 403;
+        if (settlement.errorCode === 'WRITE_LIMIT_EXCEEDED') status = 413;
+        if (settlement.errorCode === 'WRITE_UNAVAILABLE') status = 503;
+        if (settlement.errorCode === 'EDIT_CONFLICT') status = 409;
+        res.status(status).json({
+          error: settlement.error,
+          code: settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED',
+        });
+        return;
       }
-    }),
-  );
+      res.status(200).json(settlement.result);
+    } catch (error) {
+      if (error instanceof BridgeStoreError) {
+        outcome.errorCode = error.code;
+        if (error.code === 'WORKSPACE_QUEUE_TIMEOUT') res.setHeader('Retry-After', '1');
+        res.status(bridgeStoreStatus(error)).json({
+          error: error.message,
+          code: error.code,
+        });
+        return;
+      }
+      outcome.errorCode = 'INTERNAL_ERROR';
+      throw error;
+    } finally {
+      outcome.dispatchPending = false;
+      outcome.flush();
+      req.removeListener('aborted', abort);
+      res.removeListener('close', abortClosedResponse);
+    }
+  });
+  router.post('/workspace-tools/execute', execute(false));
+  router.post('/workspace-tools/requests', execute(true));
 
   router.get('/workspace-tools/capabilities', asyncRoute(async (req, res) => {
     if (!getPrincipalOrReject(req, res)) return;

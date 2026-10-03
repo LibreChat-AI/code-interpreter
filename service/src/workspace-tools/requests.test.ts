@@ -5,6 +5,8 @@ import Redis from 'ioredis';
 import { RedisBridgeStore } from '../bridge/store';
 import type { CodeBridgeAssignment } from '../bridge/store';
 import { RedisWorkspaceRequests } from './requests';
+import { workspaceRequestCoordinationScope } from './coordination';
+import type { WorkspaceRequestCoordinationPolicy } from './coordination';
 
 const testRedisUrl = process.env.BRIDGE_TEST_REDIS_URL;
 const redis = testRedisUrl !== undefined && testRedisUrl.length > 0
@@ -190,15 +192,15 @@ test('durable requests preserve negotiated independent-root concurrency', async 
   expect((await requests.get(owner, 'request-00000000002'))?.state).toBe('completed');
 });
 
-test('restart after capacity reservation but before enqueue refreshes its own reservation without duplicating work', async () => {
-  const requests = await setup();
+test.each([1, 2])('restart after capacity reservation refreshes its own reservation without duplicating work (slots=%s)', async slots => {
+  const requests = await setup(slots);
   await submit(requests);
   const generation = spyOn(redis, 'incr').mockRejectedValue(new Error('process stopped before enqueue'));
   try { await expect(tick(requests)).rejects.toThrow('process stopped before enqueue'); } finally { generation.mockRestore(); }
   expect((await requests.get(owner, requestId))?.state).toBe('queued');
   await redis.pexpire(`codeapi:bridge:v1:worker:${workerId}:lock`, 5000);
   await tick(new RedisWorkspaceRequests(redis, bridge));
-  const assignment = await bridge.lease(workerId, incarnationId, 0);
+  const assignment = await bridge.lease(workerId, incarnationId, 0, undefined, undefined, slots === 1 ? undefined : 0);
   expect(assignment).toBeDefined();
   expect(await redis.pttl(`codeapi:bridge:v1:worker:${workerId}:lock`)).toBeGreaterThan(30_000);
 });
@@ -274,4 +276,110 @@ test('restart between workspace commit and cleanup preserves the result and rele
   await tick(new RedisWorkspaceRequests(redis, bridge));
   expect((await requests.get(owner, requestId))?.state).toBe('completed');
   expect(await redis.zcard(activeKey)).toBe(0);
+});
+
+test('simultaneous submissions from replicas keep one request identity and one FIFO entry', async () => {
+  const requests = await setup();
+  const replica = new RedisWorkspaceRequests(redis, bridge);
+  const statuses = await Promise.all([submit(requests), submit(replica)]);
+  for (const status of statuses) expect(status).toMatchObject({ requestId, state: 'queued', queuePosition: 1 });
+  expect(await redis.zcard(queueKey)).toBe(1);
+  expect(await redis.zcard(activeKey)).toBe(1);
+  await tick(requests);
+  expect(await bridge.lease(workerId, incarnationId, 0)).toBeDefined();
+});
+
+test.each([false, true])('temporary registration loss preserves FIFO until the original worker reconnects (replacement=%s)', async replacement => {
+  const requests = await setup();
+  await submit(requests); await submit(requests, 'request-00000000002');
+  // Registration/readiness TTL expiry, without losing accepted work.
+  const worker = `codeapi:bridge:v1:worker:${workerId}`;
+  await redis.del(worker, `${worker}:incarnation`, `${worker}:ready`);
+  const restarted = new RedisWorkspaceRequests(redis, bridge);
+  await tick(restarted);
+  expect(await restarted.get(owner, requestId)).toMatchObject({ state: 'queued', queuePosition: 1 });
+  expect(await redis.zcard(activeKey)).toBe(2);
+  if (replacement) {
+    await bridge.register({ protocolVersion: 1, workerId, incarnationId: 'replacement-00001',
+      capabilities: { sandboxProfile: 'native-srt', statefulWorkspace: false, runtimes: [],
+        workspaceTools: { protocolVersion: 1, operations: ['read_file'], workspaces: [{ id: 'primary' }] } },
+    });
+    await tick(restarted);
+    expect(await restarted.get(owner, requestId)).toMatchObject({ state: 'failed', error: { code: 'WORKER_FENCED' } });
+    expect(await bridge.lease(workerId, 'replacement-00001', 0)).toBeUndefined();
+  } else {
+    await setup(); await tick(restarted);
+    const assignment = (await bridge.lease(workerId, incarnationId, 0))!;
+    expect(assignment).toBeDefined();
+    await settle(assignment); await tick(restarted);
+    expect((await restarted.get(owner, requestId))?.state).toBe('completed');
+  }
+});
+
+test('an offline worker cannot extend the queue deadline', async () => {
+  const requests = await setup(); await submit(requests);
+  const worker = `codeapi:bridge:v1:worker:${workerId}`;
+  await redis.del(worker, `${worker}:incarnation`, `${worker}:ready`);
+  await tick(requests);
+  expect((await requests.get(owner, requestId))?.state).toBe('queued');
+  await mutateRecord(record => { record.queueDeadlineAtMs = Date.now() - 1; });
+  await tick(requests);
+  expect(await requests.get(owner, requestId)).toMatchObject({ state: 'failed', error: { code: 'WORKSPACE_QUEUE_TIMEOUT' } });
+  expect(await redis.zcard(activeKey)).toBe(0);
+});
+
+test('durable reset epochs outlive their receipts and reject late quarantine after reset', async () => {
+  const requests = await setup(2); await submit(requests); await tick(requests);
+  const assignment = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0))!;
+  await settle(assignment); await tick(requests);
+  const receipt = `codeapi:bridge:v1:assignment:${assignment.assignmentId}:workspace-fence-owner`;
+  const fence = `codeapi:bridge:v1:worker:${workerId}:workspace:${createHash('sha256').update('native-workspace:primary').digest('hex')}:quarantined`;
+  expect(await redis.pttl(`${fence}:epoch`)).toBeGreaterThanOrEqual(await redis.pttl(receipt) - 50);
+  expect(await redis.pttl(`${fence}:epoch`)).toBeGreaterThan(86_000_000);
+  // Simulate execution-ownership TTL expiry. The durable receipt and epoch survive.
+  await redis.del(`codeapi:bridge:v1:worker:${workerId}:workspace-slots`,
+    `codeapi:bridge:v1:worker:${workerId}:lock`, `codeapi:bridge:v1:worker:${workerId}:lock:incarnation`);
+  await bridge.resetWorkspace(workerId, incarnationId, 'native-workspace:primary');
+  await submit(requests, 'request-00000000002'); await tick(requests);
+  const next = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0))!;
+  await expect(bridge.settle(workerId, assignment.assignmentId, {
+    protocolVersion: 1, incarnationId, generation: assignment.generation, leaseToken: assignment.leaseToken,
+    status: 'rejected', error: 'delayed local cleanup failure',
+  }, undefined, undefined, true)).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+  expect(await redis.get(fence)).toBe(next.assignmentId);
+  await settle(next); await tick(requests);
+  expect((await requests.get(owner, 'request-00000000002'))?.state).toBe('completed');
+});
+
+const coordinationPolicy: WorkspaceRequestCoordinationPolicy = {
+  bridgeEnabled: true, backend: 'remote-bridge', executionProfile: 'default', authMode: 'paired',
+  configuredWorkerId: '', dynamicWorkers: true, maxWorkspaceLeaseSlots: 2, maxCommandTimeoutMs: 30_000,
+};
+
+test('disabled bridges do not participate and each scheduling policy has an isolated scope', () => {
+  expect(workspaceRequestCoordinationScope({ ...coordinationPolicy, bridgeEnabled: false })).toBeUndefined();
+  const scope = workspaceRequestCoordinationScope(coordinationPolicy);
+  expect(workspaceRequestCoordinationScope({ ...coordinationPolicy })).toBe(scope);
+  const variants: Partial<WorkspaceRequestCoordinationPolicy>[] = [
+    { maxWorkspaceLeaseSlots: 1 }, { backend: 'http' }, { executionProfile: 'stateful' },
+    { authMode: 'static' }, { configuredWorkerId: 'another' }, { dynamicWorkers: false },
+    { maxCommandTimeoutMs: 60_000 },
+  ];
+  for (const variant of variants) expect(workspaceRequestCoordinationScope({ ...coordinationPolicy, ...variant })).not.toBe(scope);
+});
+
+test('a different policy cannot claim or fail work accepted by a two-slot bridge API', async () => {
+  await setup(2);
+  const scope = workspaceRequestCoordinationScope(coordinationPolicy)!;
+  const requests = new RedisWorkspaceRequests(redis, bridge, undefined, scope);
+  await submit(requests);
+  const foreignScope = workspaceRequestCoordinationScope({ ...coordinationPolicy, maxWorkspaceLeaseSlots: 1 })!;
+  const foreign = new RedisWorkspaceRequests(redis, new RedisBridgeStore(redis), undefined, foreignScope);
+  await foreign.reconcile();
+  expect((await requests.get(owner, requestId))?.state).toBe('queued');
+  expect(await foreign.get(owner, requestId)).toBeUndefined();
+  const restarted = new RedisWorkspaceRequests(redis, new RedisBridgeStore(redis, 600, 1000, 2), undefined, scope);
+  await restarted.reconcile();
+  const assignment = await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0);
+  expect(assignment).toBeDefined();
 });

@@ -14,7 +14,7 @@ afterEach(() => { server?.close(); server = undefined; });
 const body = { protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' };
 const requestId = 'http-request-000001';
 
-async function setup(durable = true): Promise<string> {
+async function setup(durable = true, rejectSynchronous = false): Promise<string> {
   const redis = new RedisMock() as unknown as Redis;
   const bridge = new RedisBridgeStore(redis);
   await bridge.register({ protocolVersion: 1, workerId: 'worker', incarnationId: 'incarnation-00000001', capabilities: {
@@ -30,7 +30,7 @@ async function setup(durable = true): Promise<string> {
     next();
   });
   app.use(createWorkspaceToolsRouter({
-    store: bridge, requests: durable ? new RedisWorkspaceRequests(redis, bridge) : undefined,
+    store: rejectSynchronous ? { async dispatchWorkspaceTool(): Promise<never> { throw new Error('Durable URL dispatched synchronously'); } } : bridge, requests: durable ? new RedisWorkspaceRequests(redis, bridge) : undefined,
     backend: 'remote-bridge', configuredWorkerId: 'worker', dynamicWorkers: false,
   }));
   server = createServer(app);
@@ -81,4 +81,16 @@ test('unauthenticated request status and capability discovery are rejected', asy
   for (const path of ['capabilities', `requests/${requestId}`]) {
     expect((await fetch(`${url}/workspace-tools/${path}`, { headers: { 'X-Test-User': 'unauthenticated' } })).status).toBe(401);
   }
+});
+
+test.each(['/workspace-tools/requests/', '/workspace-tools/REQUESTS'])('durable route aliases remain idempotent (%s)', async path => {
+  const url = await setup(true, true);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await fetch(`${url}${path}`, { method: 'POST', headers: {
+      'Content-Type': 'application/json', 'X-LibreChat-Workspace-Request-Id': requestId,
+    }, body: JSON.stringify(body) });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ requestId, state: 'queued', queuePosition: 1 });
+  }
+  expect(await (await fetch(`${url}/workspace-tools/requests/${requestId}`)).json()).toMatchObject({ state: 'queued' });
 });
