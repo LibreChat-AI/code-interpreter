@@ -14,6 +14,14 @@ import type {
 export const EDIT_DIAGNOSTIC_MAX_CHARS = 3000;
 const MAX_REPORTED_LINES = 5;
 const MAX_SNIPPET_CHARS = 120;
+/** A missing edit's current-text excerpt: a few lines, each shortened, in one bounded hint. */
+const MAX_EXCERPT_LINES = 8;
+const MAX_EXCERPT_LINE_CHARS = 160;
+const MAX_EXCERPT_CHARS = 1_600;
+/** Alignment votes cast while locating the region a missing edit most likely meant. */
+const MAX_REGION_VOTES = 200_000;
+/** Lines too generic to anchor a region on their own (`}`, `);`, blank lines). */
+const ANCHOR_LINE = /[\p{L}\p{N}_]{2}/u;
 /** A highly repetitive indentation candidate must not monopolize the worker. */
 const MAX_LINE_WINDOW_VERIFICATIONS = 100_000;
 const MAX_REPLACEMENT_CHUNK_CHARS = 16 * 1024;
@@ -45,6 +53,12 @@ export interface EditFailure {
   /** Zero-based position of the edit in the request. */
   index: number;
   reason: string;
+  /**
+   * A final `; the current text at ...` hint quoting the region the edit most
+   * likely meant. It is appended to `reason` only while the whole message stays
+   * within its bound, and is the first detail dropped when it would not.
+   */
+  excerpt?: string;
 }
 
 export class WorkspaceEditMatchError extends Error {
@@ -93,14 +107,16 @@ export function applyTextEdits(
       matches.push({ strategy: outcome.strategy, occurrences: outcome.occurrences });
       return;
     }
+    if (outcome.status === 'none') {
+      failures.push({ index, ...describeMissing(working, edit.oldText, matching, lines) });
+      return;
+    }
     failures.push({
       index,
       reason:
         outcome.status === 'ambiguous'
           ? describeAmbiguous(working, outcome.strategy, outcome.count, outcome.starts)
-          : outcome.status === 'limit'
-            ? 'old_text has too many repetitive line-window candidates; include more surrounding lines or use an exact match'
-            : describeMissing(working, edit.oldText, matching, lines),
+          : 'old_text has too many repetitive line-window candidates; include more surrounding lines or use an exact match',
     });
   });
   if (failures.length > 0) {
@@ -604,9 +620,116 @@ function describeMissing(
   oldText: string,
   matching: WorkspaceEditMatching,
   lines: () => LineIndex,
+): { reason: string; excerpt?: string } {
+  const needle = neededLines(oldText).lines;
+  const nearest = nearestLine(needle.find((line) => line.trim().length > 0), lines);
+  const reason = describeMissingReason(text, oldText, needle, matching, lines, nearest);
+  const anchor = nearest != null && (!nearest.exact || nearest.count === 1) ? nearest.index : undefined;
+  const start = closestRegion(needle, lines()) ?? anchor;
+  const excerpt = start == null ? undefined : currentTextExcerpt(needle, lines(), start);
+  return excerpt == null ? { reason } : { reason, excerpt };
+}
+
+type ExcerptMark = ' ' | '~' | '!';
+
+/**
+ * Finds where a missing multi-line edit most likely belongs: the alignment on
+ * which the most of its distinctive lines, compared without surrounding
+ * whitespace, fall into place. One pass over the file with bounded votes.
+ */
+function closestRegion(needle: readonly string[], lines: LineIndex): number | undefined {
+  const offsets = new Map<string, number[]>();
+  let anchors = 0;
+  needle.forEach((line, offset) => {
+    const key = line.trim();
+    if (!ANCHOR_LINE.test(key)) return;
+    anchors++;
+    const known = offsets.get(key);
+    if (known) known.push(offset);
+    else offsets.set(key, [offset]);
+  });
+  if (anchors < 2) return undefined;
+  const votes = new Map<number, number>();
+  let budget = MAX_REGION_VOTES;
+  let best: number | undefined;
+  let bestVotes = 0;
+  for (let index = 0; index < lines.length && budget > 0; index++) {
+    const hits = offsets.get(lines.text(index).trim());
+    if (!hits) continue;
+    for (const offset of hits) {
+      const start = index - offset;
+      if (start < 0) continue;
+      if (budget-- <= 0) break;
+      const count = (votes.get(start) ?? 0) + 1;
+      votes.set(start, count);
+      if (count > bestVotes || (count === bestVotes && best !== undefined && start < best)) {
+        best = start;
+        bestVotes = count;
+      }
+    }
+  }
+  // One shared line is too weak to claim a region; the first-line anchor covers that case.
+  return bestVotes >= 2 ? best : undefined;
+}
+
+function excerptMark(current: string, expected: string | undefined): ExcerptMark {
+  if (expected === undefined) return '!';
+  if (current === expected) return ' ';
+  return current.trim() === expected.trim() ? '~' : '!';
+}
+
+function shortenLine(line: string): string {
+  if (line.length <= MAX_EXCERPT_LINE_CHARS) return line;
+  let end = MAX_EXCERPT_LINE_CHARS;
+  if (/[\uD800-\uDBFF]/.test(line[end - 1]) && /[\uDC00-\uDFFF]/.test(line[end])) end--;
+  return `${line.slice(0, end)}…`;
+}
+
+/**
+ * Quotes the current text where a missing edit most likely belongs, so the next
+ * attempt can copy it instead of re-reading the file. Each line is marked
+ * against the `old_text` line at the same position: a space when identical,
+ * `~` when only whitespace differs and `!` when the text differs. A region
+ * longer than the excerpt is shown from just before its first difference.
+ */
+function currentTextExcerpt(needle: readonly string[], lines: LineIndex, start: number): string | undefined {
+  const span = Math.max(1, Math.min(needle.length, lines.length - start));
+  const marks = Array.from({ length: span }, (_, offset) =>
+    excerptMark(lines.text(start + offset), needle[offset]),
+  );
+  const shown = Math.min(span, MAX_EXCERPT_LINES);
+  const firstDifference = Math.max(0, marks.findIndex((mark) => mark !== ' '));
+  const first = start + Math.min(Math.max(0, firstDifference - 1), span - shown);
+  const rows = marks
+    .slice(first - start, first - start + shown)
+    .map((mark, offset) => `${first + offset + 1}|${mark}${shortenLine(lines.text(first + offset))}`);
+  for (; rows.length > 0; rows.pop()) {
+    const where = rows.length === 1 ? `line ${first + 1}` : `lines ${first + 1}-${first + rows.length}`;
+    const excerpt = `the current text at ${where} (~ whitespace differs, ! text differs) is ${JSON.stringify(rows.join('\n'))}`;
+    if (excerpt.length <= MAX_EXCERPT_CHARS) return excerpt;
+  }
+  return undefined;
+}
+
+interface NearestLine {
+  exact: boolean;
+  count: number;
+  /** Line index of the first exact candidate, or of the best token match. */
+  index: number;
+  starts: number[];
+  text: string;
+}
+
+function describeMissingReason(
+  text: string,
+  oldText: string,
+  needle: readonly string[],
+  matching: WorkspaceEditMatching,
+  lines: () => LineIndex,
+  nearest: NearestLine | undefined,
 ): string {
   const hints: string[] = [];
-  const nonBlank = neededLines(oldText).lines.filter((line) => line.trim().length > 0);
+  const nonBlank = needle.filter((line) => line.trim().length > 0);
   if (nonBlank.some((line) => ELISION_LINE.test(line))) {
     hints.push('it contains an elision placeholder ("..."); copy the exact lines instead of abbreviating');
   }
@@ -629,7 +752,6 @@ function describeMissing(
       hints.push('the file uses CRLF line endings');
     }
   }
-  const nearest = nearestLine(nonBlank[0], lines);
   if (nearest != null && hints.length === 0) {
     hints.push(
       nearest.exact
@@ -644,45 +766,65 @@ function describeMissing(
 function nearestLine(
   firstLine: string | undefined,
   getLines: () => LineIndex,
-): { exact: boolean; count: number; starts: number[]; text: string } | undefined {
+): NearestLine | undefined {
   const target = firstLine?.trim();
   if (!target) return undefined;
   const lines = getLines();
   const starts: number[] = [];
   let count = 0;
-  let firstMatch = '';
+  let first = 0;
   for (let index = 0; index < lines.length; index++) {
-    const content = lines.text(index);
-    if (content.trim() !== target) continue;
-    if (count++ === 0) firstMatch = content;
+    if (lines.text(index).trim() !== target) continue;
+    if (count++ === 0) first = index;
     if (starts.length < MAX_REPORTED_LINES) starts.push(lines.start(index));
   }
   if (count > 0) {
-    return { exact: true, count, starts, text: firstMatch };
+    return { exact: true, count, index: first, starts, text: lines.text(first) };
   }
   const tokens = new Set(target.split(/\W+/).filter((token) => token.length > 1));
   if (tokens.size < 2) return undefined;
-  let best: Line | undefined;
+  let best: number | undefined;
   let bestScore = 0;
   for (let index = 0; index < lines.length; index++) {
-    const content = lines.text(index);
     let score = 0;
-    for (const token of new Set(content.split(/\W+/))) {
+    for (const token of new Set(lines.text(index).split(/\W+/))) {
       if (tokens.has(token)) score++;
     }
     if (score > bestScore) {
-      best = { start: lines.start(index), end: lines.end(index), next: lines.next(index), text: content };
+      best = index;
       bestScore = score;
     }
   }
   return best != null && bestScore / tokens.size >= 0.5
-    ? { exact: false, count: 1, starts: [best.start], text: best.text }
+    ? { exact: false, count: 1, index: best, starts: [lines.start(best)], text: lines.text(best) }
     : undefined;
+}
+
+/** A failure's reason, followed by its excerpt when the excerpt was granted room. */
+function failureText(failure: EditFailure, withExcerpt: boolean): string {
+  return withExcerpt && failure.excerpt ? `${failure.reason}; ${failure.excerpt}` : failure.reason;
+}
+
+/**
+ * Grants excerpts in edit order while the message still fits. Excerpts are the
+ * most expendable detail, so granting one never shortens another reason.
+ */
+function grantExcerpts(failures: readonly EditFailure[], available: number): boolean[] {
+  let remaining = available - failures.reduce((total, failure) => total + failure.reason.length, 0);
+  return failures.map((failure) => {
+    const cost = failure.excerpt ? failure.excerpt.length + 2 : 0;
+    if (cost === 0 || cost > remaining) return false;
+    remaining -= cost;
+    return true;
+  });
 }
 
 function formatEditFailures(failures: readonly EditFailure[], editCount: number): string {
   if (editCount === 1) {
-    return `Workspace edit did not apply and nothing was written: ${failures[0]?.reason ?? 'no match'}.`.slice(
+    const single = (withExcerpt: boolean) =>
+      `Workspace edit did not apply and nothing was written: ${failures[0] ? failureText(failures[0], withExcerpt) : 'no match'}.`;
+    const detailed = single(true);
+    return (detailed.length <= EDIT_DIAGNOSTIC_MAX_CHARS ? detailed : single(false)).slice(
       0,
       EDIT_DIAGNOSTIC_MAX_CHARS,
     );
@@ -696,10 +838,12 @@ function formatEditFailures(failures: readonly EditFailure[], editCount: number)
   // reasons or source excerpts. Never leave callers guessing which edits failed.
   const available = EDIT_DIAGNOSTIC_MAX_CHARS - header.length - footer.length -
     prefixes.reduce((total, prefix) => total + prefix.length + 1, 0);
-  const reasonLength = failures.reduce((total, failure) => total + failure.reason.length, 0);
+  const granted = grantExcerpts(failures, available);
+  const reasons = failures.map((failure, index) => failureText(failure, granted[index]));
+  const reasonLength = reasons.reduce((total, reason) => total + reason.length, 0);
   const reasonLimit = reasonLength <= available ? Infinity : Math.floor(available / failures.length);
-  const details = failures.map((failure, index) => {
-    let reason = failure.reason;
+  const details = reasons.map((full, index) => {
+    let reason = full;
     if (reason.length > reasonLimit) {
       let end = reasonLimit - 1;
       // Do not split a surrogate pair in a shortened source excerpt.

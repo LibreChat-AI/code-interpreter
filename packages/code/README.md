@@ -640,7 +640,15 @@ fails, the worker still checks the rest and rejects the whole batch with one
 batch messages shorten reasons and source excerpts to stay within the bound,
 but never omit failing edit positions. A missing edit names the nearest
 candidate line and flags elided (`...`) or line-numbered `oldText`, a
-whitespace-only difference, or CRLF line endings.
+whitespace-only difference, or CRLF line endings. When the file has a region
+that `oldText` most likely meant (the alignment where the most of its
+distinctive lines fall into place, or its unique first line or closest line),
+the reason ends with `the current text at lines A-B (~ whitespace differs, !
+text differs) is "<rows>"`: a JSON string of at most 8 rows of the form
+`<line>|<mark><text>`, each line shortened to 160 characters, where the mark is
+a space for a line identical to `oldText` at that position, `~` when only its
+whitespace differs and `!` when its text differs. Excerpts are the first detail
+dropped to fit the message bound, and never shorten another edit's reason.
 An ambiguous edit gives its match count and line numbers. Overlapping
 occurrences count as separate locations. Detailed source-line excerpts require
 `read_file` or `preview_edit` on the same workspace; edit-only workers return a

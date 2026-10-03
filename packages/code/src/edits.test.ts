@@ -719,3 +719,156 @@ test('short batch diagnostic reasons remain complete when the message fits', () 
     assert.ok(error.message.includes(`\nEdit ${failure.index + 1}: ${failure.reason}.`));
   }
 });
+
+const EXCERPT = /the current text at lines? (\d+)(?:-(\d+))? \(~ whitespace differs, ! text differs\) is ("(?:[^"\\]|\\.)*")/;
+
+function excerptOf(message: string): { first: number; last: number; rows: string[] } | undefined {
+  const match = EXCERPT.exec(message);
+  if (!match) return undefined;
+  const first = Number(match[1]);
+  return { first, last: Number(match[2] ?? first), rows: (JSON.parse(match[3]) as string).split('\n') };
+}
+
+test('a missing edit quotes the current text of the region it meant, marking what differs', () => {
+  const text = 'export function load(user) {\n  const id = user.id;\n  return fetchUser(id);\n}\n';
+  const error = rejection(() => applyTextEdits(text, [{
+    oldText: 'export function load(user) {\n    const id = user.id;\n  return fetchUser(user);\n}',
+    newText: 'x',
+  }], 'tolerant'));
+  assert.match(error.message, /old_text was not found; its first line appears at line 1, but the lines after it differ; the current text/);
+  assert.deepEqual(excerptOf(error.message), {
+    first: 1,
+    last: 4,
+    rows: [
+      '1| export function load(user) {',
+      '2|~  const id = user.id;',
+      '3|!  return fetchUser(id);',
+      '4| }',
+    ],
+  });
+  assert.match(error.message, /\.$/);
+});
+
+test('the region is found from later lines when the first line itself changed', () => {
+  const text = 'header();\nfunction save(record) {\n  validate(record);\n  persist(record);\n}\nfooter();\n';
+  const error = rejection(() => applyTextEdits(text, [{
+    oldText: 'function save(item) {\n  validate(record);\n  persist(record);\n}',
+    newText: 'x',
+  }]));
+  assert.deepEqual(excerptOf(error.message), {
+    first: 2,
+    last: 5,
+    rows: ['2|!function save(record) {', '3|   validate(record);', '4|   persist(record);', '5| }'],
+  });
+});
+
+test('the region with the most aligned lines wins, and ties prefer the earliest', () => {
+  const block = (name: string) => `function ${name}() {\n  prepare();\n  run();\n  cleanup();\n}\n`;
+  const text = `${block('first')}${block('second')}`;
+  const error = rejection(() => applyTextEdits(text, [{
+    oldText: 'function second() {\n  prepare();\n  execute();\n  cleanup();\n}',
+    newText: 'x',
+  }]));
+  assert.equal(excerptOf(error.message)?.first, 6);
+  const tied = rejection(() => applyTextEdits(text, [{
+    oldText: 'function third() {\n  prepare();\n  execute();\n  cleanup();\n}',
+    newText: 'x',
+  }]));
+  assert.equal(excerptOf(tied.message)?.first, 1);
+});
+
+test('a missing one-line edit quotes its closest line', () => {
+  const error = rejection(() => applyTextEdits('const total = items.length;\nreturn total;\n', [
+    { oldText: 'const total = items.size;', newText: 'x' },
+  ]));
+  assert.match(error.message, /the closest line is line 1: "const total = items.length;"/);
+  assert.deepEqual(excerptOf(error.message), { first: 1, last: 1, rows: ['1|!const total = items.length;'] });
+});
+
+test('exact mode quotes the whitespace to copy alongside the whitespace hint', () => {
+  const error = rejection(() => applyTextEdits('class A {\n    a();\n    b();\n}\n', [
+    { oldText: 'a();\nb();', newText: 'x' },
+  ]));
+  assert.match(error.message, /exists at line 2 with different whitespace \(indentation-flexible\); copy that whitespace exactly; the current text at lines 2-3/);
+  assert.deepEqual(excerptOf(error.message)?.rows, ['2|~    a();', '3|~    b();']);
+});
+
+test('a long region is quoted from just before its first difference', () => {
+  const source = Array.from({ length: 40 }, (_, index) => `step(${index});`);
+  const needle = source.slice(5, 25);
+  needle[8] = 'step(changed);';
+  const error = rejection(() => applyTextEdits(`${source.join('\n')}\n`, [{ oldText: needle.join('\n'), newText: 'x' }]));
+  const excerpt = excerptOf(error.message);
+  assert.equal(excerpt?.first, 13);
+  assert.equal(excerpt?.last, 20);
+  assert.equal(excerpt?.rows[1], '14|!step(13);');
+  assert.ok(excerpt?.rows.every((row, index) => index === 1 || row.includes('| ')));
+});
+
+test('excerpts shorten long lines and stay bounded without splitting characters', () => {
+  const wide = `x${'😀'.repeat(400)}`;
+  const controls = '\u0001'.repeat(2_000);
+  const text = Array.from({ length: 10 }, (_, index) => `key_${index} = ${index % 2 === 0 ? wide : controls}`).join('\n');
+  const oldText = Array.from({ length: 10 }, (_, index) => `key_${index} = other`).join('\n');
+  const error = rejection(() => applyTextEdits(text, [{ oldText, newText: 'x' }]));
+  const excerpt = excerptOf(error.message);
+  assert.ok(excerpt != null);
+  assert.ok(excerpt.rows.length >= 1 && excerpt.rows.length <= 8);
+  assert.ok(EXCERPT.exec(error.message)![0].length <= 1_600);
+  for (const row of excerpt.rows) {
+    assert.ok(row.length <= 175, row.slice(0, 40));
+    assert.equal(Buffer.from(row).toString('utf8'), row);
+  }
+});
+
+test('an edit that resembles nothing in the file gets no excerpt', () => {
+  const error = rejection(() => applyTextEdits('alpha\nbeta\n', [
+    { oldText: 'completely different text\nwith nothing shared', newText: 'x' },
+  ]));
+  assert.equal(excerptOf(error.message), undefined);
+  assert.match(error.message, /old_text was not found\.$/);
+});
+
+test('ambiguous and line-numbered edits keep their messages without an excerpt', () => {
+  const ambiguous = rejection(() => applyTextEdits('return a;\nreturn a;\n', [{ oldText: 'return a;', newText: 'x' }]));
+  assert.equal(excerptOf(ambiguous.message), undefined);
+  const numbered = rejection(() => applyTextEdits('start\nmiddle\nend\n', [{ oldText: '1 | start\n2 | middle', newText: 'x' }]));
+  assert.equal(excerptOf(numbered.message), undefined);
+});
+
+test('batch excerpts are granted in edit order only while every position and reason still fits', () => {
+  const lines = Array.from({ length: 400 }, (_, index) => `value_${index} = compute_${index}(input_${index}, ${'p'.repeat(120)});`);
+  const edits = Array.from({ length: 12 }, (_, index) => ({
+    oldText: `${lines[index * 10]}\n${lines[index * 10 + 1].replace('compute', 'changed')}\n${lines[index * 10 + 2]}`,
+    newText: 'x',
+  }));
+  const error = rejection(() => applyTextEdits(`${lines.join('\n')}\n`, edits));
+  assert.ok(error.message.length <= EDIT_DIAGNOSTIC_MAX_CHARS);
+  assert.deepEqual(
+    [...error.message.matchAll(/\nEdit (\d+):/g)].map((match) => Number(match[1])),
+    Array.from({ length: 12 }, (_, index) => index + 1),
+  );
+  const quoted = [...error.message.matchAll(/\nEdit (\d+): [^\n]*the current text at/g)].map((match) => Number(match[1]));
+  assert.ok(quoted.length >= 1 && quoted.length < 12);
+  assert.deepEqual(quoted, Array.from({ length: quoted.length }, (_, index) => index + 1));
+  for (const failure of error.failures) {
+    assert.ok(error.message.includes(`\nEdit ${failure.index + 1}: ${failure.reason}`));
+  }
+});
+
+test('a single edit drops its excerpt rather than exceed the bound', () => {
+  const error = new WorkspaceEditMatchError([
+    { index: 0, reason: `old_text was not found${'; x'.repeat(1_200)}`, excerpt: 'the current text at line 1 (~ whitespace differs, ! text differs) is "1|!y"' },
+  ], 1);
+  assert.ok(error.message.length <= EDIT_DIAGNOSTIC_MAX_CHARS);
+  assert.doesNotMatch(error.message, /the current text/);
+});
+
+test('region votes stay bounded on highly repetitive files', () => {
+  const text = 'item = value;\nother = thing;\n'.repeat(150_000);
+  const oldText = 'item = value;\nother = thing;\nmissing = line;\nitem = value;';
+  const started = performance.now();
+  const error = rejection(() => applyTextEdits(text, [{ oldText, newText: 'x' }]));
+  assert.ok(performance.now() - started < 3_000, 'a repetitive file must not cast unbounded votes');
+  assert.match(error.message, /did not apply and nothing was written/);
+});
