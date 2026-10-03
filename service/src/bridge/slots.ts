@@ -1,4 +1,5 @@
 import type Redis from 'ioredis';
+import { durableAdmissionFence } from './admission';
 
 /** Hard bound keeps every atomic scheduling scan constant-sized. */
 export const MAX_WORKSPACE_LEASE_SLOTS = 8;
@@ -37,6 +38,8 @@ export class BridgeWorkspaceSlots {
     workspaceId: string;
     capacity: number;
     expiresAtMs: number;
+    refreshOwned?: boolean;
+    guard?: { key: string; claimKey: string; token: string };
   }): Promise<number | undefined> {
     if (
       !Number.isSafeInteger(args.capacity) ||
@@ -48,9 +51,12 @@ export class BridgeWorkspaceSlots {
     ) {
       throw new Error('Invalid workspace slot reservation');
     }
+    const keys = this.keys(args.workerId);
+    if (args.guard != null) keys.push(args.guard.key, args.guard.claimKey);
     const result = Number(
       await this.redis.eval(
         [
+          ...(args.guard == null ? [] : durableAdmissionFence('KEYS[9]', 'KEYS[10]', 'ARGV[8]', -3)),
           "if redis.call('GET', KEYS[4]) ~= ARGV[1] then return -2 end",
           "if (redis.call('GET', KEYS[8]) or '1') ~= ARGV[4] then return -2 end",
           // Parent of a linked-worktree lane key; nil for a checkout key.
@@ -83,7 +89,15 @@ export class BridgeWorkspaceSlots {
           "      redis.call('HDEL', KEYS[1], 'a:' .. slot, 'i:' .. slot, 'w:' .. slot, 'e:' .. slot)",
           '      occupied = false',
           '    else',
-          '      if entry[1] == ARGV[2] then return slot end',
+          '      if entry[1] == ARGV[2] then',
+          '        if ARGV[7] == \'1\' then',
+          '          redis.call(\'HSET\', KEYS[1], \'e:\' .. slot, ARGV[5])',
+          '          for _, key in ipairs({KEYS[1], KEYS[2], KEYS[3]}) do',
+          '            if redis.call(\'PTTL\', key) < tonumber(ARGV[5]) - tonumber(ARGV[6]) then redis.call(\'PEXPIREAT\', key, ARGV[5]) end',
+          '          end',
+          '        end',
+          '        return slot',
+          '      end',
           '      busy[entry[3]] = true',
           '      local busyParent = parentOf(entry[3])',
           '      if busyParent then busyChildren[busyParent] = true end',
@@ -125,14 +139,16 @@ export class BridgeWorkspaceSlots {
           "redis.call('SET', KEYS[3], ARGV[1], 'PXAT', latest)",
           'return free',
         ].join('\n'),
-        8,
-        ...this.keys(args.workerId),
+        keys.length,
+        ...keys,
         args.incarnationId,
         args.assignmentId,
         args.workspaceId,
         args.capacity,
         args.expiresAtMs,
         Date.now(),
+        args.refreshOwned === true ? '1' : '0',
+        args.guard?.token ?? '',
       ),
     );
     if (result === -2)
