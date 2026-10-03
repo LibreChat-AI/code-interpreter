@@ -70,6 +70,7 @@ mock.method(prototype, 'read', function (...args) {
     // Invoke Node's original FileHandle.read, including its active-I/O references.
     pendingIo = originalRead.apply(this, args).finally(() => { readSettled = true; });
     if (cause === 'deadline') elapsed = 10_000;
+    if (cause === 'early-deadline') elapsed = 9_999.75;
     entered();
     return pendingIo;
 });
@@ -87,6 +88,7 @@ const fallback = setTimeout(drain, 2_000);
 try {
     await rejected;
     assert.equal(released, false, 'request settled before pool was drained');
+    if (cause === 'early-deadline') assert.ok(performance.now() < now + 10_000, 'timer settled before the monotonic deadline');
     assert.equal(readSettled, false, 'real descriptor read remained pending');
     assert.ok(fs.fstatSync(physicalFd).isFile(), 'Node still owns the physical descriptor');
     assert.equal(closing.length, held === 'true' ? 2 : 1, 'file and held-root closes initiated');
@@ -104,7 +106,7 @@ try {
 }
 `;
 
-for (const cause of ['abort', 'deadline'] as const) {
+for (const cause of ['abort', 'deadline', 'early-deadline'] as const) {
     for (const held of [false, true]) {
         test(`${cause} settles before real queued I/O drains (${
             held ? 'held' : 'legacy'

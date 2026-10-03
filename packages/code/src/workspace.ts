@@ -275,11 +275,17 @@ function resolveWorkspacePath(root: string, requestedPath: string): string {
   return candidate;
 }
 
+interface WorkspaceReadControl {
+  signal?: AbortSignal;
+  deadline: number;
+  interrupted: boolean;
+}
+
 async function withConfinedFile<T>(
   root: string,
   requestedPath: string,
   read: (handle: FileHandle, size: number) => Promise<T>,
-  readDeadline?: { signal?: AbortSignal; deadline: number },
+  control?: WorkspaceReadControl,
 ): Promise<T> {
   const candidate = resolveWorkspacePath(root, requestedPath);
   let handle: FileHandle | undefined;
@@ -311,11 +317,7 @@ async function withConfinedFile<T>(
   } finally {
     if (handle) {
       const closing = handle.close();
-      if (
-        readDeadline &&
-        (readDeadline.signal?.aborted ||
-          performance.now() >= readDeadline.deadline)
-      ) {
+      if (control?.interrupted) {
         // Node retains the descriptor and buffer until outstanding I/O drains.
         deferWorkspaceRootCleanup();
         void closing.catch(() => {});
@@ -357,13 +359,26 @@ async function readConfinedFileBuffer(
   });
 }
 
-function checkReadDeadline(
-  signal: AbortSignal | undefined,
-  deadline: number,
-): void {
-  throwIfAborted(signal);
-  if (performance.now() >= deadline) {
-    throw new WorkspaceToolError(
+function interruptRead(
+  control: WorkspaceReadControl,
+  message: string,
+  code: 'EXECUTION_ABORTED' | 'READ_LIMIT_EXCEEDED',
+): WorkspaceToolError {
+  control.interrupted = true;
+  return new WorkspaceToolError(message, code);
+}
+
+function checkReadDeadline(control: WorkspaceReadControl): void {
+  if (control.signal?.aborted) {
+    throw interruptRead(
+      control,
+      'Workspace tool execution aborted',
+      'EXECUTION_ABORTED',
+    );
+  }
+  if (performance.now() >= control.deadline) {
+    throw interruptRead(
+      control,
       'Workspace read exceeded its scan time limit; request an earlier startLine or use search_text to locate content',
       'READ_LIMIT_EXCEEDED',
     );
@@ -375,10 +390,10 @@ async function readWorkspaceChunk(
   buffer: Buffer,
   length: number,
   position: number,
-  signal: AbortSignal | undefined,
-  deadline: number,
+  control: WorkspaceReadControl,
 ): Promise<number> {
-  checkReadDeadline(signal, deadline);
+  checkReadDeadline(control);
+  const { signal, deadline } = control;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let abort: (() => void) | undefined;
   try {
@@ -389,7 +404,8 @@ async function readWorkspaceChunk(
       new Promise<never>((_, reject) => {
         abort = () =>
           reject(
-            new WorkspaceToolError(
+            interruptRead(
+              control,
               'Workspace tool execution aborted',
               'EXECUTION_ABORTED',
             ),
@@ -399,7 +415,8 @@ async function readWorkspaceChunk(
         timer = setTimeout(
           () =>
             reject(
-              new WorkspaceToolError(
+              interruptRead(
+                control,
                 'Workspace read exceeded its scan time limit; retry with an earlier startLine',
                 'READ_LIMIT_EXCEEDED',
               ),
@@ -421,7 +438,11 @@ async function readConfinedFile(
 ): Promise<WorkspaceReadFileResult> {
   const startLine = request.startLine ?? 1;
   const maxLines = request.maxLines ?? 200;
-  const deadline = performance.now() + READ_TIMEOUT_MS;
+  const control: WorkspaceReadControl = {
+    signal,
+    deadline: performance.now() + READ_TIMEOUT_MS,
+    interrupted: false,
+  };
   const read = async (
     handle: FileHandle,
     size: number,
@@ -437,10 +458,9 @@ async function readConfinedFile(
         buffer,
         Math.min(header.length - headerBytes, size - position),
         position,
-        signal,
-        deadline,
+        control,
       );
-      checkReadDeadline(signal, deadline);
+      checkReadDeadline(control);
       if (bytes === 0) break;
       buffer.copy(header, headerBytes, 0, bytes);
       headerBytes += bytes;
@@ -474,7 +494,7 @@ async function readConfinedFile(
     const consume = (text: string): void => {
       let offset = 0;
       while (offset < text.length) {
-        checkReadDeadline(signal, deadline);
+        checkReadDeadline(control);
         const newline = text.indexOf('\n', offset);
         const end = newline < 0 ? text.length : newline;
         if (line >= startLine) {
@@ -524,10 +544,9 @@ async function readConfinedFile(
         buffer,
         Math.min(buffer.length, size - position),
         position,
-        signal,
-        deadline,
+        control,
       );
-      checkReadDeadline(signal, deadline);
+      checkReadDeadline(control);
       if (bytes === 0) break;
       position += bytes;
       consume(decoder.decode(buffer.subarray(0, bytes), { stream: true }));
@@ -538,7 +557,7 @@ async function readConfinedFile(
         lines.push(fragments.join(''));
       }
     }
-    checkReadDeadline(signal, deadline);
+    checkReadDeadline(control);
     const endLine = startLine + lines.length - 1;
     return {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -552,7 +571,7 @@ async function readConfinedFile(
       ...(truncated ? { nextStartLine: endLine + 1 } : {}),
     };
   };
-  return withConfinedFile(root, request.path, read, { signal, deadline });
+  return withConfinedFile(root, request.path, read, control);
 }
 
 interface WorkspaceRoot {
