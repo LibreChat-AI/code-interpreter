@@ -129,7 +129,12 @@ for (const cause of ['abort', 'deadline', 'early-deadline'] as const) {
                     String(held),
                 ],
                 {
-                    env: { ...process.env, UV_THREADPOOL_SIZE: '1' },
+                    // Node 20 can bypass the pool for regular files via io_uring.
+                    env: {
+                        ...process.env,
+                        UV_THREADPOOL_SIZE: '1',
+                        UV_USE_IO_URING: '0',
+                    },
                     timeout: 10_000,
                 }
             );
