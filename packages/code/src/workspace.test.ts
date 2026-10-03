@@ -15,7 +15,7 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
@@ -1862,16 +1862,38 @@ test('parent creation never follows symlinks, crosses files, or leaves the works
   await assert.rejects(stat(join(parent, 'missing-target')));
 });
 
-test('a rejected write removes the parent directories it created', async (t) => {
+test('a write finishes once it has created parents, even if cancelled', async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-workspace-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const tools = await heldRootTools(root);
-  /** Aborts only once both parents exist, after creation and before the file is installed. */
+  /** Reports cancellation as soon as the parents exist. */
   const signal = {
     get aborted() {
       return existsSync(join(root, 'fresh', 'nested'));
     },
   } as AbortSignal;
+
+  const result = await tools.execute(
+    {
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path: 'fresh/nested/file.txt',
+      content: 'installed',
+    },
+    signal,
+  );
+
+  assert.equal(result.operation === 'write_file' && result.created, true);
+  assert.equal(await readFile(join(root, 'fresh', 'nested', 'file.txt'), 'utf8'), 'installed');
+});
+
+test('a write cancelled before creating parents leaves the workspace unchanged', async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-workspace-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await heldRootTools(root);
+  const controller = new AbortController();
+  controller.abort();
 
   await assert.rejects(
     tools.execute(
@@ -1882,7 +1904,7 @@ test('a rejected write removes the parent directories it created', async (t) => 
         path: 'fresh/nested/file.txt',
         content: 'never installed',
       },
-      signal,
+      controller.signal,
     ),
     (error: unknown) =>
       error instanceof WorkspaceToolError &&
@@ -1890,38 +1912,6 @@ test('a rejected write removes the parent directories it created', async (t) => 
       !error.mutationMayHaveCommitted,
   );
   assert.deepEqual(await readdir(root), []);
-});
-
-test('a rejected write that cannot remove its parents reports a possible mutation', async (t) => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'librechat-code-workspace-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const tools = await heldRootTools(root);
-  const nested = join(root, 'fresh', 'nested');
-  /** Leaves a file behind in the created directory, as a leaked staging file would. */
-  const signal = {
-    get aborted() {
-      if (!existsSync(nested)) return false;
-      writeFileSync(join(nested, '.librechat-code-leaked.tmp'), '');
-      return true;
-    },
-  } as AbortSignal;
-
-  await assert.rejects(
-    tools.execute(
-      {
-        protocolVersion: 1,
-        operation: 'write_file',
-        workspaceId: 'primary',
-        path: 'fresh/nested/file.txt',
-        content: 'never installed',
-      },
-      signal,
-    ),
-    (error: unknown) =>
-      error instanceof WorkspaceToolError &&
-      error.code === 'EXECUTION_ABORTED' &&
-      error.mutationMayHaveCommitted,
-  );
 });
 
 test('a pathname-only workspace root reports a missing parent instead of creating it', async (t) => {

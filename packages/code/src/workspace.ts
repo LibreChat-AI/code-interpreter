@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { holdsWorkspaceRoot, link, lstat, mkdir, open, realpath, rename, rmdir, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
+import { holdsWorkspaceRoot, link, lstat, mkdir, open, realpath, rename, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
@@ -404,8 +404,8 @@ async function ancestorsUnchanged(ancestors: readonly DirectoryIdentity[]): Prom
 
 /**
  * Reports an absent target as `NOT_FOUND` only when the walk from the root
- * reaches the missing entry through real directories that are unchanged after
- * the miss. A symlink, a file used as a directory, or an ancestor replaced
+ * reaches the missing entry through real directories, the root included, that
+ * are unchanged after the miss. A symlink, a file used as a directory, or an ancestor replaced
  * during the walk stays a path-safety rejection, so the distinction never
  * describes a path beyond the root.
  */
@@ -416,6 +416,13 @@ async function classifyMissingWorkspacePath(
   const invalid = new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   const segments = relative(root, candidate).split(sep).filter(Boolean);
   const ancestors: DirectoryIdentity[] = [];
+  try {
+    const rootEntry = await lstat(root);
+    if (rootEntry.isSymbolicLink() || !rootEntry.isDirectory()) return invalid;
+    ancestors.push({ path: root, dev: rootEntry.dev, ino: rootEntry.ino });
+  } catch {
+    return invalid;
+  }
   let current = root;
   for (const [index, segment] of segments.entries()) {
     current = resolve(current, segment);
@@ -437,14 +444,17 @@ async function classifyMissingWorkspacePath(
 /**
  * Creates each missing ancestor of a write target as a real directory beneath
  * the root, one verified level at a time, and syncs each new entry into its
- * parent. Creation needs a held root descriptor, so `mkdirat` cannot follow a
- * swapped path out of the root; a pathname-only root creates nothing and its
- * write reports the missing parent. An existing symlink or file stops the walk.
+ * parent. Creation needs a held root descriptor, so `mkdirat` is anchored to
+ * the root; a pathname-only root creates nothing and its write reports the
+ * missing parent. An existing symlink or file stops the walk.
+ *
+ * Created directories are a committed side effect, never rolled back: once one
+ * exists, a later failure of this write is reported as a possible mutation, so
+ * the worker quarantines rather than claiming an atomic rejection.
  */
 async function createMissingParentDirectories(
   root: string,
   candidate: string,
-  signal?: AbortSignal,
 ): Promise<string[]> {
   const created: string[] = [];
   if (!holdsWorkspaceRoot()) return created;
@@ -461,7 +471,6 @@ async function createMissingParentDirectories(
       }
       let createdHere = false;
       if (entry == null) {
-        throwIfAborted(signal);
         try {
           await mkdir(current, 0o777);
           created.push(current);
@@ -470,7 +479,8 @@ async function createMissingParentDirectories(
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         }
         entry = await lstat(current);
-        if (createdHere) await syncWorkspaceDirectory(dirname(current));
+        /** Also after a raced `EEXIST`: the write relies on that entry too. */
+        await syncWorkspaceDirectory(dirname(current));
       }
       if (
         entry.isSymbolicLink() ||
@@ -482,35 +492,15 @@ async function createMissingParentDirectories(
     }
     return created;
   } catch (error) {
-    throw await withCreatedDirectoriesRemoved(
-      created,
-      classifyWritePathValidationError(error),
-    );
+    throw afterCreatedDirectories(created, classifyWritePathValidationError(error));
   }
 }
 
-/**
- * Removes directories a rejected write created, deepest first, syncing each
- * removal into its parent. `rmdir` only removes an empty directory, so content
- * is never touched. Unless every created directory is durably gone, the
- * rejection is uncertain and the worker quarantines the workspace instead of
- * reporting an atomic failure: a directory left non-empty may hold this
- * write's own staged file.
- */
-async function withCreatedDirectoriesRemoved(
+function afterCreatedDirectories(
   created: readonly string[],
   error: WorkspaceToolError,
-): Promise<WorkspaceToolError> {
-  let removed = true;
-  for (let index = created.length - 1; index >= 0; index -= 1) {
-    try {
-      await rmdir(created[index]);
-      await syncWorkspaceDirectory(dirname(created[index]));
-    } catch (cleanupError) {
-      if (!isMissingEntry(cleanupError)) removed = false;
-    }
-  }
-  if (removed || error.mutationMayHaveCommitted) return error;
+): WorkspaceToolError {
+  if (created.length === 0 || error.mutationMayHaveCommitted) return error;
   return new WorkspaceToolError(error.message, error.code, true);
 }
 
@@ -828,24 +818,20 @@ async function writeWorkspaceFile(
   const directories = await createMissingParentDirectories(
     root,
     resolveWorkspacePath(root, request.path),
-    signal,
   );
   let created: boolean;
   try {
+    /** Once parents exist, finish the write rather than abandon them to a cancellation. */
     ({ created } = await atomicWriteConfinedFile(
       root,
       request.path,
       content,
-      signal,
+      directories.length === 0 ? signal : undefined,
       undefined,
       request.overwrite !== false,
     ));
   } catch (error) {
-    if (directories.length === 0) throw error;
-    throw await withCreatedDirectoriesRemoved(
-      directories,
-      classifyWritePathValidationError(error),
-    );
+    throw afterCreatedDirectories(directories, classifyWritePathValidationError(error));
   }
   return {
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
