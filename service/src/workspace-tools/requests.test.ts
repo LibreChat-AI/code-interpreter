@@ -498,3 +498,46 @@ test.each([1, 2])('capacity acquisition rejects terminal, cancelled, expired, an
     expect(await bridge.lease(workerId, incarnationId, 0, undefined, undefined, slots === 1 ? undefined : 0)).toBeUndefined();
   }
 });
+
+test.each([false, true])('quarantine retains the winning durable outcome across two-minute recovery (settled=%s)', async settled => {
+  const requests = await setup(2);
+  await requests.submit({ owner, requestId, workerId, requireTenantBinding: false,
+    request: { protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' },
+    queueWaitMs: 300_000, executionTimeoutMs: 30_000,
+  });
+  await tick(requests);
+  const assignment = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0))!;
+  await bridge.acknowledgeLease(workerId, incarnationId, assignment.assignmentId, assignment.generation, assignment.leaseToken);
+  const firstError = 'Command stopped before local cleanup';
+  const quarantineError = 'Workspace cleanup failed before settlement';
+  const envelope = { protocolVersion: 1 as const, incarnationId,
+    generation: assignment.generation, leaseToken: assignment.leaseToken,
+    status: 'rejected' as const,
+  };
+  if (settled) await bridge.settle(workerId, assignment.assignmentId, { ...envelope, error: firstError });
+  await bridge.settle(workerId, assignment.assignmentId, { ...envelope, error: quarantineError }, undefined, undefined, true);
+  const resultKey = `codeapi:bridge:v1:assignment:${assignment.assignmentId}:settlement`;
+  const receiptKey = `codeapi:bridge:v1:assignment:${assignment.assignmentId}:workspace-fence-owner`;
+  const receipt = JSON.parse((await redis.hget(receiptKey, 'metadata'))!);
+  expect(receipt.durableRequestKey).toBe((await redis.zrange(activeKey, 0, -1))[0]);
+  const remaining = await redis.pttl(resultKey);
+  expect(remaining).toBeGreaterThan(86_000_000);
+  expect(await redis.get(`codeapi:bridge:v1:assignment:${assignment.assignmentId}`)).toBeNull();
+  // Advance retained storage and the coordinator clock without a two-minute sleep.
+  await redis.pexpire(resultKey, Math.max(0, remaining - 120_000));
+  const clock = spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+  const restarted = new RedisWorkspaceRequests(redis, new RedisBridgeStore(redis, 600, 1000, 2));
+  try {
+    await tick(restarted);
+    expect(await restarted.get(owner, requestId)).toMatchObject({
+      state: 'failed', error: { code: 'WORKSPACE_TOOL_REJECTED', message: settled ? firstError : quarantineError },
+    });
+    expect(await redis.pttl(resultKey)).toBeGreaterThan(85_000_000);
+    expect(await redis.zcard(activeKey)).toBe(0);
+    await submit(restarted, 'request-00000000002'); await tick(restarted);
+    expect(await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0)).toBeUndefined();
+    expect(await restarted.get(owner, 'request-00000000002')).toMatchObject({
+      state: 'failed', error: { code: 'WORKSPACE_QUARANTINED' },
+    });
+  } finally { clock.mockRestore(); }
+});

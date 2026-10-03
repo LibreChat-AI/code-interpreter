@@ -121,6 +121,7 @@ type AssignmentOwnership = Pick<
   | 'workerIdentityId'
   | 'expiresAt'
   | 'runtimeSessionId'
+  | 'durableRequestKey'
 >;
 
 const NATIVE_WORKSPACE_FENCE_PREFIX = 'native-workspace:';
@@ -396,6 +397,12 @@ function tokenHash(token: string): string {
 
 function assignmentTtlSeconds(deadlineAtMs: number): number {
   return Math.max(1, Math.ceil((deadlineAtMs - Date.now()) / 1000) + 30);
+}
+
+function assignmentOutcomeTtlSeconds(assignment: AssignmentOwnership): number {
+  return assignment.durableRequestKey == null
+    ? assignmentTtlSeconds(Date.parse(assignment.expiresAt))
+    : 24 * 60 * 60;
 }
 
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -1844,9 +1851,7 @@ export class RedisBridgeStore {
         'Bridge assignment has expired',
       );
     }
-    const ttlSeconds = assignment.durableRequestKey == null
-      ? assignmentTtlSeconds(Date.parse(assignment.expiresAt))
-      : 86400;
+    const ttlSeconds = assignmentOutcomeTtlSeconds(assignment);
     const settlementKeys = [
       assignmentKey(assignmentId),
       settlementKey(assignmentId),
@@ -2125,7 +2130,7 @@ export class RedisBridgeStore {
           raw.epoch,
           assignmentId,
           JSON.stringify(settlement),
-          assignmentTtlSeconds(Date.parse(receipt.expiresAt)),
+          assignmentOutcomeTtlSeconds(receipt),
           quarantine ? '1' : '0',
         ),
         signal,
@@ -2451,6 +2456,7 @@ export class RedisBridgeStore {
       leaseTokenHash: assignment.leaseTokenHash,
       workerIdentityId: assignment.workerIdentityId,
       expiresAt: assignment.expiresAt,
+      durableRequestKey: assignment.durableRequestKey,
     };
     let fenceScope: '' | 'lane' | 'checkout' = '';
     if (assignment.workspaceLeaseSlot !== undefined) {
@@ -2495,7 +2501,7 @@ export class RedisBridgeStore {
       fenceScope,
       keyCount,
       guard?.token ?? '',
-      guard == null ? ttlSeconds : 86400,
+      guard == null ? ttlSeconds : assignmentOutcomeTtlSeconds(assignment),
     );
     if (Number(result) === -1) {
       throw new BridgeStoreError(
