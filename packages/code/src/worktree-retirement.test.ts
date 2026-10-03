@@ -433,6 +433,30 @@ test('a checkout request in flight defers retirement of its lanes', async (t) =>
   assert.deepEqual(after.retired, ['repo:quiet']);
 });
 
+test('a checkout request that runs during inspection defers retirement', async (t) => {
+  const root = await repository(t);
+  await worktree(root, 'touched');
+  await age(root, 'touched');
+  const tools = await laneTools(root);
+  const before = tools.checkoutActivity('repo');
+  await tools.execute({ protocolVersion: 1, operation: 'read_file', workspaceId: 'repo', path: 'README.md' });
+  assert.equal(tools.checkoutActivity('repo'), before + 2, 'a checkout request counts at start and finish');
+
+  let reads = 0;
+  const duringInspection = {
+    lastUsed: (workspaceId: string, name: string) => tools.lastUsed(workspaceId, name),
+    // The second read, under the reservation, sees a checkout request that ran during inspection.
+    checkoutActivity: () => reads++,
+    whileIdle: <T>(workspaceId: string, name: string, task: () => Promise<T>) => tools.whileIdle(workspaceId, name, task),
+  };
+  const deferred = await retireStaleWorktrees({ sources: sources(root), activity: duringInspection });
+  assert.deepEqual(deferred.kept, { changed: 1 });
+  assert.ok(await exists(join(root, '.worktrees', 'touched')));
+
+  const quiet = await retireStaleWorktrees({ sources: sources(root), activity: tools });
+  assert.deepEqual(quiet.retired, ['repo:touched']);
+});
+
 test('quarantined lanes and checkouts are left for the operator', async (t) => {
   const root = await repository(t);
   await worktree(root, 'held');

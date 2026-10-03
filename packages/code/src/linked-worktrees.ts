@@ -39,6 +39,8 @@ const LINKED_WORKTREE_ACTIVITY_LIMIT = 4096;
 export interface LinkedWorktreeActivity {
   /** When a request for the lane last started or finished in this process. */
   lastUsed(workspaceId: string, worktree: string): number | undefined;
+  /** Changes whenever a checkout request (outside any lane) starts or finishes. */
+  checkoutActivity(workspaceId: string): number;
   /**
    * Run `task` only while neither the lane nor its checkout has a request in
    * flight. Requests for the lane or its checkout that arrive meanwhile wait
@@ -241,6 +243,8 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, Link
   private readonly checkoutRequests = new Map<string, number>();
   /** Last request start or finish by lane internal ID, oldest first. */
   private readonly used = new Map<string, number>();
+  /** Checkout request starts and finishes by workspace ID. */
+  private readonly checkoutEvents = new Map<string, number>();
   /** Lanes being retired by internal ID; requests for the lane or its checkout wait for them to settle. */
   private readonly retiring = new Map<string, { workspaceId: string; done: Promise<void> }>();
 
@@ -368,6 +372,10 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, Link
     return this.used.get(linkedWorktreeWorkspaceId(workspaceId, worktree));
   }
 
+  checkoutActivity(workspaceId: string): number {
+    return this.checkoutEvents.get(workspaceId) ?? 0;
+  }
+
   async whileIdle<T>(
     workspaceId: string,
     worktree: string,
@@ -408,15 +416,19 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, Link
     task: () => Promise<T>,
     lane: boolean,
   ): Promise<T> {
+    const record = (): void => {
+      if (lane) this.touch(key);
+      else this.checkoutEvents.set(key, (this.checkoutEvents.get(key) ?? 0) + 1);
+    };
     requests.set(key, (requests.get(key) ?? 0) + 1);
-    if (lane) this.touch(key);
+    record();
     try {
       return await task();
     } finally {
       const remaining = (requests.get(key) ?? 1) - 1;
       if (remaining > 0) requests.set(key, remaining);
       else requests.delete(key);
-      if (lane) this.touch(key);
+      record();
     }
   }
 

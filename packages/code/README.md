@@ -964,7 +964,8 @@ hold; otherwise it is kept and the reason is counted:
 - It verifies as a linked worktree of the checkout under `.worktrees/`, as for
   lane admission. The checkout itself and worktrees elsewhere are never
   touched.
-- Neither the lane nor its checkout has a request in flight, and both this
+- Neither the lane nor its checkout has a request in flight or ran one while
+  the worktree was being inspected, and both this
   worker's last use of the lane and the newest on-disk activity (the worktree
   directory and its Git `HEAD`, `index`, `logs/HEAD`, `ORIG_HEAD` and
   `FETCH_HEAD`) are older than the idle threshold, seven days by default.

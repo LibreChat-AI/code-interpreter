@@ -114,6 +114,8 @@ interface Candidate {
   diskActiveAt: number;
   /** This worker's own last use of the lane, re-read under the reservation. */
   usedAt?: number;
+  /** Checkout request activity when inspection began, re-read under the reservation. */
+  checkoutAt?: number;
   /** Newest of on-disk activity and this worker's own lane use. */
   activeAt: number;
 }
@@ -451,6 +453,10 @@ async function remove(
   if (options.activity?.lastUsed(source.workspaceId, name) !== candidate.usedAt) {
     return { kept: 'changed', detail: 'used during inspection' };
   }
+  // A checkout request can reach `.worktrees/*`, including ignored files that `git status` never reports.
+  if (options.activity?.checkoutActivity(source.workspaceId) !== candidate.checkoutAt) {
+    return { kept: 'changed', detail: 'checkout used during inspection' };
+  }
   // A request that finished between inspection and this reservation may have quarantined either.
   try {
     if (
@@ -583,6 +589,7 @@ export async function retireStaleWorktrees(
     inspected += 1;
     rotation?.add(key(candidate));
     try {
+      candidate.checkoutAt = options.activity?.checkoutActivity(source.workspaceId);
       const verdict = await inspect(candidate, options, signal);
       if ('kept' in verdict) {
         keep(source, name, verdict.kept, verdict.detail);
