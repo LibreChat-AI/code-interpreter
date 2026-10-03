@@ -444,12 +444,23 @@ async function inspect(
 async function remove(
   candidate: Candidate,
   head: string,
-  activity: LinkedWorktreeActivity | undefined,
+  options: WorktreeRetirementOptions,
   signal?: AbortSignal,
 ): Promise<Kept | 'retired'> {
   const { lane, metadata, name, source } = candidate;
-  if (activity?.lastUsed(source.workspaceId, name) !== candidate.usedAt) {
+  if (options.activity?.lastUsed(source.workspaceId, name) !== candidate.usedAt) {
     return { kept: 'changed', detail: 'used during inspection' };
+  }
+  // A request that finished between inspection and this reservation may have quarantined either.
+  try {
+    if (
+      (await options.isQuarantined?.(source.workspaceId)) ||
+      (await options.isQuarantined?.(source.workspaceId, name))
+    ) {
+      return { kept: 'quarantined' };
+    }
+  } catch {
+    return { kept: 'quarantined', detail: 'quarantine state is unreadable' };
   }
   let current: VerifiedLinkedWorktree;
   try {
@@ -577,7 +588,7 @@ export async function retireStaleWorktrees(
         keep(source, name, verdict.kept, verdict.detail);
         continue;
       }
-      const retire = (): Promise<Kept | 'retired'> => remove(candidate, verdict.head, options.activity, signal);
+      const retire = (): Promise<Kept | 'retired'> => remove(candidate, verdict.head, options, signal);
       const reserved = options.activity
         ? await options.activity.whileIdle(source.workspaceId, name, retire)
         : { ran: true as const, value: await retire() };

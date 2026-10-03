@@ -455,6 +455,27 @@ test('quarantined lanes and checkouts are left for the operator', async (t) => {
   assert.ok(await exists(join(root, '.worktrees', 'held')));
 });
 
+test('a quarantine that appears after inspection is caught under the lane reservation', async (t) => {
+  const root = await repository(t);
+  await worktree(root, 'late');
+  await age(root, 'late');
+  for (const quarantinedLater of [undefined, 'late']) {
+    const asked: string[] = [];
+    const summary = await retireStaleWorktrees({
+      sources: sources(root),
+      activity: await laneTools(root),
+      isQuarantined: async (_workspaceId, worktree) => {
+        asked.push(worktree ?? '<checkout>');
+        // Clear for the scan and inspection; quarantined once the lane is reserved.
+        return asked.length > 2 && worktree === quarantinedLater;
+      },
+    });
+    assert.deepEqual(summary.kept, { quarantined: 1 });
+    assert.deepEqual(asked, ['<checkout>', 'late', '<checkout>', ...(quarantinedLater ? ['late'] : [])]);
+    assert.ok(await exists(join(root, '.worktrees', 'late')));
+  }
+});
+
 test('one worktree failing does not stop the pass', async (t) => {
   const root = await repository(t);
   await worktree(root, 'broken');
