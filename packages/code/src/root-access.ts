@@ -350,7 +350,7 @@ export class WorkspaceRootAccess {
         }
     }
 
-    entry(path: string, operation: 'mkdir' | 'symlink' | 'readlink', target?: string): string | void {
+    entry(path: string, operation: 'mkdir' | 'symlink' | 'readlink', target?: string, mode = 0o700): string | void {
         const parent = this.parent(path);
         try {
             if (operation === 'readlink') {
@@ -361,7 +361,7 @@ export class WorkspaceRootAccess {
                 return buffer.subarray(0, length).toString();
             }
             const result = operation === 'mkdir'
-                ? mkdirAt!(parent.fd, parent.name, 0o700)
+                ? mkdirAt!(parent.fd, parent.name, mode)
                 : symlinkAt!(target!, parent.fd, parent.name);
             if (result !== 0) throw nativeError();
         } finally { closeSync(parent.fd); }
@@ -504,10 +504,10 @@ export const readdir = async (path: string, maxEntries = 200_000): Promise<strin
 };
 export const readlink = async (path: string): Promise<string> =>
     context.getStore()?.entry(path, 'readlink') as string ?? fs.readlink(path);
-export const mkdir = async (path: string): Promise<void> => {
+export const mkdir = async (path: string, mode = 0o700): Promise<void> => {
     const access = context.getStore();
-    if (access) access.entry(path, 'mkdir');
-    else await fs.mkdir(path, { mode: 0o700 });
+    if (access) access.entry(path, 'mkdir', undefined, mode);
+    else await fs.mkdir(path, { mode });
 };
 export const symlink = async (target: string, path: string): Promise<void> => {
     const access = context.getStore();

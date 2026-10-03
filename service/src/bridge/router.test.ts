@@ -438,6 +438,7 @@ describe('paired bridge HTTP API', () => {
         'replace_all',
       ],
       supportedWorkspaceListFileFeatures: ['after_path'],
+      supportedWorkspaceToolErrorCodes: ['NOT_FOUND'],
     });
 
     const crossDeploymentRevoke = await fetch(

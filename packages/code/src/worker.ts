@@ -11,6 +11,7 @@ import {
   workspaceIsolationKey,
   workspaceIsolationKeysConflict,
   workspaceIsolationParent,
+  WORKSPACE_TOOL_ERROR_CODE_FALLBACKS,
 } from './protocol.js';
 import { EndpointRuntimeSupervisor } from './runtime.js';
 import { signBridgeRequest } from './identity.js';
@@ -28,6 +29,7 @@ import type {
   BridgeWorkspaceToolOperation,
   BridgeWorkspaceProgrammaticRequest,
   RepositoryInstructionDescriptor,
+  WorkspaceToolErrorCode,
 } from './protocol.js';
 import type { RuntimeLease, RuntimeSupervisor } from './runtime.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
@@ -464,6 +466,8 @@ export class BridgeWorker {
   private registrationCapabilities: BridgeWorkerCapabilities;
   private activeCapabilities: BridgeWorkerCapabilities;
   private instructionMetadataSupported = true;
+  /** Added error codes the current Code API registration accepts in settlements. */
+  private settlementErrorCodes: ReadonlySet<WorkspaceToolErrorCode> = new Set();
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
   private maintenanceOnly = false;
@@ -803,6 +807,11 @@ export class BridgeWorker {
     }
     this.registrationTtlMs = registration.leaseTtlMs;
     this.activeCapabilities = this.registrationCapabilities;
+    this.settlementErrorCodes = new Set(
+      Array.isArray(registration.supportedWorkspaceToolErrorCodes)
+        ? registration.supportedWorkspaceToolErrorCodes
+        : [],
+    );
     await this.options.onRegistered?.(registration);
     if (
       !this.maintenanceOnly &&
@@ -2085,7 +2094,7 @@ export class BridgeWorker {
         ...((assignment.executionKind === 'workspace_tool' ||
           assignment.executionKind === 'workspace_programmatic') &&
         error instanceof WorkspaceToolError
-          ? { errorCode: error.code }
+          ? { errorCode: this.settlementErrorCode(error.code) }
           : {}),
         error: (assignment.executionKind === 'workspace_tool' &&
           isWorkspaceToolRequest(assignment.request) &&
@@ -2474,6 +2483,12 @@ export class BridgeWorker {
     );
   }
 
+  /** An older Code API refuses a settlement carrying a code it does not know. */
+  private settlementErrorCode(code: WorkspaceToolErrorCode): WorkspaceToolErrorCode {
+    if (this.settlementErrorCodes.has(code)) return code;
+    return WORKSPACE_TOOL_ERROR_CODE_FALLBACKS[code] ?? code;
+  }
+
   private async settleWithRetry(
     assignment: BridgeAssignment,
     settlement: BridgeSettlement,
@@ -2525,6 +2540,20 @@ export class BridgeWorker {
         } catch (error) {
           lastError = error;
           if (signal?.aborted) break;
+          const legacyErrorCode =
+            settlement.status === 'rejected' && settlement.errorCode != null
+              ? WORKSPACE_TOOL_ERROR_CODE_FALLBACKS[settlement.errorCode]
+              : undefined;
+          if (
+            settlement.status === 'rejected' &&
+            legacyErrorCode != null &&
+            error instanceof BridgeProtocolError &&
+            error.status === 400
+          ) {
+            /** A replica that predates the added code can still serve this settlement. */
+            settlement = { ...settlement, errorCode: legacyErrorCode };
+            continue;
+          }
           if (
             error instanceof BridgeProtocolError &&
             error.status != null &&

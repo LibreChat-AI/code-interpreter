@@ -1737,7 +1737,7 @@ test('oversized replaceAll previews and edits fail before writing the source fil
   }
 });
 
-test('writes reject symlink targets and missing parent directories', async (t) => {
+test('writes reject symlink targets and symlinked parent directories', async (t) => {
   const parent = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
   t.after(() => rm(parent, { recursive: true, force: true }));
   const root = join(parent, 'root');
@@ -1752,8 +1752,8 @@ test('writes reject symlink targets and missing parent directories', async (t) =
 
   for (const path of [
     'link.txt',
-    'missing/notes.txt',
     'directory-link/notes.txt',
+    'directory-link/missing/notes.txt',
   ]) {
     await assert.rejects(
       tools.execute({
@@ -1768,6 +1768,141 @@ test('writes reject symlink targets and missing parent directories', async (t) =
     );
   }
   assert.equal(await readFile(join(parent, 'outside.txt'), 'utf8'), 'outside');
+  assert.deepEqual(await readdir(join(root, 'real-directory')), []);
+});
+
+test('writes create missing parent directories inside the workspace', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'src'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  for (const [path, overwrite] of [
+    ['src/feature/deep/new.ts', undefined],
+    ['fresh/created.ts', false],
+  ] as const) {
+    const result = await tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path,
+      content: 'export {};\n',
+      ...(overwrite === undefined ? {} : { overwrite }),
+    });
+    assert.deepEqual(result, {
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'primary',
+      path,
+      created: true,
+      bytesWritten: 11,
+    });
+    assert.equal(await readFile(join(root, ...path.split('/')), 'utf8'), 'export {};\n');
+  }
+  assert.equal((await stat(join(root, 'src', 'feature', 'deep'))).isDirectory(), true);
+});
+
+test('parent creation never follows symlinks, crosses files, or leaves the workspace', async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-parent-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, 'root');
+  const outside = join(parent, 'outside');
+  await mkdir(root);
+  await mkdir(outside);
+  await writeFile(join(root, 'file.txt'), 'file');
+  await symlink(outside, join(root, 'linked-outside'));
+  await symlink(join(parent, 'missing-target'), join(root, 'dangling'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+
+  for (const [path, code] of [
+    ['linked-outside/new/notes.txt', 'INVALID_PATH'],
+    ['dangling/new/notes.txt', 'INVALID_PATH'],
+    ['file.txt/new/notes.txt', 'INVALID_PATH'],
+    ['../outside/new/notes.txt', 'INVALID_REQUEST'],
+    ['new/../../outside/notes.txt', 'INVALID_REQUEST'],
+  ] as const) {
+    await assert.rejects(
+      tools.execute({
+        protocolVersion: 1,
+        operation: 'write_file',
+        workspaceId: 'primary',
+        path,
+        content: 'blocked',
+      }),
+      (error: unknown) =>
+        error instanceof WorkspaceToolError &&
+        error.code === code &&
+        !error.mutationMayHaveCommitted,
+      path,
+    );
+  }
+  assert.deepEqual(await readdir(outside), []);
+  assert.deepEqual((await readdir(root)).sort(), ['dangling', 'file.txt', 'linked-outside']);
+  await assert.rejects(stat(join(parent, 'missing-target')));
+});
+
+test('a missing workspace path is NOT_FOUND only when reached through the workspace', async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), 'librechat-code-workspace-parent-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, 'root');
+  const outside = join(parent, 'outside');
+  await mkdir(join(root, 'src'), { recursive: true });
+  await mkdir(outside);
+  await writeFile(join(root, 'file.txt'), 'file');
+  await symlink(join(root, 'src'), join(root, 'alias'));
+  await symlink(outside, join(root, 'linked-outside'));
+  await symlink(join(parent, 'missing-target'), join(root, 'dangling'));
+  const tools = await LocalWorkspaceTools.create({
+    workspaces: [{ id: 'primary', root, writable: true }],
+  });
+  const edits = [{ oldText: 'a', newText: 'b' }];
+  const requests = (path: string): WorkspaceToolRequest[] => [
+    { protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path },
+    { protocolVersion: 1, operation: 'edit_file', workspaceId: 'primary', path, edits },
+    { protocolVersion: 1, operation: 'preview_edit', workspaceId: 'primary', path, edits },
+    { protocolVersion: 1, operation: 'search_text', workspaceId: 'primary', query: 'x', path },
+    { protocolVersion: 1, operation: 'list_files', workspaceId: 'primary', path },
+  ];
+
+  for (const [path, code] of [
+    ['missing.log', 'NOT_FOUND'],
+    ['src/missing.ts', 'NOT_FOUND'],
+    ['not-yet/created/output.log', 'NOT_FOUND'],
+    ['alias/missing.ts', 'NOT_FOUND'],
+    ['linked-outside/missing.txt', 'INVALID_PATH'],
+    ['dangling', 'INVALID_PATH'],
+    ['file.txt/missing.txt', 'INVALID_PATH'],
+  ] as const) {
+    for (const request of requests(path)) {
+      await assert.rejects(
+        tools.execute(request),
+        (error: unknown) => {
+          assert.ok(error instanceof WorkspaceToolError);
+          assert.equal(error.code, code, `${request.operation} ${path}`);
+          assert.equal(error.message.includes(parent), false);
+          if (code === 'NOT_FOUND') {
+            assert.equal(error.message, 'Workspace path does not exist');
+          }
+          return true;
+        },
+      );
+    }
+  }
+  for (const path of ['../outside/missing.txt', 'src/../../outside/missing.txt']) {
+    for (const request of requests(path)) {
+      await assert.rejects(
+        tools.execute(request),
+        (error: unknown) =>
+          error instanceof WorkspaceToolError &&
+          (error.code === 'INVALID_REQUEST' || error.code === 'INVALID_PATH'),
+        `${request.operation} ${path}`,
+      );
+    }
+  }
 });
 
 test('workspace mutations preserve existing file permissions', async (t) => {

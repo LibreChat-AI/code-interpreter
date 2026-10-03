@@ -541,6 +541,7 @@ router.post(
         supportedWorkspaceProgrammaticLanguages: ['bash'],
         supportedWorkspaceInstanceTypes: ['git_worktree'],
         supportedWorkspaceScopes: ['git_linked_worktree'],
+        supportedWorkspaceToolErrorCodes: ['NOT_FOUND'],
       });
     } catch (error) {
       if (error instanceof BridgeStoreError) {

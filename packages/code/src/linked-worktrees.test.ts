@@ -225,6 +225,59 @@ test('lane file tools are confined to the worktree and report the public workspa
   );
 });
 
+test('lane writes create missing parents inside the worktree and report missing files', async (t) => {
+  const { parent, root } = await checkout();
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const tools = await laneTools(root);
+  const lane = join(root, '.worktrees', 'task-a');
+
+  await tools.execute({
+    protocolVersion: 1,
+    operation: 'write_file',
+    workspaceId: 'repo',
+    worktree: 'task-a',
+    path: 'packages/new-package/package.json',
+    content: '{}\n',
+  });
+  assert.equal(await readFile(join(lane, 'packages', 'new-package', 'package.json'), 'utf8'), '{}\n');
+  await assert.rejects(stat(join(root, 'packages')));
+
+  await rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'repo',
+      worktree: 'task-a',
+      path: '.checks/tests.log',
+    }),
+    'NOT_FOUND',
+  );
+
+  await symlink(root, join(lane, 'checkout-link'));
+  await rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'write_file',
+      workspaceId: 'repo',
+      worktree: 'task-a',
+      path: 'checkout-link/escaped/notes.txt',
+      content: 'blocked',
+    }),
+    'INVALID_PATH',
+  );
+  await rejects(
+    tools.execute({
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'repo',
+      worktree: 'task-a',
+      path: 'checkout-link/missing.txt',
+    }),
+    'INVALID_PATH',
+  );
+  await assert.rejects(stat(join(root, 'escaped')));
+});
+
 test('lane commands register a confined root once, whatever siblings come and go', async (t) => {
   const { parent, root } = await checkout();
   t.after(() => rm(parent, { recursive: true, force: true }));

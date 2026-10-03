@@ -237,6 +237,112 @@ test('worker omits pagination fields until Code API negotiates them', async () =
   });
 });
 
+async function settleMissingFile(
+  registeredCodes: string[] | undefined,
+  rejectSettlement: (body: Record<string, unknown>) => boolean = () => false,
+): Promise<{ settlements: Array<Record<string, unknown>>; failure?: unknown }> {
+  const settlements: Array<Record<string, unknown>> = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: [],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        throw new WorkspaceToolError('Workspace path does not exist', 'NOT_FOUND');
+      },
+    },
+    fetchImpl: async (input, init) => {
+      if (!String(input).endsWith('/settle')) {
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          incarnationId,
+          registeredAt: new Date().toISOString(),
+          leaseTtlMs: 60_000,
+          supportedWorkspaceToolOperations: ['read_file'],
+          ...(registeredCodes ? { supportedWorkspaceToolErrorCodes: registeredCodes } : {}),
+        });
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      settlements.push(body);
+      if (rejectSettlement(body)) {
+        return Response.json({ error: 'Invalid bridge settlement' }, { status: 400 });
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.register();
+  const failure = await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-missing-file',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'primary',
+      path: 'logs/pending.log',
+    },
+  }).then(() => undefined, (error: unknown) => error);
+  return { settlements, failure };
+}
+
+test('worker reports NOT_FOUND only to a Code API that advertised it', async () => {
+  const { settlements: supported } = await settleMissingFile(['NOT_FOUND']);
+  assert.deepEqual(
+    supported.map(({ status, errorCode, error }) => ({ status, errorCode, error })),
+    [{ status: 'rejected', errorCode: 'NOT_FOUND', error: 'Workspace path does not exist' }],
+  );
+
+  for (const registeredCodes of [undefined, [], ['SOMETHING_ELSE']]) {
+    const { settlements: legacy } = await settleMissingFile(registeredCodes);
+    assert.deepEqual(
+      legacy.map(({ status, errorCode, error }) => ({ status, errorCode, error })),
+      [{ status: 'rejected', errorCode: 'INVALID_PATH', error: 'Workspace path does not exist' }],
+    );
+  }
+});
+
+test('worker resends a refused NOT_FOUND settlement with its legacy code', async () => {
+  const { settlements, failure } = await settleMissingFile(
+    ['NOT_FOUND'],
+    (body) => body.errorCode === 'NOT_FOUND',
+  );
+
+  assert.equal(failure, undefined);
+  assert.deepEqual(
+    settlements.map(({ errorCode }) => errorCode),
+    ['NOT_FOUND', 'INVALID_PATH'],
+  );
+});
+
+test('worker does not resend a refused legacy settlement', async () => {
+  const { settlements, failure } = await settleMissingFile(undefined, () => true);
+
+  assert.deepEqual(settlements.map(({ errorCode }) => errorCode), ['INVALID_PATH']);
+  assert.ok(failure instanceof BridgeProtocolError);
+  assert.equal(failure.status, 400);
+});
+
 test('worker omits restricted workspaces that legacy registration would widen', async () => {
   const registrations: Array<{
     operations: string[];

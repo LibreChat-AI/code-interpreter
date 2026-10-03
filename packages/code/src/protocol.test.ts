@@ -8,8 +8,10 @@ import {
   isSupportedBridgeArtifactName,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
+  isWorkspaceToolErrorCode,
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
+  WORKSPACE_TOOL_ERROR_CODE_FALLBACKS,
   workspaceIsolationKey,
   workspaceIsolationKeysConflict,
   workspaceIsolationParent,
@@ -18,6 +20,17 @@ import type {
   WorkspaceEditFileRequest,
   WorkspacePreviewEditRequest,
 } from './protocol.js';
+
+test('every added workspace error code falls back to a legacy code', () => {
+  assert.equal(isWorkspaceToolErrorCode('NOT_FOUND'), true);
+  assert.equal(isWorkspaceToolErrorCode('MISSING'), false);
+  for (const [code, legacy] of Object.entries(WORKSPACE_TOOL_ERROR_CODE_FALLBACKS)) {
+    assert.equal(isWorkspaceToolErrorCode(code), true);
+    assert.equal(isWorkspaceToolErrorCode(legacy), true);
+    assert.equal(legacy in WORKSPACE_TOOL_ERROR_CODE_FALLBACKS, false);
+  }
+  assert.equal(WORKSPACE_TOOL_ERROR_CODE_FALLBACKS.NOT_FOUND, 'INVALID_PATH');
+});
 
 test('accepts gateway directory markers as artifacts', () => {
   assert.equal(isSupportedBridgeArtifactName('.dirkeep'), true);

@@ -836,6 +836,8 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceInstanceTypes?: ['git_worktree'];
   /** Scheduling scopes this Code API can admit as independent lanes. */
   supportedWorkspaceScopes?: ['git_linked_worktree'];
+  /** Added workspace tool error codes this Code API accepts in settlements. */
+  supportedWorkspaceToolErrorCodes?: WorkspaceToolErrorCode[];
 }
 
 /** Administrator-visible liveness for a configured worker. Credentials,
@@ -976,6 +978,7 @@ export interface BridgeRejectedSettlement {
 
 export type WorkspaceToolErrorCode =
   | 'INVALID_PATH'
+  | 'NOT_FOUND'
   | 'INVALID_REQUEST'
   | 'READ_LIMIT_EXCEEDED'
   | 'WRITE_LIMIT_EXCEEDED'
@@ -994,6 +997,7 @@ export type WorkspaceToolErrorCode =
 
 const WORKSPACE_TOOL_ERROR_CODES = new Set<WorkspaceToolErrorCode>([
   'INVALID_PATH',
+  'NOT_FOUND',
   'INVALID_REQUEST',
   'READ_LIMIT_EXCEEDED',
   'WRITE_LIMIT_EXCEEDED',
@@ -1010,6 +1014,15 @@ const WORKSPACE_TOOL_ERROR_CODES = new Set<WorkspaceToolErrorCode>([
   'COMMAND_UNAVAILABLE',
   'COMMAND_DISABLED',
 ]);
+
+/**
+ * Codes added after the original settlement contract, each with the legacy code
+ * an older Code API accepts in its place. A worker reports an added code only
+ * after registration advertises it, and falls back if a settlement is refused.
+ */
+export const WORKSPACE_TOOL_ERROR_CODE_FALLBACKS: Readonly<
+  Partial<Record<WorkspaceToolErrorCode, WorkspaceToolErrorCode>>
+> = { NOT_FOUND: 'INVALID_PATH' };
 
 export function isWorkspaceToolErrorCode(
   value: unknown,

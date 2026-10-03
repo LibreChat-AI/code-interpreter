@@ -223,6 +223,8 @@ test.each([
   ['COMMAND_TIMEOUT', 504],
   ['COMMAND_UNAVAILABLE', 503],
   ['COMMAND_DISABLED', 403],
+  ['INVALID_PATH', 422],
+  ['NOT_FOUND', 422],
 ] as const)('maps worker %s rejections to HTTP %i', async (errorCode, expectedStatus) => {
   const app = express();
   app.use(json());

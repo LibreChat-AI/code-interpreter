@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, open, realpath, rename, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
+import { link, lstat, mkdir, open, realpath, rename, rmdir, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
@@ -324,6 +324,9 @@ async function readConfinedFileBuffer(
     return buffer.subarray(0, bytesRead);
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
+    if (isMissingEntry(error)) {
+      throw await classifyMissingWorkspacePath(root, candidate);
+    }
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   } finally {
     await handle?.close();
@@ -367,6 +370,114 @@ async function verifyDirectoryPathHasNoSymlinks(
     }
   }
   return currentIdentity;
+}
+
+function isMissingEntry(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
+
+/**
+ * Reports an absent target as `NOT_FOUND` only when every existing ancestor
+ * resolves to a directory inside the workspace. Anything else stays a
+ * path-safety rejection, so the distinction reveals nothing beyond the root.
+ */
+async function classifyMissingWorkspacePath(
+  root: string,
+  candidate: string,
+): Promise<WorkspaceToolError> {
+  const invalid = new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  const segments = relative(root, candidate).split(sep).filter(Boolean);
+  let current = root;
+  for (const [index, segment] of segments.entries()) {
+    current = resolve(current, segment);
+    let entry: Awaited<ReturnType<typeof lstat>>;
+    try {
+      entry = await lstat(current);
+    } catch (error) {
+      return isMissingEntry(error)
+        ? new WorkspaceToolError('Workspace path does not exist', 'NOT_FOUND')
+        : invalid;
+    }
+    if (index === segments.length - 1) return invalid;
+    if (!entry.isSymbolicLink()) {
+      if (!entry.isDirectory()) return invalid;
+      continue;
+    }
+    try {
+      current = await realpath(current);
+      if (!isWithinRoot(root, current) || !(await stat(current)).isDirectory()) {
+        return invalid;
+      }
+    } catch {
+      return invalid;
+    }
+  }
+  return invalid;
+}
+
+/**
+ * Creates each missing ancestor of a write target as a real directory beneath
+ * the root, one verified level at a time. An existing symlink or file stops the
+ * walk, and a created directory that resolves outside the root is rejected.
+ */
+async function createMissingParentDirectories(
+  root: string,
+  candidate: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const created: string[] = [];
+  const segments = relative(root, dirname(candidate)).split(sep).filter(Boolean);
+  let current = root;
+  try {
+    for (const segment of segments) {
+      current = resolve(current, segment);
+      let entry: Awaited<ReturnType<typeof lstat>> | undefined;
+      try {
+        entry = await lstat(current);
+      } catch (error) {
+        if (!isMissingEntry(error)) throw error;
+      }
+      let createdHere = false;
+      if (entry == null) {
+        throwIfAborted(signal);
+        try {
+          await mkdir(current, 0o777);
+          created.push(current);
+          createdHere = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        }
+        entry = await lstat(current);
+      }
+      if (
+        entry.isSymbolicLink() ||
+        !entry.isDirectory() ||
+        (createdHere && !isWithinRoot(root, await realpath(current)))
+      ) {
+        throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+      }
+    }
+    return created;
+  } catch (error) {
+    await removeCreatedDirectories(created);
+    throw classifyWritePathValidationError(error);
+  }
+}
+
+/** Best effort: `rmdir` removes a directory only while it is still empty. */
+async function removeCreatedDirectories(created: readonly string[]): Promise<void> {
+  for (let index = created.length - 1; index >= 0; index -= 1) {
+    await rmdir(created[index]).catch(() => undefined);
+  }
+}
+
+function assertWithinWriteLimit(content: Buffer): void {
+  if (content.byteLength > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
+    throw new WorkspaceToolError(
+      'Workspace file exceeds write limit',
+      'WRITE_LIMIT_EXCEEDED',
+    );
+  }
 }
 
 function classifyWritePathValidationError(error: unknown): WorkspaceToolError {
@@ -481,12 +592,7 @@ async function atomicWriteConfinedFile(
   allowOverwrite = true,
 ): Promise<{ created: boolean }> {
   throwIfAborted(signal);
-  if (content.byteLength > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
-    throw new WorkspaceToolError(
-      'Workspace file exceeds write limit',
-      'WRITE_LIMIT_EXCEEDED',
-    );
-  }
+  assertWithinWriteLimit(content);
   const candidate = resolveWorkspacePath(root, requestedPath);
   const parent = dirname(candidate);
   let canonicalParent: string;
@@ -671,14 +777,27 @@ async function writeWorkspaceFile(
   signal?: AbortSignal,
 ): Promise<WorkspaceWriteFileResult> {
   const content = Buffer.from(request.content, 'utf8');
-  const { created } = await atomicWriteConfinedFile(
+  throwIfAborted(signal);
+  assertWithinWriteLimit(content);
+  const directories = await createMissingParentDirectories(
     root,
-    request.path,
-    content,
+    resolveWorkspacePath(root, request.path),
     signal,
-    undefined,
-    request.overwrite !== false,
   );
+  let created: boolean;
+  try {
+    ({ created } = await atomicWriteConfinedFile(
+      root,
+      request.path,
+      content,
+      signal,
+      undefined,
+      request.overwrite !== false,
+    ));
+  } catch (error) {
+    await removeCreatedDirectories(directories);
+    throw error;
+  }
   return {
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
     operation: 'write_file',
@@ -757,6 +876,9 @@ async function editWorkspaceFile(
     };
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
+    if (isMissingEntry(error)) {
+      throw await classifyMissingWorkspacePath(root, candidate);
+    }
     throw classifyWritePathValidationError(error);
   } finally {
     await opened?.close().catch(() => undefined);
@@ -1009,7 +1131,10 @@ async function searchWorkspace(
   let canonicalTarget: string;
   try {
     canonicalTarget = await realpath(target);
-  } catch {
+  } catch (error) {
+    if (isMissingEntry(error)) {
+      throw await classifyMissingWorkspacePath(root, target);
+    }
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   }
   if (!isWithinRoot(root, canonicalTarget))
@@ -1060,7 +1185,9 @@ async function searchWorkspace(
     } catch (error) {
       if (
         error instanceof WorkspaceToolError &&
-        (error.code === 'INVALID_PATH' || error.code === 'READ_LIMIT_EXCEEDED')
+        (error.code === 'INVALID_PATH' ||
+          error.code === 'NOT_FOUND' ||
+          error.code === 'READ_LIMIT_EXCEEDED')
       ) {
         continue;
       }
@@ -1167,6 +1294,13 @@ async function listWorkspaceFiles(
     );
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
+    if (isMissingEntry(error)) {
+      throw await withinListDeadline(
+        classifyMissingWorkspacePath(root, target),
+        signal,
+        deadline,
+      );
+    }
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   }
   if (!isWithinRoot(root, canonicalTarget)) {
@@ -1181,6 +1315,13 @@ async function listWorkspaceFiles(
     ).isDirectory();
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
+    if (isMissingEntry(error)) {
+      throw await withinListDeadline(
+        classifyMissingWorkspacePath(root, target),
+        signal,
+        deadline,
+      );
+    }
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   }
   const normalizedRequestedResultPath = request.path
