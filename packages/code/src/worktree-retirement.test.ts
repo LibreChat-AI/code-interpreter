@@ -258,7 +258,7 @@ test('a squash- or rebase-merged branch whose remote branch was deleted is retir
   await git(ahead, 'commit', '-q', '-m', 'later, also landed on main but never pushed here');
 
   const hosting = join(parent, 'hosting');
-  await git(parent, 'clone', '-q', join(parent, 'remote.git'), hosting);
+  await git(parent, 'clone', '-q', '-b', 'main', join(parent, 'remote.git'), hosting);
   await git(hosting, 'merge', '-q', '--squash', 'origin/squashed');
   await git(hosting, 'commit', '-q', '-m', 'squash merge');
   await git(hosting, 'cherry-pick', 'origin/rebased');
