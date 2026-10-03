@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -357,9 +357,17 @@ test('a lane request that arrives during retirement waits, then finds the lane g
   let settled = false;
   const request = tools.execute(laneCommand('leaving'));
   request.catch(() => undefined).finally(() => { settled = true; });
+  let checkoutSettled = false;
+  const checkout = tools.execute({ protocolVersion: 1, operation: 'read_file', workspaceId: 'repo', path: 'README.md' });
+  checkout.finally(() => { checkoutSettled = true; });
+  const cancelled = new AbortController();
+  const abandoned = tools.execute(laneCommand('leaving'), cancelled.signal);
   await pause(20);
   assert.equal(settled, false, 'the lane request waits for retirement');
+  assert.equal(checkoutSettled, false, 'a checkout request waits too: it can reach the lane being removed');
   assert.deepEqual(await tools.whileIdle('repo', 'leaving', async () => 'again'), { ran: false });
+  cancelled.abort(new Error('caller gave up'));
+  await assert.rejects(abandoned, /caller gave up/, 'cancellation ends the wait without the retirement');
 
   release();
   assert.deepEqual(await retiring, { ran: true, value: 'removed' });
@@ -367,7 +375,26 @@ test('a lane request that arrives during retirement waits, then finds the lane g
     request,
     (error: unknown) => error instanceof WorkspaceToolError && error.code === 'INVALID_REQUEST',
   );
+  const read = await checkout;
+  assert.equal(read.operation === 'read_file' && read.content.trimEnd(), 'root');
   assert.equal(executions, 0);
+});
+
+test('retirement never prunes other registered worktrees that are temporarily missing', async (t) => {
+  const root = await repository(t);
+  const external = join(root, '..', 'external');
+  await git(root, 'worktree', 'add', '-q', '-b', 'external', external);
+  await rename(external, `${external}.unmounted`);
+  await worktree(root, 'done');
+  await age(root, 'done');
+
+  const summary = await retireStaleWorktrees({ sources: sources(root) });
+
+  assert.deepEqual(summary.retired, ['repo:done']);
+  assert.ok(await exists(join(root, '.git', 'worktrees', 'external')), 'the unavailable worktree stays registered');
+  assert.equal(await exists(join(root, '.git', 'worktrees', 'done')), false, 'removal deletes its own metadata');
+  await rename(`${external}.unmounted`, external);
+  assert.equal(await git(external, 'branch', '--show-current'), 'external');
 });
 
 test('a checkout request in flight defers retirement of its lanes', async (t) => {

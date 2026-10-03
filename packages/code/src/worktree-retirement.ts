@@ -18,19 +18,23 @@ export const WORKTREE_RETIREMENT_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const WORKTREE_RETIREMENT_START_DELAY_MS = 2 * 60 * 1000;
 /** A pass that hit a bound continues soon instead of waiting a full interval. */
 const WORKTREE_RETIREMENT_CONTINUATION_MS = 5 * 60 * 1000;
-/** Directory entries read beneath one checkout's `.worktrees` per pass. */
-const SCAN_LIMIT = 4096;
+/**
+ * Directory entries read beneath one checkout's `.worktrees` per pass: a
+ * memory bound far above any real checkout, so every pass sees every entry.
+ * Git inspection is what is bounded per pass, and rotation keeps it fair.
+ */
+const SCAN_LIMIT = 65_536;
 /** Idle worktrees whose Git state is inspected per pass, oldest first. */
 const INSPECT_LIMIT = 128;
 /** Worktrees removed per pass. */
 const RETIRE_LIMIT = 32;
 const GIT_TIMEOUT_MS = 30_000;
 /**
- * Removal deletes ignored build output too, which can take a while. It is never
- * cut short: a half-deleted worktree loses its `.git` file and can no longer be
- * verified, retired or recognized.
+ * Removal deletes ignored build output too, which can take a while. It has no
+ * timeout and ignores cancellation: a half-deleted worktree loses its `.git`
+ * file and can no longer be verified, retired or recognized.
  */
-const GIT_REMOVE_TIMEOUT_MS = 30 * 60_000;
+const GIT_REMOVE_NO_TIMEOUT = 0;
 const GIT_OUTPUT_LIMIT = 64 * 1024;
 /** Path and commit lists between a stale branch and its default branch can be long. */
 const GIT_LIST_LIMIT = 16 * 1024 * 1024;
@@ -470,7 +474,7 @@ async function remove(
   signal?.throwIfAborted();
   try {
     // Never --force: Git re-checks for changes and untracked files itself and refuses a dirty or locked worktree.
-    await git(lane.checkoutRoot, ['worktree', 'remove', lane.root], undefined, GIT_REMOVE_TIMEOUT_MS);
+    await git(lane.checkoutRoot, ['worktree', 'remove', lane.root], undefined, GIT_REMOVE_NO_TIMEOUT);
   } catch (error) {
     return { kept: 'failed', detail: `remove: ${errorDetail(error)}` };
   }
@@ -482,8 +486,11 @@ async function remove(
  * verified, idle, clean, free of in-progress operations and locks, and whose
  * HEAD is contained in a remote-tracking ref or already merged into the
  * remote's default branch by content. Removal is `git worktree remove`
- * without `--force`; branches are kept, so `git worktree add` restores any of
- * them. Each worktree is judged independently; one failure never ends the pass.
+ * without `--force`, which also deletes that worktree's own metadata; no
+ * repository-wide `git worktree prune` runs, since it would also expire other
+ * registered worktrees that are only temporarily unavailable. Branches are
+ * kept, so `git worktree add` restores any of them. Each worktree is judged
+ * independently; one failure never ends the pass.
  */
 export async function retireStaleWorktrees(
   options: WorktreeRetirementOptions,
@@ -588,13 +595,6 @@ export async function retireStaleWorktrees(
     } catch (error) {
       signal?.throwIfAborted();
       keep(source, name, 'failed', errorDetail(error));
-    }
-  }
-  for (const checkout of retiredCheckouts) {
-    try {
-      await git(checkout, ['worktree', 'prune']);
-    } catch (error) {
-      options.log?.('debug', `worktree retirement could not prune worktree metadata: ${errorDetail(error)}`);
     }
   }
   if (retiredCheckouts.size > 0) {

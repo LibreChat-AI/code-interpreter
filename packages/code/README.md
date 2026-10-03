@@ -955,7 +955,8 @@ keeps its own dependencies and build output. A worker with lanes therefore
 retires stale ones itself, with no configuration: a pass runs two minutes after
 startup and every six hours after that, sooner while a backlog remains, and
 also before managed environment setup would be deferred for low disk space.
-Passes run in the background, never overlap, and never hold back requests.
+Passes run in the background and never overlap. Only an actual removal holds
+back requests, and only those for that lane or its checkout.
 
 A worktree in a writable registered root is retired only when **all** of these
 hold; otherwise it is kept and the reason is counted:
@@ -983,13 +984,18 @@ hold; otherwise it is kept and the reason is counted:
   Commits beyond a live upstream are never treated as merged.
 
 Removal is `git worktree remove` **without** `--force`, so Git re-checks for
-changes itself, followed by `git worktree prune`. Ignored files such as
-`node_modules`, build output and ignored `.env` files go with the worktree;
-that is the space being reclaimed. The branch is kept, so
-`git worktree add .worktrees/<name> <branch>` restores the worktree. A lane
-request that arrives during removal waits for it and then fails as an unknown
-worktree. Each pass inspects at most 128 idle worktrees and removes at most 32,
-oldest first. Each pass logs one summary line, for example
+changes itself and deletes only that worktree's metadata. No repository-wide
+`git worktree prune` runs, so other registered worktrees that are temporarily
+unavailable stay registered. Removal has no timeout, because a half-deleted
+worktree could no longer be recognized. Ignored files such as `node_modules`,
+build output and ignored `.env` files go with the worktree; that is the space
+being reclaimed. The branch is kept, so
+`git worktree add .worktrees/<name> <branch>` restores the worktree. Lane and
+checkout requests that arrive during a removal wait for it, or for their own
+cancellation; a lane request then fails as an unknown worktree. Each pass reads
+every `.worktrees` entry, inspects at most 128 idle worktrees and removes at
+most 32, oldest first, rotating so that worktrees kept for lasting reasons
+cannot hide the rest. Each pass logs one summary line, for example
 `worktree retirement: retired 3, kept 12 (dirty 2, recent 8, unpushed 2), freed
 about 4.1 GiB`; set `LIBRECHAT_CODE_LOG_LEVEL=debug` to log every kept worktree
 and its reason.

@@ -41,8 +41,9 @@ export interface LinkedWorktreeActivity {
   lastUsed(workspaceId: string, worktree: string): number | undefined;
   /**
    * Run `task` only while neither the lane nor its checkout has a request in
-   * flight. Lane requests that arrive meanwhile wait for it to finish, then
-   * verify the lane again; checkout requests are never held back.
+   * flight. Requests for the lane or its checkout that arrive meanwhile wait
+   * for it to finish (or for their own cancellation); a lane request then
+   * verifies the lane again.
    */
   whileIdle<T>(
     workspaceId: string,
@@ -240,8 +241,8 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, Link
   private readonly checkoutRequests = new Map<string, number>();
   /** Last request start or finish by lane internal ID, oldest first. */
   private readonly used = new Map<string, number>();
-  /** Lanes being retired; their requests wait for retirement to settle. */
-  private readonly retiring = new Map<string, Promise<void>>();
+  /** Lanes being retired by internal ID; requests for the lane or its checkout wait for them to settle. */
+  private readonly retiring = new Map<string, { workspaceId: string; done: Promise<void> }>();
 
   constructor(private readonly options: LinkedWorktreeWorkspaceToolsOptions) {
     this.mutationFailuresAreAtomic = options.delegate.mutationFailuresAreAtomic;
@@ -381,7 +382,8 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, Link
       return { ran: false };
     }
     let settle!: () => void;
-    this.retiring.set(internalId, new Promise<void>((resolve) => { settle = resolve; }));
+    const done = new Promise<void>((resolve) => { settle = resolve; });
+    this.retiring.set(internalId, { workspaceId, done });
     try {
       return { ran: true, value: await task() };
     } finally {
@@ -418,21 +420,52 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, Link
     }
   }
 
-  private async inLane<T>(workspaceId: string, worktree: string, task: () => Promise<T>): Promise<T> {
+  /** Wait out retirements a request could collide with, unless the request is cancelled first. */
+  private async afterRetirement(
+    collides: (internalId: string, workspaceId: string) => boolean,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const pending = [...this.retiring]
+      .filter(([internalId, entry]) => collides(internalId, entry.workspaceId))
+      .map(([, entry]) => entry.done);
+    if (pending.length === 0) return;
+    signal?.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => reject(signal?.reason);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      void Promise.all(pending).then(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      });
+    });
+  }
+
+  private async inCheckout<T>(workspaceId: string, task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return await this.tracked(this.checkoutRequests, workspaceId, async () => {
+      await this.afterRetirement((_internalId, laneWorkspaceId) => laneWorkspaceId === workspaceId, signal);
+      return await task();
+    }, false);
+  }
+
+  private async inLane<T>(
+    workspaceId: string,
+    worktree: string,
+    task: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     const internalId = linkedWorktreeWorkspaceId(workspaceId, worktree);
     return await this.tracked(this.laneRequests, internalId, async () => {
-      await this.retiring.get(internalId);
+      await this.afterRetirement((retiringId) => retiringId === internalId, signal);
       return await task();
     }, true);
   }
 
   async execute(request: WorkspaceToolRequest, signal?: AbortSignal): Promise<WorkspaceToolResult> {
     if (request.worktree == null) {
-      return await this.tracked(
-        this.checkoutRequests,
+      return await this.inCheckout(
         request.workspaceId,
         () => this.options.delegate.execute(request, signal),
-        false,
+        signal,
       );
     }
     if (request.operation === 'execute_command' && request.environmentAction) {
@@ -455,7 +488,7 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, Link
       }
       const executor = await this.fileExecutor(internalId, lane, source);
       return publicResult(await executor.execute(laneRequest, signal), request.workspaceId);
-    });
+    }, signal);
   }
 
   async executeProgrammatic(
@@ -469,11 +502,10 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, Link
       if (!delegate) {
         throw new WorkspaceToolError('Workspace programmatic execution is unavailable', 'COMMAND_DISABLED');
       }
-      return await this.tracked(
-        this.checkoutRequests,
+      return await this.inCheckout(
         workspaceId,
         () => delegate.executeProgrammatic(workspaceId, request, signal),
-        false,
+        signal,
       );
     }
     return await this.inLane(workspaceId, worktree, async () => {
@@ -485,6 +517,6 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, Link
       const pool = await this.registerCommandRoot(internalId, lane, source);
       const { workspace_worktree: _worktree, ...body } = request.body;
       return await pool.executeProgrammatic(internalId, { ...request, body }, signal);
-    });
+    }, signal);
   }
 }
