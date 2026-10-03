@@ -872,3 +872,37 @@ test('region votes stay bounded on highly repetitive files', () => {
   assert.ok(performance.now() - started < 3_000, 'a repetitive file must not cast unbounded votes');
   assert.match(error.message, /did not apply and nothing was written/);
 });
+
+test('an excerpt anchored on a first line after blank lines starts where old_text starts', () => {
+  const error = rejection(() => applyTextEdits('header();\nconst total = items.length;\nreturn total;\n', [
+    { oldText: '\nconst total = items.size;', newText: 'x' },
+  ]));
+  assert.deepEqual(excerptOf(error.message), {
+    first: 1,
+    last: 2,
+    rows: ['1|!header();', '2|!const total = items.length;'],
+  });
+});
+
+test('region votes count every inspected anchor offset against the budget', () => {
+  const oldText = `${'repeat_line();\n'.repeat(5_000)}missing();`;
+  const text = 'repeat_line();\n'.repeat(20_000);
+  const started = performance.now();
+  const error = rejection(() => applyTextEdits(text, [{ oldText, newText: 'x' }]));
+  assert.ok(performance.now() - started < 3_000, 'repeated anchor offsets must not escape the vote budget');
+  assert.match(error.message, /did not apply and nothing was written/);
+});
+
+test('quoted text escapes line separators so every batch edit stays on one line', () => {
+  const separator = String.fromCharCode(0x2028);
+  const text = `const label = "first${separator}second";\nconst other = "value";\n`;
+  const error = rejection(() => applyTextEdits(text, [
+    { oldText: `const label = "first${separator}third";`, newText: 'x' },
+    { oldText: 'const other = "changed";', newText: 'y' },
+  ]));
+  assert.ok(!error.message.includes(separator));
+  const lines = error.message.split('\n');
+  assert.match(lines[1], /^Edit 1: old_text was not found; the closest line is line 1: .*\\u2028.*the current text at line 1/);
+  assert.match(lines[2], /^Edit 2: /);
+  assert.deepEqual(excerptOf(lines[1])?.rows, [`1|!const label = "first${separator}second";`]);
+});

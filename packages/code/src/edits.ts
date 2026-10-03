@@ -22,6 +22,7 @@ const MAX_EXCERPT_CHARS = 1_600;
 const MAX_REGION_VOTES = 200_000;
 /** Lines too generic to anchor a region on their own (`}`, `);`, blank lines). */
 const ANCHOR_LINE = /[\p{L}\p{N}_]{2}/u;
+const LINE_SEPARATORS = /[\u2028\u2029]/g;
 /** A highly repetitive indentation candidate must not monopolize the worker. */
 const MAX_LINE_WINDOW_VERIFICATIONS = 100_000;
 const MAX_REPLACEMENT_CHUNK_CHARS = 16 * 1024;
@@ -605,11 +606,21 @@ function describeAmbiguous(
   return `old_text matched ${count} locations${how} at ${formatLineList(text, starts, count)}; include more surrounding lines so it matches exactly one`;
 }
 
+/**
+ * JSON quoting that also escapes U+2028/U+2029, which JSON.stringify leaves
+ * raw: hosts read a batch diagnostic one line per edit, and a regular
+ * expression `.` stops at those separators.
+ */
+function quote(value: string): string {
+  return JSON.stringify(value).replace(
+    LINE_SEPARATORS,
+    (separator) => `\\u${separator.charCodeAt(0).toString(16)}`,
+  );
+}
+
 function snippet(line: string): string {
   const trimmed = line.trim();
-  return JSON.stringify(
-    trimmed.length > MAX_SNIPPET_CHARS ? `${trimmed.slice(0, MAX_SNIPPET_CHARS)}…` : trimmed,
-  );
+  return quote(trimmed.length > MAX_SNIPPET_CHARS ? `${trimmed.slice(0, MAX_SNIPPET_CHARS)}…` : trimmed);
 }
 
 const ELISION_LINE = /^\s*(?:(?:\/\/|#|--|\/\*|\*|<!--)\s*)?(?:\.{3}|…)(?:.*(?:\.{3}|…|\*\/|-->))?\s*$/;
@@ -622,9 +633,13 @@ function describeMissing(
   lines: () => LineIndex,
 ): { reason: string; excerpt?: string } {
   const needle = neededLines(oldText).lines;
-  const nearest = nearestLine(needle.find((line) => line.trim().length > 0), lines);
+  const firstOffset = needle.findIndex((line) => line.trim().length > 0);
+  const nearest = nearestLine(needle[firstOffset], lines);
   const reason = describeMissingReason(text, oldText, needle, matching, lines, nearest);
-  const anchor = nearest != null && (!nearest.exact || nearest.count === 1) ? nearest.index : undefined;
+  // The anchor is the first non-blank line, so the region starts that many lines earlier.
+  const anchor = nearest != null && (!nearest.exact || nearest.count === 1)
+    ? Math.max(0, nearest.index - firstOffset)
+    : undefined;
   const start = closestRegion(needle, lines()) ?? anchor;
   const excerpt = start == null ? undefined : currentTextExcerpt(needle, lines(), start);
   return excerpt == null ? { reason } : { reason, excerpt };
@@ -656,10 +671,11 @@ function closestRegion(needle: readonly string[], lines: LineIndex): number | un
   for (let index = 0; index < lines.length && budget > 0; index++) {
     const hits = offsets.get(lines.text(index).trim());
     if (!hits) continue;
+    // Offsets ascend, so every later one would start before the file too.
     for (const offset of hits) {
-      const start = index - offset;
-      if (start < 0) continue;
       if (budget-- <= 0) break;
+      const start = index - offset;
+      if (start < 0) break;
       const count = (votes.get(start) ?? 0) + 1;
       votes.set(start, count);
       if (count > bestVotes || (count === bestVotes && best !== undefined && start < best)) {
@@ -705,7 +721,7 @@ function currentTextExcerpt(needle: readonly string[], lines: LineIndex, start: 
     .map((mark, offset) => `${first + offset + 1}|${mark}${shortenLine(lines.text(first + offset))}`);
   for (; rows.length > 0; rows.pop()) {
     const where = rows.length === 1 ? `line ${first + 1}` : `lines ${first + 1}-${first + rows.length}`;
-    const excerpt = `the current text at ${where} (~ whitespace differs, ! text differs) is ${JSON.stringify(rows.join('\n'))}`;
+    const excerpt = `the current text at ${where} (~ whitespace differs, ! text differs) is ${quote(rows.join('\n'))}`;
     if (excerpt.length <= MAX_EXCERPT_CHARS) return excerpt;
   }
   return undefined;
