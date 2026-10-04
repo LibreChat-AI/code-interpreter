@@ -22,6 +22,7 @@ export type ErrorCode =
     | 'STRUCTURE_LIMIT'
     | 'ENCRYPTED_DOCUMENT'
     | 'UNSUPPORTED_ENCODING'
+    | 'UNSUPPORTED_CONTENT'
     | 'RESOURCE_LIMIT';
 export class ExtractionError extends Error {
     constructor(readonly code: ErrorCode) {

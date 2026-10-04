@@ -81,7 +81,27 @@ const nestedOnly = await send(
 );
 assert.equal(nestedOnly.status, 200);
 assert.match(nestedOnly.value.segments[0].text, /Only nested text/);
+for (const name of [
+    'renamed-valid.docx',
+    'renamed-default.docx',
+    'renamed-case.docx',
+]) {
+    const response = await send('docx', readFileSync(`${fixtures}/${name}`));
+    assert.equal(response.status, 200, name);
+    assert.deepEqual(response.value.segments, docx.value.segments, name);
+}
 for (const [name, format, code] of [
+    ['control.docx', 'docx', 'UNSUPPORTED_CONTENT'],
+    ['control-cell.docx', 'docx', 'UNSUPPORTED_CONTENT'],
+    ['control-inline.docx', 'docx', 'UNSUPPORTED_CONTENT'],
+    ['control-only.docx', 'docx', 'UNSUPPORTED_CONTENT'],
+    ['custom-wrapper.docx', 'docx', 'UNSUPPORTED_CONTENT'],
+    ['revision.docx', 'docx', 'UNSUPPORTED_CONTENT'],
+    ['simple-field.docx', 'docx', 'UNSUPPORTED_CONTENT'],
+    ['renamed-entities.docx', 'docx', 'INVALID_DOCUMENT'],
+    ['renamed-default-entities.docx', 'docx', 'INVALID_DOCUMENT'],
+    ['renamed-case-entities.docx', 'docx', 'INVALID_DOCUMENT'],
+    ['renamed-utf8.docx', 'docx', 'INVALID_DOCUMENT'],
     ['empty.pdf', 'pdf', 'EMPTY_OUTPUT'],
     ['empty.docx', 'docx', 'EMPTY_OUTPUT'],
     ['inflate.pdf', 'pdf', 'DECOMPRESSION_LIMIT'],
@@ -141,5 +161,5 @@ pages.copy(padded);
 assert.equal((await send('pdf', padded)).status, 200);
 assert.equal((await send('pdf', Buffer.alloc(padded.length + 1))).status, 413);
 console.log(
-    'Container endpoint: PDF/DOCX success, structure, input limits and 19 adversarial fixtures passed'
+    'Container endpoint: PDF/DOCX success, structure, input limits and 30 adversarial fixtures passed'
 );

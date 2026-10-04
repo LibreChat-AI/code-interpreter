@@ -15,6 +15,9 @@ export const capabilities = Object.freeze({
         pdf: 'ordered pages, one-based index',
         docx: 'document body, paragraphs and tables',
     },
+    limitations: {
+        docx: 'Body only. Content controls, custom XML wrappers, revisions, alternate content, simple fields and text boxes are rejected.',
+    },
     limits: {
         ...policy,
         concurrency: 2,

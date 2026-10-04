@@ -30,6 +30,7 @@ const parserErrors = new Set([
     'STRUCTURE_LIMIT',
     'ENCRYPTED_DOCUMENT',
     'UNSUPPORTED_ENCODING',
+    'UNSUPPORTED_CONTENT',
     'RESOURCE_LIMIT',
 ]);
 export class RestrictedBackend implements Backend {

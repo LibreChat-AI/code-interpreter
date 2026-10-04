@@ -113,3 +113,79 @@ while True:
         break
     position += 4
 (root / 'forged-bomb.docx').write_bytes(value)
+
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+import xml.etree.ElementTree as ET
+
+# Body, cell and inline wrappers are rejected rather than silently omitted.
+for name, placement in [('control.docx', 'body'), ('control-cell.docx', 'cell'),
+                        ('control-inline.docx', 'inline'), ('control-only.docx', 'only')]:
+    document = Document()
+    if placement != 'only':
+        document.add_paragraph('Ordinary text must not hide unsupported content')
+    if placement == 'cell':
+        paragraph = document.add_table(rows=1, cols=1).cell(0, 0).add_paragraph('Controlled cell text')
+        element = paragraph._p
+    elif placement == 'inline':
+        element = document.add_paragraph('Before ').add_run('Controlled inline text')._r
+    else:
+        element = document.add_paragraph('Controlled body text')._p
+    parent, index = element.getparent(), element.getparent().index(element)
+    control = OxmlElement('w:sdt')
+    content = OxmlElement('w:sdtContent')
+    control.append(content)
+    content.append(element)
+    parent.insert(index, control)
+    document.save(root / name)
+
+for name, tag in [('custom-wrapper.docx', 'w:customXml'), ('revision.docx', 'w:ins'),
+                  ('simple-field.docx', 'w:fldSimple')]:
+    document = Document()
+    document.add_paragraph('Ordinary text')
+    paragraph = document.add_paragraph('Wrapped text')
+    element = paragraph.add_run('Hidden field text')._r if tag == 'w:fldSimple' else paragraph._p
+    parent, index = element.getparent(), element.getparent().index(element)
+    wrapper = OxmlElement(tag)
+    wrapper.append(element)
+    parent.insert(index, wrapper)
+    document.save(root / name)
+
+ct = '{http://schemas.openxmlformats.org/package/2006/content-types}'
+for name, mapping, payload in [
+    ('renamed-valid.docx', 'override', 'valid'),
+    ('renamed-default.docx', 'default', 'valid'),
+    ('renamed-case.docx', 'case', 'valid'),
+    ('renamed-entities.docx', 'override', 'entity'),
+    ('renamed-default-entities.docx', 'default', 'entity'),
+    ('renamed-case-entities.docx', 'case', 'entity'),
+    ('renamed-utf8.docx', 'override', 'utf8'),
+]:
+    with zipfile.ZipFile(root / 'body.docx') as source, zipfile.ZipFile(root / name, 'w', compression=zipfile.ZIP_DEFLATED) as target:
+        for entry in source.infolist():
+            value = source.read(entry)
+            member = entry.filename
+            if member == '[Content_Types].xml':
+                types = ET.fromstring(value)
+                for item in list(types):
+                    if item.attrib.get('PartName') == '/word/document.xml':
+                        if mapping == 'default':
+                            types.remove(item)
+                            ET.SubElement(types, ct + 'Default', Extension='bin', ContentType=item.attrib['ContentType'])
+                        else:
+                            item.attrib['PartName'] = '/WORD/DOCUMENT.BIN' if mapping == 'case' else '/word/document.bin'
+                value = ET.tostring(types, encoding='utf-8', xml_declaration=True)
+            elif member == '_rels/.rels':
+                value = value.replace(b'word/document.xml', b'word/document.bin')
+            elif member == 'word/document.xml':
+                member = 'word/document.bin'
+                if payload == 'entity':
+                    declaration_end = value.index(b'?>') + 2
+                    value = value[:declaration_end] + b'<!DOCTYPE w:document [<!ENTITY controlled "Entity text">]>' + value[declaration_end:]
+                    value = value.replace(b'First paragraph', b'&controlled;')
+                elif payload == 'utf8':
+                    value = value.replace(b'First paragraph', b'\xff')
+            elif member == 'word/_rels/document.xml.rels':
+                member = 'word/_rels/document.bin.rels'
+            target.writestr(member, value)
+print('DOCX completeness and content-type fixtures generated')

@@ -12,7 +12,7 @@
         "test": "npm run build && node --test dist/*.test.js",
         "start": "node dist/main.js",
         "test:container": "bash tests/container.sh",
-        "format:check": "prettier --check src tests/*.mjs *.json compose.yaml README.md ../../.github/workflows/extraction.yml"
+        "format:check": "prettier --check src tests/*.mjs *.json compose.yaml ../../.github/workflows/extraction.yml"
     },
     "devDependencies": {
         "@types/node": "24.10.1",

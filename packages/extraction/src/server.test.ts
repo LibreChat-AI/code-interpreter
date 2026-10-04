@@ -247,3 +247,21 @@ test('duplicate extraction control headers are rejected before worker creation',
         await f.close();
     }
 });
+
+test('unsupported document content returns a safe failure after cleanup', async () => {
+    const f = await fixture();
+    f.backend.run = async () => {
+        throw new ExtractionError('UNSUPPORTED_CONTENT');
+    };
+    try {
+        const response = await send(f.socketPath);
+        assert.equal(response.status, 422);
+        assert.deepEqual(JSON.parse(response.body), {
+            error: { code: 'UNSUPPORTED_CONTENT' },
+        });
+        assert.deepEqual(f.events, ['create', 'cleanup']);
+        assert.deepEqual(await readdir(f.root), ['service.sock']);
+    } finally {
+        await f.close();
+    }
+});

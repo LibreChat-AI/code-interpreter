@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 import socket
 import struct
 import sys
+import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 
@@ -135,11 +136,46 @@ def pdf_segments(data):
     return result, text.size
 
 
+def validate_xml(value):
+    xml = value.decode("utf-8", errors="strict")
+    if "\x00" in xml or "<!DOCTYPE" in xml.upper() or "<!ENTITY" in xml.upper():
+        raise Rejected("INVALID_DOCUMENT")
+    return ET.fromstring(value)
+
+
+def xml_parts(parts):
+    types = validate_xml(parts["[Content_Types].xml"])
+    namespace = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+    if types.tag != namespace + "Types":
+        raise Rejected("INVALID_DOCUMENT")
+    defaults = {}
+    overrides = {}
+    for item in types:
+        content_type = item.attrib["ContentType"].lower()
+        if item.tag == namespace + "Default":
+            key = item.attrib["Extension"].lower()
+            mapping = defaults
+        elif item.tag == namespace + "Override":
+            key = item.attrib["PartName"].lower()
+            mapping = overrides
+        else:
+            raise Rejected("INVALID_DOCUMENT")
+        if key in mapping:
+            raise Rejected("INVALID_DOCUMENT")
+        mapping[key] = content_type
+    for name, value in parts.items():
+        lowered = name.lower()
+        content_type = overrides.get("/" + lowered, defaults.get(PurePosixPath(lowered).suffix[1:], ""))
+        if (lowered.endswith((".xml", ".rels")) or content_type.endswith("+xml")
+                or content_type in ("application/xml", "text/xml")):
+            validate_xml(value)
+
+
 def safe_docx(data):
     total = 0
     names = set()
-    output = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(data)) as archive, zipfile.ZipFile(output, "w") as clean:
+    parts = {}
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
         if len(archive.infolist()) > 512:
             raise Rejected("STRUCTURE_LIMIT")
         for entry in archive.infolist():
@@ -188,11 +224,12 @@ def safe_docx(data):
                 if size != entry.file_size or crc != entry.CRC:
                     raise Rejected("INVALID_DOCUMENT")
             value = b"".join(chunks)
-            if name.lower().endswith((".xml", ".rels")):
-                xml = value.decode("utf-8", errors="strict")
-                if "\x00" in xml or "<!DOCTYPE" in xml.upper() or "<!ENTITY" in xml.upper():
-                    raise Rejected("INVALID_DOCUMENT")
-            # The native parser sees this reconstructed, measured archive only.
+            parts[name] = value
+    xml_parts(parts)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as clean:
+        for name, value in parts.items():
+            # The document parser sees only measured, validated parts.
             clean.writestr(name, value, compress_type=zipfile.ZIP_STORED)
     return output.getvalue()
 
@@ -202,6 +239,15 @@ def docx_segments(data):
     from docx.table import Table
 
     document = Document(io.BytesIO(safe_docx(data)))
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    unsupported = {word + name for name in (
+        "sdt", "customXml", "ins", "del", "moveFrom", "moveTo", "altChunk",
+        "subDoc", "fldSimple", "txbxContent",
+    )}
+    unsupported.add("{http://schemas.openxmlformats.org/markup-compatibility/2006}AlternateContent")
+    # python-docx omits these wrappers. Never return successful partial text.
+    if any(element.tag in unsupported for element in document.element.iter()):
+        raise Rejected("UNSUPPORTED_CONTENT")
     text = Text()
     def blocks(container, depth=0, cell=False):
         if depth > 32:
