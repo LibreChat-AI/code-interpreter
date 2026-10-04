@@ -71,6 +71,7 @@ async function putFileToFileServer(
 ): Promise<t.UploadResult> {
   const response = await fetch(url, {
     method: 'PUT',
+    redirect: 'error',
     headers,
     body: Readable.toWeb(file) as unknown as ReadableStream,
     signal,
@@ -416,6 +417,7 @@ router.get('/download/:session_id/:fileId', downloadLimiter, sessionAuth, async 
     const response = await axios({
       method: 'get',
       url: `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}`,
+      maxRedirects: 0,
       headers: internalServiceHeaders(),
       responseType: 'stream'
     });
@@ -909,6 +911,7 @@ router.get('/files/:session_id', fetchLimiter, sessionAuth, async (req: t.Authen
   try {
     const response = await axios.get(`${env.FILE_SERVER_URL}/sessions/${session_id}/objects`, {
       params: { detail },
+      maxRedirects: 0,
       headers: internalServiceHeaders({ 'Accept': 'application/json' })
     });
 
@@ -941,7 +944,7 @@ router.get('/sessions/:session_id/objects/:fileId', fetchLimiter, sessionAuth, a
   try {
     const response = await axios.get(
       `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}/metadata`,
-      { headers: internalServiceHeaders({ Accept: 'application/json' }) },
+      { maxRedirects: 0, headers: internalServiceHeaders({ Accept: 'application/json' }) },
     );
 
     return res.status(200).json(response.data);
@@ -972,7 +975,7 @@ const deleteSessionObject = async (req: t.AuthenticatedRequest, res: Response) =
   try {
     const response = await axios.delete(
       `${env.FILE_SERVER_URL}/sessions/${session_id}/objects/${fileId}`,
-      { headers: internalServiceHeaders() }
+      { maxRedirects: 0, headers: internalServiceHeaders() }
     );
 
     await connection.del(`upload:${req.sessionKey}${session_id}${fileId}`);

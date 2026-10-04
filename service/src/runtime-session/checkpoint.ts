@@ -94,6 +94,7 @@ export async function pullCheckpoint(
     ? AbortSignal.any([args.signal, transferDeadlineSignal])
     : transferDeadlineSignal;
   const response = await axios.get<Readable>(`${args.endpointBase}/api/v2/session/checkpoint`, {
+    maxRedirects: 0,
     headers: {
       [token.headerName]: token.token,
       ...microvmPortHeaders(config.port),
@@ -125,6 +126,7 @@ export async function pushRestore(
 ): Promise<void> {
   const token = await args.mintToken();
   await axios.post(`${args.endpointBase}/api/v2/session/restore`, fs.createReadStream(data.path), {
+    maxRedirects: 0,
     headers: {
       [token.headerName]: token.token,
       ...microvmPortHeaders(config.port),
@@ -153,6 +155,7 @@ export async function probeInputs(
     `${args.endpointBase}/api/v2/session/inputs/probe`,
     { refs },
     {
+      maxRedirects: 0,
       headers: {
         [token.headerName]: token.token,
         ...microvmPortHeaders(config.port),
@@ -197,6 +200,7 @@ export async function pushInputs(
    * unlink the archive first and the stream then emits an unhandled ENOENT. */
   const requestData = typeof data === 'function' ? data() : data;
   await axios.post(`${args.endpointBase}/api/v2/session/inputs`, requestData, {
+    maxRedirects: 0,
     headers: {
       [token.headerName]: token.token,
       ...microvmPortHeaders(config.port),

@@ -211,6 +211,43 @@ afterAll(() => {
 });
 
 describe('egress gateway routes', () => {
+  test('rejects file-server redirects before forwarding internal credentials', async () => {
+    let redirected = 0;
+    let contacted = 0;
+    const target = Bun.serve({
+      port: 0,
+      fetch() {
+        redirected++;
+        return new Response('unexpected');
+      },
+    });
+    const upstream = Bun.serve({
+      port: 0,
+      fetch(req) {
+        contacted++;
+        expect(req.headers.get(INTERNAL_SERVICE_TOKEN_HEADER)).toBe(INTERNAL_TOKEN);
+        return new Response(null, {
+          status: 307,
+          headers: { Location: `http://127.0.0.1:${target.port}/stolen` },
+        });
+      },
+    });
+    try {
+      globalThis.fetch = originalFetch;
+      env.EGRESS_GATEWAY_FILE_SERVER_URL = `http://127.0.0.1:${upstream.port}`;
+      const response = await gatewayFetch(
+        `/sessions/${sessionHandle({ dir: 'read', sessionId: 'sess_input' })}/objects/${objectHandle({})}`,
+        { headers: grantHeader() },
+      );
+      expect(response.status).toBe(500);
+      expect(contacted).toBe(1);
+      expect(redirected).toBe(0);
+    } finally {
+      upstream.stop(true);
+      target.stop(true);
+    }
+  });
+
   test('protects internal grant create, restore, and revoke routes', async () => {
     const createBody = JSON.stringify({ payload: payload(), claims: executionClaims() });
     const unauthorized = await gatewayFetch('/internal/egress-grants', {

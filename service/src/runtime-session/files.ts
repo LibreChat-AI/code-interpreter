@@ -202,6 +202,7 @@ async function fetchFileObjectToPath(
   const url = `${baseUrl}/sessions/${encodeURIComponent(ref.storage_session_id)}/objects/${encodeURIComponent(ref.id)}`;
   try {
     const response = await axios.get<Readable>(url, {
+      maxRedirects: 0,
       headers: internalServiceHeaders(),
       responseType: 'stream',
       timeout: opts.timeoutMs,

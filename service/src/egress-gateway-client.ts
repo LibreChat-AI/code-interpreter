@@ -48,6 +48,7 @@ export async function createGatewayEgressGrant(args: {
     gatewayUrl('/internal/egress-grants'),
     body,
     {
+      maxRedirects: 0,
       headers: injectTraceHeaders(gatewayHeaders({ 'Content-Type': 'application/json' }, isSynthetic)),
       signal,
       timeout: env.EGRESS_GATEWAY_REQUEST_TIMEOUT_MS,
@@ -73,6 +74,7 @@ export async function restoreGatewaySandboxResult<T extends { session_id: string
     gatewayUrl(path),
     { result: args.result, egressGrantToken: args.egressGrantToken },
     {
+      maxRedirects: 0,
       headers: injectTraceHeaders(gatewayHeaders({ 'Content-Type': 'application/json' }, args.isSynthetic)),
       signal: args.signal,
       timeout: env.EGRESS_GATEWAY_REQUEST_TIMEOUT_MS,
@@ -105,6 +107,7 @@ export async function revokeGatewayEgressGrant(args: {
     gatewayUrl(path),
     body,
     {
+      maxRedirects: 0,
       headers: injectTraceHeaders(gatewayHeaders({ 'Content-Type': 'application/json' }, args.isSynthetic)),
       timeout: args.timeoutMs ?? env.EGRESS_GATEWAY_REVOKE_TIMEOUT_MS,
     },
@@ -125,6 +128,7 @@ export async function createGatewayPtcCallbackToken(args: {
     gatewayUrl('/internal/ptc-callback-token'),
     args,
     {
+      maxRedirects: 0,
       headers: injectTraceHeaders(internalServiceHeaders({ 'Content-Type': 'application/json' })),
       signal: options.signal,
       timeout: options.timeoutMs ?? env.EGRESS_GATEWAY_REQUEST_TIMEOUT_MS,

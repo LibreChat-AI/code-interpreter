@@ -544,7 +544,7 @@ app.get('/sessions/:sessionHandle/objects', async (req, res) => {
         `/sessions/${encodeURIComponent(sessionId)}/objects`,
         '?detail=normalized',
       ),
-      { headers: injectTraceHeaders(internalServiceHeaders({ Accept: 'application/json' })) },
+      { redirect: 'error', headers: injectTraceHeaders(internalServiceHeaders({ Accept: 'application/json' })) },
     );
     if (!upstream.ok) {
       return pipeFetchResponse(upstream, res);
@@ -638,7 +638,7 @@ app.post('/input-manifest', express.json({ limit: '4mb' }), async (req, res) => 
       controller.signal.throwIfAborted();
       const upstream = await fetch(forwardUrl(env.EGRESS_GATEWAY_FILE_SERVER_URL,
         `/sessions/${encodeURIComponent(sessionId)}/objects/${encodeURIComponent(objectId)}/metadata`),
-      { headers: injectTraceHeaders(internalServiceHeaders()), signal: controller.signal });
+      { redirect: 'error', headers: injectTraceHeaders(internalServiceHeaders()), signal: controller.signal });
       if (!upstream.ok) {
         await upstream.body?.cancel();
         // Recheck failures individually through the existing retry/classification path.
@@ -668,7 +668,7 @@ app.get('/sessions/:sessionHandle/objects/:objectHandle/metadata', async (req, r
     await recordEgressRead(grant);
     const upstream = await fetch(forwardUrl(env.EGRESS_GATEWAY_FILE_SERVER_URL,
       `/sessions/${encodeURIComponent(sessionId)}/objects/${encodeURIComponent(object.id)}/metadata`),
-    { headers: injectTraceHeaders(internalServiceHeaders()) });
+    { redirect: 'error', headers: injectTraceHeaders(internalServiceHeaders()) });
     if (!upstream.ok) return pipeFetchResponse(upstream, res);
     return res.json(inputMetadata(await upstream.json(), grant, sessionId, object.id));
   } catch (error) {
@@ -694,7 +694,7 @@ app.get('/sessions/:sessionHandle/objects/:objectHandle', async (req, res) => {
         env.EGRESS_GATEWAY_FILE_SERVER_URL,
         `/sessions/${encodeURIComponent(sessionId)}/objects/${encodeURIComponent(object.id)}`,
       ),
-      { headers: injectTraceHeaders(internalServiceHeaders(expectedVersion ? { 'X-CodeAPI-Input-Version': expectedVersion } : {})) },
+      { redirect: 'error', headers: injectTraceHeaders(internalServiceHeaders(expectedVersion ? { 'X-CodeAPI-Input-Version': expectedVersion } : {})) },
     );
     const headerOverrides = isOpaqueObjectContentDisposition(
       upstream.headers.get('content-disposition'),
@@ -750,6 +750,7 @@ app.put('/sessions/:sessionHandle/objects/:fileId', async (req, res) => {
       ),
       {
         method: 'PUT',
+        redirect: 'error',
         headers,
         body: req as unknown as BodyInit,
         duplex: 'half',
@@ -832,6 +833,7 @@ app.post('/tool-call', async (req, res) => {
       await recordEgressToolCall(callback.grant_id, executionId);
       const upstream = await fetch(forwardUrl(env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL, '/tool-call'), {
         method: 'POST',
+        redirect: 'error',
         headers: {
           ...injectTraceHeaders(),
           'Content-Type': req.header('content-type') ?? 'application/json',
@@ -847,6 +849,7 @@ app.post('/tool-call', async (req, res) => {
     await recordEgressToolCall(callback.grant_id, executionId);
     const upstream = await fetch(forwardUrl(env.EGRESS_GATEWAY_TOOL_CALL_SERVER_URL, '/tool-call'), {
       method: 'POST',
+      redirect: 'error',
       headers: {
         ...injectTraceHeaders(),
         'Content-Type': req.header('content-type') ?? 'application/json',

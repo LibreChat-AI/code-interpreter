@@ -104,6 +104,13 @@ const SECCOMP_POLICY = [
   '#define AF_VSOCK 40',
   '#define CLONE_NAMESPACE_FLAGS 0x7e020000',
   '#define KVM_IOCTL_MAGIC 0xAE00',
+  '#define FUTEX_CMD_MASK 0x7f',
+  '#define FUTEX_LOCK_PI 6',
+  '#define FUTEX_UNLOCK_PI 7',
+  '#define FUTEX_TRYLOCK_PI 8',
+  '#define FUTEX_WAIT_REQUEUE_PI 11',
+  '#define FUTEX_CMP_REQUEUE_PI 12',
+  '#define FUTEX_LOCK_PI2 13',
   'POLICY sandbox {',
   '  KILL {',
   '    ptrace, memfd_create, personality, userfaultfd,',
@@ -141,6 +148,9 @@ const SECCOMP_POLICY = [
   '  },',
   '  ERRNO(1) {',
   '    io_uring_setup, io_uring_enter, io_uring_register, sched_setaffinity, vmsplice,',
+  /* GhostLock (CVE-2026-43499): deny PI operations, including private and
+   * realtime variants, without blocking ordinary runtime futex wait/wake. */
+  '    futex(uaddr, op) { (op & FUTEX_CMD_MASK) == FUTEX_LOCK_PI || (op & FUTEX_CMD_MASK) == FUTEX_UNLOCK_PI || (op & FUTEX_CMD_MASK) == FUTEX_TRYLOCK_PI || (op & FUTEX_CMD_MASK) == FUTEX_WAIT_REQUEUE_PI || (op & FUTEX_CMD_MASK) == FUTEX_CMP_REQUEUE_PI || (op & FUTEX_CMD_MASK) == FUTEX_LOCK_PI2 },',
   '    clone(flags) { (flags & CLONE_NAMESPACE_FLAGS) != 0 },',
   /* Block signals to PID 1 of the sandbox PID namespace (the NsJail
    * monitor). With clone_newpid the user can't reach other tenants — but

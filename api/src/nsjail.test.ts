@@ -374,6 +374,22 @@ describe('NsJail seccomp policy', () => {
     expect(errnoSocketRule).not.toContain('AF_VSOCK');
   });
 
+  test('blocks priority-inheritance futex operations without denying ordinary wait/wake', () => {
+    const policy = seccompPolicy();
+    expect(policy).toContain('#define FUTEX_CMD_MASK 0x7f');
+    const rule = policy.split('ERRNO(1)')[1]?.split('\n')
+      .find(line => line.includes('futex(uaddr, op)'));
+    expect(rule).toBeDefined();
+    for (const [operation, command] of [
+      ['LOCK_PI', 6], ['UNLOCK_PI', 7], ['TRYLOCK_PI', 8],
+      ['WAIT_REQUEUE_PI', 11], ['CMP_REQUEUE_PI', 12], ['LOCK_PI2', 13],
+    ] as const) {
+      expect(policy).toContain(`#define FUTEX_${operation} ${command}`);
+      expect(rule).toContain(`(op & FUTEX_CMD_MASK) == FUTEX_${operation}`);
+    }
+    expect(rule).not.toMatch(/== FUTEX_(WAIT|WAKE)(?:\s|$)/);
+  });
+
   test('rejects Copy Fail and Dirty Frag socket entry points in the sandbox', () => {
     const policy = seccompPolicy();
     const errnoBlock = policy.split('ERRNO(1)')[1] ?? '';

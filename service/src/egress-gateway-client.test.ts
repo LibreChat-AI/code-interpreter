@@ -21,6 +21,7 @@ type AxiosPostCall = {
     headers?: Record<string, string>;
     signal?: AbortSignal;
     timeout?: number;
+    maxRedirects?: number;
   };
 };
 
@@ -109,6 +110,7 @@ describe('egress gateway client', () => {
       allowedToolNames: ['query_clickhouse'],
     }, { signal: controller.signal });
 
+    expect(calls.map(call => call.config.maxRedirects)).toEqual([0, 0, 0]);
     expect(calls.map(call => call.config.timeout)).toEqual([12_345, 12_345, 12_345]);
     expect(calls.map(call => call.config.signal)).toEqual([
       controller.signal,
@@ -147,6 +149,7 @@ describe('egress gateway client', () => {
     await revokeGatewayEgressGrant({ grantId: 'grant_123', reason: 'completed' });
     await revokeGatewayEgressGrant({ grantId: 'grant_123', reason: 'failed', timeoutMs: 321 });
 
+    expect(calls.map(call => call.config.maxRedirects)).toEqual([0, 0]);
     expect(calls.map(call => call.config.timeout)).toEqual([987, 321]);
   });
 

@@ -319,7 +319,7 @@ function waitForExecutionState(
                 () =>
                     axios.get<BlockingPendingState>(
           `${env.TOOL_CALL_SERVER_URL}/sessions/${id}/pending`,
-          { headers: internalServiceHeaders() },
+          { maxRedirects: 0, headers: internalServiceHeaders() },
         ),
         'Get pending tool calls',
       );
@@ -1598,7 +1598,7 @@ async function handleBlocking(
             error_message: r.error_message,
           })),
                         },
-                        { headers: internalServiceHeaders() },
+                        { maxRedirects: 0, headers: internalServiceHeaders() },
                     ),
         'Submit tool results',
       );
@@ -1783,7 +1783,7 @@ async function handleBlocking(
           timeout,
           tools,
                         },
-                        { headers: internalServiceHeaders() },
+                        { maxRedirects: 0, headers: internalServiceHeaders() },
                     ),
         'Create Tool Call Server session',
       );
