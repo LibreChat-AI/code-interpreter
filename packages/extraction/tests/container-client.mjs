@@ -66,11 +66,24 @@ assert.deepEqual(docx.value.segments, [
         text: 'First paragraph\nLeft cell\tRight cell\nLast paragraph\n',
     },
 ]);
+const nested = await send('docx', readFileSync(`${fixtures}/nested.docx`));
+assert.equal(nested.status, 200);
+assert.match(
+    nested.value.segments[0].text,
+    /Before nested table\nNested left\tNested right[\n]+After nested table/
+);
+const nestedOnly = await send(
+    'docx',
+    readFileSync(`${fixtures}/nested-only.docx`)
+);
+assert.equal(nestedOnly.status, 200);
+assert.match(nestedOnly.value.segments[0].text, /Only nested text/);
 for (const [name, format, code] of [
     ['empty.pdf', 'pdf', 'EMPTY_OUTPUT'],
     ['empty.docx', 'docx', 'EMPTY_OUTPUT'],
     ['inflate.pdf', 'pdf', 'DECOMPRESSION_LIMIT'],
     ['aggregate.pdf', 'pdf', 'DECOMPRESSION_LIMIT'],
+    ['raw-limit.pdf', 'pdf', 'DECOMPRESSION_LIMIT'],
     ['aggregate.docx', 'docx', 'DECOMPRESSION_LIMIT'],
     ['bad.docx', 'docx', 'INVALID_DOCUMENT'],
     ['entries.docx', 'docx', 'STRUCTURE_LIMIT'],
@@ -90,6 +103,10 @@ for (const [name, format, code] of [
         `${name}: ${JSON.stringify(response)}`
     );
 }
+assert.equal(
+    (await send('pdf', readFileSync(`${fixtures}/raw-exact.pdf`))).status,
+    200
+);
 const exact = await send('docx', readFileSync(`${fixtures}/exact.docx`));
 assert.equal(exact.status, 200);
 assert.equal(exact.value.textBytes, 1024 * 1024);
@@ -118,5 +135,5 @@ pages.copy(padded);
 assert.equal((await send('pdf', padded)).status, 200);
 assert.equal((await send('pdf', Buffer.alloc(padded.length + 1))).status, 413);
 console.log(
-    'Container endpoint: PDF/DOCX success, structure, input limits and 15 adversarial fixtures passed'
+    'Container endpoint: PDF/DOCX success, structure, input limits and 16 adversarial fixtures passed'
 );

@@ -65,6 +65,14 @@ static void restrict_syscalls(void) {
 #endif
         DENY(__NR_ptrace), DENY(__NR_process_vm_readv), DENY(__NR_process_vm_writev),
         DENY(__NR_kill), DENY(__NR_tkill), DENY(__NR_tgkill), DENY(__NR_pidfd_send_signal),
+        DENY(__NR_rt_sigqueueinfo), DENY(__NR_rt_tgsigqueueinfo), DENY(__NR_ioctl),
+        /* Async descriptor ownership can cause kernel-delivered signals. */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fcntl, 0, 7),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1])),
+        DENY(F_SETOWN), DENY(F_SETOWN_EX), DENY(F_SETSIG),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        DENY(__NR_mq_open), DENY(__NR_mq_unlink), DENY(__NR_mq_timedsend),
+        DENY(__NR_mq_timedreceive), DENY(__NR_mq_notify), DENY(__NR_mq_getsetattr),
         DENY(__NR_mount), DENY(__NR_umount2), DENY(__NR_pivot_root), DENY(__NR_chroot),
         DENY(__NR_unshare), DENY(__NR_setns), DENY(__NR_bpf), DENY(__NR_userfaultfd),
         DENY(__NR_io_uring_setup), DENY(__NR_perf_event_open),

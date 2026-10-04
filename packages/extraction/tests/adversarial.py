@@ -42,3 +42,25 @@ for index in range(129):
     writer.add_blank_page(width=10, height=10)
 writer.write(root / 'too-many-pages.pdf')
 print('Adversarial documents generated')
+
+for delta, name in [(0, 'raw-exact.pdf'), (1, 'raw-limit.pdf')]:
+    writer = PdfWriter()
+    writer.append(root / 'pages.pdf')
+    stream = writer.pages[0]['/Contents'].get_object()
+    value = stream.get_data()
+    stream.set_data(b' ' * (8 * 1024 * 1024 - len(value) + delta) + value)
+    writer.write(root / name)
+
+document = Document()
+outer = document.add_table(rows=1, cols=1)
+cell = outer.cell(0, 0)
+cell.paragraphs[0].text = 'Before nested table'
+nested = cell.add_table(rows=1, cols=2)
+nested.cell(0, 0).text = 'Nested left'
+nested.cell(0, 1).text = 'Nested right'
+cell.add_paragraph('After nested table')
+document.save(root / 'nested.docx')
+document = Document()
+outer = document.add_table(rows=1, cols=1)
+outer.cell(0, 0).add_table(rows=1, cols=1).cell(0, 0).text = 'Only nested text'
+document.save(root / 'nested-only.docx')

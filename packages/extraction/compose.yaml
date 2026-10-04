@@ -1,6 +1,6 @@
 services:
     extraction:
-        image: librechat-extraction:local
+        image: ${EXTRACTION_IMAGE:-librechat-extraction:local}
         build:
             context: ../..
             dockerfile: packages/extraction/Dockerfile

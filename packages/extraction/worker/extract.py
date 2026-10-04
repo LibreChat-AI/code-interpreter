@@ -41,11 +41,15 @@ class Text:
 def pdf_segments(data):
     import pypdf
     from pypdf import filters
+    from pypdf.generic import DecodedStreamObject
 
     used = 0
+    credited = {}
     original = filters.decode_stream_data
+    original_data = DecodedStreamObject.get_data
 
     def inflate(value):
+        nonlocal used
         # Strict bounded decoding, without pypdf's recovery/fallback paths.
         cap = min(ENTRY_BYTES, EXPANDED_BYTES - used)
         decoder = zlib.decompressobj()
@@ -54,10 +58,22 @@ def pdf_segments(data):
             raise Rejected("DECOMPRESSION_LIMIT")
         if not decoder.eof:
             raise Rejected("INVALID_DOCUMENT")
+        used += len(result)
+        credited[id(result)] = result
         return result
 
-    def decode(stream):
+    def decoded_data(stream):
         nonlocal used
+        value = original_data(stream)
+        if not getattr(stream, "_extraction_counted", False):
+            if credited.get(id(value)) is not value:
+                used += len(value)
+            if len(value) > ENTRY_BYTES or used > EXPANDED_BYTES:
+                raise Rejected("DECOMPRESSION_LIMIT")
+            stream._extraction_counted = True
+        return value
+
+    def decode(stream):
         names = stream.get("/Filter", [])
         if not isinstance(names, list):
             names = [names]
@@ -65,12 +81,9 @@ def pdf_segments(data):
             "/FlateDecode", "/Fl", "/ASCIIHexDecode", "/AHx", "/ASCII85Decode", "/A85"
         } for name in names):
             raise Rejected("UNSUPPORTED_ENCODING")
-        value = original(stream)
-        used += len(value)
-        if len(value) > ENTRY_BYTES or used > EXPANDED_BYTES:
-            raise Rejected("DECOMPRESSION_LIMIT")
-        return value
+        return original(stream)
 
+    DecodedStreamObject.get_data = decoded_data
     filters.decompress = inflate
     filters.decode_stream_data = decode
     reader = pypdf.PdfReader(io.BytesIO(data), strict=True)
@@ -129,17 +142,30 @@ def docx_segments(data):
 
     document = Document(io.BytesIO(safe_docx(data)))
     text = Text()
-    for block in document.iter_inner_content():
-        if isinstance(block, Table):
-            for row in block.rows:
-                for index, cell in enumerate(row.cells):
-                    if index:
-                        text.add("\t")
-                    text.add(cell.text)
+    def blocks(container, depth=0, cell=False):
+        if depth > 32:
+            raise Rejected("STRUCTURE_LIMIT")
+        first = True
+        for block in container.iter_inner_content():
+            if cell and not first:
                 text.add("\n")
-        else:
-            text.add(block.text)
-            text.add("\n")
+            first = False
+            if isinstance(block, Table):
+                for row_index, row in enumerate(block.rows):
+                    if row_index:
+                        text.add("\n")
+                    for index, child in enumerate(row.cells):
+                        if index:
+                            text.add("\t")
+                        blocks(child, depth + 1, cell=True)
+                if not cell:
+                    text.add("\n")
+            else:
+                text.add(block.text)
+                if not cell:
+                    text.add("\n")
+
+    blocks(document)
     return [{"kind": "document", "index": 1, "text": text.value()}], text.size
 
 

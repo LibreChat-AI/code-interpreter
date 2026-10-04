@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
-project="extraction-test-$$"
-image="librechat-extraction-test:$$"
+run_id=$(node -e 'console.log(require("node:crypto").randomUUID())')
+project="extraction-test-$run_id"
+image="librechat-extraction-test:$run_id"
+export EXTRACTION_IMAGE="librechat-extraction:$run_id"
 compose=(docker compose -p "$project" -f packages/extraction/compose.yaml)
 cleanup() {
   "${compose[@]}" down -v --remove-orphans >/dev/null
-  docker image rm "$image" >/dev/null 2>&1 || true
+  docker image rm "$image" "$EXTRACTION_IMAGE" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 "${compose[@]}" build extraction
