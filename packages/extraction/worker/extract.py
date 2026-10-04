@@ -234,20 +234,55 @@ def safe_docx(data):
     return output.getvalue()
 
 
+def validate_docx_body(body):
+    from lxml.etree import _Element
+
+    literal = _Element.text.__get__
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    # These are the exact content paths read by pinned python-docx. Unknown
+    # wrappers fail closed rather than hiding text from its direct-child XPath.
+    grammar = {
+        "body": {"p", "tbl", "sectPr"},
+        "tbl": {"tblPr", "tblGrid", "tr"},
+        "tr": {"trPr", "tc"},
+        "tc": {"tcPr", "p", "tbl"},
+        "p": {"pPr", "r", "hyperlink"},
+        "hyperlink": {"r"},
+        "r": {"rPr", "t", "tab", "br", "cr", "noBreakHyphen", "ptab", "lastRenderedPageBreak"},
+    }
+    properties = {"sectPr", "tblPr", "tblGrid", "trPr", "tcPr", "pPr", "rPr"}
+    markers = {"bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd",
+               "permStart", "permEnd", "proofErr"}
+    stack = [(body, "body")]
+    while stack:
+        parent, kind = stack.pop()
+        if literal(parent) and literal(parent).strip():
+            raise Rejected("UNSUPPORTED_CONTENT")
+        for child in parent:
+            tag = child.tag.removeprefix(word) if isinstance(child.tag, str) else ""
+            marker = kind in {"body", "p", "hyperlink", "tc"} and tag in markers
+            if child.tag != word + tag or (tag not in grammar[kind] and not marker):
+                raise Rejected("UNSUPPORTED_CONTENT")
+            if child.tail and child.tail.strip():
+                raise Rejected("UNSUPPORTED_CONTENT")
+            if tag in properties:
+                # Formatting is ignored, but cannot conceal textual content.
+                if any(node.tag in {word + "t", word + "instrText", word + "delText"}
+                       or (literal(node) and literal(node).strip())
+                       or (node.tail and node.tail.strip()) for node in child.iter()):
+                    raise Rejected("UNSUPPORTED_CONTENT")
+            elif tag in grammar:
+                stack.append((child, tag))
+            elif len(child) or (tag != "t" and literal(child) and literal(child).strip()):
+                raise Rejected("UNSUPPORTED_CONTENT")
+
+
 def docx_segments(data):
     from docx import Document
     from docx.table import Table
 
     document = Document(io.BytesIO(safe_docx(data)))
-    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    unsupported = {word + name for name in (
-        "sdt", "customXml", "ins", "del", "moveFrom", "moveTo", "altChunk",
-        "subDoc", "fldSimple", "txbxContent",
-    )}
-    unsupported.add("{http://schemas.openxmlformats.org/markup-compatibility/2006}AlternateContent")
-    # python-docx omits these wrappers. Never return successful partial text.
-    if any(element.tag in unsupported for element in document.element.iter()):
-        raise Rejected("UNSUPPORTED_CONTENT")
+    validate_docx_body(document.element.body)
     text = Text()
     def blocks(container, depth=0, cell=False):
         if depth > 32:

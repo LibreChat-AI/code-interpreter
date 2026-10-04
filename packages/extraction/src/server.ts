@@ -16,7 +16,7 @@ export const capabilities = Object.freeze({
         docx: 'document body, paragraphs and tables',
     },
     limitations: {
-        docx: 'Body only. Content controls, custom XML wrappers, revisions, alternate content, simple fields and text boxes are rejected.',
+        docx: 'Body paragraphs/tables and direct runs/hyperlinks only. Other content structures, fields, images and wrappers are rejected; formatting is ignored.',
     },
     limits: {
         ...policy,

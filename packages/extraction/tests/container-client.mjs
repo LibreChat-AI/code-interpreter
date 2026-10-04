@@ -90,7 +90,16 @@ for (const name of [
     assert.equal(response.status, 200, name);
     assert.deepEqual(response.value.segments, docx.value.segments, name);
 }
-for (const [name, format, code] of [
+const primitives = await send(
+    'docx',
+    readFileSync(`${fixtures}/supported-runs.docx`)
+);
+assert.equal(primitives.status, 200);
+assert.equal(
+    primitives.value.segments[0].text,
+    'Bold Link\tTabbed\nNext-\t\nEnd\n'
+);
+const rejectedFixtures = [
     ['control.docx', 'docx', 'UNSUPPORTED_CONTENT'],
     ['control-cell.docx', 'docx', 'UNSUPPORTED_CONTENT'],
     ['control-inline.docx', 'docx', 'UNSUPPORTED_CONTENT'],
@@ -121,7 +130,20 @@ for (const [name, format, code] of [
     ['output.docx', 'docx', 'OUTPUT_LIMIT'],
     ['encrypted.pdf', 'pdf', 'ENCRYPTED_DOCUMENT'],
     ['too-many-pages.pdf', 'pdf', 'STRUCTURE_LIMIT'],
-]) {
+];
+for (const tag of ['dir', 'bdo', 'smartTag', 'unknownWrapper']) {
+    for (const placement of ['paragraph', 'cell', 'hyperlink']) {
+        rejectedFixtures.push([
+            `wrapper-${tag}-${placement}.docx`,
+            'docx',
+            'UNSUPPORTED_CONTENT',
+        ]);
+    }
+}
+for (const name of ['wrapper-block.docx', 'wrapper-run.docx']) {
+    rejectedFixtures.push([name, 'docx', 'UNSUPPORTED_CONTENT']);
+}
+for (const [name, format, code] of rejectedFixtures) {
     const response = await send(format, readFileSync(`${fixtures}/${name}`));
     assert.equal(
         response.value.error?.code,
@@ -161,5 +183,5 @@ pages.copy(padded);
 assert.equal((await send('pdf', padded)).status, 200);
 assert.equal((await send('pdf', Buffer.alloc(padded.length + 1))).status, 413);
 console.log(
-    'Container endpoint: PDF/DOCX success, structure, input limits and 30 adversarial fixtures passed'
+    `Container endpoint: PDF/DOCX success, structure, input limits and ${rejectedFixtures.length} adversarial fixtures passed`
 );

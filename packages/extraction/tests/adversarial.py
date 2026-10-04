@@ -189,3 +189,73 @@ for name, mapping, payload in [
                 member = 'word/_rels/document.bin.rels'
             target.writestr(member, value)
 print('DOCX completeness and content-type fixtures generated')
+
+# The supported structure is closed, not an expanding list of forbidden tags.
+for tag in ['dir', 'bdo', 'smartTag', 'unknownWrapper']:
+    for placement in ['paragraph', 'cell', 'hyperlink']:
+        document = Document()
+        document.add_paragraph('Ordinary text must not hide wrapped content')
+        paragraph = (document.add_table(rows=1, cols=1).cell(0, 0).add_paragraph()
+                     if placement == 'cell' else document.add_paragraph())
+        run = paragraph.add_run('Wrapped run text')._r
+        parent = run.getparent()
+        if placement == 'hyperlink':
+            link = OxmlElement('w:hyperlink')
+            link.set(qn('w:anchor'), 'test')
+            parent.append(link)
+            parent = link
+        wrapper = OxmlElement('w:' + tag)
+        if tag in ('dir', 'bdo'):
+            wrapper.set(qn('w:val'), 'rtl')
+        wrapper.append(run)
+        parent.append(wrapper)
+        document.save(root / f'wrapper-{tag}-{placement}.docx')
+
+# A malformed unknown block and run child cannot bypass the same invariant.
+document = Document()
+document.add_paragraph('Ordinary text')
+paragraph = document.add_paragraph('Unknown body wrapper text')
+parent = paragraph._p.getparent()
+wrapper = OxmlElement('w:unknownWrapper')
+wrapper.append(paragraph._p)
+parent.insert(0, wrapper)
+document.save(root / 'wrapper-block.docx')
+document = Document()
+document.add_paragraph('Ordinary text')
+run = document.add_paragraph().add_run('Run wrapper text')._r
+text = run[0]
+wrapper = OxmlElement('w:unknownWrapper')
+wrapper.append(text)
+run.append(wrapper)
+document.save(root / 'wrapper-run.docx')
+
+# Accepted formatting, hyperlinks, bookmarks and run text primitives retain order.
+document = Document()
+paragraph = document.add_paragraph()
+bookmark = OxmlElement('w:bookmarkStart')
+bookmark.set(qn('w:id'), '1')
+bookmark.set(qn('w:name'), 'test')
+paragraph._p.append(bookmark)
+paragraph.add_run('Bold ').bold = True
+link = OxmlElement('w:hyperlink')
+link.set(qn('w:anchor'), 'test')
+run = OxmlElement('w:r')
+text = OxmlElement('w:t')
+text.text = 'Link'
+run.append(text)
+link.append(run)
+paragraph._p.append(link)
+paragraph.add_run('\tTabbed\nNext')
+run = paragraph.add_run()._r
+run.append(OxmlElement('w:noBreakHyphen'))
+run.append(OxmlElement('w:ptab'))
+run.append(OxmlElement('w:cr'))
+text = OxmlElement('w:t')
+text.text = 'End'
+run.append(text)
+run.append(OxmlElement('w:lastRenderedPageBreak'))
+bookmark = OxmlElement('w:bookmarkEnd')
+bookmark.set(qn('w:id'), '1')
+paragraph._p.append(bookmark)
+document.save(root / 'supported-runs.docx')
+print('DOCX closed-structure fixtures generated')
