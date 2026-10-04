@@ -2,9 +2,11 @@
 import hashlib
 import io
 import json
+import logging
 import os
 from pathlib import PurePosixPath
 import socket
+import struct
 import sys
 import zipfile
 import zlib
@@ -44,7 +46,27 @@ def pdf_segments(data):
     from pypdf.generic import DecodedStreamObject
 
     used = 0
+    failure = None
     credited = {}
+
+    def reject(code):
+        nonlocal failure
+        failure = failure or code
+        raise Rejected(failure)
+
+    def check_failure():
+        if failure is not None:
+            raise Rejected(failure)
+
+    class Warnings(logging.Handler):
+        def emit(self, record):
+            nonlocal failure
+            failure = failure or "INVALID_DOCUMENT"
+
+    logger = logging.getLogger("pypdf")
+    logger.addHandler(Warnings())
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
     original = filters.decode_stream_data
     original_data = DecodedStreamObject.get_data
 
@@ -53,11 +75,14 @@ def pdf_segments(data):
         # Strict bounded decoding, without pypdf's recovery/fallback paths.
         cap = min(ENTRY_BYTES, EXPANDED_BYTES - used)
         decoder = zlib.decompressobj()
-        result = decoder.decompress(value, cap + 1)
+        try:
+            result = decoder.decompress(value, cap + 1)
+        except zlib.error:
+            reject("INVALID_DOCUMENT")
         if len(result) > cap or decoder.unconsumed_tail:
-            raise Rejected("DECOMPRESSION_LIMIT")
-        if not decoder.eof:
-            raise Rejected("INVALID_DOCUMENT")
+            reject("DECOMPRESSION_LIMIT")
+        if not decoder.eof or decoder.unused_data:
+            reject("INVALID_DOCUMENT")
         used += len(result)
         credited[id(result)] = result
         return result
@@ -69,7 +94,7 @@ def pdf_segments(data):
             if credited.get(id(value)) is not value:
                 used += len(value)
             if len(value) > ENTRY_BYTES or used > EXPANDED_BYTES:
-                raise Rejected("DECOMPRESSION_LIMIT")
+                reject("DECOMPRESSION_LIMIT")
             stream._extraction_counted = True
         return value
 
@@ -80,13 +105,21 @@ def pdf_segments(data):
         if len(names) > 1 or any(str(name) not in {
             "/FlateDecode", "/Fl", "/ASCIIHexDecode", "/AHx", "/ASCII85Decode", "/A85"
         } for name in names):
-            raise Rejected("UNSUPPORTED_ENCODING")
-        return original(stream)
+            reject("UNSUPPORTED_ENCODING")
+        try:
+            return original(stream)
+        except Rejected:
+            raise
+        except MemoryError:
+            reject("RESOURCE_LIMIT")
+        except Exception:
+            reject("INVALID_DOCUMENT")
 
     DecodedStreamObject.get_data = decoded_data
     filters.decompress = inflate
     filters.decode_stream_data = decode
     reader = pypdf.PdfReader(io.BytesIO(data), strict=True)
+    check_failure()
     if reader.is_encrypted:
         raise Rejected("ENCRYPTED_DOCUMENT")
     if len(reader.pages) > SEGMENTS:
@@ -95,8 +128,10 @@ def pdf_segments(data):
     text = Text()
     for index, page in enumerate(reader.pages):
         value = page.extract_text() or ""
+        check_failure()
         text.add(value)
         result.append({"kind": "page", "index": index + 1, "text": value})
+    check_failure()
     return result, text.size
 
 
@@ -109,6 +144,8 @@ def safe_docx(data):
             raise Rejected("STRUCTURE_LIMIT")
         for entry in archive.infolist():
             name = entry.filename
+            if entry.orig_filename != name:
+                raise Rejected("INVALID_DOCUMENT")
             path = PurePosixPath(name)
             if (name in names or path.is_absolute() or ".." in path.parts or "\\" in name
                     or "\x00" in name or (entry.external_attr >> 16) & 0o170000 == 0o120000
@@ -117,17 +154,41 @@ def safe_docx(data):
             names.add(name)
             if entry.file_size > ENTRY_BYTES:
                 raise Rejected("DECOMPRESSION_LIMIT")
-            chunks = []
-            size = 0
-            with archive.open(entry) as source:
-                while chunk := source.read(64 * 1024):
+            # Let ZipFile validate local names, flags and entry overlap, but do
+            # not use ZipExtFile.read(): it trims data to untrusted file_size.
+            with archive.open(entry):
+                offset = entry.header_offset
+                if offset < 0 or offset + 30 > len(data):
+                    raise Rejected("INVALID_DOCUMENT")
+                method = struct.unpack_from("<H", data, offset + 8)[0]
+                if method != entry.compress_type:
+                    raise Rejected("INVALID_DOCUMENT")
+                name_size, extra_size = struct.unpack_from("<HH", data, offset + 26)
+                start = offset + 30 + name_size + extra_size
+                end = start + entry.compress_size
+                if end > len(data):
+                    raise Rejected("INVALID_DOCUMENT")
+                decoder = zlib.decompressobj(-zlib.MAX_WBITS) if entry.compress_type == 8 else None
+                chunks = []
+                size = 0
+                crc = 0
+                for position in range(start, end, 64 * 1024):
+                    chunk = data[position:min(position + 64 * 1024, end)]
+                    if decoder:
+                        cap = min(ENTRY_BYTES - size, EXPANDED_BYTES - total)
+                        chunk = decoder.decompress(chunk, cap + 1)
                     size += len(chunk)
                     total += len(chunk)
                     if size > ENTRY_BYTES or total > EXPANDED_BYTES:
                         raise Rejected("DECOMPRESSION_LIMIT")
+                    crc = zlib.crc32(chunk, crc)
                     chunks.append(chunk)
+                if decoder and (not decoder.eof or decoder.unused_data or decoder.unconsumed_tail):
+                    raise Rejected("INVALID_DOCUMENT")
+                if size != entry.file_size or crc != entry.CRC:
+                    raise Rejected("INVALID_DOCUMENT")
             value = b"".join(chunks)
-            if name.endswith((".xml", ".rels")):
+            if name.lower().endswith((".xml", ".rels")):
                 xml = value.decode("utf-8", errors="strict")
                 if "\x00" in xml or "<!DOCTYPE" in xml.upper() or "<!ENTITY" in xml.upper():
                     raise Rejected("INVALID_DOCUMENT")

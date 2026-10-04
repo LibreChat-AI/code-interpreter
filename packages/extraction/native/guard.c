@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/prctl.h>
+#include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -65,7 +66,13 @@ static void restrict_syscalls(void) {
 #endif
         DENY(__NR_ptrace), DENY(__NR_process_vm_readv), DENY(__NR_process_vm_writev),
         DENY(__NR_kill), DENY(__NR_tkill), DENY(__NR_tgkill), DENY(__NR_pidfd_send_signal),
-        DENY(__NR_rt_sigqueueinfo), DENY(__NR_rt_tgsigqueueinfo), DENY(__NR_ioctl),
+        DENY(__NR_rt_sigqueueinfo), DENY(__NR_rt_tgsigqueueinfo),
+        /* CPython marks opened files close-on-exec through FIOCLEX. */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ioctl, 0, 3),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1])),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FIOCLEX, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
         /* Async descriptor ownership can cause kernel-delivered signals. */
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fcntl, 0, 7),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1])),

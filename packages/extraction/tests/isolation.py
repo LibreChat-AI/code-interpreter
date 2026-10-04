@@ -5,6 +5,7 @@ import os
 import resource
 import signal
 import socket
+import struct
 import sys
 
 if sys.argv[1] == 'hang':
@@ -25,7 +26,10 @@ for path, mode in [('/jobs/other/secret', 'rb'), ('/jobs/other/secret', 'wb'),
 for operation in [lambda: socket.socket(), lambda: socket.socket(socket.AF_UNIX),
                   lambda: os.fork(), lambda: os.kill(os.getppid(), 0),
                   lambda: os.chmod('/jobs/other/secret', 0o777),
-                  lambda: fcntl.fcntl(1, fcntl.F_SETOWN, os.getppid())]:
+                  lambda: fcntl.fcntl(1, fcntl.F_SETOWN, os.getppid()),
+                  lambda: fcntl.fcntl(1, 15, struct.pack("ii", 1, os.getppid())),
+                  lambda: fcntl.fcntl(1, fcntl.F_SETSIG, 0),
+                  lambda: fcntl.ioctl(1, 0x8901, struct.pack("i", os.getppid()))]:
     try:
         operation()
     except PermissionError:
@@ -61,4 +65,9 @@ except PermissionError:
 else:
     raise RuntimeError('Forbidden ioctl')
 
+
+
+libc.mq_open.argtypes = [ctypes.c_char_p, ctypes.c_int]
+assert libc.mq_open(b"/extraction-negative-probe", os.O_RDONLY) == -1
+assert ctypes.get_errno() == errno.EPERM
 print("ISOLATED", flush=True)

@@ -66,6 +66,9 @@ assert.deepEqual(docx.value.segments, [
         text: 'First paragraph\nLeft cell\tRight cell\nLast paragraph\n',
     },
 ]);
+const form = await send('pdf', readFileSync(`${fixtures}/form-valid.pdf`));
+assert.equal(form.status, 200);
+assert.match(form.value.segments[0].text, /Form content/);
 const nested = await send('docx', readFileSync(`${fixtures}/nested.docx`));
 assert.equal(nested.status, 200);
 assert.match(
@@ -84,11 +87,14 @@ for (const [name, format, code] of [
     ['inflate.pdf', 'pdf', 'DECOMPRESSION_LIMIT'],
     ['aggregate.pdf', 'pdf', 'DECOMPRESSION_LIMIT'],
     ['raw-limit.pdf', 'pdf', 'DECOMPRESSION_LIMIT'],
+    ['form-limit.pdf', 'pdf', 'DECOMPRESSION_LIMIT'],
+    ['form-filter.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
     ['aggregate.docx', 'docx', 'DECOMPRESSION_LIMIT'],
     ['bad.docx', 'docx', 'INVALID_DOCUMENT'],
     ['entries.docx', 'docx', 'STRUCTURE_LIMIT'],
     ['duplicate.docx', 'docx', 'INVALID_DOCUMENT'],
     ['forged.docx', 'docx', 'INVALID_DOCUMENT'],
+    ['forged-bomb.docx', 'docx', 'DECOMPRESSION_LIMIT'],
     ['utf8.docx', 'docx', 'INVALID_DOCUMENT'],
     ['entities.docx', 'docx', 'INVALID_DOCUMENT'],
     ['bomb.docx', 'docx', 'DECOMPRESSION_LIMIT'],
@@ -135,5 +141,5 @@ pages.copy(padded);
 assert.equal((await send('pdf', padded)).status, 200);
 assert.equal((await send('pdf', Buffer.alloc(padded.length + 1))).status, 413);
 console.log(
-    'Container endpoint: PDF/DOCX success, structure, input limits and 16 adversarial fixtures passed'
+    'Container endpoint: PDF/DOCX success, structure, input limits and 19 adversarial fixtures passed'
 );

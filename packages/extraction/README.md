@@ -81,7 +81,8 @@ deadline. A disconnected or stalled upload may close without a response. There i
 -   **PDF:** pypdf, one segment per page, including empty pages. Text only, without OCR,
     image decoding, attachment extraction, or script execution. Encrypted files are rejected.
     Compressed text streams support a single Flate, ASCIIHex, or ASCII85 filter. Other filter
-    combinations are deliberately rejected. Malformed PDFs are not repaired. The decoded-byte budget also counts intermediate
+    combinations are deliberately rejected. Malformed PDFs are not repaired. Recovery warnings reject the document rather than
+    returning partial text. The decoded-byte budget also counts intermediate
     inflation buffers when predictors transform them.
 -   **DOCX:** python-docx/lxml, one document-body segment. Paragraphs and table rows remain
     ordered; cells are tab-separated, including nested tables (at most 32 levels). Headers, footers, comments, text boxes, tracked revisions,
