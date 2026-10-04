@@ -130,8 +130,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Check for an existing tag
+        # `sha-` tags are written once. A re-run (or a dispatch on the same
+        # commit) builds only the images whose tag is missing, so a failed
+        # re-run cannot leave the commit's set mixed across two builds.
+        id: existing
+        if: needs.plan.outputs.publish == 'true'
+        env:
+          REF: ${{ env.NAMESPACE }}/${{ matrix.image }}:sha-${{ github.sha }}
+        run: |
+          for attempt in 1 2 3; do
+            if revision=$(docker buildx imagetools inspect "$REF" --format '{{ json .Image }}' |
+              jq -er 'if has("config") then . else .["linux/amd64"] end
+                | .config.Labels["org.opencontainers.image.revision"]'); then
+              if [ "$revision" != "$GITHUB_SHA" ]; then
+                echo "::error::$REF records revision $revision"
+                exit 1
+              fi
+              echo "$REF already exists; not rebuilding it."
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+
       - name: Image metadata
         id: meta
+        if: steps.existing.outputs.exists != 'true'
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         env:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
@@ -147,6 +173,7 @@ jobs:
 
       - name: Build${{ needs.plan.outputs.publish == 'true' && ' and push' || '' }}
         id: build
+        if: steps.existing.outputs.exists != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -173,11 +200,16 @@ jobs:
         env:
           IMAGE_NAME: ${{ matrix.image }}
           PUSHED: ${{ needs.plan.outputs.publish == 'true' && steps.build.outcome == 'success' }}
+          EXISTED: ${{ steps.existing.outputs.exists == 'true' }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           lowest=$(sort -n "$RUNNER_TEMP/disk-avail-mib.log" 2>/dev/null | head -n1)
           {
             echo "### $IMAGE_NAME"
+            if [ "$EXISTED" = true ]; then
+              echo "\`$NAMESPACE/$IMAGE_NAME:sha-$GITHUB_SHA\` was already published; left unchanged."
+              echo
+            fi
             if [ "$PUSHED" = true ]; then
               echo "Pushed \`$NAMESPACE/$IMAGE_NAME:sha-$GITHUB_SHA\`, pinnable as \`$NAMESPACE/$IMAGE_NAME@$DIGEST\`."
               echo
@@ -214,7 +246,9 @@ jobs:
 
       - name: Point main at the newest complete commit
         # Target: the newest of the last 100 commits on main for which every
-        # image has a `sha-` tag. A registry cannot move several repositories'
+        # image has a `sha-` tag. No image's `main` moves to an older commit
+        # than the one it names, so an inspection error can delay a promotion
+        # but never reverse one. A registry cannot move several repositories'
         # tags in one transaction, so a failure part-way leaves some `main`
         # tags behind; the next promotion, or a re-run of this job, finishes
         # the move. Deployments should pin `sha-` tags rather than `main`.
@@ -224,10 +258,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Prints the revision a tag records; fails if the tag cannot be read
+          # after one retry (missing, or the registry is unreachable).
           revision_of() {
-            docker buildx imagetools inspect "$1" --format '{{ json .Image }}' 2>/dev/null |
-              jq -r 'if has("config") then . else .["linux/amd64"] end
-                | .config.Labels["org.opencontainers.image.revision"] // empty'
+            local attempt
+            for attempt in 1 2; do
+              docker buildx imagetools inspect "$1" --format '{{ json .Image }}' 2>/dev/null |
+                jq -er 'if has("config") then . else .["linux/amd64"] end
+                  | .config.Labels["org.opencontainers.image.revision"]' && return 0
+              sleep 2
+            done
+            return 1
           }
 
           complete() {
@@ -248,6 +289,8 @@ jobs:
 
           mapfile -t images < <(jq -r '.[].image' <<<"$IMAGES")
           mapfile -t commits < <(gh api "repos/$GITHUB_REPOSITORY/commits?sha=main&per_page=100" --jq '.[].sha')
+          declare -A position
+          for i in "${!commits[@]}"; do position[${commits[$i]}]=$i; done
 
           target=''
           for sha in "${commits[@]}"; do
@@ -263,8 +306,14 @@ jobs:
 
           for image in "${images[@]}"; do
             ref="$NAMESPACE/$image"
-            if [ "$(revision_of "$ref:main" || true)" = "$target" ]; then
+            current=$(revision_of "$ref:main" || true)
+            if [ "$current" = "$target" ]; then
               echo "$ref:main already at sha-$target" | tee -a "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            if [ -n "$current" ] && [ -n "${position[$current]:-}" ] &&
+              [ "${position[$current]}" -lt "${position[$target]}" ]; then
+              echo "::warning::$ref:main names $current, newer than $target; leaving it."
               continue
             fi
             retag "$ref" "$target"

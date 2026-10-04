@@ -153,8 +153,9 @@ Tags:
   The seven tags move one after another, so pin `sha-` tags for deployments
   and treat `main` as a convenience.
 
-There is no `latest`. Re-running the workflow for a commit rebuilds and
-replaces that commit's `sha-` tag. For exact bytes, replace a service's
+There is no `latest`. `sha-` tags are written once: re-running the workflow
+for a commit builds only the images whose tag is missing. For exact bytes,
+replace a service's
 `image:` below with `ghcr.io/librechat-ai/<image>@sha256:<digest>`; each image
 has its own digest, listed in the summary of the run that pushed it.
 
@@ -197,7 +198,9 @@ services:
 
 Then pin a built commit and start the stack, listing any host override after
 it. Keep the checkout at the same commit as the images, so the Compose
-configuration matches what the images expect:
+configuration matches what the images expect. `docker-compose.mac.yml` runs
+the unpublished `sandbox-build` target with its own entrypoint, so on macOS
+leave `sandbox-runner` out of this override and keep building it:
 
 ```bash
 export CODEAPI_IMAGE_TAG=sha-<commit>
