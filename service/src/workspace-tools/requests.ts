@@ -129,9 +129,7 @@ export class RedisWorkspaceRequests {
     const queue = new BridgeAdmissionQueue(this.redis);
     const accepted = await queue.submit({
       workerId: record.workerId, id: record.id, deadlineAtMs: record.queueDeadlineAtMs,
-      workspaceId: (registration.capabilities.workspaceLeaseSlots ?? 1) > 1
-        ? workspaceAdmissionId(record.request.workspaceId, record.request.workspaceInstanceId, record.request.worktree)
-        : undefined,
+      workspaceId: workspaceAdmissionId(record.request.workspaceId, record.request.workspaceInstanceId, record.request.worktree),
       key, activeKey: this.activeKey, fingerprint, record: JSON.stringify(record), retentionMs: RETENTION_MS,
     });
     if (accepted === 'conflict') throw new WorkspaceRequestConflict('Request ID was already used for different work');

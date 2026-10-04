@@ -166,6 +166,10 @@ export interface BridgeWorkerStatus {
   capabilities?: BridgeWorkerRegistration['capabilities'];
 }
 
+function isWorkspaceMutation(request: WorkspaceToolRequest): boolean {
+  return request.operation === 'write_file' || request.operation === 'edit_file' || request.operation === 'execute_command';
+}
+
 function supportsWorkspaceTool(
   registration: RegisteredBridgeWorker,
   request: WorkspaceToolRequest,
@@ -895,6 +899,7 @@ export class RedisBridgeStore {
       }
     } catch (error) {
       if (!(error instanceof BridgeStoreError) || error.code !== 'ASSIGNMENT_EXPIRED') throw error;
+      if (record.cancelRequested === true && !isWorkspaceMutation(record.request)) return { state: 'cancelled' };
       return { state: 'failed', error: { code: error.code, message: 'Assignment ended without a confirmed result. Do not replay this operation.' } };
     }
     if (settlement.status === 'fulfilled') {
@@ -2275,14 +2280,12 @@ export class RedisBridgeStore {
     const cancelledMutation =
       signal.aborted &&
       (assignment.executionKind === 'workspace_programmatic' ||
-        (workspaceRequest != null &&
-          (workspaceRequest.operation === 'write_file' ||
-            workspaceRequest.operation === 'edit_file' ||
-            workspaceRequest.operation === 'execute_command')));
-    if (cancelledMutation) {
+        (workspaceRequest != null && isWorkspaceMutation(workspaceRequest)));
+    const cancelledDurableWorkspace = signal.aborted && assignment.durableRequestKey != null && workspaceRequest != null;
+    if (cancelledMutation || cancelledDurableWorkspace) {
       try {
         // Keep the acknowledged assignment available long enough for the
-        // worker to terminate its process tree and commit a clean rejection.
+        // worker to stop its operation and commit a clean rejection.
         // Closing it first makes that rejection impossible to acknowledge and
         // leaves the worker's durable mutation guard armed.
         await this.cancel(assignment.assignmentId, assignment);

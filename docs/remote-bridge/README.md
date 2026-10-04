@@ -404,7 +404,9 @@ Disconnecting does not cancel accepted work.
   `admitted`, `completed`, `failed`, and `cancelled`. Lookup is tenant/user scoped;
   unknown or another principal's IDs return 404. Results are non-consuming reads.
 - Cancel with `DELETE /v1/workspace-tools/requests/:requestId`. Cancellation is a
-  request, not proof of termination. A committed result can win the race.
+  request, not proof of termination. All operations notify the worker. A committed
+  result can win the race. Without a confirmed settlement, read-only calls retain
+  `cancelled`; mutations retain an unknown-outcome failure and their safety fence.
   `ASSIGNMENT_EXPIRED` means execution may have occurred. Never replay it.
 - Status includes worker/workspace/lane metadata, queue position when available,
   measured queue wait, and the execution deadline after admission. Queue position

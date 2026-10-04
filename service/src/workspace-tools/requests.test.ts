@@ -5,6 +5,7 @@ import Redis from 'ioredis';
 import { RedisBridgeStore } from '../bridge/store';
 import { BridgeAdmissionQueue } from '../bridge/admission';
 import type { CodeBridgeAssignment } from '../bridge/store';
+import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 import { RedisWorkspaceRequests } from './requests';
 import { workspaceRequestCoordinationScope } from './coordination';
 import type { WorkspaceRequestCoordinationPolicy } from './coordination';
@@ -29,7 +30,7 @@ async function setup(slots = 1): Promise<RedisWorkspaceRequests> {
     capabilities: {
       sandboxProfile: 'native-srt', statefulWorkspace: false, runtimes: ['bash'],
       ...(slots > 1 ? { workspaceLeaseSlots: slots, requiresReadyConfirmation: true } : {}),
-      workspaceTools: { protocolVersion: 1, operations: ['read_file', 'execute_command'],
+      workspaceTools: { protocolVersion: 1, operations: ['read_file', 'execute_command', 'list_files', 'search_text', 'preview_edit'],
         workspaces: [{ id: 'primary' }, { id: 'independent' }] },
     },
   });
@@ -541,3 +542,130 @@ test.each([false, true])('quarantine retains the winning durable outcome across 
     });
   } finally { clock.mockRestore(); }
 });
+
+test('queued durable requests retain FIFO workspace metadata across same-incarnation slot changes', async () => {
+  const requests = await setup();
+  await submit(requests);
+  await submit(requests, 'request-00000000002');
+  await submit(requests, 'request-00000000003', 'independent');
+  await submit(requests);
+  await setup(2);
+  await tick(requests); await tick(requests);
+  const first = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0))!;
+  const independent = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 1))!;
+  expect(first).toBeDefined(); expect(independent).toBeDefined();
+  expect(first.request).toMatchObject({ workspaceId: 'primary' });
+  expect(independent.request).toMatchObject({ workspaceId: 'independent' });
+  expect(await requests.get(owner, 'request-00000000002')).toMatchObject({ state: 'queued', queuePosition: 2 });
+  await settle(first); await settle(independent); await tick(requests);
+  await bridge.confirmWorkspaceCleanup(workerId, first.assignmentId, {
+    protocolVersion: 1, incarnationId, generation: first.generation, leaseToken: first.leaseToken,
+    status: 'rejected', error: 'local cleanup confirmed',
+  });
+  await tick(requests);
+  const next = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0))!;
+  expect(next).toBeDefined();
+  await settle(next); await tick(requests);
+  expect((await requests.get(owner, 'request-00000000002'))?.state).toBe('completed');
+});
+
+const readOnlyRequests: WorkspaceToolRequest[] = [
+  { protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' },
+  { protocolVersion: 1, operation: 'list_files', workspaceId: 'primary' },
+  { protocolVersion: 1, operation: 'search_text', workspaceId: 'primary', query: 'needle' },
+  { protocolVersion: 1, operation: 'preview_edit', workspaceId: 'primary', path: 'README.md', oldText: 'old', newText: 'new' },
+];
+const readCancellationCases = readOnlyRequests.flatMap(request => [1, 2].flatMap(slots =>
+  ['unleased', 'claimed', 'acknowledged'].map(phase => ({ request, slots, phase })),
+));
+
+test.each(readCancellationCases)('durable read cancellation notifies the worker before closing (%j)', async ({ request, slots, phase }) => {
+  const requests = await setup(slots);
+  await requests.submit({ owner, requestId, workerId, requireTenantBinding: false,
+    request, queueWaitMs: 300_000, executionTimeoutMs: 30_000,
+  });
+  await tick(requests);
+  const slot = slots === 1 ? undefined : 0;
+  let assignment = phase === 'unleased' ? undefined : await bridge.lease(workerId, incarnationId, 0, undefined, undefined, slot);
+  if (phase === 'acknowledged') await bridge.acknowledgeLease(workerId, incarnationId, assignment!.assignmentId,
+    assignment!.generation, assignment!.leaseToken);
+  const key = (await redis.zrange(activeKey, 0, -1))[0];
+  const stored = JSON.parse((await redis.hget(key, 'assignment'))!);
+  await requests.cancel(owner, requestId);
+  const cancelling = tick(new RedisWorkspaceRequests(redis, bridge));
+  const marker = `codeapi:bridge:v1:assignment:${stored.assignmentId}:cancelled`;
+  const limit = Date.now() + 1000;
+  try {
+    while (await redis.get(marker) !== '1') {
+      if (Date.now() >= limit) throw new Error('Read-only worker was never notified');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    expect((await requests.get(owner, requestId))?.state).toBe('admitted');
+    assignment ??= await bridge.lease(workerId, incarnationId, 0, undefined, undefined, slot);
+    expect(assignment).toBeDefined();
+    expect(await bridge.cancelled(workerId, incarnationId, assignment!.assignmentId)).toBe(true);
+    await settle(assignment!, false);
+    await cancelling;
+    expect(await requests.get(owner, requestId)).toMatchObject({ state: 'cancelled', cancelRequested: true });
+    expect(await redis.zcard(activeKey)).toBe(0);
+  } finally { await cancelling; }
+});
+
+test.each([1, 2])('a durable read cancellation remains cancelled without worker settlement (slots=%s)', async slots => {
+  const requests = await setup(slots); await submit(requests); await tick(requests);
+  const key = (await redis.zrange(activeKey, 0, -1))[0];
+  const stored = JSON.parse((await redis.hget(key, 'assignment'))!);
+  await requests.cancel(owner, requestId);
+  await tick(new RedisWorkspaceRequests(redis, bridge));
+  expect(await redis.get(`codeapi:bridge:v1:assignment:${stored.assignmentId}:cancelled`)).toBe('1');
+  expect(await requests.get(owner, requestId)).toMatchObject({ state: 'cancelled', cancelRequested: true });
+  expect((await requests.get(owner, requestId))?.error).toBeUndefined();
+  expect(await bridge.lease(workerId, incarnationId, 0, undefined, undefined, slots === 1 ? undefined : 0)).toBeUndefined();
+  expect(await redis.zcard(activeKey)).toBe(0);
+  await submit(requests, 'request-00000000002'); await tick(requests);
+  expect(await bridge.lease(workerId, incarnationId, 0, undefined, undefined, slots === 1 ? undefined : 0)).toBeDefined();
+}, 10_000);
+
+test('fulfillment racing durable read cancellation keeps the winning result', async () => {
+  const requests = await setup(); await submit(requests); await tick(requests);
+  const assignment = (await bridge.lease(workerId, incarnationId, 0))!;
+  await requests.cancel(owner, requestId);
+  const cancelling = tick(requests);
+  const marker = `codeapi:bridge:v1:assignment:${assignment.assignmentId}:cancelled`;
+  const limit = Date.now() + 1000;
+  try {
+    while (await redis.get(marker) !== '1') {
+      if (Date.now() >= limit) throw new Error('Read-only worker was never notified');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    await settle(assignment);
+    await cancelling;
+    expect(await requests.get(owner, requestId)).toMatchObject({ state: 'completed', result: { content: 'hello' } });
+  } finally { await cancelling; }
+});
+
+test('queued workspace metadata also permits a same-incarnation return to serial admission', async () => {
+  const requests = await setup(2); await submit(requests); await setup(); await tick(requests);
+  const assignment = (await bridge.lease(workerId, incarnationId, 0))!;
+  expect(assignment).toBeDefined();
+  expect(assignment.workspaceLeaseSlot).toBeUndefined();
+  await settle(assignment); await tick(requests);
+  expect((await requests.get(owner, requestId))?.state).toBe('completed');
+});
+
+test('unconfirmed durable mutation cancellation still reports an unknown outcome and retains its fence', async () => {
+  const requests = await setup();
+  await requests.submit({ owner, requestId, workerId, requireTenantBinding: false,
+    request: { protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'sleep 30' },
+    queueWaitMs: 300_000, executionTimeoutMs: 35_000,
+  });
+  await tick(requests);
+  const assignment = (await bridge.lease(workerId, incarnationId, 0))!;
+  await bridge.acknowledgeLease(workerId, incarnationId, assignment.assignmentId, assignment.generation, assignment.leaseToken);
+  await requests.cancel(owner, requestId); await tick(requests);
+  expect(await requests.get(owner, requestId)).toMatchObject({
+    state: 'failed', cancelRequested: true, error: { code: 'ASSIGNMENT_EXPIRED' },
+  });
+  const fence = `codeapi:bridge:v1:worker:${workerId}:workspace:${createHash('sha256').update('native-workspace:primary').digest('hex')}:quarantined`;
+  expect(await redis.get(fence)).toBe(assignment.assignmentId);
+}, 10_000);
