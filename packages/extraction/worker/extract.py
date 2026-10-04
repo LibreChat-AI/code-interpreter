@@ -43,12 +43,15 @@ class Text:
 
 def pdf_segments(data):
     import pypdf
-    from pypdf import filters
-    from pypdf.generic import DecodedStreamObject
+    from pypdf import filters, _page
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+    from pypdf._codecs.core_font_metrics import CORE_FONT_METRICS
+    from pypdf._text_extraction._text_extractor import TextExtraction
 
     used = 0
     failure = None
     credited = {}
+    shown_bytes = 0
 
     def reject(code):
         nonlocal failure
@@ -70,6 +73,8 @@ def pdf_segments(data):
     logger.propagate = False
     original = filters.decode_stream_data
     original_data = DecodedStreamObject.get_data
+    original_show = TextExtraction._handle_tj_operation
+    original_resources = _page._get_page_resources
 
     def inflate(value):
         nonlocal used
@@ -116,6 +121,56 @@ def pdf_segments(data):
         except Exception:
             reject("INVALID_DOCUMENT")
 
+    def resources_for_text(obj):
+        resources = original_resources(obj)
+        if resources:
+            for state in resources.get("/ExtGState", DictionaryObject()).get_object().values():
+                if "/Font" in state.get_object():
+                    reject("UNSUPPORTED_ENCODING")
+            return resources
+        # Do not let the parser skip text operators solely because resources
+        # are absent. A used missing font must reach the rejection below.
+        return DictionaryObject({NameObject("/Font"): DictionaryObject()})
+
+    def show_text(extractor, operands):
+        nonlocal shown_bytes
+        if operands and operands[0]:
+            font, resource = extractor.font, extractor.font_resource
+            if resource is None or not font.interpretable:
+                reject("UNSUPPORTED_ENCODING")
+            if font.sub_type not in {"Type1", "MMType1", "TrueType", "Type3", "Type0"}:
+                reject("UNSUPPORTED_ENCODING")
+            require_map = ("/ToUnicode" in resource or font.sub_type in {"Type3", "Type0"}
+                           or isinstance(font.encoding, str)
+                           or ("/Encoding" not in resource and font.name not in CORE_FONT_METRICS))
+            value = operands[0]
+            if isinstance(value, bytes):
+                try:
+                    if isinstance(font.encoding, str):
+                        # Never take pypdf's charmap recovery on codec failure.
+                        characters = value.decode(font.encoding, errors="surrogatepass")
+                    else:
+                        characters = (font.encoding[code] for code in value)
+                    for character in characters:
+                        if require_map and character not in font.character_map:
+                            reject("UNSUPPORTED_ENCODING")
+                        mapped = font.character_map.get(character, character)
+                        # Unknown Adobe glyph names are preserved as NameObject.
+                        if (not isinstance(mapped, str) or isinstance(mapped, NameObject)
+                                or not mapped or "\ufffd" in mapped
+                                or any(ord(char) < 32 and char not in "\t\n\r" for char in mapped)):
+                            reject("UNSUPPORTED_ENCODING")
+                        shown_bytes += len(mapped.encode("utf-8", errors="strict"))
+                        if shown_bytes > TEXT_BYTES:
+                            reject("OUTPUT_LIMIT")
+                except (LookupError, UnicodeError, TypeError):
+                    reject("UNSUPPORTED_ENCODING")
+            elif not isinstance(value, str):
+                reject("UNSUPPORTED_ENCODING")
+        return original_show(extractor, operands)
+
+    _page._get_page_resources = resources_for_text
+    TextExtraction._handle_tj_operation = show_text
     DecodedStreamObject.get_data = decoded_data
     filters.decompress = inflate
     filters.decode_stream_data = decode

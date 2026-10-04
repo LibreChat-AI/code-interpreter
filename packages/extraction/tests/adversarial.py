@@ -325,3 +325,119 @@ for name, mode in [('merge-content.docx', 'content'), ('merge-orphan.docx', 'orp
             continuation.get_or_add_tcPr().get_or_add_gridSpan().val = 2
     document.save(root / name)
 print('DOCX merged and omitted-cell fixtures generated')
+
+from pypdf.generic import FloatObject, TextStringObject
+
+def font_pdf(name, subtype, raw=b'A', mapping=None, glyph='/unmappedGlyph', encoding=None, form=False):
+    writer = PdfWriter()
+    writer.append(root / 'pages.pdf')
+    page = writer.pages[0]
+    font = DictionaryObject({NameObject('/Type'): NameObject('/Font'),
+                             NameObject('/Subtype'): NameObject('/' + subtype),
+                             NameObject('/BaseFont'): NameObject('/Helvetica')})
+    if subtype == 'Type3':
+        proc = DecodedStreamObject()
+        proc.set_data(b'600 0 0 0 500 700 d1 0 0 500 700 re f')
+        font[NameObject('/CharProcs')] = DictionaryObject({NameObject(glyph): writer._add_object(proc)})
+        font[NameObject('/FontBBox')] = ArrayObject([NumberObject(v) for v in [0, 0, 500, 700]])
+        font[NameObject('/FontMatrix')] = ArrayObject([FloatObject(v) for v in [0.001, 0, 0, 0.001, 0, 0]])
+        font[NameObject('/Resources')] = DictionaryObject()
+        font[NameObject('/FirstChar')] = NumberObject(65)
+        font[NameObject('/LastChar')] = NumberObject(66)
+        font[NameObject('/Widths')] = ArrayObject([NumberObject(600), NumberObject(600)])
+    if subtype == 'Type0':
+        descendant = DictionaryObject({
+            NameObject('/Type'): NameObject('/Font'), NameObject('/Subtype'): NameObject('/CIDFontType2'),
+            NameObject('/BaseFont'): NameObject('/TestComposite'),
+            NameObject('/CIDSystemInfo'): DictionaryObject({
+                NameObject('/Registry'): TextStringObject('Adobe'),
+                NameObject('/Ordering'): TextStringObject('Identity'), NameObject('/Supplement'): NumberObject(0),
+            }),
+            NameObject('/FontDescriptor'): DictionaryObject({
+                NameObject('/Type'): NameObject('/FontDescriptor'), NameObject('/FontName'): NameObject('/TestComposite'),
+                NameObject('/Flags'): NumberObject(4), NameObject('/Ascent'): NumberObject(800),
+                NameObject('/Descent'): NumberObject(-200), NameObject('/CapHeight'): NumberObject(700),
+                NameObject('/ItalicAngle'): NumberObject(0), NameObject('/StemV'): NumberObject(80),
+                NameObject('/FontBBox'): ArrayObject([NumberObject(v) for v in [0, -200, 1000, 800]]),
+            }), NameObject('/CIDToGIDMap'): NameObject('/Identity'),
+        })
+        font[NameObject('/DescendantFonts')] = ArrayObject([writer._add_object(descendant)])
+        font[NameObject('/Encoding')] = NameObject('/Identity-H')
+    else:
+        font[NameObject('/Encoding')] = DictionaryObject({
+            NameObject('/BaseEncoding'): NameObject('/WinAnsiEncoding'),
+            NameObject('/Differences'): ArrayObject([NumberObject(65), NameObject(glyph)]),
+        })
+    if encoding:
+        font[NameObject('/Encoding')] = NameObject(encoding)
+    if mapping is not None:
+        cmap = DecodedStreamObject()
+        size = 2 if subtype == 'Type0' else 1
+        start, end = ('0000', 'FFFF') if size == 2 else ('00', 'FF')
+        pairs = '\n'.join(f'<{code:0{size*2}X}> <{value.encode("utf-16-be", errors="surrogatepass").hex()}>'
+                          for code, value in mapping.items())
+        cmap.set_data((f'/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n'
+                       f'/CMapName /TestUnicode def\n/CMapType 2 def\n'
+                       f'1 begincodespacerange\n<{start}> <{end}>\nendcodespacerange\n'
+                       f'{len(mapping)} beginbfchar\n{pairs}\nendbfchar\nendcmap\n'
+                       f'CMapName currentdict /CMap defineresource pop\nend\nend').encode('ascii'))
+        font[NameObject('/ToUnicode')] = writer._add_object(cmap.flate_encode())
+    resources = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F2'): writer._add_object(font)})})
+    stream = DecodedStreamObject()
+    stream.set_data(b'BT /F2 12 Tf 72 700 Td <' + raw.hex().encode() + b'> Tj ET')
+    if form:
+        stream[NameObject('/Type')] = NameObject('/XObject')
+        stream[NameObject('/Subtype')] = NameObject('/Form')
+        stream[NameObject('/BBox')] = ArrayObject([NumberObject(v) for v in [0, 0, 612, 792]])
+        stream[NameObject('/Resources')] = resources
+        page['/Resources'][NameObject('/XObject')] = DictionaryObject({NameObject('/FontForm'): writer._add_object(stream)})
+        content = page['/Contents'].get_object()
+        content.set_data(content.get_data() + b'\n/FontForm Do')
+    else:
+        page[NameObject('/Resources')] = resources
+        page[NameObject('/Contents')] = writer._add_object(stream)
+    writer.write(root / name)
+
+font_pdf('font-type3-unmapped.pdf', 'Type3')
+font_pdf('font-simple-unmapped.pdf', 'Type1')
+font_pdf('font-form-unmapped.pdf', 'Type3', form=True)
+font_pdf('font-partial-map.pdf', 'Type3', raw=b'AB', mapping={65: 'A'})
+font_pdf('font-empty-map.pdf', 'Type3', mapping={})
+font_pdf('font-bad-unicode.pdf', 'Type3', mapping={65: '\ud800'})
+font_pdf('font-composite-unmapped.pdf', 'Type0', raw=b'\x00A')
+font_pdf('font-codec-fallback.pdf', 'Type0', raw=b'\x01', mapping={1: 'A'})
+font_pdf('font-composite-partial.pdf', 'Type0', raw=b'\x00\x01\x00\x02', mapping={1: 'A'})
+font_pdf('font-type3-unicode.pdf', 'Type3', mapping={65: '\u03a9'})
+font_pdf('font-simple-unicode.pdf', 'Type1', mapping={65: '\u03a9'})
+font_pdf('font-known-glyph.pdf', 'Type1', glyph='/Aacute')
+font_pdf('font-ligature.pdf', 'Type3', mapping={65: 'fi'})
+font_pdf('font-emoji.pdf', 'Type3', mapping={65: '\U0001f600'})
+font_pdf('font-composite-unicode.pdf', 'Type0', raw=b'\x00\x01\x00\x02', mapping={1: 'A', 2: 'fi'})
+font_pdf('font-form-unicode.pdf', 'Type3', mapping={65: '\u03a9'}, form=True)
+writer = PdfWriter()
+writer.append(root / 'pages.pdf')
+content = writer.pages[0]['/Contents'].get_object()
+content.set_data(content.get_data().replace(b'/F1', b'/MissingFont'))
+writer.write(root / 'font-missing.pdf')
+print('PDF font mapping fixtures generated')
+
+font_pdf('font-replacement.pdf', 'Type3', mapping={65: '\ufffd'})
+font_pdf('font-partial-simple.pdf', 'Type1', raw=b'AB', mapping={65: 'A'})
+writer = PdfWriter()
+writer.append(root / 'pages.pdf')
+del writer.pages[0]['/Resources']
+writer.write(root / 'font-no-resources.pdf')
+writer = PdfWriter()
+writer.append(root / 'pages.pdf')
+del writer.pages[0]['/Resources']
+writer.pages[0]['/Contents'].get_object().set_data(b'q 0 0 10 10 re f Q')
+writer.write(root / 'no-resources-graphics.pdf')
+writer = PdfWriter()
+writer.append(root / 'pages.pdf')
+page = writer.pages[0]
+page['/Resources'][NameObject('/ExtGState')] = DictionaryObject({NameObject('/GS1'): DictionaryObject({
+    NameObject('/Font'): ArrayObject([page['/Resources']['/Font'].raw_get('/F1'), NumberObject(12)]),
+})})
+stream = page['/Contents'].get_object()
+stream.set_data(b'/GS1 gs\n' + stream.get_data())
+writer.write(root / 'font-graphics-state.pdf')

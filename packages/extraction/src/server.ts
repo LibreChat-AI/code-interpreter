@@ -16,6 +16,7 @@ export const capabilities = Object.freeze({
         docx: 'document body, paragraphs and tables',
     },
     limitations: {
+        pdf: 'Text only. Simple fonts need interpretable standard/Unicode mappings. Type3/composite fonts need complete Unicode maps. Unmapped glyphs, codec recovery and graphics-state font selection are rejected.',
         docx: 'Body paragraphs/tables and direct runs/hyperlinks only. Other content structures, fields, images and wrappers are rejected; formatting is ignored.',
     },
     limits: {

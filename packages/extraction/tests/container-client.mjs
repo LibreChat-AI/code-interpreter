@@ -131,7 +131,48 @@ for (const name of ['merged-large.docx', 'merged-large-vertical.docx']) {
         name
     );
 }
+for (const [name, expected] of [
+    ['font-type3-unicode.pdf', '\u03a9'],
+    ['font-simple-unicode.pdf', '\u03a9'],
+    ['font-known-glyph.pdf', '\u00c1'],
+    ['font-ligature.pdf', 'fi'],
+    ['font-emoji.pdf', '\ud83d\ude00'],
+    ['font-composite-unicode.pdf', 'Afi'],
+]) {
+    const response = await send('pdf', readFileSync(`${fixtures}/${name}`));
+    assert.equal(response.status, 200, name);
+    assert.equal(response.value.segments[0].text, expected, name);
+}
+const fontForm = await send(
+    'pdf',
+    readFileSync(`${fixtures}/font-form-unicode.pdf`)
+);
+assert.equal(fontForm.status, 200);
+assert.match(fontForm.value.segments[0].text, /First page text[\n]+\u03a9/);
+const noResources = await send(
+    'pdf',
+    readFileSync(`${fixtures}/no-resources-graphics.pdf`)
+);
+assert.equal(noResources.status, 200);
+assert.deepEqual(
+    noResources.value.segments.map(segment => segment.text),
+    ['', 'Second page text']
+);
 const rejectedFixtures = [
+    ['font-replacement.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-partial-simple.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-no-resources.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-graphics-state.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-type3-unmapped.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-simple-unmapped.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-form-unmapped.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-partial-map.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-empty-map.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-bad-unicode.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-composite-unmapped.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-codec-fallback.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-composite-partial.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['font-missing.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
     ['merge-content.docx', 'docx', 'UNSUPPORTED_CONTENT'],
     ['merge-orphan.docx', 'docx', 'INVALID_DOCUMENT'],
     ['merge-span.docx', 'docx', 'INVALID_DOCUMENT'],
