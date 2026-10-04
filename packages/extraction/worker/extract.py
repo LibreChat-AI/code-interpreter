@@ -44,7 +44,8 @@ class Text:
 def pdf_segments(data):
     import pypdf
     from pypdf import filters, _page
-    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, NullObject, StreamObject
+    from pypdf._cmap import charset_encoding
     from pypdf._codecs.core_font_metrics import CORE_FONT_METRICS
     from pypdf._text_extraction._text_extractor import TextExtraction
 
@@ -124,6 +125,25 @@ def pdf_segments(data):
     def resources_for_text(obj):
         resources = original_resources(obj)
         if resources:
+            fonts = resources.get("/Font")
+            if fonts is not None and not isinstance(fonts.get_object(), NullObject):
+                for ref in fonts.get_object().values():
+                    resource = ref.get_object()
+                    for key in ("/Encoding", "/ToUnicode"):
+                        if key in resource and isinstance(resource[key], NullObject):
+                            del resource[key]
+                    encoding = resource.get("/Encoding")
+                    if encoding is not None:
+                        encoding = encoding.get_object()
+                        if not isinstance(encoding, (NameObject, DictionaryObject)):
+                            reject("UNSUPPORTED_ENCODING")
+                        if isinstance(encoding, DictionaryObject):
+                            base = encoding.get("/BaseEncoding")
+                            if base is not None and isinstance(base.get_object(), NullObject):
+                                del encoding["/BaseEncoding"]
+                    unicode_map = resource.get("/ToUnicode")
+                    if unicode_map is not None and not isinstance(unicode_map.get_object(), StreamObject):
+                        reject("UNSUPPORTED_ENCODING")
             for state in resources.get("/ExtGState", DictionaryObject()).get_object().values():
                 if "/Font" in state.get_object():
                     reject("UNSUPPORTED_ENCODING")
@@ -140,9 +160,17 @@ def pdf_segments(data):
                 reject("UNSUPPORTED_ENCODING")
             if font.sub_type not in {"Type1", "MMType1", "TrueType", "Type3", "Type0"}:
                 reject("UNSUPPORTED_ENCODING")
+            encoding = resource.get("/Encoding")
+            if encoding is not None:
+                encoding = encoding.get_object()
+            if isinstance(encoding, DictionaryObject):
+                encoding = encoding.get("/BaseEncoding")
+                if encoding is not None:
+                    encoding = encoding.get_object()
+            standard_encoding = isinstance(encoding, NameObject) and encoding in charset_encoding
             require_map = ("/ToUnicode" in resource or font.sub_type in {"Type3", "Type0"}
                            or isinstance(font.encoding, str)
-                           or ("/Encoding" not in resource and font.name not in CORE_FONT_METRICS))
+                           or (not standard_encoding and font.name not in CORE_FONT_METRICS))
             value = operands[0]
             if isinstance(value, bytes):
                 try:

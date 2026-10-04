@@ -158,6 +158,28 @@ assert.deepEqual(
     noResources.value.segments.map(segment => segment.text),
     ['', 'Second page text']
 );
+for (const mode of [
+    'null',
+    'indirect-null',
+    'null-unicode',
+    'indirect-null-unicode',
+    'null-base',
+]) {
+    const response = await send(
+        'pdf',
+        readFileSync(`${fixtures}/font-core-${mode}.pdf`)
+    );
+    assert.equal(response.status, 200, mode);
+    assert.deepEqual(response.value.segments, result.value.segments, mode);
+}
+for (const [name, expected] of [
+    ['font-null-with-unicode.pdf', '\u03a9'],
+    ['font-custom-standard.pdf', '\u00c1'],
+]) {
+    const response = await send('pdf', readFileSync(`${fixtures}/${name}`));
+    assert.equal(response.status, 200, name);
+    assert.equal(response.value.segments[0].text, expected, name);
+}
 const rejectedFixtures = [
     ['font-replacement.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
     ['font-partial-simple.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
@@ -209,6 +231,22 @@ const rejectedFixtures = [
     ['encrypted.pdf', 'pdf', 'ENCRYPTED_DOCUMENT'],
     ['too-many-pages.pdf', 'pdf', 'STRUCTURE_LIMIT'],
 ];
+for (const subtype of ['type1', 'truetype']) {
+    for (const mode of [
+        'absent',
+        'null',
+        'indirect-null',
+        'empty-dict',
+        'null-base',
+        'invalid-number',
+    ]) {
+        rejectedFixtures.push([
+            `font-${subtype}-${mode}.pdf`,
+            'pdf',
+            'UNSUPPORTED_ENCODING',
+        ]);
+    }
+}
 for (const tag of ['dir', 'bdo', 'smartTag', 'unknownWrapper']) {
     for (const placement of ['paragraph', 'cell', 'hyperlink']) {
         rejectedFixtures.push([

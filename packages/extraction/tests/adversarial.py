@@ -441,3 +441,48 @@ page['/Resources'][NameObject('/ExtGState')] = DictionaryObject({NameObject('/GS
 stream = page['/Contents'].get_object()
 stream.set_data(b'/GS1 gs\n' + stream.get_data())
 writer.write(root / 'font-graphics-state.pdf')
+
+from pypdf.generic import NullObject
+
+# Null optional dictionary entries mean absent, including indirect nulls.
+for subtype in ['Type1', 'TrueType']:
+    for mode in ['absent', 'null', 'indirect-null', 'empty-dict', 'null-base', 'invalid-number']:
+        writer = PdfWriter()
+        writer.append(root / 'pages.pdf')
+        font = writer.pages[0]['/Resources']['/Font']['/F1']
+        font[NameObject('/Subtype')] = NameObject('/' + subtype)
+        font[NameObject('/BaseFont')] = NameObject('/UnknownCustomFont')
+        if mode == 'null':
+            font[NameObject('/Encoding')] = NullObject()
+        elif mode == 'indirect-null':
+            font[NameObject('/Encoding')] = writer._add_object(NullObject())
+        elif mode == 'empty-dict':
+            font[NameObject('/Encoding')] = DictionaryObject()
+        elif mode == 'null-base':
+            font[NameObject('/Encoding')] = DictionaryObject({NameObject('/BaseEncoding'): NullObject()})
+        elif mode == 'invalid-number':
+            font[NameObject('/Encoding')] = NumberObject(1)
+        writer.write(root / f'font-{subtype.lower()}-{mode}.pdf')
+
+for mode in ['null', 'indirect-null', 'null-unicode', 'indirect-null-unicode', 'null-base']:
+    writer = PdfWriter()
+    writer.append(root / 'pages.pdf')
+    font = writer.pages[0]['/Resources']['/Font']['/F1']
+    if mode == 'null-base':
+        font[NameObject('/Encoding')] = DictionaryObject({NameObject('/BaseEncoding'): NullObject()})
+    else:
+        key = '/ToUnicode' if 'unicode' in mode else '/Encoding'
+        font[NameObject(key)] = writer._add_object(NullObject()) if mode.startswith('indirect') else NullObject()
+    writer.write(root / f'font-core-{mode}.pdf')
+
+writer = PdfWriter()
+writer.append(root / 'font-simple-unicode.pdf')
+font = writer.pages[0]['/Resources']['/Font']['/F2']
+font[NameObject('/BaseFont')] = NameObject('/UnknownCustomFont')
+font[NameObject('/Encoding')] = NullObject()
+writer.write(root / 'font-null-with-unicode.pdf')
+writer = PdfWriter()
+writer.append(root / 'font-known-glyph.pdf')
+writer.pages[0]['/Resources']['/Font']['/F2'][NameObject('/BaseFont')] = NameObject('/UnknownCustomFont')
+writer.write(root / 'font-custom-standard.pdf')
+print('PDF null/absent encoding fixtures generated')
