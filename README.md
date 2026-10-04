@@ -146,16 +146,17 @@ changes an image input:
 
 Tags:
 
-- `sha-<full commit SHA>` for every commit the workflow built. Commits that
-  change no image input (docs, Helm, tests) get no tags, and a run still queued
-  when a newer commit lands is skipped, so take the SHA from a successful
-  Images run or the package page.
-- `main`, moved only after all seven images built for a commit, so every
-  image's `main` names the same commit.
+- `sha-<full commit SHA>` for every commit on `main` that changes an image
+  input. Commits that change none (docs, Helm, tests) get no tags, so take the
+  SHA from a successful Images run or the package page.
+- `main`, pointed at the newest commit on `main` that has all seven images.
+  The seven tags move one after another, so pin `sha-` tags for deployments
+  and treat `main` as a convenience.
 
 There is no `latest`. Re-running the workflow for a commit rebuilds and
-replaces that commit's tag; pin `@sha256:<digest>` when you need the exact
-bytes.
+replaces that commit's `sha-` tag. For exact bytes, replace a service's
+`image:` below with `ghcr.io/librechat-ai/<image>@sha256:<digest>`; each image
+has its own digest, listed in the summary of the run that pushed it.
 
 Pulling a public package needs no login. A private package needs
 `docker login ghcr.io` with a token that has `read:packages`; GHCR creates new

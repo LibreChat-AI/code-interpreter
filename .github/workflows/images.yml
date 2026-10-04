@@ -6,8 +6,8 @@
 # Entry points:
 #
 #   * push to main — build every image, push `sha-<commit>` tags, and refresh
-#     each image's registry build cache. Once every image has built, the
-#     promote job moves the `main` tags together.
+#     each image's registry build cache. The promote job then points the
+#     `main` tags at the newest main commit that has all images.
 #   * pull_request — build every image without pushing, reading the cache that
 #     main wrote, so Dockerfile breakage surfaces before merge.
 #   * workflow_dispatch — on main, the same as a push; on any other branch, a
@@ -42,10 +42,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: images-${{ github.ref }}
-  # Runs on main are never cancelled: a cancelled promote job could leave the
-  # `main` tags split across commits. They queue instead, and GitHub replaces
-  # a queued run with a newer one, so a burst of merges builds only the newest.
+  # Each main commit gets its own group and is never cancelled, so no commit's
+  # build can be dropped by a later queued run (GitHub keeps only one pending
+  # run per group). Other refs share one group per ref and cancel superseded
+  # runs.
+  group: images-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -69,26 +70,21 @@ jobs:
           images=$(jq -c . <<'JSON'
           [
             {"image": "code-interpreter-api", "dockerfile": "service/Dockerfile", "target": "api",
-             "description": "Code API HTTP server (Compose service api)",
-             "free_disk": false, "timeout": 30},
+             "description": "Code API HTTP server (Compose service api)", "timeout": 30},
             {"image": "code-interpreter-worker", "dockerfile": "service/Dockerfile", "target": "worker",
-             "description": "Code API job worker (Compose service service-worker)",
-             "free_disk": false, "timeout": 30},
+             "description": "Code API job worker (Compose service service-worker)", "timeout": 30},
             {"image": "code-interpreter-file-server", "dockerfile": "service/Dockerfile", "target": "production",
-             "description": "Code API file server (Compose service file_server)",
-             "free_disk": false, "timeout": 30},
+             "description": "Code API file server (Compose service file_server)", "timeout": 30},
             {"image": "code-interpreter-egress-gateway", "dockerfile": "service/Dockerfile.egress-gateway", "target": "production",
-             "description": "Sandbox egress gateway (Compose service egress_gateway)",
-             "free_disk": false, "timeout": 30},
+             "description": "Sandbox egress gateway (Compose service egress_gateway)", "timeout": 30},
             {"image": "code-interpreter-tool-call-server", "dockerfile": "service/Dockerfile.tool-call-server", "target": "production",
-             "description": "Tool call server (Compose service tool_call_server)",
-             "free_disk": false, "timeout": 30},
+             "description": "Tool call server (Compose service tool_call_server)", "timeout": 30},
             {"image": "code-interpreter-sandbox-runner", "dockerfile": "api/Dockerfile", "target": "sandbox-runner-true",
              "description": "libkrun microVM sandbox runner with the guest rootfs and runtime packages baked in (Compose service sandbox-runner, KVM_ENABLED=true)",
-             "free_disk": true, "timeout": 150},
+             "timeout": 60},
             {"image": "code-interpreter-sandbox-runner-direct", "dockerfile": "api/Dockerfile", "target": "sandbox-runner-false",
              "description": "Directory-root sandbox runner; runtime packages are mounted from the host (Compose service sandbox-runner, KVM_ENABLED=false)",
-             "free_disk": false, "timeout": 60}
+             "timeout": 30}
           ]
           JSON
           )
@@ -114,25 +110,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Free runner disk
-        # The KVM runner build compiles Python with PGO and holds the runtime
-        # package tree several times over (package stage, rootfs copy, ext4
-        # image, compressed layers). The preinstalled SDKs below are unused.
-        if: matrix.free_disk
-        run: |
-          df -h / /mnt 2>/dev/null || df -h /
-          sudo rm -rf \
-            /opt/ghc \
-            /opt/hostedtoolcache/CodeQL \
-            /usr/local/.ghcup \
-            /usr/local/lib/android \
-            /usr/local/share/powershell \
-            /usr/share/dotnet \
-            /usr/share/swift
-          docker image prune --all --force >/dev/null
-          df -h /
-
       - name: Sample free disk
+        # A cold KVM runner build peaks at roughly 17 GB of builder state, well
+        # inside the hosted runner's free space, so no preinstalled toolchains
+        # are removed. The sampler keeps that margin visible in the summary.
         run: |
           nohup bash -c 'while :; do df -BM --output=avail / | tail -n1 | tr -dc 0-9; echo; sleep 10; done' \
             >"$RUNNER_TEMP/disk-avail-mib.log" 2>/dev/null &
@@ -165,6 +146,7 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
 
       - name: Build${{ needs.plan.outputs.publish == 'true' && ' and push' || '' }}
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -186,14 +168,20 @@ jobs:
           cache-from: type=registry,ref=${{ env.NAMESPACE }}/${{ matrix.image }}:buildcache
           cache-to: ${{ needs.plan.outputs.publish == 'true' && format('type=registry,ref={0}/{1}:buildcache,mode=max,ignore-error=true', env.NAMESPACE, matrix.image) || '' }}
 
-      - name: Report disk headroom
+      - name: Summarize
         if: always()
         env:
           IMAGE_NAME: ${{ matrix.image }}
+          PUSHED: ${{ needs.plan.outputs.publish == 'true' && steps.build.outcome == 'success' }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           lowest=$(sort -n "$RUNNER_TEMP/disk-avail-mib.log" 2>/dev/null | head -n1)
           {
             echo "### $IMAGE_NAME"
+            if [ "$PUSHED" = true ]; then
+              echo "Pushed \`$NAMESPACE/$IMAGE_NAME:sha-$GITHUB_SHA\`, pinnable as \`$NAMESPACE/$IMAGE_NAME@$DIGEST\`."
+              echo
+            fi
             echo "Lowest free space on / while building: ${lowest:-unknown} MiB"
             echo '```'
             df -h /
@@ -207,6 +195,13 @@ jobs:
     if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # Promotions run one at a time. Each resolves its target when it runs
+    # instead of trusting its own commit, so a stale re-run, or a queued
+    # promotion that GitHub replaces, cannot leave `main` behind or move it
+    # backwards.
+    concurrency:
+      group: images-promote
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -217,9 +212,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Point main at this commit
-        # `main` moves only after every image built, and only forward: a re-run
-        # of an older commit leaves it on the newer one.
+      - name: Point main at the newest complete commit
+        # Target: the newest of the last 100 commits on main for which every
+        # image has a `sha-` tag. A registry cannot move several repositories'
+        # tags in one transaction, so a failure part-way leaves some `main`
+        # tags behind; the next promotion, or a re-run of this job, finishes
+        # the move. Deployments should pin `sha-` tags rather than `main`.
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGES: ${{ needs.plan.outputs.images }}
@@ -227,35 +225,48 @@ jobs:
           set -euo pipefail
 
           revision_of() {
-            docker buildx imagetools inspect "$1" --format '{{ json .Image }}' |
+            docker buildx imagetools inspect "$1" --format '{{ json .Image }}' 2>/dev/null |
               jq -r 'if has("config") then . else .["linux/amd64"] end
                 | .config.Labels["org.opencontainers.image.revision"] // empty'
           }
 
-          mapfile -t images < <(jq -r '.[].image' <<<"$IMAGES")
+          complete() {
+            local image
+            for image in "${images[@]}"; do
+              [ "$(revision_of "$NAMESPACE/$image:sha-$1" || true)" = "$1" ] || return 1
+            done
+          }
 
-          for image in "${images[@]}"; do
-            ref="$NAMESPACE/$image"
-            built=$(revision_of "$ref:sha-$GITHUB_SHA")
-            if [ "$built" != "$GITHUB_SHA" ]; then
-              echo "::error::$ref:sha-$GITHUB_SHA records revision '$built'"
-              exit 1
-            fi
-            # The sha tag just resolved, so registry access works; a failure
-            # here is taken to mean `main` does not exist yet (first publish).
-            current=$(revision_of "$ref:main" 2>/dev/null) || current=''
-            if [ -z "$current" ] || [ "$current" = "$GITHUB_SHA" ]; then
-              continue
-            fi
-            status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$current...$GITHUB_SHA" --jq .status)
-            if [ "$status" != ahead ]; then
-              echo "::notice::$ref:main is at $current, which $GITHUB_SHA is not ahead of ($status); leaving the main tags unchanged."
-              exit 0
+          retag() {
+            local attempt
+            for attempt in 1 2 3; do
+              docker buildx imagetools create --tag "$1:main" "$1:sha-$2" && return 0
+              sleep $(( attempt * 10 ))
+            done
+            return 1
+          }
+
+          mapfile -t images < <(jq -r '.[].image' <<<"$IMAGES")
+          mapfile -t commits < <(gh api "repos/$GITHUB_REPOSITORY/commits?sha=main&per_page=100" --jq '.[].sha')
+
+          target=''
+          for sha in "${commits[@]}"; do
+            if complete "$sha"; then
+              target=$sha
+              break
             fi
           done
+          if [ -z "$target" ]; then
+            echo "::error::None of the last ${#commits[@]} commits on main has all images."
+            exit 1
+          fi
 
           for image in "${images[@]}"; do
             ref="$NAMESPACE/$image"
-            docker buildx imagetools create --tag "$ref:main" "$ref:sha-$GITHUB_SHA"
-            echo "$ref:main -> sha-$GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$(revision_of "$ref:main" || true)" = "$target" ]; then
+              echo "$ref:main already at sha-$target" | tee -a "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            retag "$ref" "$target"
+            echo "$ref:main -> sha-$target" | tee -a "$GITHUB_STEP_SUMMARY"
           done
