@@ -72,6 +72,12 @@ export async function writeLinkedWorktreeGitGuard(directory: string): Promise<vo
     '    esac',
     '  done',
     '  case "${1:-}" in',
+    '    worktree)',
+    '      if [ "${2:-}" != list ]; then',
+    '        echo "git: worktree registration changes require checkout admission or the lifecycle API" >&2',
+    '        return 1',
+    '      fi ;;',
+
     '    prune|gc|repack|prune-packed|maintenance|multi-pack-index|for-each-repo)',
     '      echo "git: run storage maintenance from the checkout, not a linked worktree lane" >&2',
     '      return 1 ;;',
