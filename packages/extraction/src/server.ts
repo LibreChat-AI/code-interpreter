@@ -23,6 +23,7 @@ export const capabilities = Object.freeze({
         concurrency: 2,
         expandedBytes: 32 * 1024 * 1024,
         archiveEntries: 512,
+        tableColumns: 512,
     },
 });
 const status = (code: string): number => {

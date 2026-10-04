@@ -279,7 +279,7 @@ def validate_docx_body(body):
 
 def docx_segments(data):
     from docx import Document
-    from docx.table import Table
+    from docx.table import Table, _Cell
 
     document = Document(io.BytesIO(safe_docx(data)))
     validate_docx_body(document.element.body)
@@ -293,13 +293,48 @@ def docx_segments(data):
                 text.add("\n")
             first = False
             if isinstance(block, Table):
+                width = len(block._tbl.tblGrid.gridCol_lst)
+                if width < 1 or width > 512:
+                    raise Rejected("STRUCTURE_LIMIT")
+                previous = set()
                 for row_index, row in enumerate(block.rows):
                     if row_index:
                         text.add("\n")
-                    for index, child in enumerate(row.cells):
+                    before, after = row.grid_cols_before, row.grid_cols_after
+                    if before < 0 or after < 0 or before + after >= width:
+                        raise Rejected("INVALID_DOCUMENT")
+                    column = before
+                    text.add("\t" * before)
+                    current = set()
+                    for index, tc in enumerate(row._tr.tc_lst):
+                        span, merge = tc.grid_span, tc.vMerge
+                        if span < 1 or column + span > width - after:
+                            raise Rejected("INVALID_DOCUMENT")
+                        if tc.tcPr is not None and tc.tcPr.find(
+                                "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}hMerge") is not None:
+                            raise Rejected("UNSUPPORTED_CONTENT")
                         if index:
                             text.add("\t")
-                        blocks(child, depth + 1, cell=True)
+                        position = (column, span)
+                        if merge == "continue":
+                            if position not in previous:
+                                raise Rejected("INVALID_DOCUMENT")
+                            # Continuations occupy columns, not another copy of
+                            # the originating cell. Hidden content is rejected.
+                            if tc.xpath(".//w:t | .//w:tbl | .//w:tab | .//w:br | .//w:cr | .//w:noBreakHyphen | .//w:ptab"):
+                                raise Rejected("UNSUPPORTED_CONTENT")
+                        else:
+                            blocks(_Cell(tc, block), depth + 1, cell=True)
+                        if merge is not None:
+                            if merge not in {"restart", "continue"}:
+                                raise Rejected("INVALID_DOCUMENT")
+                            current.add(position)
+                        text.add("\t" * (span - 1))
+                        column += span
+                    if column + after != width:
+                        raise Rejected("INVALID_DOCUMENT")
+                    text.add("\t" * after)
+                    previous = current
                 if not cell:
                     text.add("\n")
             else:

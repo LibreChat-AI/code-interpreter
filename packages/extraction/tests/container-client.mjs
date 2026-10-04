@@ -99,7 +99,44 @@ assert.equal(
     primitives.value.segments[0].text,
     'Bold Link\tTabbed\nNext-\t\nEnd\n'
 );
+for (const [name, expected] of [
+    ['horizontal.docx', 'Merged text\t\tR0C2\nR1C0\tR1C1\tR1C2\n'],
+    ['vertical.docx', 'Merged text\tR0C1\tR0C2\n\tR1C1\tR1C2\n'],
+    ['rectangle.docx', 'Merged text\t\tR0C2\n\t\tR1C2\n'],
+    ['omitted-cells.docx', '\tMiddle cell\t\n'],
+]) {
+    const response = await send('docx', readFileSync(`${fixtures}/${name}`));
+    assert.equal(response.status, 200, name);
+    assert.equal(response.value.segments[0].text, expected, name);
+}
+const mergedNested = await send(
+    'docx',
+    readFileSync(`${fixtures}/merged-nested.docx`)
+);
+assert.equal(mergedNested.status, 200);
+assert.equal(
+    mergedNested.value.segments[0].text.match(/Unique nested content/g).length,
+    1
+);
+assert.match(
+    mergedNested.value.segments[0].text,
+    /Before merged nested table[\n]+Unique nested content[\n]+After merged nested table/
+);
+for (const name of ['merged-large.docx', 'merged-large-vertical.docx']) {
+    const response = await send('docx', readFileSync(`${fixtures}/${name}`));
+    assert.equal(response.status, 200, name);
+    assert.equal(
+        response.value.segments[0].text.match(/x/g).length,
+        600 * 1024,
+        name
+    );
+}
 const rejectedFixtures = [
+    ['merge-content.docx', 'docx', 'UNSUPPORTED_CONTENT'],
+    ['merge-orphan.docx', 'docx', 'INVALID_DOCUMENT'],
+    ['merge-span.docx', 'docx', 'INVALID_DOCUMENT'],
+    ['merge-legacy.docx', 'docx', 'UNSUPPORTED_CONTENT'],
+    ['wide-table.docx', 'docx', 'STRUCTURE_LIMIT'],
     ['control.docx', 'docx', 'UNSUPPORTED_CONTENT'],
     ['control-cell.docx', 'docx', 'UNSUPPORTED_CONTENT'],
     ['control-inline.docx', 'docx', 'UNSUPPORTED_CONTENT'],

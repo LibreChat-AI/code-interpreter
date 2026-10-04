@@ -259,3 +259,69 @@ bookmark.set(qn('w:id'), '1')
 paragraph._p.append(bookmark)
 document.save(root / 'supported-runs.docx')
 print('DOCX closed-structure fixtures generated')
+
+# Physical cells are unique. A merged origin's text must never be repeated.
+for name, end in [('horizontal.docx', (0, 1)), ('vertical.docx', (1, 0)),
+                  ('rectangle.docx', (1, 1))]:
+    document = Document()
+    table = document.add_table(rows=2, cols=3)
+    for row in range(2):
+        for column in range(3):
+            table.cell(row, column).text = f'R{row}C{column}'
+    table.cell(0, 0).merge(table.cell(*end)).text = 'Merged text'
+    document.save(root / name)
+
+document = Document()
+table = document.add_table(rows=2, cols=2)
+origin = table.cell(0, 0).merge(table.cell(1, 1))
+origin.text = 'Before merged nested table'
+origin.add_table(rows=1, cols=1).cell(0, 0).text = 'Unique nested content'
+origin.add_paragraph('After merged nested table')
+document.save(root / 'merged-nested.docx')
+
+for name, end in [('merged-large.docx', (0, 1)), ('merged-large-vertical.docx', (1, 0))]:
+    document = Document()
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).merge(table.cell(*end)).text = 'x' * (600 * 1024)
+    document.save(root / name)
+
+document = Document()
+table = document.add_table(rows=1, cols=3)
+table.cell(0, 1).text = 'Middle cell'
+row = table.rows[0]._tr
+row.remove(row.tc_lst[-1])
+row.remove(row.tc_lst[0])
+properties = row.get_or_add_trPr()
+for tag in ('gridBefore', 'gridAfter'):
+    value = OxmlElement('w:' + tag)
+    value.set(qn('w:val'), '1')
+    properties.append(value)
+document.save(root / 'omitted-cells.docx')
+
+for name, mode in [('merge-content.docx', 'content'), ('merge-orphan.docx', 'orphan'),
+                   ('merge-span.docx', 'span'), ('merge-legacy.docx', 'legacy'),
+                   ('wide-table.docx', 'width')]:
+    document = Document()
+    table = document.add_table(rows=2, cols=2)
+    if mode == 'legacy':
+        value = OxmlElement('w:hMerge')
+        value.set(qn('w:val'), 'restart')
+        table.cell(0, 0)._tc.get_or_add_tcPr().append(value)
+    elif mode == 'width':
+        for _ in range(511):
+            table._tbl.tblGrid.append(OxmlElement('w:gridCol'))
+    else:
+        table.cell(0, 0).merge(table.cell(1, 0)).text = 'Origin text'
+        continuation = table.rows[1]._tr.tc_lst[0]
+        if mode == 'content':
+            continuation.p_lst[0].append(OxmlElement('w:r'))
+            text = OxmlElement('w:t')
+            text.text = 'Unexpected continuation text'
+            continuation.p_lst[0][-1].append(text)
+        elif mode == 'orphan':
+            table.rows[0]._tr.tc_lst[0].get_or_add_tcPr().remove(
+                table.rows[0]._tr.tc_lst[0].tcPr.vMerge)
+        elif mode == 'span':
+            continuation.get_or_add_tcPr().get_or_add_gridSpan().val = 2
+    document.save(root / name)
+print('DOCX merged and omitted-cell fixtures generated')
