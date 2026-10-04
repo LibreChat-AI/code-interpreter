@@ -191,3 +191,7 @@ session-management routes stay unauthenticated for backwards compatibility.
 - Worker: `GET /health` and `GET /ready`
 - File Server: `GET /health` and `GET /ready`
 - Tool Call Server: `GET /health`
+
+## Standalone File Extraction
+
+[File extraction service](packages/extraction/README.md): a separate, self-hostable companion container for bounded PDF/DOCX text extraction. It does not require or modify the Code Interpreter API or `/exec`.
