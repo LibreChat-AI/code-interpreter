@@ -1,0 +1,261 @@
+# Builds the Code API container images and publishes them to GHCR, so a host
+# can pull a tested image instead of compiling one in place. Like ci.yml this
+# file is inert inside the monorepo — GitHub only runs workflows from the repo
+# root — and becomes a root workflow in the published repo.
+#
+# Entry points:
+#
+#   * push to main — build every image, push `sha-<commit>` tags, and refresh
+#     each image's registry build cache. Once every image has built, the
+#     promote job moves the `main` tags together.
+#   * pull_request — build every image without pushing, reading the cache that
+#     main wrote, so Dockerfile breakage surfaces before merge.
+#   * workflow_dispatch — on main, the same as a push; on any other branch, a
+#     build-only run.
+#
+# The image list lives in the plan job and feeds both the build matrix and the
+# promotion, so the two cannot drift apart. README.md ("Prebuilt images")
+# documents the tags and how a Compose host switches to them.
+name: Images
+
+on:
+  push:
+    branches: [main]
+    # Everything the Dockerfiles below COPY from the build context, plus this
+    # workflow. Every run builds every image, so a commit that has tags has
+    # them for all images; unchanged images are cache hits.
+    paths: &image-inputs
+      - .dockerignore
+      - .github/workflows/images.yml
+      - api/**
+      - docker/**
+      - javascript-packages.txt
+      - launcher/**
+      - packages/code/src/**
+      - service/**
+      - shared/**
+  pull_request:
+    paths: *image-inputs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  # Runs on main are never cancelled: a cancelled promote job could leave the
+  # `main` tags split across commits. They queue instead, and GitHub replaces
+  # a queued run with a newer one, so a burst of merges builds only the newest.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  NAMESPACE: ghcr.io/librechat-ai
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    outputs:
+      images: ${{ steps.images.outputs.images }}
+      publish: ${{ github.repository == 'LibreChat-AI/code-interpreter' && github.ref == 'refs/heads/main' }}
+    steps:
+      - name: List images
+        id: images
+        # One image per distinct Compose build in docker-compose.yaml. The
+        # sandbox runner's two Compose targets (KVM_ENABLED=true/false) are
+        # published as two images. The Lambda MicroVM targets are not built
+        # here; they are not used by Compose hosts.
+        run: |
+          images=$(jq -c . <<'JSON'
+          [
+            {"image": "code-interpreter-api", "dockerfile": "service/Dockerfile", "target": "api",
+             "description": "Code API HTTP server (Compose service api)",
+             "free_disk": false, "timeout": 30},
+            {"image": "code-interpreter-worker", "dockerfile": "service/Dockerfile", "target": "worker",
+             "description": "Code API job worker (Compose service service-worker)",
+             "free_disk": false, "timeout": 30},
+            {"image": "code-interpreter-file-server", "dockerfile": "service/Dockerfile", "target": "production",
+             "description": "Code API file server (Compose service file_server)",
+             "free_disk": false, "timeout": 30},
+            {"image": "code-interpreter-egress-gateway", "dockerfile": "service/Dockerfile.egress-gateway", "target": "production",
+             "description": "Sandbox egress gateway (Compose service egress_gateway)",
+             "free_disk": false, "timeout": 30},
+            {"image": "code-interpreter-tool-call-server", "dockerfile": "service/Dockerfile.tool-call-server", "target": "production",
+             "description": "Tool call server (Compose service tool_call_server)",
+             "free_disk": false, "timeout": 30},
+            {"image": "code-interpreter-sandbox-runner", "dockerfile": "api/Dockerfile", "target": "sandbox-runner-true",
+             "description": "libkrun microVM sandbox runner with the guest rootfs and runtime packages baked in (Compose service sandbox-runner, KVM_ENABLED=true)",
+             "free_disk": true, "timeout": 150},
+            {"image": "code-interpreter-sandbox-runner-direct", "dockerfile": "api/Dockerfile", "target": "sandbox-runner-false",
+             "description": "Directory-root sandbox runner; runtime packages are mounted from the host (Compose service sandbox-runner, KVM_ENABLED=false)",
+             "free_disk": false, "timeout": 60}
+          ]
+          JSON
+          )
+          echo "images=$images" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.image }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+      # Pushes happen only when needs.plan.outputs.publish is true (main).
+      # Pull request runs read the build cache and never push; GitHub caps a
+      # fork's token at read access regardless.
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.images) }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Free runner disk
+        # The KVM runner build compiles Python with PGO and holds the runtime
+        # package tree several times over (package stage, rootfs copy, ext4
+        # image, compressed layers). The preinstalled SDKs below are unused.
+        if: matrix.free_disk
+        run: |
+          df -h / /mnt 2>/dev/null || df -h /
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/local/share/powershell \
+            /usr/share/dotnet \
+            /usr/share/swift
+          docker image prune --all --force >/dev/null
+          df -h /
+
+      - name: Sample free disk
+        run: |
+          nohup bash -c 'while :; do df -BM --output=avail / | tail -n1 | tr -dc 0-9; echo; sleep 10; done' \
+            >"$RUNNER_TEMP/disk-avail-mib.log" 2>/dev/null &
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        # Pull request runs log in only to read the cache, and only from this
+        # repository; fork runs read public packages anonymously.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ env.NAMESPACE }}/${{ matrix.image }}
+          tags: type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.description=${{ matrix.description }}
+          annotations: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.description=${{ matrix.description }}
+
+      - name: Build${{ needs.plan.outputs.publish == 'true' && ' and push' || '' }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: ${{ needs.plan.outputs.publish == 'true' }}
+          # Without a push, keep the result in the builder only: nothing is
+          # loaded into the runner's Docker engine, which would need a second
+          # copy of the multi-gigabyte sandbox image on disk.
+          outputs: ${{ needs.plan.outputs.publish != 'true' && 'type=cacheonly' || '' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          # A registry cache next to each image, written only from main.
+          # mode=max keeps the intermediate stages (the KVM runner's package
+          # stage above all), which the GitHub Actions cache could not hold:
+          # its 10 GB repository limit would evict them between pushes.
+          cache-from: type=registry,ref=${{ env.NAMESPACE }}/${{ matrix.image }}:buildcache
+          cache-to: ${{ needs.plan.outputs.publish == 'true' && format('type=registry,ref={0}/{1}:buildcache,mode=max,ignore-error=true', env.NAMESPACE, matrix.image) || '' }}
+
+      - name: Report disk headroom
+        if: always()
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          lowest=$(sort -n "$RUNNER_TEMP/disk-avail-mib.log" 2>/dev/null | head -n1)
+          {
+            echo "### $IMAGE_NAME"
+            echo "Lowest free space on / while building: ${lowest:-unknown} MiB"
+            echo '```'
+            df -h /
+            docker buildx du 2>/dev/null | tail -n1 || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    name: Move main tags
+    needs: [plan, build]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Point main at this commit
+        # `main` moves only after every image built, and only forward: a re-run
+        # of an older commit leaves it on the newer one.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGES: ${{ needs.plan.outputs.images }}
+        run: |
+          set -euo pipefail
+
+          revision_of() {
+            docker buildx imagetools inspect "$1" --format '{{ json .Image }}' |
+              jq -r 'if has("config") then . else .["linux/amd64"] end
+                | .config.Labels["org.opencontainers.image.revision"] // empty'
+          }
+
+          mapfile -t images < <(jq -r '.[].image' <<<"$IMAGES")
+
+          for image in "${images[@]}"; do
+            ref="$NAMESPACE/$image"
+            built=$(revision_of "$ref:sha-$GITHUB_SHA")
+            if [ "$built" != "$GITHUB_SHA" ]; then
+              echo "::error::$ref:sha-$GITHUB_SHA records revision '$built'"
+              exit 1
+            fi
+            # The sha tag just resolved, so registry access works; a failure
+            # here is taken to mean `main` does not exist yet (first publish).
+            current=$(revision_of "$ref:main" 2>/dev/null) || current=''
+            if [ -z "$current" ] || [ "$current" = "$GITHUB_SHA" ]; then
+              continue
+            fi
+            status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$current...$GITHUB_SHA" --jq .status)
+            if [ "$status" != ahead ]; then
+              echo "::notice::$ref:main is at $current, which $GITHUB_SHA is not ahead of ($status); leaving the main tags unchanged."
+              exit 0
+            fi
+          done
+
+          for image in "${images[@]}"; do
+            ref="$NAMESPACE/$image"
+            docker buildx imagetools create --tag "$ref:main" "$ref:sha-$GITHUB_SHA"
+            echo "$ref:main -> sha-$GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+          done

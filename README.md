@@ -128,6 +128,86 @@ Versions are `vMAJOR.MINOR.PATCH`, with `-rcN` release candidates published as
 pre-releases. See [docs/RELEASING.md](docs/RELEASING.md) for how releases are
 cut.
 
+## Prebuilt images
+
+The [Images workflow](.github/workflows/images.yml) builds one `linux/amd64`
+image per Compose build and publishes it to GHCR whenever a push to `main`
+changes an image input:
+
+| Image (`ghcr.io/librechat-ai/…`) | Dockerfile (target) | Compose service |
+|---|---|---|
+| `code-interpreter-api` | `service/Dockerfile` (`api`) | `api` |
+| `code-interpreter-worker` | `service/Dockerfile` (`worker`) | `service-worker` |
+| `code-interpreter-file-server` | `service/Dockerfile` (`production`) | `file_server` |
+| `code-interpreter-egress-gateway` | `service/Dockerfile.egress-gateway` (`production`) | `egress_gateway` |
+| `code-interpreter-tool-call-server` | `service/Dockerfile.tool-call-server` (`production`) | `tool_call_server` |
+| `code-interpreter-sandbox-runner` | `api/Dockerfile` (`sandbox-runner-true`) | `sandbox-runner`, `KVM_ENABLED=true` (default) |
+| `code-interpreter-sandbox-runner-direct` | `api/Dockerfile` (`sandbox-runner-false`) | `sandbox-runner`, `KVM_ENABLED=false` |
+
+Tags:
+
+- `sha-<full commit SHA>` for every commit the workflow built. Commits that
+  change no image input (docs, Helm, tests) get no tags, and a run still queued
+  when a newer commit lands is skipped, so take the SHA from a successful
+  Images run or the package page.
+- `main`, moved only after all seven images built for a commit, so every
+  image's `main` names the same commit.
+
+There is no `latest`. Re-running the workflow for a commit rebuilds and
+replaces that commit's tag; pin `@sha256:<digest>` when you need the exact
+bytes.
+
+Pulling a public package needs no login. A private package needs
+`docker login ghcr.io` with a token that has `read:packages`; GHCR creates new
+packages as private until an organization owner changes their visibility.
+
+To switch a Compose host from building to pulling, save this override as
+`docker-compose.images.yml` (`!reset` needs Docker Compose 2.24.4 or later):
+
+```yaml
+services:
+  api:
+    build: !reset null
+    image: ghcr.io/librechat-ai/code-interpreter-api:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    pull_policy: missing
+  service-worker:
+    build: !reset null
+    image: ghcr.io/librechat-ai/code-interpreter-worker:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    pull_policy: missing
+  file_server:
+    build: !reset null
+    image: ghcr.io/librechat-ai/code-interpreter-file-server:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    pull_policy: missing
+  egress_gateway:
+    build: !reset null
+    image: ghcr.io/librechat-ai/code-interpreter-egress-gateway:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    pull_policy: missing
+  tool_call_server:
+    build: !reset null
+    image: ghcr.io/librechat-ai/code-interpreter-tool-call-server:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    pull_policy: missing
+  sandbox-runner:
+    build: !reset null
+    # With KVM_ENABLED=false use code-interpreter-sandbox-runner-direct, which
+    # still reads runtime packages from SANDBOX_PACKAGES_PATH.
+    image: ghcr.io/librechat-ai/code-interpreter-sandbox-runner:${CODEAPI_IMAGE_TAG:?set CODEAPI_IMAGE_TAG}
+    pull_policy: missing
+```
+
+Then pin a built commit and start the stack, listing any host override after
+it. Keep the checkout at the same commit as the images, so the Compose
+configuration matches what the images expect:
+
+```bash
+export CODEAPI_IMAGE_TAG=sha-<commit>
+docker compose -f docker-compose.yaml -f docker-compose.images.yml pull
+docker compose -f docker-compose.yaml -f docker-compose.images.yml up -d
+```
+
+`pull_policy: missing` never re-pulls a tag the host already has, which suits
+an immutable `sha-` tag. To track `main` instead, set `CODEAPI_IMAGE_TAG=main`
+and run `pull` before every `up`.
+
 ## Local Development
 
 Copy `.env.example` to `.env` and set `CODEAPI_BRIDGE_TOKEN` to a private value
