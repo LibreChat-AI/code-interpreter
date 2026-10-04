@@ -274,3 +274,16 @@ test('Git LFS fetch and pull cannot request pruning in a lane', async t => {
     assert.equal((await run(['cat-file', '-t', object])).stdout.trim(), 'blob');
   }
 });
+
+test('lane guard rejects registration changes but permits read-only worktree listing', async t => {
+  const parent = await mkdtemp(join(tmpdir(), 'lane-registration-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const bin = join(parent, 'bin');
+  await mkdir(bin); await writeLinkedWorktreeGitGuard(bin);
+  await execFileAsync('/usr/bin/git', ['init', '-q', '-b', 'main'], { cwd: parent });
+  const run = (args: string[]) => execFileAsync(join(bin, 'git'), args, { cwd: parent });
+  assert.match((await run(['worktree', 'list', '--porcelain'])).stdout, /worktree/);
+  for (const operation of ['add', 'remove', 'move', 'repair', 'prune', 'lock', 'unlock']) {
+    await assert.rejects(run(['-C', parent, 'worktree', operation, '.worktrees/other']), /require checkout admission/);
+  }
+});
