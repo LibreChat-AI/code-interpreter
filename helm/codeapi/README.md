@@ -18,7 +18,8 @@ key; sandbox-runner only receives the public verifier, so a runner compromise
 cannot mint new manifests. The chart ships **no default keypair** —
 `executionManifest.privateKey` and `executionManifest.publicKey` are empty in
 `values.yaml`, and `helm install`/`helm upgrade` fails fast when
-`workerSandbox.enabled=true` (the default) and either value is unset.
+`workerSandbox.enabled=true` (the default), `secrets.existingSecret` is empty,
+and either value is unset.
 
 Generate a keypair and pass it as base64-encoded DER (or PEM with escaped
 newlines):
@@ -46,6 +47,154 @@ to a values file.
 `values-local.yaml` carries a **test-only keypair** for minikube local dev. It
 is publicly known (the same keypair is hardcoded in the unit tests), so never
 use it outside local development.
+
+## Existing Secrets and GitOps
+
+Set `secrets.existingSecret` to use credentials provisioned by an external
+controller or operator. The chart then creates no CodeAPI Secret and does not
+require signing keys in Helm values. Pods reference individual Secret keys;
+only the service-worker receives the execution private key, and the runner
+receives the public verifier through `secretKeyRef`.
+
+```yaml
+secrets:
+  existingSecret: codeapi-credentials
+redis:
+  auth:
+    existingSecret: codeapi-credentials
+    existingSecretPasswordKey: redis-password
+minio:
+  enabled: false
+fileServer:
+  s3:
+    enabled: true
+    endpoint: s3.example.com
+    bucket: codeapi-files
+    useSSL: true
+    useIrsa: false
+```
+
+The Secret must exist in the release namespace before workloads start. Its
+required keys depend on the enabled components:
+
+| `secrets.keys` option | Default Secret key | Used by |
+| --- | --- | --- |
+| `internalServiceToken` | `codeapi-internal-service-token` | API, worker, file server, tool-call server, egress gateway |
+| `egressGrantSecret` | `codeapi-egress-grant-secret` | Egress gateway |
+| `executionManifestPrivateKey` | `codeapi-execution-manifest-private-key` | Service-worker |
+| `executionManifestPublicKey` | `sandbox-execution-manifest-public-key` | Sandbox-runner |
+| `redisPassword` | `redis-password` | Components that connect to Redis |
+| `s3AccessKey` | `minio-access-key` | File server using static S3 credentials |
+| `s3SecretKey` | `minio-secret-key` | File server using static S3 credentials |
+
+Override `secrets.keys` to match an existing naming convention. Signing keys use
+the same Ed25519 encoding described above. No credentials are generated or
+rotated by this option. Secret-backed environment variables are read at pod
+startup: coordinate credential changes and restart the affected components.
+
+Redis and MinIO are independent subcharts: configure their existing-Secret
+options as well, or supply matching credentials. For Redis, use
+`redis.auth.existingSecret` and `redis.auth.existingSecretPasswordKey` as above.
+For Bitnami MinIO, use `minio.auth.existingSecret` and its `root-user` and
+`root-password` keys, mapping `secrets.keys.s3AccessKey` and `s3SecretKey` to
+those keys when using the same Secret. The separate `minio.useSimple` mode
+still reads `minio.auth.rootUser` and `rootPassword` from values; it does not
+support an existing Secret. With IRSA, the file server does not need static S3
+keys; preserve its projected ServiceAccount token.
+
+JWT authentication for callers remains configurable through `api.extraEnv`;
+its signing/verifying keys are separate from the internal execution keypair.
+
+## Deployment customization
+
+Each of `api`, `fileServer`, `toolCallServer`, `egressGateway`,
+`workerSandbox.serviceWorker`, and `workerSandbox.sandboxRunner` accepts:
+
+| Value | Kubernetes field / behavior |
+| --- | --- |
+| `deploymentAnnotations` | Deployment metadata annotations, e.g. GitOps sync ordering |
+| `podLabels`, `podAnnotations` | Pod metadata; selector labels and the API pairing-fence annotation remain chart-owned |
+| `podSecurityContext` | Pod `securityContext` |
+| `securityContext` | Main container `securityContext` |
+| `extraVolumes`, `extraVolumeMounts` | Pod volumes and main-container mounts |
+| `topologySpreadConstraints` | Pod topology spreading |
+| `strategy` | Deployment rollout strategy |
+| `resources` | Main container resource requests/limits |
+
+These settings are opt-in and preserve existing defaults. An empty per-worker
+`resources` map inherits `workerSandbox.resources`; a nonempty map replaces it.
+Runner security contexts merge into the mode-specific defaults (KVM or direct
+NsJail); hostPath KVM mode retains its supplemental group unless overridden.
+An explicit runner `seccompProfile` replaces the entire default profile.
+In direct mode, set `securityContext.capabilities.add: []` to clear the default
+capability additions; setting `drop: [ALL]` alone leaves those additions intact.
+Runner volumes/mounts append to package and KVM mounts: use distinct volume
+names and mount paths. Device-plugin resource requests/limits remain chart-managed.
+
+For example, a hardened API with writable scratch space and host spreading:
+
+```yaml
+api:
+  serviceAccount:
+    create: true
+    automountServiceAccountToken: false
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  extraVolumes:
+    - name: tmp
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: tmp
+      mountPath: /tmp
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: codeapi # Helm release name
+          app.kubernetes.io/component: api
+  autoscaling:
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 300
+```
+
+Choose security settings that match each image and runtime. In particular,
+the sandbox launcher has different UID/filesystem requirements from the HTTP
+services. Do not copy the API context blindly to the runner. `api.strategy`
+retains its existing `Recreate` default and pairing-fence requirements; see
+`scripts/safe-pairing-rollback.sh` before changing rollout/rollback behavior.
+
+ServiceAccount configuration (`create`, `name`, `annotations`,
+`automountServiceAccountToken`) lives under `api.serviceAccount`,
+`fileServer.serviceAccount`, `toolCallServer.serviceAccount`,
+`egressGateway.serviceAccount`, and the existing `workerSandbox.serviceAccount`
+and `workerSandbox.sandboxServiceAccount` paths. Set `create: false` with `name`
+to reuse an existing account. `automountServiceAccountToken: null` omits the
+field and preserves Kubernetes/ServiceAccount defaults; explicit `false` is
+applied to both the pod and any chart-created account. The runner continues to
+default to `false`.
+
+`workerSandbox.serviceWorker` and `egressGateway` also support
+`initContainerSecurityContext` for their wait containers and
+`initImage.repository` / `initImage.tag` (default `busybox:1.36.1`). A tag can
+include `@sha256:...` to pin a digest. Configure HPA `behavior` under
+`api.autoscaling` and `workerSandbox.sandboxRunner.autoscaling`.
+
+`commonLabels` adds labels to CodeAPI resource metadata without changing
+selectors or pod labels. Use `podLabels` explicitly for pods and the subchart's
+own settings (e.g. `redis.commonLabels`) for dependency resources.
 
 ## Production deployment notes
 

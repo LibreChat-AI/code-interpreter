@@ -10,22 +10,58 @@ metadata:
   name: {{ include "codeapi.fullname" . }}-tool-call-server
   labels:
     {{- include "codeapi.toolCallServer.labels" . | nindent 4 }}
+  {{- with .Values.toolCallServer.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
+  {{- with .Values.toolCallServer.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   replicas: {{ .Values.toolCallServer.replicaCount }}
   selector:
     matchLabels:
       {{- include "codeapi.toolCallServer.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- with .Values.toolCallServer.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
-        {{- include "codeapi.toolCallServer.selectorLabels" . | nindent 8 }}
+        {{- include "codeapi.podLabels" (dict "root" . "component" "toolCallServer" "values" .Values.toolCallServer) | nindent 8 }}
     spec:
+      {{- with .Values.toolCallServer.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.toolCallServer.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.toolCallServer.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.toolCallServer.serviceAccount.create .Values.toolCallServer.serviceAccount.name }}
+      serviceAccountName: {{ .Values.toolCallServer.serviceAccount.name | default (printf "%s-tool-call-server" (include "codeapi.fullname" .)) }}
+      {{- end }}
+      {{- include "codeapi.automountServiceAccountToken" .Values.toolCallServer.serviceAccount | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: tool-call-server
+          {{- with .Values.toolCallServer.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.toolCallServer.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           image: "{{ .Values.toolCallServer.image.repository }}:{{ .Values.toolCallServer.image.tag }}"
           imagePullPolicy: {{ .Values.toolCallServer.image.pullPolicy }}
           ports:
@@ -42,13 +78,13 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: redis-password
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.redisPassword }}
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: codeapi-internal-service-token
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.internalServiceToken }}
             # Server config
             - name: TOOL_CALL_SERVER_PORT
               value: {{ .Values.toolCallServer.service.port | quote }}

@@ -13,10 +13,10 @@ Split runtime deployments:
 {{- end }}
 {{- $serviceWorkerServiceAccount := .Values.workerSandbox.serviceAccount.name | default (printf "%s-service-worker" (include "codeapi.fullname" .)) }}
 {{- $sandboxRunnerServiceAccount := .Values.workerSandbox.sandboxServiceAccount.name | default (printf "%s-sandbox-runner" (include "codeapi.fullname" .)) }}
-{{- if not .Values.executionManifest.privateKey }}
+{{- if and (not .Values.secrets.existingSecret) (not .Values.executionManifest.privateKey) }}
 {{- fail "workerSandbox.enabled requires executionManifest.privateKey so service-worker can sign sandbox execute manifests. The chart ships no default keypair; generate your own Ed25519 keypair (see helm/codeapi/README.md 'Execution manifest signing keys') and set it via --set or a values file (base64 DER or PEM with escaped newlines). For minikube local dev use -f values-local.yaml" }}
 {{- end }}
-{{- if not .Values.executionManifest.publicKey }}
+{{- if and (not .Values.secrets.existingSecret) (not .Values.executionManifest.publicKey) }}
 {{- fail "workerSandbox.enabled requires executionManifest.publicKey so sandbox-runner can verify signed execute manifests without a signing secret. The chart ships no default keypair; derive the public key from your Ed25519 private key (see helm/codeapi/README.md 'Execution manifest signing keys') and set it via --set or a values file (base64 DER or PEM with escaped newlines). For minikube local dev use -f values-local.yaml" }}
 {{- end }}
 {{- $packagesSource := .Values.workerSandbox.packages.source | default "image" }}
@@ -81,6 +81,7 @@ Split runtime deployments:
 {{- if .Values.workerSandbox.serviceAccount.create }}
 apiVersion: v1
 kind: ServiceAccount
+{{- include "codeapi.automountServiceAccountToken" .Values.workerSandbox.serviceAccount | nindent 0 }}
 metadata:
   name: {{ $serviceWorkerServiceAccount }}
   labels:
@@ -94,7 +95,7 @@ metadata:
 {{- if .Values.workerSandbox.sandboxServiceAccount.create }}
 apiVersion: v1
 kind: ServiceAccount
-automountServiceAccountToken: {{ .Values.workerSandbox.sandboxServiceAccount.automountServiceAccountToken }}
+{{- include "codeapi.automountServiceAccountToken" .Values.workerSandbox.sandboxServiceAccount | nindent 0 }}
 metadata:
   name: {{ $sandboxRunnerServiceAccount }}
   labels:
@@ -111,16 +112,41 @@ metadata:
   name: {{ include "codeapi.fullname" . }}-service-worker
   labels:
     {{- include "codeapi.serviceWorker.labels" . | nindent 4 }}
+  {{- with .Values.workerSandbox.serviceWorker.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
+  {{- with .Values.workerSandbox.serviceWorker.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   replicas: {{ $serviceWorkerReplicas }}
   selector:
     matchLabels:
       {{- include "codeapi.serviceWorker.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- with .Values.workerSandbox.serviceWorker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
-        {{- include "codeapi.serviceWorker.selectorLabels" . | nindent 8 }}
+        {{- include "codeapi.podLabels" (dict "root" . "component" "serviceWorker" "values" .Values.workerSandbox.serviceWorker) | nindent 8 }}
     spec:
+      {{- with .Values.workerSandbox.serviceWorker.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workerSandbox.serviceWorker.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workerSandbox.serviceWorker.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "codeapi.automountServiceAccountToken" .Values.workerSandbox.serviceAccount | nindent 6 }}
       {{- if or .Values.workerSandbox.serviceAccount.create .Values.workerSandbox.serviceAccount.name }}
       serviceAccountName: {{ $serviceWorkerServiceAccount }}
       {{- end }}
@@ -130,13 +156,29 @@ spec:
       {{- end }}
       initContainers:
         - name: wait-for-redis
-          image: busybox:1.36.1
+          {{- with .Values.workerSandbox.serviceWorker.initContainerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.workerSandbox.serviceWorker.initImage.repository }}:{{ .Values.workerSandbox.serviceWorker.initImage.tag }}"
           command: ['sh', '-c', 'until nc -z {{ include "codeapi.redis.host" . }} {{ include "codeapi.redis.port" . }}; do echo waiting for redis; sleep 2; done']
         - name: wait-for-sandbox-runner
-          image: busybox:1.36.1
+          {{- with .Values.workerSandbox.serviceWorker.initContainerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.workerSandbox.serviceWorker.initImage.repository }}:{{ .Values.workerSandbox.serviceWorker.initImage.tag }}"
           command: ['sh', '-c', 'until nc -z {{ include "codeapi.fullname" . }}-sandbox-runner {{ .Values.workerSandbox.sandbox.port }}; do echo waiting for sandbox-runner; sleep 2; done']
       containers:
         - name: service-worker
+          {{- with .Values.workerSandbox.serviceWorker.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.workerSandbox.serviceWorker.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           image: "{{ .Values.workerSandbox.workerImage.repository }}:{{ .Values.workerSandbox.workerImage.tag }}"
           imagePullPolicy: {{ .Values.workerSandbox.workerImage.pullPolicy }}
           ports:
@@ -162,18 +204,18 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: redis-password
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.redisPassword }}
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: codeapi-internal-service-token
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.internalServiceToken }}
             - name: CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: codeapi-execution-manifest-private-key
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.executionManifestPrivateKey }}
             - name: EXECUTION_MANIFEST_TTL_SECONDS
               value: {{ .Values.executionManifest.ttlSeconds | quote }}
             - name: EGRESS_GRANT_TTL_SECONDS
@@ -204,13 +246,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
           resources:
-            requests:
-              cpu: {{ .Values.workerSandbox.resources.requests.cpu }}
-              memory: {{ .Values.workerSandbox.resources.requests.memory }}
-            {{- with .Values.workerSandbox.resources.limits }}
-            limits:
-              {{- toYaml . | nindent 14 }}
-            {{- end }}
+            {{- toYaml (.Values.workerSandbox.serviceWorker.resources | default .Values.workerSandbox.resources) | nindent 12 }}
       {{- with $serviceWorkerNodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -230,7 +266,15 @@ metadata:
   name: {{ include "codeapi.fullname" . }}-sandbox-runner
   labels:
     {{- include "codeapi.sandboxRunner.labels" . | nindent 4 }}
+  {{- with .Values.workerSandbox.sandboxRunner.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
+  {{- with .Values.workerSandbox.sandboxRunner.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- if not .Values.workerSandbox.sandboxRunner.autoscaling.enabled }}
   replicas: {{ $sandboxRunnerReplicas }}
   {{- end }}
@@ -239,20 +283,32 @@ spec:
       {{- include "codeapi.sandboxRunner.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- with .Values.workerSandbox.sandboxRunner.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
-        {{- include "codeapi.sandboxRunner.selectorLabels" . | nindent 8 }}
+        {{- include "codeapi.podLabels" (dict "root" . "component" "sandboxRunner" "values" .Values.workerSandbox.sandboxRunner) | nindent 8 }}
     spec:
+      {{- with .Values.workerSandbox.sandboxRunner.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if or .Values.workerSandbox.sandboxServiceAccount.create .Values.workerSandbox.sandboxServiceAccount.name }}
       serviceAccountName: {{ $sandboxRunnerServiceAccount }}
       {{- end }}
-      automountServiceAccountToken: {{ .Values.workerSandbox.sandboxServiceAccount.automountServiceAccountToken }}
+      {{- include "codeapi.automountServiceAccountToken" .Values.workerSandbox.sandboxServiceAccount | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- $podSecurityContext := dict }}
       {{- if $useKvmHostPath }}
+      {{- $_ := set $podSecurityContext "supplementalGroups" (list .Values.workerSandbox.kvmGid) }}
+      {{- end }}
+      {{- with mergeOverwrite $podSecurityContext (deepCopy .Values.workerSandbox.sandboxRunner.podSecurityContext) }}
       securityContext:
-        supplementalGroups: [{{ .Values.workerSandbox.kvmGid }}]
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: sandbox-runner
@@ -333,12 +389,22 @@ spec:
             - name: SANDBOX_REQUIRE_EGRESS_MANIFEST
               value: "true"
             - name: SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY
+              {{- if .Values.secrets.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.executionManifestPublicKey }}
+              {{- else }}
               value: {{ .Values.executionManifest.publicKey | quote }}
+              {{- end }}
             {{- with .Values.workerSandbox.sandboxExtraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if or $packagesFromPvc $useKvmHostPath }}
+          {{- if or $packagesFromPvc $useKvmHostPath .Values.workerSandbox.sandboxRunner.extraVolumeMounts }}
           volumeMounts:
+            {{- with .Values.workerSandbox.sandboxRunner.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
             {{- if $packagesFromPvc }}
             - name: packages
               mountPath: /host-packages
@@ -349,45 +415,12 @@ spec:
               mountPath: /dev/kvm
             {{- end }}
           {{- end }}
-          {{- if .Values.workerSandbox.kvmEnabled }}
-          securityContext:
-            privileged: false
-            {{- if and .Values.workerSandbox.seccomp .Values.workerSandbox.seccomp.enabled }}
-            seccompProfile:
-              type: Localhost
-              localhostProfile: profiles/nsjail.json
-            {{- else }}
-            seccompProfile:
-              type: RuntimeDefault
-            {{- end }}
-          {{- else }}
-          securityContext:
-            privileged: false
-            {{- if and .Values.workerSandbox.seccomp .Values.workerSandbox.seccomp.enabled }}
-            seccompProfile:
-              type: Localhost
-              localhostProfile: profiles/nsjail.json
-            {{- else }}
-            seccompProfile:
-              type: Unconfined
-            {{- end }}
-            capabilities:
-              add:
-                - SYS_ADMIN
-                - SYS_CHROOT
-                - SYS_PTRACE
-                - SETUID
-                - SETGID
-                - NET_ADMIN
-                - DAC_OVERRIDE
-                - DAC_READ_SEARCH
-                - CHOWN
-                - FOWNER
-                - FSETID
-                - KILL
-                - SETFCAP
-                - MKNOD
+          {{- $defaultSecurityContext := include "codeapi.sandboxRunner.defaultSecurityContext" . | fromYaml }}
+          {{- if hasKey .Values.workerSandbox.sandboxRunner.securityContext "seccompProfile" }}
+          {{- $_ := unset $defaultSecurityContext "seccompProfile" }}
           {{- end }}
+          securityContext:
+            {{- mergeOverwrite $defaultSecurityContext (deepCopy .Values.workerSandbox.sandboxRunner.securityContext) | toYaml | nindent 12 }}
           livenessProbe:
             exec:
               command:
@@ -404,7 +437,7 @@ spec:
             timeoutSeconds: 7
             failureThreshold: 1
           resources:
-            {{- $sandboxResources := deepCopy .Values.workerSandbox.resources }}
+            {{- $sandboxResources := deepCopy (.Values.workerSandbox.sandboxRunner.resources | default .Values.workerSandbox.resources) }}
             {{- if $useKvmDevicePlugin }}
             {{- $requests := (get $sandboxResources "requests") | default dict }}
             {{- $limits := (get $sandboxResources "limits") | default dict }}
@@ -414,8 +447,11 @@ spec:
             {{- $_ := set $sandboxResources "limits" $limits }}
             {{- end }}
             {{- toYaml $sandboxResources | nindent 12 }}
-      {{- if or $packagesFromPvc $useKvmHostPath }}
+      {{- if or $packagesFromPvc $useKvmHostPath .Values.workerSandbox.sandboxRunner.extraVolumes }}
       volumes:
+        {{- with .Values.workerSandbox.sandboxRunner.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- if $packagesFromPvc }}
         - name: packages
           {{- if .Values.workerSandbox.packages.hostPath }}
