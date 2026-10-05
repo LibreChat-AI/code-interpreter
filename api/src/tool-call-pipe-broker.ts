@@ -55,6 +55,14 @@ export function serveToolCallPipe(channel: Duplex, rawTarget: string, options: {
   };
   const reject = (id: number, status: number, error: string): void => reply(id, status, JSON.stringify({ success: false, error }));
   const accept = (bytes: Buffer): void => {
+    // Charge every complete frame before JSON/claim validation, including
+    // rejected concurrency requests. Exhaustion closes the capability rather
+    // than generating an unlimited stream of cheap 429/400 replies.
+    const now = Date.now();
+    tokens = Math.min(64, tokens + Math.max(0, now - lastRefill) * 0.02);
+    lastRefill = now;
+    if (tokens < 1) { fail(); return; }
+    tokens -= 1;
     let parsed: { id?: unknown; headers?: unknown; body?: unknown };
     try { parsed = JSON.parse(bytes.toString('utf8')); } catch { fail(); return; }
     if (!parsed || typeof parsed !== 'object' || !Number.isSafeInteger(parsed.id)
@@ -71,11 +79,7 @@ export function serveToolCallPipe(channel: Duplex, rawTarget: string, options: {
       }
       headers[name] = value;
     }
-    const now = Date.now();
-    tokens = Math.min(64, tokens + (now - lastRefill) * 0.02);
-    lastRefill = now;
-    if (tokens < 1 || requests.size >= maxActive) { reject(id, 429, 'tool-call request budget exceeded'); return; }
-    tokens -= 1;
+    if (requests.size >= maxActive) { reject(id, 429, 'tool-call request budget exceeded'); return; }
     const body = Buffer.from(parsed.body);
     headers['content-length'] = body.length;
     let deadline: ReturnType<typeof setTimeout>;

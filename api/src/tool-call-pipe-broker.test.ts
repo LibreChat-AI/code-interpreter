@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test, spyOn } from 'bun:test';
 import * as http from 'node:http';
 import * as net from 'node:net';
 import { once } from 'node:events';
@@ -108,6 +108,21 @@ describe('per-invocation tool-call pipe broker', () => {
     harness.client.destroy();
     for (let n = 0; n < 100 && !upstreamClosed; n++) await Bun.sleep(5);
     expect(upstreamClosed).toBe(true);
+  });
+
+  test.each(['invalid claims', 'invalid body', 'active limit'])('closes a drained channel when %s exhausts the frame budget', async kind => {
+    const clock = spyOn(Date, 'now').mockReturnValue(1_000);
+    try {
+      let count = 0;
+      const harness = await setup(req => { count++; req.resume(); }, { maxActiveRequests: 1 });
+      const ended = once(harness.client, 'close');
+      for (let id = 1; id <= 65; id++) {
+        harness.send(kind === 'invalid claims' ? { ...frame(id), headers: {} }
+          : kind === 'invalid body' ? { ...frame(id), body: null } : frame(id));
+      }
+      await ended; // setup drains replies continuously, so backpressure cannot hide the bypass.
+      expect(count).toBeLessThanOrEqual(kind === 'active limit' ? 1 : 0);
+    } finally { clock.mockRestore(); }
   });
 
   test('enforces an absolute deadline on a stalled upstream', async () => {

@@ -95,6 +95,17 @@ cleanup, and run the actual broker/relay/NsJail/guard/generated Python client
 with concurrent replies. These checks do not boot libkrun or establish deployed
 kernel patch status.
 
+Every complete frame consumes the admission budget before JSON or claim
+validation, including frames rejected by the active-request limit. Exhausting
+that budget closes the channel and terminates the invocation instead of
+producing an unlimited stream of rejection replies. Losing the response pipe's
+reader also terminates the invocation, even when no reply is buffered.
+
+The standalone launcher guest, API runner and combined worker runner all
+package Node, the broker bundle and the compiled pipe bridge. Native CI builds
+the standalone launcher guest on both architectures and exercises a round trip
+using that image's own binaries.
+
 ### Local Mac/Docker canary
 
 `tests/tool_call_runner.cjs` exercises signed API authorization, the normal

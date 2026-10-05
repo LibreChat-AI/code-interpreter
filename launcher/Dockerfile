@@ -28,13 +28,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone -b master --single-branch https://github.com/google/nsjail.git . \
-    && git checkout dccf911fd2659e7b08ce9507c25b2b38ec2c5800
+    && git checkout 66ad78dc361721512fbf9470488e584364c75489 \
+    && git submodule update --init --recursive
 
 RUN make -j$(nproc)
 
 COPY api/src/spec-guard.c /tmp/spec-guard.c
+COPY api/src/tool-call-pipe-bridge.c /tmp/tool-call-pipe-bridge.c
 COPY docker/rootfs-setup.c /tmp/rootfs-setup.c
-RUN gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
+RUN gcc -O2 -static -Wall -Wextra -Werror -o /usr/local/bin/tool-call-pipe-bridge /tmp/tool-call-pipe-bridge.c \
+    && gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
     && gcc -O2 -static -o /usr/local/bin/sandbox-rootfs-setup /tmp/rootfs-setup.c \
     && chmod 0111 /usr/local/bin/spec-guard /usr/local/bin/sandbox-rootfs-setup
 
@@ -64,12 +67,14 @@ RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/sbin/nsjail
 COPY --from=nsjail-builder /usr/local/bin/spec-guard /usr/local/bin/spec-guard
+COPY --from=nsjail-builder /usr/local/bin/tool-call-pipe-bridge /usr/local/bin/tool-call-pipe-bridge
+COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
 RUN chmod +x /usr/sbin/nsjail
 
 WORKDIR /sandbox_api
 
-COPY api/package.json ./
-RUN bun install
+COPY api/package.json api/bun.lock ./
+RUN bun ci
 
 COPY api/tsconfig.json ./
 COPY api/src ./src

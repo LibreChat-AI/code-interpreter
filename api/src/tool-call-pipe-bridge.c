@@ -104,6 +104,8 @@ int main(int argc, char **argv) {
         int result = poll(pollfds, 3, 100);
         if (result < 0 && errno == EINTR) continue;
         if (result < 0 || (pollfds[0].revents & (POLLERR | POLLNVAL))
+            || (pollfds[1].revents & (POLLERR | POLLNVAL))
+            || (pollfds[2].revents & (POLLERR | POLLHUP | POLLNVAL))
             || transfer(&request, pollfds[1].revents & (POLLIN | POLLHUP), pollfds[0].revents & POLLOUT) < 0
             || transfer(&response, pollfds[0].revents & (POLLIN | POLLHUP), pollfds[2].revents & POLLOUT) < 0 || response.source < 0) {
             /* EOF/error terminates the entire invocation, including an

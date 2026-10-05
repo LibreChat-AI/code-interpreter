@@ -87,6 +87,35 @@ print("PASS: real pipes, restricted filter, guard cleanup and concurrent Python 
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
         assert sorted(Upstream.calls) == list(range(8)), Upstream.calls
         print(result.stdout.strip())
+    # Losing the response reader must terminate even with no buffered reply.
+    with tempfile.TemporaryDirectory() as directory:
+        closer = os.path.join(directory, 'close-response.py')
+        with open(closer, 'w') as output:
+            output.write("import os,time; os.close(4); time.sleep(30)")
+        interrupted = subprocess.run(command[:-1] + [closer], env=env,
+                                     capture_output=True, text=True, timeout=2)
+        assert interrupted.returncode == 137, (interrupted.returncode, interrupted.stdout, interrupted.stderr)
+    print('PASS: closing the response reader promptly terminates the invocation')
+    # A guest that drains rejection replies must still lose the capability
+    # once malformed-claim frames exhaust the broker's admission budget.
+    with tempfile.TemporaryDirectory() as directory:
+        flooder = os.path.join(directory, 'rejected-frames.py')
+        with open(flooder, 'w') as output:
+            output.write("""import json,os,struct,threading,time
+threading.Thread(target=lambda: [os.read(4, 4096) for _ in range(1000)], daemon=True).start()
+frames = []
+for id in range(1, 258):
+    frame = json.dumps({'id': id, 'headers': {}, 'body': ''}).encode()
+    frames.append(struct.pack('!I', len(frame)) + frame)
+data = b''.join(frames)
+while data:
+    data = data[os.write(3, data):]
+time.sleep(30)
+""")
+        interrupted = subprocess.run(command[:-1] + [flooder], env=env,
+                                     capture_output=True, text=True, timeout=2)
+        assert interrupted.returncode == 137, (interrupted.returncode, interrupted.stdout, interrupted.stderr)
+    print('PASS: drained rejection-frame flood promptly terminates the invocation')
     # A killed API/controller must not orphan its broker, relay or job. Become a
     # subreaper so this test can reap both adopted descendants in Docker.
     assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0

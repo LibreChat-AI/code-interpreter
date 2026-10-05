@@ -59,6 +59,7 @@ jobs:
         run: |
           docker buildx build --check -f api/Dockerfile .
           docker buildx build --check -f docker/Dockerfile.worker-sandbox .
+          docker buildx build --check -f launcher/Dockerfile .
 
   launcher-unit-tests:
     name: Launcher Unit Tests
@@ -163,6 +164,13 @@ jobs:
           bun service/scripts/dump-pipe-preamble.ts > "$RUNNER_TEMP/pipe-client.py"
       - name: Build pinned NsJail and Kafel
         run: docker build --target nsjail-ipc-test -t nsjail-ipc-test -f api/Dockerfile .
+      - name: Verify standalone launcher guest pipe runtime
+        run: |
+          docker build --target sandbox-build -t launcher-guest-test -f launcher/Dockerfile .
+          docker run --rm --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            --entrypoint /usr/local/bin/node \
+            launcher-guest-test /tests/pipe_runtime_image.cjs
       - name: Verify descriptor denial and runtime IPC with the installed filter
         run: |
           docker run --rm --security-opt seccomp=unconfined \
