@@ -61,11 +61,14 @@ export async function readLaneGit(
   timeoutMs: number = LANE_GIT_TIMEOUT_MS,
 ): Promise<WorkspaceLaneGit | undefined> {
   const [branch, head] = await Promise.all([
-    read(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'], DETACHED_EXIT, signal, timeoutMs),
+    read(root, ['symbolic-ref', '--quiet', 'HEAD'], DETACHED_EXIT, signal, timeoutMs),
     read(root, ['rev-parse', '--verify', 'HEAD^{commit}'], UNBORN_EXIT, signal, timeoutMs),
   ]);
   if (branch === undefined || head === undefined) return undefined;
-  return { branch: boundedBranch(branch), head: boundedHead(head) };
+  // `--short` shortens ambiguously (`heads/foo` when a tag `foo` exists). Take the full ref and strip
+  // exactly `refs/heads/`; a HEAD pointing anywhere else is not a branch.
+  const name = branch?.startsWith('refs/heads/') ? branch.slice('refs/heads/'.length) : null;
+  return { branch: boundedBranch(name), head: boundedHead(head) };
 }
 
 async function absent(path: string): Promise<boolean> {
@@ -94,11 +97,13 @@ async function refsAreLinkFree(refs: string): Promise<boolean> {
   const pending = [refs];
   let seen = 0;
   while (pending.length > 0) {
-    const directory = await opendir(pending.pop()!);
+    const current = pending.pop()!;
+    const directory = await opendir(current);
     for await (const entry of directory) {
       if (++seen > LANE_GIT_REFS_MAX_ENTRIES) return false;
       if (entry.isSymbolicLink()) return false;
-      if (entry.isDirectory()) pending.push(join(entry.parentPath, entry.name));
+      // `Dirent.parentPath` needs Node 20.12; the package supports 20.11.
+      if (entry.isDirectory()) pending.push(join(current, entry.name));
       else if (!entry.isFile()) return false;
     }
   }
@@ -129,6 +134,26 @@ export async function ownsGitMetadata(root: string): Promise<boolean> {
       (await absent(join(dotGit, 'commondir'))) &&
       ((await absent(join(dotGit, 'packed-refs'))) || (await plain(join(dotGit, 'packed-refs'), 'file')))
     );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The linked worktree counterpart of `ownsGitMetadata`. `verifyLinkedWorktree` proves the lane's
+ * `.git` pointer chain, but the probe also reads the lane's own `HEAD` and the refs it names from
+ * the shared common directory, and a command can write to both. Without this, a ref symlinked at
+ * another checkout and named by the lane's `HEAD` would be followed by the host-side probe.
+ */
+export async function ownsLinkedWorktreeMetadata(commonGitDir: string, name: string): Promise<boolean> {
+  const metadata = join(commonGitDir, 'worktrees', name);
+  try {
+    if (!(await plain(join(metadata, 'HEAD'), 'file'))) return false;
+    if (!(await plain(join(commonGitDir, 'refs'), 'directory')) || !(await refsAreLinkFree(join(commonGitDir, 'refs')))) {
+      return false;
+    }
+    if (!(await absent(join(metadata, 'refs'))) && !(await refsAreLinkFree(join(metadata, 'refs')))) return false;
+    return (await absent(join(commonGitDir, 'packed-refs'))) || (await plain(join(commonGitDir, 'packed-refs'), 'file'));
   } catch {
     return false;
   }

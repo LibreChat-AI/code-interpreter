@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { LaneGitWorkspaceTools, ownsGitMetadata, readLaneGit } from './lane-git.js';
+import { LaneGitWorkspaceTools, ownsGitMetadata, ownsLinkedWorktreeMetadata, readLaneGit } from './lane-git.js';
 import { isValidBridgeWorkspaceToolCapabilities, isWorkspaceLaneGit, isWorkspaceToolResult } from './protocol.js';
 import { BridgeWorker } from './worker.js';
 
@@ -454,6 +454,50 @@ test('a nested branch ref that is a plain file inside .git is still probed', asy
   await exec('git', ['-C', source, 'checkout', '-b', 'feature/deep/name']);
   assert.equal(await ownsGitMetadata(source), true);
   assert.equal((await readLaneGit(source))?.branch, 'feature/deep/name');
+});
+
+test('a branch that shares its short name with a tag is reported by its real name', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  await exec('git', ['-C', source, 'checkout', '-b', 'foo']);
+  await exec('git', ['-C', source, 'tag', 'foo']);
+  assert.equal((await readLaneGit(source))?.branch, 'foo');
+});
+
+test('a HEAD that points outside refs/heads reports a null branch', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  await exec('git', ['-C', source, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
+  await exec('git', ['-C', source, 'symbolic-ref', 'HEAD', 'refs/remotes/origin/main']);
+  assert.equal((await readLaneGit(source))?.branch, null);
+});
+
+test('a linked lane whose HEAD names a ref symlinked at another checkout is not probed', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const firstCommit = await sha(source);
+  await exec('git', ['-C', source, ...identity, 'commit', '--allow-empty', '-m', 'second']);
+  const other = join(root, 'other');
+  await exec('git', ['clone', '-q', source, other]);
+  await exec('git', ['-C', other, 'checkout', '-q', '-b', 'other-wip', firstCommit]);
+  const lane = join(root, 'lane');
+  await exec('git', ['-C', source, 'worktree', 'add', '-b', 'lane-branch', lane]);
+  const common = join(source, '.git');
+  assert.equal(await ownsLinkedWorktreeMetadata(common, 'lane'), true);
+  await symlink(join(other, '.git', 'refs', 'heads', 'other-wip'), join(common, 'refs', 'heads', 'leak'));
+  await writeFile(join(common, 'worktrees', 'lane', 'HEAD'), 'ref: refs/heads/leak\n');
+  assert.equal(await ownsLinkedWorktreeMetadata(common, 'lane'), false);
+});
+
+test('a linked lane with a symlinked metadata HEAD is not probed', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const lane = join(root, 'lane');
+  await exec('git', ['-C', source, 'worktree', 'add', '-b', 'lane-branch', lane]);
+  const head = join(source, '.git', 'worktrees', 'lane', 'HEAD');
+  await rm(head);
+  await symlink(join(source, '.git', 'HEAD'), head);
+  assert.equal(await ownsLinkedWorktreeMetadata(join(source, '.git'), 'lane'), false);
 });
 
 test('a linked worktree .git file is not claimed by the source checkout check', async (t) => {
