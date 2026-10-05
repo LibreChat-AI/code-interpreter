@@ -62,23 +62,29 @@ export async function readLaneGit(
 ): Promise<WorkspaceLaneGit | undefined> {
   return await snapshotLaneGit(
     () => read(root, ['symbolic-ref', '--quiet', 'HEAD'], DETACHED_EXIT, signal, timeoutMs),
-    () => read(root, ['rev-parse', '--verify', 'HEAD^{commit}'], UNBORN_EXIT, signal, timeoutMs),
+    // `--no-replace-objects`: a `refs/replace` entry must not turn a blob into a reported commit.
+    (ref) => read(root, ['--no-replace-objects', 'rev-parse', '--verify', `${ref}^{commit}`], UNBORN_EXIT, signal, timeoutMs),
   );
 }
 
 /**
  * Two Git processes cannot see one atomic snapshot, so a checkout between them could pair one
- * branch with another branch's commit, a tuple that was never checked out. Read the branch before
- * and after the head and report only when it did not change in between; otherwise omit the field.
+ * branch with another branch's commit, a tuple that was never checked out. The head is therefore
+ * read from the branch ref the first read named, not from `HEAD`, and the branch is read again
+ * afterwards: a checkout away during the read omits the field. A detached HEAD has no ref to pin,
+ * so it is read twice and must agree. A change that happens and reverts within one probe is not
+ * detectable without a lock, and is not worth one for an advisory field.
  */
 export async function snapshotLaneGit(
   readBranch: () => Promise<string | null | undefined>,
-  readHead: () => Promise<string | null | undefined>,
+  readCommit: (ref: string) => Promise<string | null | undefined>,
 ): Promise<WorkspaceLaneGit | undefined> {
   const before = await readBranch();
-  const head = await readHead();
+  if (before === undefined) return undefined;
+  const head = await readCommit(before ?? 'HEAD');
   const after = await readBranch();
-  if (before === undefined || head === undefined || after === undefined || before !== after) return undefined;
+  if (head === undefined || after === undefined || before !== after) return undefined;
+  if (before === null && (await readCommit('HEAD')) !== head) return undefined;
   // `--short` shortens ambiguously (`heads/foo` when a tag `foo` exists). Take the full ref and strip
   // exactly `refs/heads/`; a HEAD pointing anywhere else is not a branch.
   const name = before?.startsWith('refs/heads/') ? before.slice('refs/heads/'.length) : null;
@@ -103,11 +109,16 @@ async function plain(path: string, kind: 'file' | 'directory'): Promise<boolean>
   }
 }
 
-/** Refs a checkout may have before the probe gives up on proving they are all plain files. */
+/** Entries a checkout may have before the probe gives up on proving they are all plain. */
 const LANE_GIT_REFS_MAX_ENTRIES = 20_000;
+const LANE_GIT_OBJECTS_MAX_ENTRIES = 100_000;
 
-/** Whether everything under `refs/` is a plain file or directory: no link can redirect a ref read. */
-async function refsAreLinkFree(refs: string, signal?: AbortSignal): Promise<boolean> {
+/** Whether everything beneath a directory is a plain file or directory: no link can redirect a read. */
+async function treeIsLinkFree(
+  refs: string,
+  signal?: AbortSignal,
+  maxEntries = LANE_GIT_REFS_MAX_ENTRIES,
+): Promise<boolean> {
   const pending = [refs];
   let seen = 0;
   while (pending.length > 0) {
@@ -118,7 +129,7 @@ async function refsAreLinkFree(refs: string, signal?: AbortSignal): Promise<bool
     const directory = await opendir(current);
     for await (const entry of directory) {
       signal?.throwIfAborted();
-      if (++seen > LANE_GIT_REFS_MAX_ENTRIES) return false;
+      if (++seen > maxEntries) return false;
       if (entry.isSymbolicLink()) return false;
       // `Dirent.parentPath` needs Node 20.12; the package supports 20.11.
       if (entry.isDirectory()) pending.push(join(current, entry.name));
@@ -126,6 +137,25 @@ async function refsAreLinkFree(refs: string, signal?: AbortSignal): Promise<bool
     }
   }
   return true;
+}
+
+/**
+ * The shared part of both ownership checks: the refs and object storage of a Git directory hold
+ * no link, no `alternates` redirect and no `reftable` backend, so the host-side reads cannot be
+ * steered at another repository's refs or objects.
+ */
+async function storageIsOwn(gitDir: string, signal?: AbortSignal): Promise<boolean> {
+  const objects = join(gitDir, 'objects');
+  return (
+    (await plain(join(gitDir, 'refs'), 'directory')) &&
+    (await treeIsLinkFree(join(gitDir, 'refs'), signal)) &&
+    (await plain(objects, 'directory')) &&
+    (await absent(join(objects, 'info', 'alternates'))) &&
+    (await absent(join(objects, 'info', 'http-alternates'))) &&
+    (await treeIsLinkFree(objects, signal, LANE_GIT_OBJECTS_MAX_ENTRIES)) &&
+    (await absent(join(gitDir, 'reftable'))) &&
+    ((await absent(join(gitDir, 'packed-refs'))) || (await plain(join(gitDir, 'packed-refs'), 'file')))
+  );
 }
 
 /**
@@ -147,10 +177,8 @@ export async function ownsGitMetadata(root: string, signal?: AbortSignal): Promi
     }
     return (
       (await plain(join(dotGit, 'HEAD'), 'file')) &&
-      (await plain(join(dotGit, 'refs'), 'directory')) &&
-      (await refsAreLinkFree(join(dotGit, 'refs'), signal)) &&
       (await absent(join(dotGit, 'commondir'))) &&
-      ((await absent(join(dotGit, 'packed-refs'))) || (await plain(join(dotGit, 'packed-refs'), 'file')))
+      (await storageIsOwn(dotGit, signal))
     );
   } catch {
     return false;
@@ -167,11 +195,8 @@ export async function ownsLinkedWorktreeMetadata(commonGitDir: string, name: str
   const metadata = join(commonGitDir, 'worktrees', name);
   try {
     if (!(await plain(join(metadata, 'HEAD'), 'file'))) return false;
-    if (!(await plain(join(commonGitDir, 'refs'), 'directory')) || !(await refsAreLinkFree(join(commonGitDir, 'refs'), signal))) {
-      return false;
-    }
-    if (!(await absent(join(metadata, 'refs'))) && !(await refsAreLinkFree(join(metadata, 'refs'), signal))) return false;
-    return (await absent(join(commonGitDir, 'packed-refs'))) || (await plain(join(commonGitDir, 'packed-refs'), 'file'));
+    if (!(await absent(join(metadata, 'refs'))) && !(await treeIsLinkFree(join(metadata, 'refs'), signal))) return false;
+    return await storageIsOwn(commonGitDir, signal);
   } catch {
     return false;
   }

@@ -520,22 +520,100 @@ test('the refs walk stops as soon as the probe signal aborts', async (t) => {
   assert.equal(checks, 3);
 });
 
-test('a branch that changes while the head is being read is not reported', async () => {
+test('the head is read from the branch ref the first read named, and only a stable branch is reported', async () => {
   const head = 'a'.repeat(40);
-  const answers = (values: Array<string | null | undefined>) => {
+  const sequence = (values: Array<string | null | undefined>) => {
     let index = 0;
     return async () => values[index++];
   };
-  // Stable: the same branch before and after the head read.
-  assert.deepEqual(await snapshotLaneGit(answers(['refs/heads/a', 'refs/heads/a']), async () => head), { branch: 'a', head });
-  // Torn: a checkout landed between the two reads, so the head may belong to the other branch.
-  assert.equal(await snapshotLaneGit(answers(['refs/heads/a', 'refs/heads/b']), async () => head), undefined);
-  assert.equal(await snapshotLaneGit(answers(['refs/heads/a', null]), async () => head), undefined);
-  assert.equal(await snapshotLaneGit(answers([null, 'refs/heads/a']), async () => head), undefined);
-  // Detached stays detached.
-  assert.deepEqual(await snapshotLaneGit(answers([null, null]), async () => head), { branch: null, head });
-  // Any unreadable value omits the field.
-  assert.equal(await snapshotLaneGit(answers(['refs/heads/a', 'refs/heads/a']), async () => undefined), undefined);
+  const refsRead: string[] = [];
+  const commit = (answer: string | null | undefined) => async (ref: string) => {
+    refsRead.push(ref);
+    return answer;
+  };
+  // Stable branch: head comes from that branch's own ref, never from HEAD.
+  assert.deepEqual(await snapshotLaneGit(sequence(['refs/heads/a', 'refs/heads/a']), commit(head)), { branch: 'a', head });
+  assert.deepEqual(refsRead, ['refs/heads/a']);
+  // A checkout away during the read is rejected.
+  assert.equal(await snapshotLaneGit(sequence(['refs/heads/a', 'refs/heads/b']), commit(head)), undefined);
+  assert.equal(await snapshotLaneGit(sequence(['refs/heads/a', null]), commit(head)), undefined);
+  assert.equal(await snapshotLaneGit(sequence([null, 'refs/heads/a']), commit(head)), undefined);
+  // Detached: HEAD is read twice and must agree, so a move between the reads is rejected.
+  refsRead.length = 0;
+  let calls = 0;
+  const moving = async (ref: string) => {
+    refsRead.push(ref);
+    return calls++ === 0 ? head : 'b'.repeat(40);
+  };
+  assert.equal(await snapshotLaneGit(sequence([null, null]), moving), undefined);
+  assert.deepEqual(refsRead, ['HEAD', 'HEAD']);
+  assert.deepEqual(await snapshotLaneGit(sequence([null, null]), commit(head)), { branch: null, head });
+  // HEAD on a non-branch ref reports no branch but still a head.
+  assert.deepEqual(await snapshotLaneGit(sequence(['refs/remotes/o/m', 'refs/remotes/o/m']), commit(head)), { branch: null, head });
+  // Unreadable values omit the field.
+  assert.equal(await snapshotLaneGit(sequence(['refs/heads/a', 'refs/heads/a']), commit(undefined)), undefined);
+});
+
+test('a replace ref cannot turn a blob into a reported commit', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const commit = await sha(source);
+  const blob = (await exec('bash', ['-c', `echo hello | git -C '${source}' hash-object -w --stdin`])).stdout.trim();
+  await mkdir(join(source, '.git', 'refs', 'replace'), { recursive: true });
+  await writeFile(join(source, '.git', 'refs', 'replace', blob), `${commit}\n`);
+  await writeFile(join(source, '.git', 'refs', 'heads', 'main'), `${blob}\n`);
+  assert.deepEqual(await readLaneGit(source), { branch: 'main', head: null });
+});
+
+test('redirected object storage is not probed, for source and linked checks alike', async (t) => {
+  const root = await scratch(t);
+  const victim = await repo(root, 'victim');
+  const cases: Array<[string, (source: string) => Promise<void>]> = [
+    ['alternates', async (s) => {
+      await mkdir(join(s, '.git', 'objects', 'info'), { recursive: true });
+      await writeFile(join(s, '.git', 'objects', 'info', 'alternates'), `${join(victim, '.git', 'objects')}\n`);
+    }],
+    ['http-alternates', async (s) => {
+      await mkdir(join(s, '.git', 'objects', 'info'), { recursive: true });
+      await writeFile(join(s, '.git', 'objects', 'info', 'http-alternates'), 'https://example.invalid/\n');
+    }],
+    ['objects symlink', async (s) => {
+      await rename(join(s, '.git', 'objects'), join(root, `moved-${Math.random()}`));
+      await symlink(join(victim, '.git', 'objects'), join(s, '.git', 'objects'));
+    }],
+    ['fanout symlink', async (s) => {
+      await symlink(join(victim, '.git', 'objects', 'info'), join(s, '.git', 'objects', 'ab'));
+    }],
+    ['pack entry symlink', async (s) => {
+      await mkdir(join(s, '.git', 'objects', 'pack'), { recursive: true });
+      await symlink(join(victim, '.git', 'HEAD'), join(s, '.git', 'objects', 'pack', 'pack-x.pack'));
+    }],
+    ['reftable redirect', async (s) => {
+      await mkdir(join(s, '.git', 'reftable'), { recursive: true });
+    }],
+  ];
+  for (const [name, tamper] of cases) {
+    const source = await repo(root, `src-${name.replace(/\W/g, '')}`);
+    await tamper(source);
+    assert.equal(await ownsGitMetadata(source), false, `source ${name}`);
+  }
+  const common = join(root, 'common');
+  await exec('git', ['init', '-q', '--initial-branch=main', common]);
+  await exec('git', ['-C', common, ...identity, 'commit', '--allow-empty', '-m', 'i']);
+  await exec('git', ['-C', common, 'worktree', 'add', '-b', 'lane', join(root, 'lane')]);
+  assert.equal(await ownsLinkedWorktreeMetadata(join(common, '.git'), 'lane'), true);
+  await mkdir(join(common, '.git', 'objects', 'info'), { recursive: true });
+  await writeFile(join(common, '.git', 'objects', 'info', 'alternates'), `${join(victim, '.git', 'objects')}\n`);
+  assert.equal(await ownsLinkedWorktreeMetadata(join(common, '.git'), 'lane'), false);
+});
+
+test('a repository with packed objects and refs is still probed', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  await exec('git', ['-C', source, ...identity, 'commit', '--allow-empty', '-m', 'second']);
+  await exec('git', ['-C', source, 'gc', '-q']);
+  assert.equal(await ownsGitMetadata(source), true);
+  assert.equal((await readLaneGit(source))?.head, await sha(source));
 });
 
 test('a linked worktree .git file is not claimed by the source checkout check', async (t) => {
