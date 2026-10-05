@@ -368,6 +368,22 @@ test('a branch name with leading or trailing Unicode whitespace is reported as i
   assert.deepEqual(await readLaneGit(source), { branch: '\u00a0main\u00a0', head: await sha(source) });
 });
 
+test('a branch name that is not valid UTF-8 is reported as null, not as a lossy copy', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  await writeFile(join(source, '.git', 'HEAD'), Buffer.concat([Buffer.from('ref: refs/heads/bad'), Buffer.from([0xff, 0x0a])]));
+  const state = await readLaneGit(source);
+  assert.equal(state?.branch, null);
+  assert.equal(JSON.stringify(state).includes('\ufffd'), false);
+});
+
+test('a valid non-ASCII branch name survives the byte level read', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  await exec('git', ['-C', source, 'checkout', '-b', 'feature/caf\u00e9-\u65e5\u672c']);
+  assert.equal((await readLaneGit(source))?.branch, 'feature/caf\u00e9-\u65e5\u672c');
+});
+
 test('a laneGit supplied by the delegate is never forwarded, only the probe value is', async (t) => {
   const root = await scratch(t);
   const source = await repo(root, 'source');

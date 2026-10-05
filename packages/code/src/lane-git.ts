@@ -1,5 +1,5 @@
 import { BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS, boundedBranch, boundedHead } from './protocol.js';
-import { git } from './worktree-retirement.js';
+import { gitBytes } from './worktree-retirement.js';
 
 import type { WorkspaceLaneGit, WorkspaceToolRequest, WorkspaceToolResult } from './protocol.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
@@ -27,9 +27,18 @@ async function read(
   timeoutMs: number = LANE_GIT_TIMEOUT_MS,
 ): Promise<string | null | undefined> {
   try {
+    const bytes = await gitBytes(root, args, signal, timeoutMs, LANE_GIT_OUTPUT_LIMIT);
+    // Git permits ref names that are not UTF-8. Decoding them leniently would report a different,
+    // valid-looking name, so anything that is not strictly valid UTF-8 is reported as null.
+    let text: string;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      return null;
+    }
     // Drop only Git's own trailing line terminator: a ref name may legally begin or end with
     // other whitespace, and trimming it would report a different branch.
-    return (await git(root, args, signal, timeoutMs, LANE_GIT_OUTPUT_LIMIT)).replace(/\r?\n$/, '');
+    return text.replace(/\r?\n$/, '');
   } catch (error) {
     signal?.throwIfAborted();
     return (error as { code?: unknown }).code === emptyExit ? null : undefined;

@@ -173,6 +173,22 @@ export async function git(
   return stdout;
 }
 
+/** Same invocation as `git`, but the raw stdout bytes, for callers that must not accept lossy decoding. */
+export async function gitBytes(
+  cwd: string,
+  args: string[],
+  signal?: AbortSignal,
+  timeout = GIT_TIMEOUT_MS,
+  maxBuffer = GIT_OUTPUT_LIMIT,
+): Promise<Buffer> {
+  const { stdout } = await execFileAsync(
+    'git',
+    ['--no-optional-locks', '-C', cwd, '-c', 'core.fsmonitor=false', ...args],
+    { encoding: 'buffer', env: gitEnvironment(), maxBuffer, signal, timeout },
+  );
+  return stdout;
+}
+
 /** The commit a ref names, or undefined when it does not resolve. */
 async function resolveCommit(cwd: string, ref: string, signal?: AbortSignal): Promise<string | undefined> {
   try {
