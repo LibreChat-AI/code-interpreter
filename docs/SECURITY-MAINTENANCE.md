@@ -184,3 +184,9 @@ Bun 1.4.2 subprocess spawning with piped stdio also uses socketpairs and is
 denied by this policy. Basic JS/TS execution remains supported. Replacing Bun
 subprocess IPC requires a separate runtime change; do not re-enable socketpairs
 to provide that compatibility.
+
+For PVC-backed Helm deployments, pin the package-init image to the same immutable
+release as the runner. The chart forces `Always` for the mutable `latest` tag,
+including upgrades that reuse an old `IfNotPresent` value, so a cached old init
+image cannot skip the runtime-marker check. Publish the patched init image
+before upgrading the runner; refresh does not make an unpublished image current.
