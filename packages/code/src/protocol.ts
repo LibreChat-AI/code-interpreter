@@ -340,7 +340,48 @@ const WORKSPACE_EDIT_MATCH_STRATEGIES = new Set<WorkspaceEditMatchStrategy>([
   'whitespace-normalized',
   'indentation-flexible',
 ]);
+
+/** A branch name reportable to LibreChat: 1 to 256 chars, no control characters. */
+export function boundedBranch(value: unknown): string | null {
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    !/[\x00-\x1f\x7f]/.test(value)
+    ? value
+    : null;
+}
+
+/** A commit id reportable to LibreChat: 40 (SHA-1) or 64 (SHA-256) lowercase hex chars. */
+export function boundedHead(value: unknown): string | null {
+  return typeof value === 'string' && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(value)
+    ? value
+    : null;
+}
+
 export type WorkspaceListFileFeature = 'after_path';
+/** `lane_git`: `execute_command` results may carry `laneGit`. Sent only when Code API echoes it. */
+export type WorkspaceCommandResultFeature = 'lane_git';
+
+/** Git state of the lane a command ran in. Never carries paths, remotes or repository content. */
+export interface WorkspaceLaneGit {
+  /** Checked-out branch, or null when HEAD is detached or the name is not reportable. */
+  branch: string | null;
+  /** HEAD commit (40 or 64 lowercase hex), or null before the first commit or when unreportable. */
+  head: string | null;
+}
+
+export function isWorkspaceLaneGit(value: unknown): value is WorkspaceLaneGit {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  const keys = Object.keys(state);
+  return (
+    keys.length === 2 &&
+    keys.includes('branch') &&
+    keys.includes('head') &&
+    (state.branch === null || (state.branch !== undefined && boundedBranch(state.branch) === state.branch)) &&
+    (state.head === null || (state.head !== undefined && boundedHead(state.head) === state.head))
+  );
+}
 export type WorkspaceProgrammaticLanguage = 'bash';
 
 export interface BridgeWorkspaceDescriptor {
@@ -374,6 +415,8 @@ export interface BridgeWorkspaceToolCapabilities {
   editFileFeatures?: WorkspaceEditFileFeature[];
   /** Omitted by workers that cannot continue a bounded file listing. */
   listFileFeatures?: WorkspaceListFileFeature[];
+  /** Omitted by workers that do not report lane Git state on command results. */
+  commandResultFeatures?: WorkspaceCommandResultFeature[];
   /** Languages that can execute PTC replay inside a selected workspace. */
   programmaticLanguages?: WorkspaceProgrammaticLanguage[];
 }
@@ -625,6 +668,8 @@ export interface WorkspaceExecuteCommandResult {
   stderr: string;
   truncated: boolean;
   timedOut: boolean;
+  /** Present only when `commandResultFeatures` negotiated `lane_git` and Git was readable. */
+  laneGit?: WorkspaceLaneGit;
 }
 
 export type WorkspaceToolRequest =
@@ -789,6 +834,7 @@ const WORKSPACE_COMMAND_RESULT_KEYS = new Set([
   'stderr',
   'truncated',
   'timedOut',
+  'laneGit',
 ]);
 const WORKSPACE_SEARCH_MATCH_KEYS = new Set(['path', 'line', 'column', 'text']);
 
@@ -836,6 +882,8 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceInstanceTypes?: ['git_worktree'];
   /** Scheduling scopes this Code API can admit as independent lanes. */
   supportedWorkspaceScopes?: ['git_linked_worktree'];
+  /** Command result fields this Code API accepts in settlements. */
+  supportedWorkspaceCommandResultFeatures?: WorkspaceCommandResultFeature[];
   /** Added workspace tool error codes this Code API accepts in settlements. */
   supportedWorkspaceToolErrorCodes?: WorkspaceToolErrorCode[];
 }
@@ -1717,6 +1765,7 @@ export function isWorkspaceToolResult(
           /^SIG[A-Z0-9]+$/.test(result.signal))) &&
       typeof result.truncated === 'boolean' &&
       typeof result.timedOut === 'boolean' &&
+      (result.laneGit === undefined || isWorkspaceLaneGit(result.laneGit)) &&
       (result.exitCode === null
         ? result.timedOut === true || result.signal !== undefined
         : result.timedOut === false && result.signal === undefined)
@@ -1835,6 +1884,16 @@ export function isValidBridgeWorkspaceToolCapabilities(
       capabilities.listFileFeatures.length !== 1 ||
       !capabilities.operations.includes('list_files') ||
       capabilities.listFileFeatures[0] !== 'after_path')
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.commandResultFeatures !== undefined &&
+    (!Array.isArray(capabilities.commandResultFeatures) ||
+      capabilities.commandResultFeatures.length !== 1 ||
+      !capabilities.operations.includes('execute_command') ||
+      capabilities.commandResultFeatures[0] !== 'lane_git')
   ) {
     return false;
   }

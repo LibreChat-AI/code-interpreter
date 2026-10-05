@@ -4,6 +4,8 @@ import { lstat, opendir, realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 
+import { boundedBranch, boundedHead } from './protocol.js';
+
 const exec = promisify(execFile);
 const skipped = new Set(['node_modules', 'vendor']);
 
@@ -221,16 +223,8 @@ export async function discoverProjects(
                 );
                 const path = rel.split(sep).join('/') || '.';
                 const normalizedRemote = remote ? projectRemote(remote) : null;
-                const validBranch =
-                    branch &&
-                    branch.length <= 256 &&
-                    !/[\x00-\x1f\x7f]/.test(branch)
-                        ? branch
-                        : null;
-                const validHead =
-                    head && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(head)
-                        ? head
-                        : null;
+                const validBranch = boundedBranch(branch);
+                const validHead = boundedHead(head);
                 if (
                     (remote !== null && normalizedRemote === null) ||
                     (branch !== null && validBranch === null) ||

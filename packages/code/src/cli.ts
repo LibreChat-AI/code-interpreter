@@ -41,7 +41,8 @@ import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { NativeWorkspaceCommandPool } from './native-pool.js';
 import { GitWorktreeWorkspaceTools, internalWorkspaceId } from './workspace-instances.js';
-import { LINKED_WORKTREE_DIRECTORY, LinkedWorktreeWorkspaceTools } from './linked-worktrees.js';
+import { LaneGitWorkspaceTools } from './lane-git.js';
+import { LINKED_WORKTREE_DIRECTORY, LinkedWorktreeWorkspaceTools, verifyLinkedWorktree } from './linked-worktrees.js';
 import { GitWorktreeManager } from './worktrees.js';
 import {
   WorktreeRetirementScheduler,
@@ -1311,6 +1312,23 @@ async function run(
       ),
     });
     workspaceTools = linkedWorktreeTools;
+  }
+  if (workspaceTools?.capabilities.operations.includes('execute_command')) {
+    workspaceTools = new LaneGitWorkspaceTools({
+      delegate: workspaceTools,
+      async resolveRoot(request, signal) {
+        const source = roots.find((root) => root.id === request.workspaceId);
+        if (!source) return undefined;
+        if (request.workspaceInstanceId != null) {
+          return await conversationWorktrees?.plannedRoot(request.workspaceId, request.workspaceInstanceId);
+        }
+        if (request.worktree != null) {
+          signal?.throwIfAborted();
+          return (await verifyLinkedWorktree(source.root, request.worktree, source.identity)).root;
+        }
+        return source.root;
+      },
+    });
   }
   const retirementSources = roots.filter((root) => root.writable);
   const debugLogs =

@@ -10,6 +10,7 @@ export const bridgeStore = new RedisBridgeStore(
   undefined,
   undefined,
   env.BRIDGE_MAX_WORKSPACE_LEASE_SLOTS,
+  env.BRIDGE_LANE_GIT,
 );
 export const bridgePairings = new RedisBridgePairingStore(
   connection,

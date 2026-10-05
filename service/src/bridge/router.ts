@@ -538,6 +538,9 @@ router.post(
         supportedWorkspaceEditFileModes: ['single', 'batch'],
         supportedWorkspaceEditFileFeatures: [...WORKSPACE_EDIT_FILE_FEATURES],
         supportedWorkspaceListFileFeatures: ['after_path'],
+        ...(options.store.laneGitEnabled
+          ? { supportedWorkspaceCommandResultFeatures: ['lane_git'] }
+          : {}),
         supportedWorkspaceProgrammaticLanguages: ['bash'],
         supportedWorkspaceInstanceTypes: ['git_worktree'],
         supportedWorkspaceScopes: ['git_linked_worktree'],

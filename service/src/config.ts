@@ -420,6 +420,11 @@ export const env = {
   BRIDGE_MAX_WORKSPACE_LEASE_SLOTS: Number(
     process.env.CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS ?? 1,
   ),
+  /**
+   * Offer `lane_git` to workers and accept `laneGit` (`{ branch, head }`) on command results.
+   * Off by default: enable only after the LibreChat talking to this service accepts the field.
+   */
+  BRIDGE_LANE_GIT: process.env.CODEAPI_BRIDGE_LANE_GIT === 'true',
   /** Outbound worker selected by the remote-bridge backend. */
   BRIDGE_WORKER_ID: process.env.CODEAPI_BRIDGE_WORKER_ID ?? '',
   /** Static compatibility auth or short-lived proof-of-possession credentials. */

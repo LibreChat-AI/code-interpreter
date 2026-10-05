@@ -158,7 +158,7 @@ function gitEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
-async function git(
+export async function git(
   cwd: string,
   args: string[],
   signal?: AbortSignal,

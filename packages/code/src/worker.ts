@@ -218,6 +218,11 @@ function workspaceCapabilitiesMatch(
       (feature, index) => feature === executor.listFileFeatures?.[index],
     ) ??
       executor.listFileFeatures == null) &&
+    advertised.commandResultFeatures?.length === executor.commandResultFeatures?.length &&
+    (advertised.commandResultFeatures?.every(
+      (feature, index) => feature === executor.commandResultFeatures?.[index],
+    ) ??
+      executor.commandResultFeatures == null) &&
     advertised.programmaticLanguages?.length ===
       executor.programmaticLanguages?.length &&
     (advertised.programmaticLanguages?.every(
@@ -314,6 +319,7 @@ function registrationCompatibleCapabilities(
     editFileModes: _editFileModes,
     editFileFeatures: _editFileFeatures,
     listFileFeatures: _listFileFeatures,
+    commandResultFeatures: _commandResultFeatures,
     programmaticLanguages: _programmaticLanguages,
     ...compatibleWorkspaceTools
   } = workspaceTools;
@@ -409,6 +415,9 @@ function supportedWorkspaceCapabilities(
   const listFileFeatures = desired.listFileFeatures?.filter((feature) =>
     registration.supportedWorkspaceListFileFeatures?.includes(feature),
   );
+  const commandResultFeatures = desired.commandResultFeatures?.filter((feature) =>
+    registration.supportedWorkspaceCommandResultFeatures?.includes(feature),
+  );
   const programmaticLanguages = desired.programmaticLanguages?.filter(
     (language) =>
       registration.supportedWorkspaceProgrammaticLanguages?.includes(language),
@@ -418,6 +427,7 @@ function supportedWorkspaceCapabilities(
     editFileModes: _editFileModes,
     editFileFeatures: _editFileFeatures,
     listFileFeatures: _listFileFeatures,
+    commandResultFeatures: _commandResultFeatures,
     programmaticLanguages: _programmaticLanguages,
     ...compatibleDesired
   } = desired;
@@ -438,6 +448,9 @@ function supportedWorkspaceCapabilities(
         : {}),
       ...(operations.includes('list_files') && listFileFeatures?.length
         ? { listFileFeatures }
+        : {}),
+      ...(operations.includes('execute_command') && commandResultFeatures?.length
+        ? { commandResultFeatures }
         : {}),
       ...(operations.includes('execute_command') &&
       programmaticLanguages?.length
@@ -1862,6 +1875,14 @@ export class BridgeWorker {
         ) {
           const { nextAfterPath: _nextAfterPath, ...compatiblePayload } =
             payload;
+          payload = compatiblePayload;
+        }
+        if (
+          workspaceRequest.operation === 'execute_command' &&
+          !advertised.commandResultFeatures?.includes('lane_git') &&
+          'laneGit' in payload
+        ) {
+          const { laneGit: _laneGit, ...compatiblePayload } = payload;
           payload = compatiblePayload;
         }
         workspaceMutationApplied = isMutation;
