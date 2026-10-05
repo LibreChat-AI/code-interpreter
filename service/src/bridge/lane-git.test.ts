@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import RedisMock from 'ioredis-mock';
 
 import type Redis from 'ioredis';
@@ -206,4 +206,46 @@ describe('retried settlements across replicas that disagree on the setting', () 
       await completion;
     });
   }
+});
+
+describe('Redis reads while settling', () => {
+  async function readsDuring(withLaneGit: boolean): Promise<number> {
+    const store = new RedisBridgeStore(redis, undefined, undefined, 1, true);
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'lane-worker',
+      incarnationId,
+      capabilities: capabilities(true),
+    });
+    const completion = store.dispatchWorkspaceTool({
+      workerId: 'lane-worker',
+      tenantId: 'tenant-1',
+      request,
+      deadlineAtMs: Date.now() + 5_000,
+      signal: new AbortController().signal,
+    });
+    completion.catch(() => undefined);
+    const assignment = await store.lease('lane-worker', incarnationId, 1_000);
+    const spy = spyOn(redis, 'get');
+    await store.settle('lane-worker', assignment?.assignmentId ?? '', {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      generation: assignment?.generation ?? 0,
+      leaseToken: assignment?.leaseToken ?? '',
+      incarnationId,
+      status: 'fulfilled',
+      result: commandResult(withLaneGit ? { laneGit: { branch: 'main', head } } : {}) as never,
+    });
+    const calls = spy.mock.calls.length;
+    spy.mockRestore();
+    await completion;
+    return calls;
+  }
+
+  test('a settlement with laneGit costs no more Redis reads than one without', async () => {
+    const without = await readsDuring(false);
+    await redis.flushall();
+    const withIt = await readsDuring(true);
+    expect(without).toBeGreaterThan(0);
+    expect(withIt).toBe(without);
+  });
 });

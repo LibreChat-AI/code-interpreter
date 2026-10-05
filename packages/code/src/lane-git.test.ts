@@ -361,6 +361,13 @@ test('the worker reports lane_git active only when the registration that stuck a
   }
 });
 
+test('a branch name with leading or trailing Unicode whitespace is reported as it is', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  await exec('git', ['-C', source, 'checkout', '-b', '\u00a0main\u00a0']);
+  assert.deepEqual(await readLaneGit(source), { branch: '\u00a0main\u00a0', head: await sha(source) });
+});
+
 test('a laneGit supplied by the delegate is never forwarded, only the probe value is', async (t) => {
   const root = await scratch(t);
   const source = await repo(root, 'source');

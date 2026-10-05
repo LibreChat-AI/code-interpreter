@@ -385,6 +385,12 @@ function assignmentKey(assignmentId: string): string {
   return `${PREFIX}:assignment:${assignmentId}`;
 }
 
+function withoutLaneGit(settlement: AnyCodeBridgeSettlement): AnyCodeBridgeSettlement {
+  if (settlement.status !== 'fulfilled') return settlement;
+  const { laneGit: _laneGit, ...result } = settlement.result as unknown as Record<string, unknown>;
+  return { ...settlement, result } as AnyCodeBridgeSettlement;
+}
+
 function settlementKey(assignmentId: string): string {
   return `${PREFIX}:assignment:${assignmentId}:settlement`;
 }
@@ -1785,9 +1791,6 @@ export class RedisBridgeStore {
     identityId?: string,
     quarantineWorkspace = false,
   ): Promise<void> {
-    if (!quarantineWorkspace) {
-      settlement = await this.sanitizeLaneGit(workerId, assignmentId, settlement, signal);
-    }
     if (quarantineWorkspace) {
       await this.quarantineSettledWorkspace(
         workerId,
@@ -1798,12 +1801,25 @@ export class RedisBridgeStore {
       );
       return;
     }
-    const serializedSettlement = JSON.stringify(settlement);
+    let serializedSettlement = JSON.stringify(settlement);
     const existingSettlement = await this.leaseCommand(
       this.redis.get(settlementKey(assignmentId)),
       signal,
       'Bridge settlement existing read',
     );
+    if (
+      existingSettlement != null &&
+      existingSettlement !== serializedSettlement &&
+      hasLaneGit(settlement.status === 'fulfilled' ? settlement.result : undefined)
+    ) {
+      // A retry of a committed settlement must stay recognizable whichever way this replica's
+      // lane Git setting differs from the replica that committed it.
+      const stripped = withoutLaneGit(settlement);
+      if (existingSettlement === JSON.stringify(stripped)) {
+        settlement = stripped;
+        serializedSettlement = existingSettlement;
+      }
+    }
     if (
       existingSettlement != null &&
       existingSettlement !== serializedSettlement
@@ -1862,6 +1878,13 @@ export class RedisBridgeStore {
         'ASSIGNMENT_EXPIRED',
         'Bridge assignment has expired',
       );
+    }
+    // Uses the assignment and registration already read above: no extra round trips on the
+    // settlement path, which has only a short grace after the command ran.
+    const sanitized = this.sanitizeLaneGit(assignmentId, settlement, assignment, registration);
+    if (sanitized !== settlement) {
+      settlement = sanitized;
+      serializedSettlement = JSON.stringify(settlement);
     }
     const ttlSeconds = assignmentOutcomeTtlSeconds(assignment);
     const settlementKeys = [
@@ -1972,50 +1995,26 @@ export class RedisBridgeStore {
   }
 
   /**
-   * Validate the optional `laneGit` of a fulfilled execute_command settlement before it
-   * is stored or forwarded. An invalid, unexpected or unadvertised value is dropped, never
-   * an error: the command's own result must still reach the caller. Settlements without
-   * the key are returned untouched, without extra reads.
+   * Validate the optional `laneGit` of a fulfilled execute_command settlement before it is
+   * stored or forwarded. An invalid, unexpected or unadvertised value is dropped, never an
+   * error: the command's own result must still reach the caller. Pure over records the caller
+   * already read, so it adds no Redis round trips.
    */
-  private async sanitizeLaneGit(
-    workerId: string,
+  private sanitizeLaneGit(
     assignmentId: string,
     settlement: AnyCodeBridgeSettlement,
-    signal?: AbortSignal,
-  ): Promise<AnyCodeBridgeSettlement> {
-    if (settlement.status !== 'fulfilled' || !hasLaneGit(settlement.result)) return settlement;
-    // A retry of an already committed settlement must stay recognizable whichever way this
-    // replica's setting differs from the one that committed it, so compare before sanitizing.
-    const existing = await this.leaseCommand(
-      this.redis.get(settlementKey(assignmentId)),
-      signal,
-      'Bridge settlement existing read',
-    );
-    if (existing != null) {
-      if (existing === JSON.stringify(settlement)) return settlement;
-      const { laneGit: _laneGit, ...rest } = settlement.result as unknown as Record<string, unknown>;
-      const stripped = { ...settlement, result: rest } as AnyCodeBridgeSettlement;
-      if (existing === JSON.stringify(stripped)) return stripped;
-    }
-    const assignment = await this.leaseCommand(
-      this.readAssignment(assignmentId),
-      signal,
-      'Bridge settlement assignment read',
-    );
+    assignment: StoredAssignment,
+    registration: RegisteredBridgeWorker | undefined,
+  ): AnyCodeBridgeSettlement {
     if (
-      assignment == null ||
-      assignment.workerId !== workerId ||
+      settlement.status !== 'fulfilled' ||
+      !hasLaneGit(settlement.result) ||
       assignment.executionKind !== 'workspace_tool' ||
       (assignment.request as WorkspaceToolRequest).operation !== 'execute_command'
     ) {
       return settlement;
     }
-    const registration = await this.leaseCommand(
-      this.registration(workerId),
-      signal,
-      'Bridge settlement registration read',
-    );
-    const { result, dropped } = laneGitPolicy({
+    const { dropped } = laneGitPolicy({
       result: settlement.result as unknown as Record<string, unknown>,
       enabled: this.laneGitEnabled,
       advertised:
@@ -2024,7 +2023,7 @@ export class RedisBridgeStore {
     if (dropped === undefined) return settlement;
     // Reason only: never the branch, the head or anything else from the result.
     logger.debug('Dropped lane Git from a command settlement', { reason: dropped, assignmentId });
-    return { ...settlement, result } as AnyCodeBridgeSettlement;
+    return withoutLaneGit(settlement);
   }
 
   async cancelled(

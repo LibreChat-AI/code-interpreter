@@ -27,7 +27,9 @@ async function read(
   timeoutMs: number = LANE_GIT_TIMEOUT_MS,
 ): Promise<string | null | undefined> {
   try {
-    return (await git(root, args, signal, timeoutMs, LANE_GIT_OUTPUT_LIMIT)).trim();
+    // Drop only Git's own trailing line terminator: a ref name may legally begin or end with
+    // other whitespace, and trimming it would report a different branch.
+    return (await git(root, args, signal, timeoutMs, LANE_GIT_OUTPUT_LIMIT)).replace(/\r?\n$/, '');
   } catch (error) {
     signal?.throwIfAborted();
     return (error as { code?: unknown }).code === emptyExit ? null : undefined;
