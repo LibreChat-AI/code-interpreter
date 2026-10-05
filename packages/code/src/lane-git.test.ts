@@ -428,6 +428,34 @@ test('Git storage redirected by a symlink, commondir or a swapped directory is n
   }
 });
 
+test('a nested ref symlinked to another checkout is not probed', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const firstCommit = await sha(source);
+  await exec('git', ['-C', source, ...identity, 'commit', '--allow-empty', '-m', 'second']);
+  // A clone shares history, so the commit its branch sits on also exists in the source's objects.
+  const other = join(root, 'other');
+  await exec('git', ['clone', '-q', source, other]);
+  await exec('git', ['-C', other, 'checkout', '-q', '-b', 'other-wip', firstCommit]);
+  await symlink(join(other, '.git', 'refs', 'heads', 'other-wip'), join(source, '.git', 'refs', 'heads', 'leak'));
+  await writeFile(join(source, '.git', 'HEAD'), 'ref: refs/heads/leak\n');
+  assert.equal(await ownsGitMetadata(source), false);
+  const tools = new LaneGitWorkspaceTools({
+    delegate: delegate(),
+    resolveRoot: async () => ((await ownsGitMetadata(source)) ? source : undefined),
+  });
+  const result = await tools.execute(commandRequest);
+  assert.equal('laneGit' in result, false);
+});
+
+test('a nested branch ref that is a plain file inside .git is still probed', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  await exec('git', ['-C', source, 'checkout', '-b', 'feature/deep/name']);
+  assert.equal(await ownsGitMetadata(source), true);
+  assert.equal((await readLaneGit(source))?.branch, 'feature/deep/name');
+});
+
 test('a linked worktree .git file is not claimed by the source checkout check', async (t) => {
   const root = await scratch(t);
   const source = await repo(root, 'source');

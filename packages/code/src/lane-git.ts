@@ -1,4 +1,4 @@
-import { lstat, realpath } from 'node:fs/promises';
+import { lstat, opendir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS, boundedBranch, boundedHead } from './protocol.js';
@@ -86,11 +86,33 @@ async function plain(path: string, kind: 'file' | 'directory'): Promise<boolean>
   }
 }
 
+/** Refs a checkout may have before the probe gives up on proving they are all plain files. */
+const LANE_GIT_REFS_MAX_ENTRIES = 20_000;
+
+/** Whether everything under `refs/` is a plain file or directory: no link can redirect a ref read. */
+async function refsAreLinkFree(refs: string): Promise<boolean> {
+  const pending = [refs];
+  let seen = 0;
+  while (pending.length > 0) {
+    const directory = await opendir(pending.pop()!);
+    for await (const entry of directory) {
+      if (++seen > LANE_GIT_REFS_MAX_ENTRIES) return false;
+      if (entry.isSymbolicLink()) return false;
+      if (entry.isDirectory()) pending.push(join(entry.parentPath, entry.name));
+      else if (!entry.isFile()) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Whether `<root>/.git` is the checkout's own Git directory, so the host-side probe cannot be
  * steered at another repository. A command can rewrite its own `.git` after it ran: replace it
- * with a `gitdir:` file, add a `commondir` redirect, or link `HEAD`, `refs` or `packed-refs` to
- * another checkout, and the unsandboxed probe would then report that checkout's branch and head.
+ * with a `gitdir:` file, add a `commondir` redirect, or link `HEAD`, `packed-refs`, `refs` or any
+ * ref beneath it to another checkout, and the unsandboxed probe would then report that checkout's
+ * branch and head. Every entry under `refs/` is therefore checked, up to a bound.
+ * The check runs after the command has finished, so it does not cover a process the command left
+ * running in the background.
  * Anything else, including a `.git` file (a linked worktree or submodule as a source root), is
  * not probed: the field is simply omitted. Linked worktree lanes are verified separately.
  */
@@ -103,6 +125,7 @@ export async function ownsGitMetadata(root: string): Promise<boolean> {
     return (
       (await plain(join(dotGit, 'HEAD'), 'file')) &&
       (await plain(join(dotGit, 'refs'), 'directory')) &&
+      (await refsAreLinkFree(join(dotGit, 'refs'))) &&
       (await absent(join(dotGit, 'commondir'))) &&
       ((await absent(join(dotGit, 'packed-refs'))) || (await plain(join(dotGit, 'packed-refs'), 'file')))
     );
