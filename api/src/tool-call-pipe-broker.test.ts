@@ -7,7 +7,7 @@ import { MAX_FRAME_BYTES, serveToolCallPipe } from './tool-call-pipe-broker';
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const close of cleanups.splice(0).reverse()) close(); });
 
-async function setup(handler: http.RequestListener, options = {}): Promise<{
+async function setup(handler: http.RequestListener, options = {}, target?: string): Promise<{
   client: net.Socket; replies: () => Promise<any>; send: (value: unknown) => void;
 }> {
   const upstream = http.createServer(handler);
@@ -15,7 +15,7 @@ async function setup(handler: http.RequestListener, options = {}): Promise<{
   await once(upstream, 'listening');
   cleanups.push(() => { upstream.closeAllConnections(); upstream.close(); });
   const server = net.createServer(channel => {
-    cleanups.push(serveToolCallPipe(channel, `http://127.0.0.1:${(upstream.address() as net.AddressInfo).port}`, options));
+    cleanups.push(serveToolCallPipe(channel, target ?? `http://127.0.0.1:${(upstream.address() as net.AddressInfo).port}`, options));
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -89,10 +89,18 @@ describe('per-invocation tool-call pipe broker', () => {
     let upstreamClosed = false;
     let received: () => void;
     const started = new Promise<void>(resolve => { received = resolve; });
-    const harness = await setup((req, _res) => {
-      req.socket.once('close', () => { upstreamClosed = true; });
-      req.resume(); received();
-    }, { maxActiveRequests: 1 });
+    // Observe the actual TCP peer: Bun 1.3.14's HTTP IncomingMessage socket
+    // does not emit close when an unfinished response loses its connection.
+    const upstream = net.createServer(socket => {
+      socket.once('close', () => { upstreamClosed = true; });
+      socket.once('data', () => received());
+      socket.resume();
+    });
+    upstream.listen(0, '127.0.0.1');
+    await once(upstream, 'listening');
+    cleanups.push(() => upstream.close());
+    const harness = await setup(() => {}, { maxActiveRequests: 1 },
+      `http://127.0.0.1:${(upstream.address() as net.AddressInfo).port}`);
     harness.send(frame(1));
     await started;
     harness.send(frame(2));
