@@ -701,7 +701,7 @@ export class Job {
   memory_limits: { run: number; compile: number };
   extra_env_vars?: Record<string, string>;
   egressGrantToken?: string;
-  toolCallSocketEnabled: boolean;
+  toolCallPipesEnabled: boolean;
   isSynthetic: boolean;
   outputSessionId: string;
 
@@ -786,7 +786,7 @@ export class Job {
     this.memory_limits = opts.memory_limits;
     this.extra_env_vars = opts.extra_env_vars;
     this.egressGrantToken = opts.egress_grant;
-    this.toolCallSocketEnabled = opts.tool_call_socket_enabled === true;
+    this.toolCallPipesEnabled = opts.tool_call_socket_enabled === true;
     this.isSynthetic = opts.is_synthetic === true;
   }
 
@@ -1644,7 +1644,7 @@ export class Job {
       stdin,
       extraPkgdirs,
       identity: this.sandboxIdentity(),
-      enableToolCallSocket: this.toolCallSocketEnabled && script === 'run',
+      enableToolCallPipes: this.toolCallPipesEnabled && script === 'run',
       suppressSuccessLogs: this.isSynthetic,
     });
   }

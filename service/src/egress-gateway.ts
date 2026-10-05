@@ -785,8 +785,8 @@ app.post('/tool-call', async (req, res) => {
     if (!executionId || !callId || !opaqueCallbackToken) {
       /* Generic 404 so a sandbox attacker probing paths cannot tell that
        * `/tool-call` is the live route by reading the error body. The
-       * body and headers must MATCH the tool-call socket proxy's own 404
-       * for unknown paths (see api/src/tool-call-socket-proxy.ts) byte-
+       * body and headers must match the generic unknown-route response
+       * for unknown paths byte-
        * for-byte — case included — otherwise the sandbox can still
        * fingerprint the real route by comparing response shapes. */
       logger.warn(

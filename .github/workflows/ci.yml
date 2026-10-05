@@ -156,15 +156,27 @@ jobs:
         run: |
           bun ci
           bun scripts/dump-seccomp-policy.ts > "$RUNNER_TEMP/nsjail.policy"
+      - name: Build pipe broker and generate Python client
+        run: |
+          bun run --cwd api build
+          bun ci --cwd service
+          bun service/scripts/dump-pipe-preamble.ts > "$RUNNER_TEMP/pipe-client.py"
       - name: Build pinned NsJail and Kafel
-        run: docker build --target nsjail-builder -t nsjail-ipc-test -f api/Dockerfile .
+        run: docker build --target nsjail-ipc-test -t nsjail-ipc-test -f api/Dockerfile .
       - name: Verify descriptor denial and runtime IPC with the installed filter
         run: |
           docker run --rm --security-opt seccomp=unconfined \
             --mount "type=bind,source=$RUNNER_TEMP/nsjail.policy,target=/policy,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
             nsjail-ipc-test \
-            python3 /tests/nsjail_unix_gc.py /policy /nsjail/kafel/libkafel.so
+            bash -c 'python3 /tests/nsjail_unix_gc.py /policy /nsjail/kafel/libkafel.so && python3 /tests/specguard_tool_call_pipes.py && gcc -O2 -static -Wall -Wextra -Werror -DSPEC_GUARD_TEST_DISABLE_CLOSE_RANGE -o /tmp/guard-fallback /tmp/spec-guard.c && SPEC_GUARD_BINARY=/tmp/guard-fallback python3 /tests/specguard_tool_call_pipes.py'
+          docker run --rm --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$RUNNER_TEMP/nsjail.policy,target=/policy,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/pipe-client.py,target=/client.py,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/api/.build/tool-call-pipe-broker.cjs,target=/broker.cjs,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            nsjail-ipc-test \
+            python3 /tests/tool_call_pipes.py /policy /broker.cjs /client.py
 
   service-unit-tests:
     name: Service Unit Tests

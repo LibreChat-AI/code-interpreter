@@ -8,14 +8,11 @@ The filter stays installed until this test process and its children exit.
 import array
 import ctypes as c
 import errno
-import http.client
 import multiprocessing as mp
 import os
 import socket
 import struct
 import sys
-import tempfile
-import threading
 
 
 class SockFilter(c.Structure):
@@ -94,48 +91,6 @@ def test_sends(libc, pair):
     right.close()
 
 
-def test_unix_http():
-    with tempfile.TemporaryDirectory() as directory:
-        pathname = os.path.join(directory, "tcs.sock")
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-            listener.bind(pathname)
-            listener.listen(1)
-            listener.settimeout(5)
-            errors = []
-
-            def serve():
-                try:
-                    with listener.accept()[0] as peer:
-                        peer.settimeout(5)
-                        request = b""
-                        while b"\r\n\r\n" not in request:
-                            chunk = peer.recv(4096)
-                            assert chunk, "client disconnected before HTTP headers"
-                            request += chunk
-                        assert request.startswith(b"POST /tool-call HTTP/1.1")
-                        peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n"
-                                     b"Connection: close\r\n\r\n{\"ok\":true}")
-                except Exception as error:
-                    errors.append(error)
-
-            thread = threading.Thread(target=serve)
-            thread.start()
-            connection = http.client.HTTPConnection("localhost", timeout=5)
-            connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            connection.sock.settimeout(5)
-            connection.sock.connect(pathname)
-            try:
-                connection.request("POST", "/tool-call", body=b"{}")
-                response = connection.getresponse()
-                assert response.status == 200
-                assert response.read() == b'{"ok":true}'
-            finally:
-                connection.close()
-                thread.join(5)
-            assert not thread.is_alive()
-            assert not errors, errors
-
-
 def main():
     # Open before installation to verify the rule also covers inherited FDs.
     inherited = socket.socketpair()
@@ -154,9 +109,13 @@ def main():
         assert libc.syscall(syscall, 0, 0, 0, 0, 0, 0) == -1
         assert c.get_errno() == errno.EPERM
     test_sends(libc, inherited)
-    for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
-        test_sends(libc, socket.socketpair(socket.AF_UNIX, kind))
-    test_unix_http()
+    test_sends(libc, socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM))
+    for domain in (socket.AF_UNIX, socket.AF_INET, socket.AF_INET6, socket.AF_NETLINK):
+        expect_eperm(lambda: socket.socket(domain, socket.SOCK_STREAM))
+    expect_eperm(lambda: socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM))
+    expect_eperm(lambda: socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM, 6))
+    import asyncio
+    asyncio.run(asyncio.sleep(0))
     for method in ("fork", "spawn"):
         context = mp.get_context(method)
         queue = context.Queue()
@@ -169,7 +128,7 @@ def main():
         queue.join_thread()
         with context.Pool(2) as pool:
             assert pool.map(square, [2, 3, 4]) == [4, 9, 16]
-    print("PASS: descriptor sends denied; Unix IPC, HTTP, queues and pools work")
+    print("PASS: descriptor sends denied; socket creation denied; stream IPC, asyncio, queues and pools work")
 
 
 if __name__ == "__main__":

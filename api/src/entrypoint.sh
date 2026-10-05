@@ -123,8 +123,8 @@ fi
 ALLOWED_PORT="${SANDBOX_ALLOWED_LOCAL_NETWORK_PORT:-0}"
 
 # NsJail runs sandboxed processes as inside UID 65534 (nobody), mapped to a
-# per-job outside UID by the sandbox API. The proxy socket remains mounted
-# into each jail, so it does not need per-UID ownership.
+# per-job outside UID by the sandbox API. Authorized tool-call invocations
+# receive two anonymous pipe ends; no socket path is mounted into a jail.
 SANDBOX_UID=65534
 
 # Extract API port from bind address (default 2000)
@@ -136,11 +136,11 @@ if [ "$ALLOWED_PORT" -gt 0 ] 2>/dev/null; then
         exit 1
     fi
 
-    echo "Tool-call socket forwarding enabled for UID $SANDBOX_UID (port $ALLOWED_PORT)"
+    echo "Tool-call pipe forwarding enabled for UID $SANDBOX_UID (port $ALLOWED_PORT)"
     # Do not start Node here. Lambda MicroVM image creation snapshots this
     # already-running container, and the official Node binary embeds OpenSSL.
-    # The API starts and awaits the narrow Unix-socket proxy only after a
-    # post-restore /execute is authorized for tool calls.
+    # The API starts a per-invocation pipe broker only after a post-restore
+    # /execute is authorized for tool calls.
 fi
 
 # Package permissions are finalized by package-init when the PVC is populated.

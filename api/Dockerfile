@@ -29,10 +29,17 @@ RUN git clone -b master --single-branch https://github.com/google/nsjail.git . \
 RUN make -j$(nproc)
 
 COPY api/src/spec-guard.c /tmp/spec-guard.c
+COPY api/src/tool-call-pipe-bridge.c /tmp/tool-call-pipe-bridge.c
 COPY docker/rootfs-setup.c /tmp/rootfs-setup.c
-RUN gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
+RUN gcc -O2 -static -Wall -Wextra -Werror -o /usr/local/bin/tool-call-pipe-bridge /tmp/tool-call-pipe-bridge.c \
+    && gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
     && gcc -O2 -static -o /usr/local/bin/sandbox-rootfs-setup /tmp/rootfs-setup.c \
     && chmod 0111 /usr/local/bin/spec-guard /usr/local/bin/sandbox-rootfs-setup
+
+# Native policy/transport verification without building the full runner.
+FROM nsjail-builder AS nsjail-ipc-test
+COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=oven/bun:1.3.14-debian /usr/local/bin/bun /usr/local/bin/bun
 
 # ============================================================================
 # Stage 1b: Build language runtime packages (only consumed by sandbox-runner-baked)
@@ -110,14 +117,11 @@ RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/sbin/nsjail
 COPY --from=nsjail-builder /usr/local/bin/spec-guard /usr/local/bin/spec-guard
+COPY --from=nsjail-builder /usr/local/bin/tool-call-pipe-bridge /usr/local/bin/tool-call-pipe-bridge
 RUN chmod +x /usr/sbin/nsjail
 
-# The tool-call socket proxy must run under Node, not Bun. Bun's node:http
-# compat layer never fires `'connection'` events and Bun.serve's idleTimeout
-# does not close silent unix-socket connections — so our DoS protections
-# (maxConnections, idleSocketTimeoutMs, accept-time tracking) silently no-op
-# under Bun and a `for i in range(N): socket.connect` storm pins FDs in the
-# proxy until the OS limit. Pulling just the Node binary from a slim image
+# The per-invocation broker starts Node after restore, so its OpenSSL process
+# state is not captured in the MicroVM snapshot. Pulling the Node binary
 # is ~30 MB and avoids inheriting npm/node_modules from a full apt install.
 COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
 

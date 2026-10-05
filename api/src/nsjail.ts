@@ -95,6 +95,8 @@ const archSpecificLowPrioritySyscalls = process.arch === 'arm64'
 
 const SECCOMP_POLICY = [
   ...syscallDefines,
+  '#define AF_UNIX 1',
+  '#define SOCK_STREAM 1',
   '#define AF_INET 2',
   '#define AF_INET6 10',
   '#define AF_NETLINK 16',
@@ -151,8 +153,9 @@ const SECCOMP_POLICY = [
   /* CVE-2026-80521: AF_UNIX GC is reachable through SCM_RIGHTS descriptor
    * passing. Seccomp cannot inspect the msghdr/mmsghdr control data, so
    * refuse both send APIs outright, including on inherited sockets.
-   * Keep AF_UNIX/socketpair and read/write/sendto for /tmp/tcs.sock and
-   * ordinary multiprocessing IPC. io_uring above must remain blocked:
+   * The job receives only anonymous tool-call pipes. Restricted Unix
+   * stream socketpairs remain for asyncio and subprocess/runtime IPC.
+   * io_uring above must remain blocked:
    * its sendmsg operations bypass syscall-level filtering. */
   '    sendmsg, sendmmsg,',
   /* GhostLock (CVE-2026-43499): deny PI operations, including private and
@@ -181,10 +184,11 @@ const SECCOMP_POLICY = [
    * runtimes the sandbox supports. */
   '    pidfd_open(pid) { pid == 1 },',
   '    pidfd_send_signal,',
-  /* Block direct network and kernel-control socket domains from sandboxed
-   * code. AF_ALG covers the Linux kernel crypto API used by Copy Fail, and
-   * AF_RXRPC covers the RxRPC family used by Dirty Frag. */
-  '    socket(domain) { domain == AF_INET || domain == AF_INET6 || domain == AF_NETLINK || domain == AF_KEY || domain == AF_RXRPC || domain == AF_ALG }',
+  /* Deny every socket() family. VSOCK keeps its stronger KILL action above.
+   * Only anonymous Unix stream socketpairs are allowed for runtime IPC;
+   * sendmsg/sendmmsg remain denied, so no SCM_RIGHTS graph can be built. */
+  '    socket(domain) { domain != AF_VSOCK },',
+  '    socketpair(domain, type, protocol) { domain != AF_UNIX || (type & 0xf) != SOCK_STREAM || protocol != 0 }',
   '  }',
   '}',
   'USE sandbox DEFAULT ALLOW',
@@ -242,7 +246,7 @@ interface ExecuteOptions {
   stdin?: string;
   extraPkgdirs?: string[];
   identity: SandboxJobIdentity;
-  enableToolCallSocket?: boolean;
+  enableToolCallPipes?: boolean;
   suppressSuccessLogs?: boolean;
 }
 
@@ -258,7 +262,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     stdin,
     extraPkgdirs,
     identity,
-    enableToolCallSocket,
+    enableToolCallPipes,
     suppressSuccessLogs,
   } = opts;
   const logId = nanoid();
@@ -277,7 +281,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
     command,
     extraPkgdirs,
     identity,
-    enableToolCallSocket,
+    enableToolCallPipes,
   });
 
   const startTime = Date.now();
@@ -399,11 +403,20 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
   const childDiedSignal = new AbortController();
   try {
     ({ value: proc, markerSeen, pollError } = await setupGate.runSetup(logPath, () => {
-      const child = spawn(config.nsjail_path, nsjailArgs, {
+      const pipeMode = enableToolCallPipes === true;
+      if (pipeMode && (config.allowed_local_network_port <= 0 || !process.env.SANDBOX_FORWARD_TARGET?.trim())) {
+        throw new Error('tool-call pipe broker is not configured');
+      }
+      const child = spawn(pipeMode ? (process.env.TCS_PIPE_BRIDGE || '/usr/local/bin/tool-call-pipe-bridge') : config.nsjail_path, pipeMode ? [
+        '--broker', process.env.TCS_NODE_BINARY || 'node',
+        process.env.TCS_PIPE_BROKER_BUNDLE ?? path.resolve(__dirname, '..', '.build', 'tool-call-pipe-broker.cjs'),
+        config.nsjail_path, ...nsjailArgs,
+      ] : nsjailArgs, {
         /* stdin always 'pipe' so we have a writable handle to .end() even
          * when no input is supplied. The child sees EOF on stdin
          * immediately, equivalent to the previous Bun.spawn 'ignore'. */
         stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, TCS_REQUEST_TIMEOUT_MS: String(timeout) },
       }) as ChildProcessWithoutNullStreams;
       /* Attach the 'error' listener SYNCHRONOUSLY before any await. The
        * setup gate then polls the log file for ~tens of ms; during that
@@ -654,7 +667,7 @@ interface BuildArgsOptions {
   command: string[];
   extraPkgdirs?: string[];
   identity: SandboxJobIdentity;
-  enableToolCallSocket?: boolean;
+  enableToolCallPipes?: boolean;
 }
 
 export function buildArgs(opts: BuildArgsOptions): string[] {
@@ -668,7 +681,7 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
     command,
     extraPkgdirs,
     identity,
-    enableToolCallSocket,
+    enableToolCallPipes,
   } = opts;
 
   const timeoutSecs = Math.max(1, Math.ceil(timeout / 1000));
@@ -721,25 +734,17 @@ export function buildArgs(opts: BuildArgsOptions): string[] {
     args.push('--cgroup_mem_max', String(memoryLimit));
   }
 
-  if (config.allowed_local_network_port > 0 && enableToolCallSocket === true) {
-    const socketPath = '/tmp/tcs.sock';
-    args.push('-B', `${socketPath}:${socketPath}`);
+  if (enableToolCallPipes === true) {
+    args.push('--pass_fd', '3', '--pass_fd', '4');
   }
 
   for (const [key, value] of Object.entries(envVars)) {
     args.push('-E', `${key}=${value}`);
   }
 
-  /* TOOL_CALL_SOCKET is intentionally NOT exported: the path is fixed at
-   * /tmp/tcs.sock and the blocking-mode runtime preamble references it
-   * as a literal.
-   * Skipping the env entry shrinks the surface user code can introspect
-   * (`os.environ`). The per-job /tmp/tcs.sock bind-mount above is what
-   * actually makes the path connectable, and ordinary execute/replay jobs
-   * do not receive that mount. */
-
-  args.push('--');
-  args.push('/usr/local/bin/spec-guard', ...command);
+  args.push('--', '/usr/local/bin/spec-guard');
+  if (enableToolCallPipes === true) args.push('--tool-call-pipes');
+  args.push(...command);
 
   return args;
 }

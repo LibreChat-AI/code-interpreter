@@ -42,8 +42,10 @@ RUN git clone -b master --single-branch https://github.com/google/nsjail.git . \
 RUN make -j$(nproc)
 
 COPY api/src/spec-guard.c /tmp/spec-guard.c
+COPY api/src/tool-call-pipe-bridge.c /tmp/tool-call-pipe-bridge.c
 COPY docker/rootfs-setup.c /tmp/rootfs-setup.c
-RUN gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
+RUN gcc -O2 -static -Wall -Wextra -Werror -o /usr/local/bin/tool-call-pipe-bridge /tmp/tool-call-pipe-bridge.c \
+    && gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
     && gcc -O2 -static -o /usr/local/bin/sandbox-rootfs-setup /tmp/rootfs-setup.c \
     && chmod 0111 /usr/local/bin/spec-guard /usr/local/bin/sandbox-rootfs-setup
 
@@ -100,7 +102,8 @@ RUN bun install --frozen-lockfile
 COPY api/src ./src
 COPY shared /shared
 COPY api/tsconfig.json ./
-RUN bun build ./src/index.ts --minify --outdir .build --target bun --external '@opentelemetry/*'
+RUN bun build ./src/index.ts --minify --outdir .build --target bun --external '@opentelemetry/*' \
+    && bun build ./src/tool-call-pipe-broker.ts --target=node --format=cjs --outfile=.build/tool-call-pipe-broker.cjs
 
 # ============================================================================
 # Stage 4: Build sandbox rootfs (full OS layer for the microVM guest)
@@ -143,7 +146,9 @@ RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/sbin/nsjail
 COPY --from=nsjail-builder /usr/local/bin/spec-guard /usr/local/bin/spec-guard
+COPY --from=nsjail-builder /usr/local/bin/tool-call-pipe-bridge /usr/local/bin/tool-call-pipe-bridge
 RUN chmod +x /usr/sbin/nsjail
+COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
 
 WORKDIR /sandbox_api
 

@@ -91,7 +91,7 @@ describe('NsJail args', () => {
     expect(valueAfter(args, '--config')).toBe('/tmp/nsjail-job-xyz.cfg');
   });
 
-  test('does not export TOOL_CALL_SOCKET into the jail (preamble references the literal path)', () => {
+  test('does not export a legacy tool-call socket path into the jail', () => {
     const args = buildArgs({
       logPath: '/tmp/nsjail-test.log',
       pkgdir: '/pkgs/python/3.14.4',
@@ -109,7 +109,7 @@ describe('NsJail args', () => {
     }
   });
 
-  test('binds the tool-call socket only for jobs that explicitly request it', () => {
+  test('passes tool-call pipes only for jobs that explicitly request the capability', () => {
     const originalAllowedPort = config.allowed_local_network_port;
     config.allowed_local_network_port = 3190;
     try {
@@ -126,8 +126,12 @@ describe('NsJail args', () => {
       const withoutSocket = buildArgs(baseOpts);
       expect(hasArgPair(withoutSocket, '-B', '/tmp/tcs.sock:/tmp/tcs.sock')).toBe(false);
 
-      const withSocket = buildArgs({ ...baseOpts, enableToolCallSocket: true });
-      expect(hasArgPair(withSocket, '-B', '/tmp/tcs.sock:/tmp/tcs.sock')).toBe(true);
+      const withSocket = buildArgs({ ...baseOpts, enableToolCallPipes: true });
+      expect(hasArgPair(withSocket, '-B', '/tmp/tcs.sock:/tmp/tcs.sock')).toBe(false);
+      expect(hasArgPair(withSocket, '--pass_fd', '3')).toBe(true);
+      expect(hasArgPair(withSocket, '--pass_fd', '4')).toBe(true);
+      expect(withSocket).toContain('--tool-call-pipes');
+      expect(withoutSocket).not.toContain('--pass_fd');
     } finally {
       config.allowed_local_network_port = originalAllowedPort;
     }
@@ -371,7 +375,7 @@ describe('NsJail seccomp policy', () => {
 
     const errnoSocketRule = errnoBlock.split('\n').find(line => line.includes('socket(domain)'));
     expect(errnoSocketRule).toBeDefined();
-    expect(errnoSocketRule).not.toContain('AF_VSOCK');
+    expect(errnoSocketRule).toContain('domain != AF_VSOCK');
   });
 
   test('blocks priority-inheritance futex operations without denying ordinary wait/wake', () => {
@@ -396,9 +400,9 @@ describe('NsJail seccomp policy', () => {
     for (const name of ['sendmsg', 'sendmmsg', 'io_uring_setup', 'io_uring_enter', 'io_uring_register']) {
       expect(errnoBlock).toMatch(new RegExp(`\\b${name}\\b[,\\s]`));
     }
-    // AF_UNIX/socketpair are needed by the tool-call channel and runtime IPC.
-    expect(policy).not.toContain('AF_UNIX');
-    for (const name of ['socketpair', 'read', 'write', 'sendto', 'recvfrom']) {
+    // Restrict socketpairs to runtime stream IPC; tool calls use real pipes.
+    expect(policy).toContain('socketpair(domain, type, protocol) { domain != AF_UNIX || (type & 0xf) != SOCK_STREAM || protocol != 0 }');
+    for (const name of ['read', 'write', 'sendto', 'recvfrom']) {
       expect(policy).not.toMatch(new RegExp(`\\b${name}\\b`));
     }
     expect(policy).toContain('USE sandbox DEFAULT ALLOW');
@@ -409,10 +413,7 @@ describe('NsJail seccomp policy', () => {
     const errnoBlock = policy.split('ERRNO(1)')[1] ?? '';
     const socketRule = errnoBlock.split('\n').find(line => line.includes('socket(domain)'));
     expect(socketRule).toBeDefined();
-    for (const family of ['AF_ALG', 'AF_RXRPC', 'AF_INET', 'AF_INET6']) {
-      expect(socketRule).toContain(family);
-    }
-    expect(socketRule).not.toContain('AF_VSOCK');
+    expect(socketRule).toContain('domain != AF_VSOCK');
   });
 
   test('KILLs the defense-in-depth batch from the audit', () => {

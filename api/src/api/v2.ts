@@ -26,7 +26,6 @@ import {
   parseSessionBindingFromHeader,
 } from '../session-workspace';
 import { streamSessionCheckpoint, restoreSessionCheckpoint } from '../session-checkpoint';
-import { ensureToolCallSocketProxyReady } from '../tool-call-socket-process';
 import {
   SESSION_INPUT_CACHE_MAX_OBJECTS,
   hasCachedInput,
@@ -579,9 +578,6 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
     }
 
     try {
-      if (toolCallSocketEnabled) {
-        await ensureToolCallSocketProxyReady();
-      }
       await withSpan('codeapi.sandbox.prime', {
         'codeapi.language': job.runtime.language,
       }, () => job!.prime());
