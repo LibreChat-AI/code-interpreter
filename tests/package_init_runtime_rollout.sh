@@ -24,4 +24,8 @@ render --set workerSandbox.packages.initJob.image.pullPolicy=IfNotPresent \
 render --set workerSandbox.packages.initJob.image.tag=release-123 \
     --set workerSandbox.packages.initJob.image.pullPolicy=IfNotPresent \
     | grep -q 'imagePullPolicy: IfNotPresent'
-echo 'PASS: package-init refreshes latest even with reused legacy values'
+# Local kind/minikube builds are deliberately loaded without a registry.
+render -f "$ROOT/helm/codeapi/values-local.yaml" | grep -q 'imagePullPolicy: Never'
+render --set workerSandbox.packages.initJob.image.pullPolicy=Never \
+    | grep -q 'imagePullPolicy: Never'
+echo 'PASS: package-init refreshes cached latest and preserves offline images'

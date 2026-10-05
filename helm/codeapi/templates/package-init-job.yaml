@@ -40,8 +40,8 @@ spec:
       containers:
         - name: package-init
           image: "{{ .Values.workerSandbox.packages.initJob.image.repository }}:{{ .Values.workerSandbox.packages.initJob.image.tag }}"
-          {{/* Mutable latest must refresh even when upgrades reuse old values. */}}
-          imagePullPolicy: {{ if eq (.Values.workerSandbox.packages.initJob.image.tag | toString) "latest" }}Always{{ else }}{{ .Values.workerSandbox.packages.initJob.image.pullPolicy }}{{ end }}
+          {{/* Refresh cached latest images; preserve explicit offline Never. */}}
+          imagePullPolicy: {{ if and (eq (.Values.workerSandbox.packages.initJob.image.tag | toString) "latest") (ne .Values.workerSandbox.packages.initJob.image.pullPolicy "Never") }}Always{{ else }}{{ .Values.workerSandbox.packages.initJob.image.pullPolicy }}{{ end }}
           env:
             - name: PYTHON_VERSION
               value: {{ .Values.workerSandbox.packages.initJob.pythonVersion | quote }}
