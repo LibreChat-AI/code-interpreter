@@ -148,6 +148,13 @@ const SECCOMP_POLICY = [
   '  },',
   '  ERRNO(1) {',
   '    io_uring_setup, io_uring_enter, io_uring_register, sched_setaffinity, vmsplice,',
+  /* CVE-2026-80521: AF_UNIX GC is reachable through SCM_RIGHTS descriptor
+   * passing. Seccomp cannot inspect the msghdr/mmsghdr control data, so
+   * refuse both send APIs outright, including on inherited sockets.
+   * Keep AF_UNIX/socketpair and read/write/sendto for /tmp/tcs.sock and
+   * ordinary multiprocessing IPC. io_uring above must remain blocked:
+   * its sendmsg operations bypass syscall-level filtering. */
+  '    sendmsg, sendmmsg,',
   /* GhostLock (CVE-2026-43499): deny PI operations, including private and
    * realtime variants, without blocking ordinary runtime futex wait/wake. */
   '    futex(uaddr, op) { (op & FUTEX_CMD_MASK) == FUTEX_LOCK_PI || (op & FUTEX_CMD_MASK) == FUTEX_UNLOCK_PI || (op & FUTEX_CMD_MASK) == FUTEX_TRYLOCK_PI || (op & FUTEX_CMD_MASK) == FUTEX_WAIT_REQUEUE_PI || (op & FUTEX_CMD_MASK) == FUTEX_CMP_REQUEUE_PI || (op & FUTEX_CMD_MASK) == FUTEX_LOCK_PI2 },',

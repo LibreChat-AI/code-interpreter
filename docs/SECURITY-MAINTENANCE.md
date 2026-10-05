@@ -26,6 +26,7 @@ Priority 2026 checks:
 |---|---|
 | Guest kernel; host kernel in direct mode | Bad Epoll, CVE-2026-46242 |
 | Guest and host kernels | GhostLock, CVE-2026-43499 |
+| Guest kernel; host kernel in direct mode | AF_UNIX garbage collection, CVE-2026-80521 |
 | x86 host KVM | CVE-2026-46113, CVE-2026-53359, CVE-2026-64561 |
 | ARM host KVM, when virtual ITS is exposed | CVE-2026-46316 |
 
@@ -36,6 +37,51 @@ VMM's behavior rather than assuming current upstream defaults match its build.
 
 The October 2026 Vercel KVM report has no disclosed root cause or affected-version
 matrix at the time of this change. These controls are not a verified fix for it.
+
+## Unix-socket descriptor passing
+
+The NsJail policy returns EPERM for `sendmsg` and `sendmmsg` to prevent
+`SCM_RIGHTS` descriptor passing into the AF_UNIX garbage collector affected by
+[CVE-2026-80521](https://www.cve.org/CVERecord?id=CVE-2026-80521).
+Seccomp cannot inspect ancillary data behind a userspace pointer, so both calls
+are denied even for messages without descriptors and for inherited sockets.
+Keep `io_uring_setup`, `io_uring_enter`, and `io_uring_register` denied: ring
+operations can submit sends without passing through these syscall filters.
+
+Unlike the UDF sandbox's socket-family restriction, this sandbox retains
+AF_UNIX and `socketpair` for `/tmp/tcs.sock` and ordinary IPC using reads,
+writes, and `sendto`. Python multiprocessing pipes, queues, and pools remain
+supported; transferring socket/file handles through `multiprocessing.reduction`
+or similar descriptor-passing APIs returns EPERM. Do not restore `sendmsg` or
+`sendmmsg` to make those APIs work without reassessing the kernel boundary.
+
+This mitigation is separate from PI-futex filtering. Verify vendor patches for
+the deployed guest and node kernels; a policy update does not establish patch
+status. Rebuild and replace sandbox runner images to deploy the policy change.
+
+The native `NsJail IPC Filter` CI jobs compile the rendered policy with the
+image's pinned Kafel on amd64 and arm64, install it in a Linux process, and
+check descriptor sends, inherited sockets, Unix HTTP, and Python fork/spawn
+queues and pools. This validates the filter and IPC compatibility, not a
+production kernel's patch status or the full microVM deployment.
+
+### Planned transport hardening
+
+Replace the job-visible Unix HTTP socket with two dedicated per-job pipes to
+a trusted broker. Keep them separate from stdin/stdout/stderr, which carry user
+input and execution output. Limit message sizes, outstanding requests, and
+timeouts; retain the existing job authorization and tool-call budgets at the
+broker. Update each language's tool-call client to use framed messages, and
+explicitly preserve only these pipe FDs through NsJail and `spec-guard`.
+The current guard closes all FDs above 2; a redesign must preserve its protection
+against unrelated inherited descriptors.
+
+Then deny `socket` and `socketpair` in the job policy and retain the send and
+io_uring denials. Validate language/runtime compatibility, including Python's
+multiprocessing resource tracker and descriptor-sharing features, before making
+that stricter policy the default. The broker retains network access outside the
+job filter; it must not expose raw socket handles to the job. This is follow-up
+work, not part of the immediate descriptor-passing mitigation.
 
 ## Preserve host-side confinement
 

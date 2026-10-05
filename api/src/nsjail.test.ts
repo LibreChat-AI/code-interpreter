@@ -390,6 +390,20 @@ describe('NsJail seccomp policy', () => {
     expect(rule).not.toMatch(/== FUTEX_(WAIT|WAKE)(?:\s|$)/);
   });
 
+  test('blocks descriptor-passing sends while preserving ordinary Unix socket IPC', () => {
+    const policy = seccompPolicy();
+    const errnoBlock = policy.split('ERRNO(1) {')[1]?.split('  }')[0] ?? '';
+    for (const name of ['sendmsg', 'sendmmsg', 'io_uring_setup', 'io_uring_enter', 'io_uring_register']) {
+      expect(errnoBlock).toMatch(new RegExp(`\\b${name}\\b[,\\s]`));
+    }
+    // AF_UNIX/socketpair are needed by the tool-call channel and runtime IPC.
+    expect(policy).not.toContain('AF_UNIX');
+    for (const name of ['socketpair', 'read', 'write', 'sendto', 'recvfrom']) {
+      expect(policy).not.toMatch(new RegExp(`\\b${name}\\b`));
+    }
+    expect(policy).toContain('USE sandbox DEFAULT ALLOW');
+  });
+
   test('rejects Copy Fail and Dirty Frag socket entry points in the sandbox', () => {
     const policy = seccompPolicy();
     const errnoBlock = policy.split('ERRNO(1)')[1] ?? '';
