@@ -84,18 +84,28 @@ export class LaneGitWorkspaceTools implements WorkspaceToolExecutor {
       : base;
   }
 
-  async execute(request: WorkspaceToolRequest, signal?: AbortSignal): Promise<WorkspaceToolResult> {
+  async execute(
+    request: WorkspaceToolRequest,
+    signal?: AbortSignal,
+    context?: { deadlineAtMs?: number },
+  ): Promise<WorkspaceToolResult> {
     const now = this.options.now ?? Date.now;
     const startedAt = now();
-    const result = await this.options.delegate.execute(request, signal);
-    if (request.operation !== 'execute_command' || result.operation !== 'execute_command') return result;
+    const delegated = await this.options.delegate.execute(request, signal, context);
+    if (request.operation !== 'execute_command' || delegated.operation !== 'execute_command') return delegated;
+    // Only the value this wrapper reads is trusted. A sandbox executor must not be able to supply
+    // its own branch and head, whether or not the probe below produces anything.
+    const { laneGit: _untrusted, ...result } = delegated;
     if (this.options.isEnabled?.() === false) return result;
-    // The assignment expires `timeoutMs` plus a grace after it starts. The probe is advisory, so it
-    // only runs in budget the command left over, and never into the part reserved for settlement.
-    const budgetMs = (request.timeoutMs ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS) + COMMAND_EXECUTION_GRACE_MS;
+    // The probe is advisory, so it only runs in budget the command left over, and never into the
+    // part reserved for settlement. The worker's real deadline accounts for time already spent on
+    // lease transport and credential refresh; without it, assume the full timeout plus the grace.
+    const deadlineAtMs =
+      context?.deadlineAtMs ??
+      startedAt + (request.timeoutMs ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS) + COMMAND_EXECUTION_GRACE_MS;
     const probeMs = Math.min(
       this.options.probeTimeoutMs ?? LANE_GIT_PROBE_MAX_MS,
-      budgetMs - (now() - startedAt) - LANE_GIT_SETTLEMENT_RESERVE_MS,
+      deadlineAtMs - now() - LANE_GIT_SETTLEMENT_RESERVE_MS,
     );
     if (probeMs < Math.min(LANE_GIT_PROBE_MIN_MS, this.options.probeTimeoutMs ?? LANE_GIT_PROBE_MIN_MS)) return result;
     // The resolver may do filesystem work that cannot observe a signal, so the race, not the

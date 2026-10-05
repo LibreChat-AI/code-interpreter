@@ -1654,9 +1654,9 @@ async function run(
                 );
       },
     });
+    laneGitWorker = worker;
     if (runtimeSessionId !== undefined) {
       await worker.refreshCredential(controller.signal);
-      laneGitWorker = worker;
       await worker.register(controller.signal);
       await worker.resetWorkspace(runtimeSessionId, controller.signal);
       process.stdout.write(

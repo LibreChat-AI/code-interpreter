@@ -100,6 +100,8 @@ export interface WorkspaceToolExecutor {
   execute(
     request: WorkspaceToolRequest,
     signal?: AbortSignal,
+    /** Local epoch ms after which the worker aborts this execution. Advisory work must finish well before it. */
+    context?: { deadlineAtMs?: number },
   ): Promise<WorkspaceToolResult>;
 }
 

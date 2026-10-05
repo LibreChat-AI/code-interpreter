@@ -253,6 +253,30 @@ test('the probe is skipped when the command left too little of its settlement bu
   }
 });
 
+test('the probe budget follows the worker deadline, not a rebuilt timeout', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  // A full 31 s budget by timeout alone, but the worker has only 1.5 s left before it aborts.
+  for (const [remainingMs, probed] of [
+    [10_000, true],
+    [1_500, true],
+    [1_200, false],
+    [500, false],
+  ] as const) {
+    let resolved = 0;
+    const tools = new LaneGitWorkspaceTools({
+      delegate: delegate(),
+      now: () => 1_000,
+      resolveRoot: async () => {
+        resolved++;
+        return source;
+      },
+    });
+    await tools.execute(commandRequest, undefined, { deadlineAtMs: 1_000 + remainingMs });
+    assert.equal(resolved, probed ? 1 : 0, `remaining ${remainingMs}`);
+  }
+});
+
 test('a slow probe is cut short and never fails the command', async (t) => {
   const root = await scratch(t);
   const source = await repo(root, 'source');
@@ -335,6 +359,71 @@ test('the worker reports lane_git active only when the registration that stuck a
     await worker.register();
     assert.equal(worker.commandResultFeatureActive('lane_git'), !secondFails, `secondFails=${secondFails}`);
   }
+});
+
+test('a laneGit supplied by the delegate is never forwarded, only the probe value is', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const forged = { branch: 'forged', head: 'f'.repeat(40) };
+  const forging = {
+    ...delegate(),
+    async execute() {
+      return { ...commandResult, laneGit: forged };
+    },
+  };
+  const unreadable = await new LaneGitWorkspaceTools({ delegate: forging, resolveRoot: async () => undefined }).execute(commandRequest);
+  assert.equal('laneGit' in unreadable, false);
+  const probed = await new LaneGitWorkspaceTools({ delegate: forging, resolveRoot: async () => source }).execute(commandRequest);
+  assert.deepEqual('laneGit' in probed && probed.laneGit, { branch: 'main', head: await sha(source) });
+});
+
+test('the worker passes its real assignment deadline to the executor', async () => {
+  const seen: Array<number | undefined> = [];
+  const base = delegate();
+  const spying = {
+    ...base,
+    async execute(request: WorkspaceToolRequest, signal?: AbortSignal, context?: { deadlineAtMs?: number }) {
+      seen.push(context?.deadlineAtMs);
+      return base.execute(request);
+    },
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: { statefulWorkspace: false, sandboxProfile: 'anthropic-srt', runtimes: [], workspaceTools: spying.capabilities },
+    workspaceTools: spying,
+    workspaceMutationQuarantine: quarantine(),
+    fetchImpl: async () =>
+      Response.json({
+        protocolVersion: 1,
+        workerId: 'vm-1',
+        incarnationId,
+        registeredAt: new Date().toISOString(),
+        leaseTtlMs: 60_000,
+        supportedWorkspaceToolOperations: ['read_file', 'execute_command'],
+      }),
+  });
+  await worker.register();
+  const before = Date.now();
+  await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-1',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    remainingMs: 2_000,
+    executionKind: 'workspace_tool',
+    workspaceId: 'primary',
+    request: commandRequest,
+  });
+  assert.equal(seen.length, 1);
+  const deadline = seen[0] as number;
+  assert.ok(deadline >= before + 1_500 && deadline <= Date.now() + 2_000, `deadline ${deadline - before}`);
 });
 
 // Compatibility: negotiation with old and new Code API servers.

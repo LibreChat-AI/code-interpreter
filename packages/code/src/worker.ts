@@ -1873,6 +1873,7 @@ export class BridgeWorker {
         payload = await this.options.workspaceTools.execute(
           workspaceRequest,
           executionController.signal,
+          { deadlineAtMs: localDeadlineAtMs },
         );
         if (
           workspaceRequest.operation === 'list_files' &&

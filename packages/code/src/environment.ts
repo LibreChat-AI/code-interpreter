@@ -237,12 +237,13 @@ export class EnvironmentWorkspaceTools implements WorkspaceToolExecutor {
     async execute(
         request: WorkspaceToolRequest,
         signal?: AbortSignal,
+        context?: { deadlineAtMs?: number },
     ): Promise<WorkspaceToolResult> {
         if (
             request.operation !== 'execute_command' ||
             !request.environmentAction
         ) {
-            return this.delegate.execute(request, signal);
+            return this.delegate.execute(request, signal, context);
         }
         const environment = this.environments.get(request.workspaceId);
         const action = environment?.definition.actions?.find(
@@ -271,6 +272,7 @@ export class EnvironmentWorkspaceTools implements WorkspaceToolExecutor {
                 cwd: '.',
             },
             signal,
+            context,
         );
     }
 }
