@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -r "$TMP_DIR"' EXIT
+mkdir "$TMP_DIR/chart"
+cp "$ROOT/helm/codeapi/values.yaml" "$TMP_DIR/chart/values.yaml"
+cp -R "$ROOT/helm/codeapi/templates" "$TMP_DIR/chart/templates"
+awk '/^dependencies:/{exit} {print}' "$ROOT/helm/codeapi/Chart.yaml" > "$TMP_DIR/chart/Chart.yaml"
 render() {
-    helm template runtime-rollout "$ROOT/helm/codeapi" \
+    helm template runtime-rollout "$TMP_DIR/chart" \
         --show-only templates/package-init-job.yaml \
+        --set executionManifest.privateKey=test \
+        --set executionManifest.publicKey=test \
         --set workerSandbox.enabled=true \
         --set workerSandbox.packages.source=pvc "$@"
 }
