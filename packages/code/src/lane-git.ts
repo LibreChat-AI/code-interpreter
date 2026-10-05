@@ -18,6 +18,15 @@ const COMMAND_EXECUTION_GRACE_MS = 5_000;
 const LANE_GIT_TIMEOUT_MS = 5_000;
 const LANE_GIT_OUTPUT_LIMIT = 4096;
 
+/**
+ * A read-only probe must never reach the network or run a transport command, whatever the checkout's
+ * own config says. A command can rewrite `.git/config` to mark a remote as a promisor and point a ref
+ * at a missing object, which makes a plain object lookup fetch lazily and run `ext::`, `ssh` or
+ * `uploadpack` programs on the host. An empty `GIT_ALLOW_PROTOCOL` disallows every transport and
+ * overrides repository configuration; `GIT_NO_LAZY_FETCH` covers Git 2.44 and later directly.
+ */
+const LANE_GIT_PROBE_ENV = { GIT_ALLOW_PROTOCOL: '', GIT_NO_LAZY_FETCH: '1' };
+
 /** Exit codes that mean "no value" rather than "could not read": detached HEAD, unborn branch. */
 const DETACHED_EXIT = 1;
 const UNBORN_EXIT = 128;
@@ -30,7 +39,7 @@ async function read(
   timeoutMs: number = LANE_GIT_TIMEOUT_MS,
 ): Promise<string | null | undefined> {
   try {
-    const bytes = await gitBytes(root, args, signal, timeoutMs, LANE_GIT_OUTPUT_LIMIT);
+    const bytes = await gitBytes(root, args, signal, timeoutMs, LANE_GIT_OUTPUT_LIMIT, LANE_GIT_PROBE_ENV);
     // Git permits ref names that are not UTF-8. Decoding them leniently would report a different,
     // valid-looking name, so anything that is not strictly valid UTF-8 is reported as null.
     let text: string;

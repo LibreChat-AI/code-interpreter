@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -614,6 +614,36 @@ test('a repository with packed objects and refs is still probed', async (t) => {
   await exec('git', ['-C', source, 'gc', '-q']);
   assert.equal(await ownsGitMetadata(source), true);
   assert.equal((await readLaneGit(source))?.head, await sha(source));
+});
+
+test('a promisor remote cannot make the probe fetch or run a command on the host', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const victim = await repo(root, 'victim');
+  await exec('git', ['-C', victim, ...identity, 'commit', '--allow-empty', '-m', 'secret']);
+  const secret = await sha(victim);
+  const marker = join(root, 'ran-on-host');
+  const config = [
+    '[remote "origin"]',
+    `\turl = ${victim}`,
+    '\tpromisor = true',
+    '\tpartialclonefilter = blob:none',
+    `\tuploadpack = touch ${marker}; git-upload-pack`,
+    '[extensions]',
+    '\tpartialclone = origin',
+    '[core]',
+    '\trepositoryformatversion = 1',
+    '[protocol]',
+    '\tallow = always',
+    '[protocol "file"]',
+    '\tallow = always',
+    '',
+  ].join('\n');
+  await writeFile(join(source, '.git', 'config'), config, { flag: 'a' });
+  await writeFile(join(source, '.git', 'refs', 'heads', 'main'), `${secret}\n`);
+  const state = await readLaneGit(source);
+  assert.notEqual(state?.head, secret);
+  await assert.rejects(readFile(marker), { code: 'ENOENT' });
 });
 
 test('a linked worktree .git file is not claimed by the source checkout check', async (t) => {

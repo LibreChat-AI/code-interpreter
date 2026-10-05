@@ -180,11 +180,12 @@ export async function gitBytes(
   signal?: AbortSignal,
   timeout = GIT_TIMEOUT_MS,
   maxBuffer = GIT_OUTPUT_LIMIT,
+  extraEnvironment: Record<string, string> = {},
 ): Promise<Buffer> {
   const { stdout } = await execFileAsync(
     'git',
     ['--no-optional-locks', '-C', cwd, '-c', 'core.fsmonitor=false', ...args],
-    { encoding: 'buffer', env: gitEnvironment(), maxBuffer, signal, timeout },
+    { encoding: 'buffer', env: { ...gitEnvironment(), ...extraEnvironment }, maxBuffer, signal, timeout },
   );
   return stdout;
 }
