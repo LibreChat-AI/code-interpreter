@@ -119,7 +119,7 @@ a separate machine.
 
 Install:
 
--   Node.js 20.11 or newer (Node.js 24 is supported);
+-   Node.js 22.21 or newer (Node.js 24 is supported);
 -   Git;
 -   `bubblewrap`, `socat`, and `ripgrep` on Linux;
 -   Bash 5.2 or newer and `jq` when Bash Programmatic Tool Calling is enabled;

@@ -224,7 +224,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['20.11.0', '22.21.0', '24.16.0']
+        node-version: ['22.21.0', '24.16.0']
     defaults:
       run:
         working-directory: packages/code

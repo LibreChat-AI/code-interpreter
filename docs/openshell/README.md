@@ -143,7 +143,7 @@ full authorization and delivery contract before implementation.
 
 ## Run the lifecycle probe
 
-Requirements: Node 20+, an OpenShell `0.1.2` CLI, a registered named evaluation
+Requirements: Node 22.21+, an OpenShell `0.1.2` CLI, a registered named evaluation
 gateway using the matching release, and a digest-pinned shell/coreutils image
 pullable by that gateway. Install and configure these separately on dedicated
 infrastructure. This repository does not install or start a gateway.

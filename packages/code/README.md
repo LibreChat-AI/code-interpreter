@@ -3,6 +3,9 @@
 Provider-neutral protocol and worker CLI for attaching a stateful, sandboxed
 code environment to LibreChat Code API.
 
+Requires Node.js 22.21 or newer. CI tests Node.js 22 and 24; Node.js 20 is
+unsupported.
+
 For a complete machine setup and operations guide, see the
 [self-hosted worker runbook](../../docs/remote-bridge/worker-runbook.md).
 
