@@ -16,10 +16,22 @@ RESOLV_FIELD_SEPARATOR='|'
 # proxying it through TSI, so a loopback resolver such as Docker's embedded
 # 127.0.0.11 never answers inside the guest. Relay it from this container's own
 # address, which the guest reaches through TSI, and hand the guest that address.
+# The relay forks per datagram and per connection, so bound how long an idle
+# child may live, and how many TCP children may run at once. socat 1.8 fails
+# every UDP-RECVFROM child given max-children, so the UDP relay relies on its
+# short idle timeout. Only the runner network reaches the relay: NsJail jobs in
+# the guest run in their own network namespace.
 RESOLVER_RELAY_READY_ATTEMPTS=50
+RESOLVER_RELAY_MAX_CHILDREN=64
+RESOLVER_RELAY_UDP_IDLE_SECONDS=5
+RESOLVER_RELAY_TCP_IDLE_SECONDS=30
+
+is_loopback_nameserver() {
+    [[ "$1" == 127.* || "$1" == ::1 ]]
+}
 
 loopback_nameserver() {
-    awk '{ sub(/\r$/, "") } $1 == "nameserver" && $2 ~ /^127\./ { print $2; exit }' "$1"
+    awk '{ sub(/\r$/, "") } $1 == "nameserver" && ($2 ~ /^127\./ || $2 == "::1") { print $2; exit }' "$1"
 }
 
 runner_address() {
@@ -36,7 +48,7 @@ encode_resolv_conf() {
             continue
         fi
         read -ra words <<< "$line"
-        if [ "${words[0]}" = nameserver ] && [[ "${words[1]}" == 127.* ]]; then
+        if [ "${words[0]}" = nameserver ] && is_loopback_nameserver "${words[1]}"; then
             [ "${words[1]}" = "$loopback" ] || continue
             words[1]="$relay"
         fi
@@ -58,9 +70,16 @@ proc_net_address() {
 
 start_resolver_relay() {
     local nameserver="$1" address="$2" local_address udp_pid tcp_pid attempt
-    socat -T 5 "UDP4-RECVFROM:53,bind=$address,fork" "UDP4-SENDTO:$nameserver:53" &
+    local udp_target="UDP4-SENDTO:$nameserver:53" tcp_target="TCP4:$nameserver:53"
+    if [ "$nameserver" = ::1 ]; then
+        udp_target='UDP6-SENDTO:[::1]:53'
+        tcp_target='TCP6:[::1]:53'
+    fi
+    socat -T "$RESOLVER_RELAY_UDP_IDLE_SECONDS" \
+        "UDP4-RECVFROM:53,bind=$address,fork" "$udp_target" &
     udp_pid=$!
-    socat "TCP4-LISTEN:53,bind=$address,reuseaddr,fork" "TCP4:$nameserver:53" &
+    socat -T "$RESOLVER_RELAY_TCP_IDLE_SECONDS" \
+        "TCP4-LISTEN:53,bind=$address,reuseaddr,fork,max-children=$RESOLVER_RELAY_MAX_CHILDREN" "$tcp_target" &
     tcp_pid=$!
     local_address="$(proc_net_address "$address")"
     for ((attempt = 0; attempt < RESOLVER_RELAY_READY_ATTEMPTS; attempt++)); do

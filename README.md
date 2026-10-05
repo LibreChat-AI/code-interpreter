@@ -248,10 +248,12 @@ rather than leaving the guest with an unrelated public DNS server.
 The guest kernel keeps loopback traffic on its own loopback device instead of
 proxying it through TSI, so it cannot reach a loopback resolver such as Docker's
 embedded `127.0.0.11`. The launcher entrypoint relays the first loopback
-nameserver over UDP and TCP port 53 from the runner's own IPv4 address with
-`socat`, and forwards that address to the guest in its place; further loopback
-nameservers are dropped, and startup fails if the relay cannot listen. Routable
-nameservers, including Kubernetes cluster DNS, are forwarded unchanged.
+nameserver (`127.0.0.0/8` or `::1`) over UDP and TCP port 53 from the runner's
+own IPv4 address with `socat`, and forwards that address to the guest in its
+place; further loopback nameservers are dropped, and startup fails if the relay
+cannot listen. Relay children exit when idle, and the TCP relay caps its
+concurrent children. Routable nameservers, including Kubernetes cluster DNS, are forwarded
+unchanged.
 
 libkrun delivers the guest environment on the kernel command line, which only
 carries single-line printable ASCII and is capped at 2048 bytes by the guest
