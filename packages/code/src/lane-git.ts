@@ -60,14 +60,28 @@ export async function readLaneGit(
   signal?: AbortSignal,
   timeoutMs: number = LANE_GIT_TIMEOUT_MS,
 ): Promise<WorkspaceLaneGit | undefined> {
-  const [branch, head] = await Promise.all([
-    read(root, ['symbolic-ref', '--quiet', 'HEAD'], DETACHED_EXIT, signal, timeoutMs),
-    read(root, ['rev-parse', '--verify', 'HEAD^{commit}'], UNBORN_EXIT, signal, timeoutMs),
-  ]);
-  if (branch === undefined || head === undefined) return undefined;
+  return await snapshotLaneGit(
+    () => read(root, ['symbolic-ref', '--quiet', 'HEAD'], DETACHED_EXIT, signal, timeoutMs),
+    () => read(root, ['rev-parse', '--verify', 'HEAD^{commit}'], UNBORN_EXIT, signal, timeoutMs),
+  );
+}
+
+/**
+ * Two Git processes cannot see one atomic snapshot, so a checkout between them could pair one
+ * branch with another branch's commit, a tuple that was never checked out. Read the branch before
+ * and after the head and report only when it did not change in between; otherwise omit the field.
+ */
+export async function snapshotLaneGit(
+  readBranch: () => Promise<string | null | undefined>,
+  readHead: () => Promise<string | null | undefined>,
+): Promise<WorkspaceLaneGit | undefined> {
+  const before = await readBranch();
+  const head = await readHead();
+  const after = await readBranch();
+  if (before === undefined || head === undefined || after === undefined || before !== after) return undefined;
   // `--short` shortens ambiguously (`heads/foo` when a tag `foo` exists). Take the full ref and strip
   // exactly `refs/heads/`; a HEAD pointing anywhere else is not a branch.
-  const name = branch?.startsWith('refs/heads/') ? branch.slice('refs/heads/'.length) : null;
+  const name = before?.startsWith('refs/heads/') ? before.slice('refs/heads/'.length) : null;
   return { branch: boundedBranch(name), head: boundedHead(head) };
 }
 

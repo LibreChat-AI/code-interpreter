@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { LaneGitWorkspaceTools, ownsGitMetadata, ownsLinkedWorktreeMetadata, readLaneGit } from './lane-git.js';
+import { LaneGitWorkspaceTools, ownsGitMetadata, ownsLinkedWorktreeMetadata, readLaneGit, snapshotLaneGit } from './lane-git.js';
 import { isValidBridgeWorkspaceToolCapabilities, isWorkspaceLaneGit, isWorkspaceToolResult } from './protocol.js';
 import { BridgeWorker } from './worker.js';
 
@@ -518,6 +518,24 @@ test('the refs walk stops as soon as the probe signal aborts', async (t) => {
   checks = 0;
   assert.equal(await ownsLinkedWorktreeMetadata(join(source, '.git'), 'lane', aborting), false);
   assert.equal(checks, 3);
+});
+
+test('a branch that changes while the head is being read is not reported', async () => {
+  const head = 'a'.repeat(40);
+  const answers = (values: Array<string | null | undefined>) => {
+    let index = 0;
+    return async () => values[index++];
+  };
+  // Stable: the same branch before and after the head read.
+  assert.deepEqual(await snapshotLaneGit(answers(['refs/heads/a', 'refs/heads/a']), async () => head), { branch: 'a', head });
+  // Torn: a checkout landed between the two reads, so the head may belong to the other branch.
+  assert.equal(await snapshotLaneGit(answers(['refs/heads/a', 'refs/heads/b']), async () => head), undefined);
+  assert.equal(await snapshotLaneGit(answers(['refs/heads/a', null]), async () => head), undefined);
+  assert.equal(await snapshotLaneGit(answers([null, 'refs/heads/a']), async () => head), undefined);
+  // Detached stays detached.
+  assert.deepEqual(await snapshotLaneGit(answers([null, null]), async () => head), { branch: null, head });
+  // Any unreadable value omits the field.
+  assert.equal(await snapshotLaneGit(answers(['refs/heads/a', 'refs/heads/a']), async () => undefined), undefined);
 });
 
 test('a linked worktree .git file is not claimed by the source checkout check', async (t) => {
