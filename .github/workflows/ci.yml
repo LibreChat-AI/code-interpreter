@@ -173,12 +173,12 @@ jobs:
             launcher-guest-test /tests/pipe_runtime_image.cjs
       - name: Verify descriptor denial and runtime IPC with the installed filter
         run: |
-          docker run --rm --security-opt seccomp=unconfined \
+          docker run --rm --init --security-opt seccomp=unconfined \
             --mount "type=bind,source=$RUNNER_TEMP/nsjail.policy,target=/policy,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
             nsjail-ipc-test \
             bash -c 'python3 /tests/nsjail_unix_gc.py /policy /nsjail/kafel/libkafel.so && python3 /tests/specguard_tool_call_pipes.py && gcc -O2 -static -Wall -Wextra -Werror -DSPEC_GUARD_TEST_DISABLE_CLOSE_RANGE -o /tmp/guard-fallback /tmp/spec-guard.c && SPEC_GUARD_BINARY=/tmp/guard-fallback python3 /tests/specguard_tool_call_pipes.py'
-          docker run --rm --security-opt seccomp=unconfined \
+          docker run --rm --init --security-opt seccomp=unconfined \
             --mount "type=bind,source=$RUNNER_TEMP/nsjail.policy,target=/policy,readonly" \
             --mount "type=bind,source=$RUNNER_TEMP/pipe-client.py,target=/client.py,readonly" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/api/.build/tool-call-pipe-broker.cjs,target=/broker.cjs,readonly" \

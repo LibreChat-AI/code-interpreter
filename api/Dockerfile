@@ -38,6 +38,8 @@ RUN gcc -O2 -static -Wall -Wextra -Werror -o /usr/local/bin/tool-call-pipe-bridg
 
 # Native policy/transport verification without building the full runner.
 FROM nsjail-builder AS nsjail-ipc-test
+COPY docker/python-runtime /python-runtime
+RUN python3 /python-runtime/install.py
 COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=oven/bun:1.4.2-debian /usr/local/bin/bun /usr/local/bin/bun
 
@@ -68,6 +70,7 @@ RUN apt-install \
 
 RUN mkdir -p /pkgs
 
+COPY docker/python-runtime /python-runtime
 COPY docker/package-init.sh /package-init.sh
 COPY javascript-packages.txt /javascript-packages.txt
 RUN chmod +x /package-init.sh && FORCE_REBUILD=true /package-init.sh

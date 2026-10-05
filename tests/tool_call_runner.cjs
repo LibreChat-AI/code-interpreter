@@ -73,6 +73,9 @@ if __name__ == '__main__':
         try: socket.socket(domain, socket.SOCK_STREAM)
         except OSError as error: assert error.errno == errno.EPERM
         else: raise AssertionError('socket creation allowed')
+    try: socket.socketpair()
+    except OSError as error: assert error.errno == errno.EPERM
+    else: raise AssertionError('socketpair allowed')
     assert subprocess.check_output([sys.executable, '-c', "import os; print(os.path.exists('/proc/self/fd/3'))"]).strip() == b'False'
     async def check():
         results = await asyncio.gather(*[_execute_tool_internal_async('echo', {'n': n}) for n in range(8)])
@@ -82,7 +85,8 @@ if __name__ == '__main__':
     # Test the supported pipe-only spawn/fork multiprocessing paths.
     for method in ('spawn', 'fork'):
         ctx = mp.get_context(method)
-        receiver, sender = ctx.Pipe(duplex=False)
+        receiver, sender = ctx.Pipe()
+        assert _stat.S_ISFIFO(os.fstat(receiver.fileno()).st_mode)
         child = ctx.Process(target=_mp_echo, args=(sender,))
         child.start()
         sender.close()
@@ -111,7 +115,7 @@ if __name__ == '__main__':
     assert(result.run.stdout.includes('PASS:'), JSON.stringify(result));
     console.log(result.run.stdout.trim());
     // Ordinary jobs still work and do not receive the tool-call descriptors.
-    const plain = await execute("import os; assert not os.path.exists('/proc/self/fd/3'); print('PASS: ordinary execution without pipe capability')", false);
+    const plain = await execute("import os, asyncio; assert not os.path.exists('/proc/self/fd/3'); asyncio.run(asyncio.to_thread(lambda: 1)); print('PASS: ordinary asyncio execution without pipe capability')", false);
     console.log(plain.run.stdout.trim());
     for (const language of ['bun-js', 'bun-ts']) {
       const js = await execute("console.log('PASS: Bun ' + Bun.version)", false, language, '1.4.2');

@@ -109,15 +109,32 @@ def main():
         assert libc.syscall(syscall, 0, 0, 0, 0, 0, 0) == -1
         assert c.get_errno() == errno.EPERM
     test_sends(libc, inherited)
-    test_sends(libc, socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM))
+    expect_eperm(lambda: socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM))
     for domain in (socket.AF_UNIX, socket.AF_INET, socket.AF_INET6, socket.AF_NETLINK):
         expect_eperm(lambda: socket.socket(domain, socket.SOCK_STREAM))
     expect_eperm(lambda: socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM))
     expect_eperm(lambda: socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM, 6))
     import asyncio
-    asyncio.run(asyncio.sleep(0))
+    from python_pipe_runtime import check_asyncio, duplex_child
+    asyncio.run(check_asyncio())
     for method in ("fork", "spawn"):
         context = mp.get_context(method)
+        left, right = context.Pipe()
+        process = context.Process(target=duplex_child, args=(right,))
+        process.start()
+        right.close()
+        left.send_bytes(b'x' * 100_000)
+        assert left.poll(10)
+        assert left.recv_bytes() == b'x' * 100_000
+        process.join(10)
+        assert process.exitcode == 0
+        try:
+            left.recv_bytes()
+        except EOFError:
+            pass
+        else:
+            raise AssertionError('duplex peer EOF missing')
+        left.close()
         queue = context.Queue()
         process = context.Process(target=queue_child, args=(queue,))
         process.start()
@@ -128,7 +145,7 @@ def main():
         queue.join_thread()
         with context.Pool(2) as pool:
             assert pool.map(square, [2, 3, 4]) == [4, 9, 16]
-    print("PASS: descriptor sends denied; socket creation denied; stream IPC, asyncio, queues and pools work")
+    print("PASS: descriptor sends denied; socket creation denied; socketpairs denied; pipe-based asyncio, duplex IPC, queues and pools work")
 
 
 if __name__ == "__main__":

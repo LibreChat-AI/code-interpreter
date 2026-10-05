@@ -12,8 +12,8 @@ Node and its TLS state must continue to start after MicroVM restore.
 
 The current stdio spawn APIs create socketpairs, not anonymous pipe endpoints.
 The existing guard also intentionally removes unrelated inherited descriptors.
-Python asyncio and duplex multiprocessing pipes use Unix stream socketpairs;
-a blanket socketpair denial would break these ordinary workloads.
+Unmodified Python asyncio and duplex multiprocessing pipes use Unix stream
+socketpairs. ADR 0012 replaces those runtime internals with anonymous pipes.
 
 ## Decision
 
@@ -33,10 +33,9 @@ requests. The Python client clears descriptor inheritance and refuses calls
 from forked or spawned children. Spawned workers may re-import tool definitions
 without receiving or using the pipe capability. stdout/stderr and user stdin remain separate.
 
-Deny all socket creation. Permit only protocol-0 Unix stream socketpairs for
-runtime IPC, retaining the sendmsg/sendmmsg/io_uring denials. This preserves
-asyncio and pipe-based multiprocessing using explicit spawn/fork contexts without permitting named socket access
-or descriptor passing. No legacy TCP/socket fallback is provided.
+Deny all socket and socketpair creation, retaining sendmsg/sendmmsg/io_uring
+denials. The patched Python runtime preserves asyncio and duplex multiprocessing
+using explicit spawn/fork contexts. No TCP/socket fallback is provided.
 
 ## Consequences
 

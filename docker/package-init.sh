@@ -87,6 +87,7 @@ echo "=============================================="
 echo ""
 
 packages_ready() {
+    [ -f "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/.sandbox-pipe-runtime-v1" ] &&
     [ -f "/pkgs/python/${PYTHON_VERSION}/.package-installed" ] &&
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/PIL" ] &&
     [ -d "/pkgs/python/${PYTHON_VERSION}/lib/python${PYTHON_SITE_VERSION}/site-packages/markitdown" ] &&
@@ -138,6 +139,7 @@ cd "Python-${PYTHON_VERSION}"
 ./configure --prefix="$PKG_DEST" --enable-optimizations 2>/dev/null
 make -j$(nproc)
 make install
+"${PKG_DEST}/bin/python3" "${SCRIPT_DIR}/python-runtime/install.py"
 cd /tmp
 rm -rf /tmp/Python-${PYTHON_VERSION}*
 

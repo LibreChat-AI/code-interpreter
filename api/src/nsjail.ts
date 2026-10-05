@@ -95,8 +95,6 @@ const archSpecificLowPrioritySyscalls = process.arch === 'arm64'
 
 const SECCOMP_POLICY = [
   ...syscallDefines,
-  '#define AF_UNIX 1',
-  '#define SOCK_STREAM 1',
   '#define AF_INET 2',
   '#define AF_INET6 10',
   '#define AF_NETLINK 16',
@@ -153,8 +151,8 @@ const SECCOMP_POLICY = [
   /* CVE-2026-80521: AF_UNIX GC is reachable through SCM_RIGHTS descriptor
    * passing. Seccomp cannot inspect the msghdr/mmsghdr control data, so
    * refuse both send APIs outright, including on inherited sockets.
-   * The job receives only anonymous tool-call pipes. Restricted Unix
-   * stream socketpairs remain for asyncio and subprocess/runtime IPC.
+   * The job receives only anonymous tool-call pipes. Anonymous
+   * pipes replace socketpairs in the packaged Python runtime.
    * io_uring above must remain blocked:
    * its sendmsg operations bypass syscall-level filtering. */
   '    sendmsg, sendmmsg,',
@@ -185,10 +183,10 @@ const SECCOMP_POLICY = [
   '    pidfd_open(pid) { pid == 1 },',
   '    pidfd_send_signal,',
   /* Deny every socket() family. VSOCK keeps its stronger KILL action above.
-   * Only anonymous Unix stream socketpairs are allowed for runtime IPC;
-   * sendmsg/sendmmsg remain denied, so no SCM_RIGHTS graph can be built. */
+   * Deny socketpairs as well; packaged runtime IPC uses anonymous pipes.
+   * Keep sendmsg/sendmmsg denied for inherited descriptors too. */
   '    socket(domain) { domain != AF_VSOCK },',
-  '    socketpair(domain, type, protocol) { domain != AF_UNIX || (type & 0xf) != SOCK_STREAM || protocol != 0 }',
+  '    socketpair',
   '  }',
   '}',
   'USE sandbox DEFAULT ALLOW',

@@ -394,14 +394,14 @@ describe('NsJail seccomp policy', () => {
     expect(rule).not.toMatch(/== FUTEX_(WAIT|WAKE)(?:\s|$)/);
   });
 
-  test('blocks descriptor-passing sends while preserving ordinary Unix socket IPC', () => {
+  test('blocks descriptor-passing sends and all socketpair creation', () => {
     const policy = seccompPolicy();
     const errnoBlock = policy.split('ERRNO(1) {')[1]?.split('  }')[0] ?? '';
     for (const name of ['sendmsg', 'sendmmsg', 'io_uring_setup', 'io_uring_enter', 'io_uring_register']) {
       expect(errnoBlock).toMatch(new RegExp(`\\b${name}\\b[,\\s]`));
     }
-    // Restrict socketpairs to runtime stream IPC; tool calls use real pipes.
-    expect(policy).toContain('socketpair(domain, type, protocol) { domain != AF_UNIX || (type & 0xf) != SOCK_STREAM || protocol != 0 }');
+    // The patched runtime and tool calls use anonymous pipes.
+    expect(policy).toContain('    socketpair');
     for (const name of ['read', 'write', 'sendto', 'recvfrom']) {
       expect(policy).not.toMatch(new RegExp(`\\b${name}\\b`));
     }

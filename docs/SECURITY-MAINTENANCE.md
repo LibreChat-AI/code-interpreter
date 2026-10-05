@@ -49,12 +49,13 @@ Keep `io_uring_setup`, `io_uring_enter`, and `io_uring_register` denied: ring
 operations can submit sends without passing through these syscall filters.
 
 The job policy denies every `socket()` family (VSOCK retains its KILL action).
-It allows only AF_UNIX SOCK_STREAM `socketpair` with protocol 0, including
-CLOEXEC/NONBLOCK flags. Python asyncio and duplex multiprocessing pipes need
-these anonymous socketpairs. Ordinary fork/spawn queues and pools are covered
-by native tests. Named Unix listeners, `multiprocessing.Manager`, datagram or
-seqpacket pairs, and descriptor-sharing APIs are unsupported. The send and
-io_uring denials still prevent SCM_RIGHTS descriptor graphs on allowed pairs.
+It also denies every `socketpair()`. The packaged Python runtime replaces
+asyncio's wakeup socketpair with a nonblocking anonymous pipe and duplex
+multiprocessing socketpairs with two anonymous pipes. Native tests cover
+thread wakeups, signals, cancellation, subprocesses, duplex spawn/fork IPC,
+queues and pools. Named Unix listeners, `multiprocessing.Manager`, forkserver,
+and descriptor-sharing APIs remain unsupported. Keep the send and io_uring
+denials for inherited descriptors and defense in depth.
 
 This mitigation is separate from PI-futex filtering. Verify vendor patches for
 the deployed guest and node kernels; a policy update does not establish patch
@@ -143,7 +144,11 @@ production kernel patch status or third-party language-package compatibility.
 ### Coordinated rollout
 
 Deploy the service's new blocking preamble together with rebuilt runner images
-containing the broker, relay and updated guard/policy. Drain old blocking jobs
+containing the broker, relay and updated guard/policy. Rebuild Python packages
+with the pipe-runtime patch before enabling socketpair denial. Package init
+checks the `.sandbox-pipe-runtime-v1` marker and rebuilds unpatched packages.
+Drain or version-route execution while replacing packages; rollback must pair
+the policy with its compatible runtime packages. Drain old blocking jobs
 and route new blocking requests only to matching images during rollout. Old
 socket preambles fail on pipe-only runners; new pipe preambles fail immediately
 on old runners. There is no TCP or Unix-socket fallback. Replay mode is unchanged.

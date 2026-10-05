@@ -75,6 +75,7 @@ RUN apt-install \
 
 RUN mkdir -p /pkgs
 
+COPY docker/python-runtime /python-runtime
 COPY docker/package-init.sh /package-init.sh
 COPY javascript-packages.txt /javascript-packages.txt
 RUN chmod +x /package-init.sh && FORCE_REBUILD=true /package-init.sh

@@ -118,6 +118,9 @@ install_python() {
         rm -rf /tmp/Python-${PYTHON_VERSION}*
     "
 
+    docker cp "$SCRIPT_DIR/docker/python-runtime" "$CONTAINER_NAME:/tmp/python-runtime"
+    docker exec "$CONTAINER_NAME" "${pkg_dest}/bin/python3" /tmp/python-runtime/install.py
+
     docker exec "$CONTAINER_NAME" bash -c "cat > ${pkg_dest}/pkg-info.json << 'EOF'
 {
     \"language\": \"python\",
