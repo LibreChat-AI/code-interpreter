@@ -1313,12 +1313,12 @@ async function run(
     });
     workspaceTools = linkedWorktreeTools;
   }
-  // Set from each registration response; stays false against a Code API that does not offer lane_git.
-  let laneGitNegotiated = false;
+  // Probe Git only while the active registration advertises lane_git, which the worker decides.
+  let laneGitWorker: BridgeWorker | undefined;
   if (workspaceTools?.capabilities.operations.includes('execute_command')) {
     workspaceTools = new LaneGitWorkspaceTools({
       delegate: workspaceTools,
-      isEnabled: () => laneGitNegotiated,
+      isEnabled: () => laneGitWorker?.commandResultFeatureActive('lane_git') === true,
       async resolveRoot(request, signal) {
         const source = roots.find((root) => root.id === request.workspaceId);
         if (!source) return undefined;
@@ -1625,10 +1625,8 @@ async function run(
               });
             }
           : undefined,
-      onRegistered: async registration => {
-            laneGitNegotiated =
-              registration.supportedWorkspaceCommandResultFeatures?.includes('lane_git') === true;
-            if (!fileRelaySupervisor) return;
+      onRegistered: fileRelaySupervisor
+                ? async registration => {
             if (
               registration.registrationGeneration == null ||
                           !Number.isSafeInteger(
@@ -1644,7 +1642,8 @@ async function run(
               registration.registrationGeneration,
               controller.signal,
             );
-          },
+          }
+        : undefined,
             onError: error => {
         const message =
                     error instanceof Error
@@ -1657,6 +1656,7 @@ async function run(
     });
     if (runtimeSessionId !== undefined) {
       await worker.refreshCredential(controller.signal);
+      laneGitWorker = worker;
       await worker.register(controller.signal);
       await worker.resetWorkspace(runtimeSessionId, controller.signal);
       process.stdout.write(

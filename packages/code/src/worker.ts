@@ -18,6 +18,7 @@ import { signBridgeRequest } from './identity.js';
 import { isWorkspaceToolRequest, WorkspaceToolError } from './workspace.js';
 
 import type {
+  WorkspaceCommandResultFeature,
   BridgeAssignment,
   BridgeLeaseResponse,
   BridgeSandboxRequest,
@@ -481,6 +482,11 @@ export class BridgeWorker {
   private instructionMetadataSupported = true;
   /** Added error codes the current Code API registration accepts in settlements. */
   private settlementErrorCodes: ReadonlySet<WorkspaceToolErrorCode> = new Set();
+  /** Whether the registration that is actually active advertised this command result feature. */
+  commandResultFeatureActive(feature: WorkspaceCommandResultFeature): boolean {
+    return this.activeCapabilities.workspaceTools?.commandResultFeatures?.includes(feature) === true;
+  }
+
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
   private maintenanceOnly = false;

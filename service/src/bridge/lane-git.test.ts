@@ -108,6 +108,8 @@ describe('laneGit on command settlements', () => {
     ['an over-long branch', { branch: 'x'.repeat(257), head }],
     ['an empty branch', { branch: '', head }],
     ['a control character in the branch', { branch: 'bad\nname', head }],
+    ['a bidi override in the branch', { branch: 'feature/\u202eabc', head }],
+    ['a zero-width character in the branch', { branch: 'fix\u200bme', head }],
     ['uppercase hex', { branch: 'main', head: 'A'.repeat(40) }],
     ['a short head', { branch: 'main', head: 'a'.repeat(39) }],
     ['non-hex head', { branch: 'main', head: 'g'.repeat(40) }],

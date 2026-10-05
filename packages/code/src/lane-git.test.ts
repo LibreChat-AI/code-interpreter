@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -266,6 +266,75 @@ test('a slow probe is cut short and never fails the command', async (t) => {
     },
   });
   assert.deepEqual(await tools.execute(commandRequest), commandResult);
+});
+
+test('a HEAD that names a blob is reported as a null head, not as a commit', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const id = (await exec('bash', ['-c', `echo hello | git -C '${source}' hash-object -w --stdin`])).stdout.trim();
+  await writeFile(join(source, '.git', 'HEAD'), `${id}\n`);
+  assert.deepEqual(await readLaneGit(source), { branch: null, head: null });
+});
+
+test('branch names with Unicode control or format characters are not reported', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  await exec('git', ['-C', source, 'checkout', '-b', 'feature/\u202eabc']);
+  assert.deepEqual(await readLaneGit(source), { branch: null, head: await sha(source) });
+  for (const name of ['a\u0085b', 'a\u202eb', 'a\u200bb', 'a\u2028b']) {
+    assert.equal(isWorkspaceLaneGit({ branch: name, head: null }), false, JSON.stringify(name));
+  }
+  assert.equal(isWorkspaceLaneGit({ branch: 'feature/caf\u00e9-\u65e5\u672c', head: null }), true);
+});
+
+test('a resolver that ignores its signal cannot hold the command result past the probe limit', async () => {
+  const tools = new LaneGitWorkspaceTools({
+    delegate: delegate(),
+    probeTimeoutMs: 50,
+    resolveRoot: () => new Promise<string | undefined>(() => {}),
+  });
+  const started = Date.now();
+  const result = await Promise.race([
+    tools.execute(commandRequest),
+    new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 2_000)),
+  ]);
+  assert.notEqual(result, 'hung');
+  assert.deepEqual(result, commandResult);
+  assert.ok(Date.now() - started < 1_000);
+});
+
+test('the worker reports lane_git active only when the registration that stuck advertised it', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  for (const secondFails of [false, true]) {
+    let registrations = 0;
+    const tools = new LaneGitWorkspaceTools({ delegate: delegate(), resolveRoot: async () => source });
+    const worker = new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1',
+      token: 'worker-secret',
+      workerId: 'vm-1',
+      incarnationId,
+      sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: { statefulWorkspace: false, sandboxProfile: 'anthropic-srt', runtimes: [], workspaceTools: tools.capabilities },
+      workspaceTools: tools,
+      workspaceMutationQuarantine: quarantine(),
+      fetchImpl: async () => {
+        registrations++;
+        if (secondFails && registrations === 2) return new Response('{}', { status: 500 });
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          incarnationId,
+          registeredAt: new Date().toISOString(),
+          leaseTtlMs: 60_000,
+          supportedWorkspaceToolOperations: ['read_file', 'execute_command'],
+          supportedWorkspaceCommandResultFeatures: ['lane_git'],
+        });
+      },
+    });
+    await worker.register();
+    assert.equal(worker.commandResultFeatureActive('lane_git'), !secondFails, `secondFails=${secondFails}`);
+  }
 });
 
 // Compatibility: negotiation with old and new Code API servers.

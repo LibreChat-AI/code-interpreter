@@ -346,7 +346,9 @@ export function boundedBranch(value: unknown): string | null {
   return typeof value === 'string' &&
     value.length > 0 &&
     value.length <= 256 &&
-    !/[\x00-\x1f\x7f]/.test(value)
+    // Git forbids only ASCII controls in ref names; the header must also never show Unicode
+    // controls, format characters (bidi overrides, zero-width) or line and paragraph separators.
+    !/[\x00-\x1f\x7f\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
     ? value
     : null;
 }

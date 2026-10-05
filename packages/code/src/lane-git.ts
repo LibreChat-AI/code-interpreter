@@ -48,7 +48,7 @@ export async function readLaneGit(
 ): Promise<WorkspaceLaneGit | undefined> {
   const [branch, head] = await Promise.all([
     read(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'], DETACHED_EXIT, signal, timeoutMs),
-    read(root, ['rev-parse', '--verify', 'HEAD'], UNBORN_EXIT, signal, timeoutMs),
+    read(root, ['rev-parse', '--verify', 'HEAD^{commit}'], UNBORN_EXIT, signal, timeoutMs),
   ]);
   if (branch === undefined || head === undefined) return undefined;
   return { branch: boundedBranch(branch), head: boundedHead(head) };
@@ -98,14 +98,33 @@ export class LaneGitWorkspaceTools implements WorkspaceToolExecutor {
       budgetMs - (now() - startedAt) - LANE_GIT_SETTLEMENT_RESERVE_MS,
     );
     if (probeMs < Math.min(LANE_GIT_PROBE_MIN_MS, this.options.probeTimeoutMs ?? LANE_GIT_PROBE_MIN_MS)) return result;
-    const probeSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(probeMs)]);
+    // The resolver may do filesystem work that cannot observe a signal, so the race, not the
+    // signal, is what bounds the wait. The signal still stops Git when the limit hits first.
+    const controller = new AbortController();
+    const probeSignal = AbortSignal.any([...(signal ? [signal] : []), controller.signal]);
+    let timer: NodeJS.Timeout | undefined;
     try {
-      const root = await this.options.resolveRoot(request, probeSignal);
-      const laneGit = root == null ? undefined : await readLaneGit(root, probeSignal, probeMs);
+      const probe = (async (): Promise<WorkspaceLaneGit | undefined> => {
+        try {
+          const root = await this.options.resolveRoot(request, probeSignal);
+          return root == null ? undefined : await readLaneGit(root, probeSignal, probeMs);
+        } catch {
+          return undefined;
+        }
+      })();
+      const limit = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          resolve(undefined);
+        }, probeMs);
+      });
+      const laneGit = await Promise.race([probe, limit]);
       return laneGit ? { ...result, laneGit } : result;
     } catch {
       // Git state is advisory; a failed read must never fail or delay the command's own result.
       return result;
+    } finally {
+      clearTimeout(timer);
     }
   }
 }
