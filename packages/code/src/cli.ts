@@ -1324,14 +1324,14 @@ async function run(
         if (!source) return undefined;
         if (request.workspaceInstanceId != null) {
           const root = await conversationWorktrees?.plannedRoot(request.workspaceId, request.workspaceInstanceId);
-          return root != null && (await ownsGitMetadata(root)) ? root : undefined;
+          return root != null && (await ownsGitMetadata(root, signal)) ? root : undefined;
         }
         if (request.worktree != null) {
           signal?.throwIfAborted();
           const lane = await verifyLinkedWorktree(source.root, request.worktree, source.identity);
-          return (await ownsLinkedWorktreeMetadata(lane.commonGitDir, request.worktree)) ? lane.root : undefined;
+          return (await ownsLinkedWorktreeMetadata(lane.commonGitDir, request.worktree, signal)) ? lane.root : undefined;
         }
-        return (await ownsGitMetadata(source.root)) ? source.root : undefined;
+        return (await ownsGitMetadata(source.root, signal)) ? source.root : undefined;
       },
     });
   }

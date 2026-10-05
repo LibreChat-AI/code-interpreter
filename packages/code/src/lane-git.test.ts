@@ -500,6 +500,26 @@ test('a linked lane with a symlinked metadata HEAD is not probed', async (t) => 
   assert.equal(await ownsLinkedWorktreeMetadata(join(source, '.git'), 'lane'), false);
 });
 
+test('the refs walk stops as soon as the probe signal aborts', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  for (let i = 0; i < 30; i++) await mkdir(join(source, '.git', 'refs', 'heads', `dir${i}`), { recursive: true });
+  let checks = 0;
+  const aborting = {
+    aborted: false,
+    throwIfAborted() {
+      if (++checks >= 3) throw new Error('aborted');
+    },
+  } as unknown as AbortSignal;
+  assert.equal(await ownsGitMetadata(source, aborting), false);
+  assert.equal(checks, 3);
+  const linked = join(root, 'lane');
+  await exec('git', ['-C', source, 'worktree', 'add', '-b', 'lane-branch', linked]);
+  checks = 0;
+  assert.equal(await ownsLinkedWorktreeMetadata(join(source, '.git'), 'lane', aborting), false);
+  assert.equal(checks, 3);
+});
+
 test('a linked worktree .git file is not claimed by the source checkout check', async (t) => {
   const root = await scratch(t);
   const source = await repo(root, 'source');

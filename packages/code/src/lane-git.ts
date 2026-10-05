@@ -93,13 +93,17 @@ async function plain(path: string, kind: 'file' | 'directory'): Promise<boolean>
 const LANE_GIT_REFS_MAX_ENTRIES = 20_000;
 
 /** Whether everything under `refs/` is a plain file or directory: no link can redirect a ref read. */
-async function refsAreLinkFree(refs: string): Promise<boolean> {
+async function refsAreLinkFree(refs: string, signal?: AbortSignal): Promise<boolean> {
   const pending = [refs];
   let seen = 0;
   while (pending.length > 0) {
+    // Stop between directory operations: the probe timeout returns the command result, but only an
+    // abort observed here keeps an abandoned walk from running on in the background.
+    signal?.throwIfAborted();
     const current = pending.pop()!;
     const directory = await opendir(current);
     for await (const entry of directory) {
+      signal?.throwIfAborted();
       if (++seen > LANE_GIT_REFS_MAX_ENTRIES) return false;
       if (entry.isSymbolicLink()) return false;
       // `Dirent.parentPath` needs Node 20.12; the package supports 20.11.
@@ -121,7 +125,7 @@ async function refsAreLinkFree(refs: string): Promise<boolean> {
  * Anything else, including a `.git` file (a linked worktree or submodule as a source root), is
  * not probed: the field is simply omitted. Linked worktree lanes are verified separately.
  */
-export async function ownsGitMetadata(root: string): Promise<boolean> {
+export async function ownsGitMetadata(root: string, signal?: AbortSignal): Promise<boolean> {
   const dotGit = join(root, '.git');
   try {
     if (!(await plain(dotGit, 'directory')) || (await realpath(dotGit)) !== join(await realpath(root), '.git')) {
@@ -130,7 +134,7 @@ export async function ownsGitMetadata(root: string): Promise<boolean> {
     return (
       (await plain(join(dotGit, 'HEAD'), 'file')) &&
       (await plain(join(dotGit, 'refs'), 'directory')) &&
-      (await refsAreLinkFree(join(dotGit, 'refs'))) &&
+      (await refsAreLinkFree(join(dotGit, 'refs'), signal)) &&
       (await absent(join(dotGit, 'commondir'))) &&
       ((await absent(join(dotGit, 'packed-refs'))) || (await plain(join(dotGit, 'packed-refs'), 'file')))
     );
@@ -145,14 +149,14 @@ export async function ownsGitMetadata(root: string): Promise<boolean> {
  * the shared common directory, and a command can write to both. Without this, a ref symlinked at
  * another checkout and named by the lane's `HEAD` would be followed by the host-side probe.
  */
-export async function ownsLinkedWorktreeMetadata(commonGitDir: string, name: string): Promise<boolean> {
+export async function ownsLinkedWorktreeMetadata(commonGitDir: string, name: string, signal?: AbortSignal): Promise<boolean> {
   const metadata = join(commonGitDir, 'worktrees', name);
   try {
     if (!(await plain(join(metadata, 'HEAD'), 'file'))) return false;
-    if (!(await plain(join(commonGitDir, 'refs'), 'directory')) || !(await refsAreLinkFree(join(commonGitDir, 'refs')))) {
+    if (!(await plain(join(commonGitDir, 'refs'), 'directory')) || !(await refsAreLinkFree(join(commonGitDir, 'refs'), signal))) {
       return false;
     }
-    if (!(await absent(join(metadata, 'refs'))) && !(await refsAreLinkFree(join(metadata, 'refs')))) return false;
+    if (!(await absent(join(metadata, 'refs'))) && !(await refsAreLinkFree(join(metadata, 'refs'), signal))) return false;
     return (await absent(join(commonGitDir, 'packed-refs'))) || (await plain(join(commonGitDir, 'packed-refs'), 'file'));
   } catch {
     return false;
