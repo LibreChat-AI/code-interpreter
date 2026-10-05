@@ -43,3 +43,8 @@ Native regression tests exercise the compiled policy on both CPU architectures,
 thread completion, signals, cancellation, async subprocesses, duplex spawn/fork
 IPC and EOF, queues/pools, and generated concurrent tool calls. A local signed
 runner canary additionally checks packaged Python and ordinary asyncio jobs.
+
+Bun 1.4.2 subprocess spawning with piped stdio also uses socketpairs and is
+denied by this policy. Basic JS/TS execution remains supported. Replacing Bun
+subprocess IPC requires a separate runtime change; do not re-enable socketpairs
+to provide that compatibility.

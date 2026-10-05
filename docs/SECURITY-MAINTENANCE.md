@@ -179,3 +179,8 @@ Remaining service audit findings at this change:
   reassess if notifications or path filters become reachable.
 - `braces` (GHSA-vfj7-8cjw-p6xm): development-only dependency with no published
   fix. Do not feed untrusted patterns to build tooling; track an upstream fix.
+
+Bun 1.4.2 subprocess spawning with piped stdio also uses socketpairs and is
+denied by this policy. Basic JS/TS execution remains supported. Replacing Bun
+subprocess IPC requires a separate runtime change; do not re-enable socketpairs
+to provide that compatibility.

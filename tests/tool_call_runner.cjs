@@ -118,7 +118,7 @@ if __name__ == '__main__':
     const plain = await execute("import os, asyncio; assert not os.path.exists('/proc/self/fd/3'); asyncio.run(asyncio.to_thread(lambda: 1)); print('PASS: ordinary asyncio execution without pipe capability')", false);
     console.log(plain.run.stdout.trim());
     for (const language of ['bun-js', 'bun-ts']) {
-      const js = await execute("console.log('PASS: Bun ' + Bun.version)", false, language, '1.4.2');
+      const js = await execute("let denied = false; try { Bun.spawn([process.execPath, '-e', '0'], {stdout:'pipe', stderr:'pipe'}); } catch (error) { if (error.code !== 'EPERM' || error.syscall !== 'socketpair') throw error; denied = true; } if (!denied) throw new Error('socketpair spawn allowed'); console.log('PASS: Bun ' + Bun.version + ', socketpair-based spawn denied')", false, language, '1.4.2');
       assert(js.run.stdout.includes('PASS: Bun 1.4.2'), JSON.stringify(js));
       console.log(language + ': ' + js.run.stdout.trim());
     }
