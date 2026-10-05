@@ -45,6 +45,8 @@ export interface LaneGitWorkspaceToolsOptions {
   delegate: WorkspaceToolExecutor;
   /** The lane root a request ran in (isolated worktree, linked worktree or source checkout), or undefined. */
   resolveRoot: (request: WorkspaceToolRequest, signal?: AbortSignal) => Promise<string | undefined>;
+  /** Whether Code API negotiated `lane_git`. Git is not probed while this is false. Defaults to true. */
+  isEnabled?: () => boolean;
 }
 
 /**
@@ -68,6 +70,7 @@ export class LaneGitWorkspaceTools implements WorkspaceToolExecutor {
   async execute(request: WorkspaceToolRequest, signal?: AbortSignal): Promise<WorkspaceToolResult> {
     const result = await this.options.delegate.execute(request, signal);
     if (request.operation !== 'execute_command' || result.operation !== 'execute_command') return result;
+    if (this.options.isEnabled?.() === false) return result;
     try {
       const root = await this.options.resolveRoot(request, signal);
       const laneGit = root == null ? undefined : await readLaneGit(root, signal);

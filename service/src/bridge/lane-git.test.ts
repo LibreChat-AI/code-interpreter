@@ -165,3 +165,43 @@ describe('laneGit on command settlements', () => {
     expect(JSON.stringify(outcome.dropped)).not.toContain('secret-branch');
   });
 });
+
+describe('retried settlements across replicas that disagree on the setting', () => {
+  // A replica commits a settlement and its response is lost; the worker retries the same body
+  // against another replica mid-rollout. The retry must be recognized as the same settlement.
+  for (const [first, second] of [
+    [true, false],
+    [false, true],
+  ] as const) {
+    test(`commit with the setting ${first ? 'on' : 'off'}, retry on a replica with it ${second ? 'on' : 'off'}`, async () => {
+      const a = new RedisBridgeStore(redis, undefined, undefined, 1, first);
+      const b = new RedisBridgeStore(redis, undefined, undefined, 1, second);
+      await a.register({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        workerId: 'lane-worker',
+        incarnationId,
+        capabilities: capabilities(true),
+      });
+      const completion = a.dispatchWorkspaceTool({
+        workerId: 'lane-worker',
+        tenantId: 'tenant-1',
+        request,
+        deadlineAtMs: Date.now() + 5_000,
+        signal: new AbortController().signal,
+      });
+      completion.catch(() => undefined);
+      const assignment = await a.lease('lane-worker', incarnationId, 1_000);
+      const settlement = {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        generation: assignment?.generation ?? 0,
+        leaseToken: assignment?.leaseToken ?? '',
+        incarnationId,
+        status: 'fulfilled' as const,
+        result: commandResult({ laneGit: { branch: 'main', head } }) as never,
+      };
+      await a.settle('lane-worker', assignment?.assignmentId ?? '', settlement);
+      await expect(b.settle('lane-worker', assignment?.assignmentId ?? '', settlement)).resolves.toBeUndefined();
+      await completion;
+    });
+  }
+});

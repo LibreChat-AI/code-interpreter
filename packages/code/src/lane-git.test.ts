@@ -202,6 +202,28 @@ test('the feature is advertised only when commands are', () => {
   );
 });
 
+test('the probe is skipped until lane_git is negotiated, then runs', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  let negotiated = false;
+  let resolved = 0;
+  const tools = new LaneGitWorkspaceTools({
+    delegate: delegate(),
+    isEnabled: () => negotiated,
+    resolveRoot: async () => {
+      resolved++;
+      return source;
+    },
+  });
+  const before = await tools.execute(commandRequest);
+  assert.equal('laneGit' in before, false);
+  assert.equal(resolved, 0);
+  negotiated = true;
+  const after = await tools.execute(commandRequest);
+  assert.equal(resolved, 1);
+  assert.deepEqual('laneGit' in after && after.laneGit, { branch: 'main', head: await sha(source) });
+});
+
 // Compatibility: negotiation with old and new Code API servers.
 
 function quarantine() {

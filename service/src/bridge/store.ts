@@ -1984,6 +1984,19 @@ export class RedisBridgeStore {
     signal?: AbortSignal,
   ): Promise<AnyCodeBridgeSettlement> {
     if (settlement.status !== 'fulfilled' || !hasLaneGit(settlement.result)) return settlement;
+    // A retry of an already committed settlement must stay recognizable whichever way this
+    // replica's setting differs from the one that committed it, so compare before sanitizing.
+    const existing = await this.leaseCommand(
+      this.redis.get(settlementKey(assignmentId)),
+      signal,
+      'Bridge settlement existing read',
+    );
+    if (existing != null) {
+      if (existing === JSON.stringify(settlement)) return settlement;
+      const { laneGit: _laneGit, ...rest } = settlement.result as unknown as Record<string, unknown>;
+      const stripped = { ...settlement, result: rest } as AnyCodeBridgeSettlement;
+      if (existing === JSON.stringify(stripped)) return stripped;
+    }
     const assignment = await this.leaseCommand(
       this.readAssignment(assignmentId),
       signal,

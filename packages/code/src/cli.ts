@@ -1313,9 +1313,12 @@ async function run(
     });
     workspaceTools = linkedWorktreeTools;
   }
+  // Set from each registration response; stays false against a Code API that does not offer lane_git.
+  let laneGitNegotiated = false;
   if (workspaceTools?.capabilities.operations.includes('execute_command')) {
     workspaceTools = new LaneGitWorkspaceTools({
       delegate: workspaceTools,
+      isEnabled: () => laneGitNegotiated,
       async resolveRoot(request, signal) {
         const source = roots.find((root) => root.id === request.workspaceId);
         if (!source) return undefined;
@@ -1622,8 +1625,10 @@ async function run(
               });
             }
           : undefined,
-      onRegistered: fileRelaySupervisor
-                ? async registration => {
+      onRegistered: async registration => {
+            laneGitNegotiated =
+              registration.supportedWorkspaceCommandResultFeatures?.includes('lane_git') === true;
+            if (!fileRelaySupervisor) return;
             if (
               registration.registrationGeneration == null ||
                           !Number.isSafeInteger(
@@ -1639,8 +1644,7 @@ async function run(
               registration.registrationGeneration,
               controller.signal,
             );
-          }
-        : undefined,
+          },
             onError: error => {
         const message =
                     error instanceof Error
