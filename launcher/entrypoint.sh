@@ -26,12 +26,22 @@ RESOLVER_RELAY_MAX_CHILDREN=64
 RESOLVER_RELAY_UDP_IDLE_SECONDS=5
 RESOLVER_RELAY_TCP_IDLE_SECONDS=30
 
+# IPv4 127.0.0.0/8, IPv6 ::1 in any zero-padded or compressed spelling, and
+# IPv4-mapped 127.0.0.0/8.
 is_loopback_nameserver() {
-    [[ "$1" == 127.* || "$1" == ::1 ]]
+    local address="${1,,}"
+    [[ "$address" == 127.* || "$address" =~ ^[0:]*:0*1$ || "$address" == ::ffff:127.* ]]
 }
 
 loopback_nameserver() {
-    awk '{ sub(/\r$/, "") } $1 == "nameserver" && ($2 ~ /^127\./ || $2 == "::1") { print $2; exit }' "$1"
+    local line words
+    while IFS= read -r line || [ -n "$line" ]; do
+        read -ra words <<< "${line%$'\r'}"
+        if [ "${words[0]:-}" = nameserver ] && is_loopback_nameserver "${words[1]:-}"; then
+            printf '%s' "${words[1]}"
+            return 0
+        fi
+    done < "$1"
 }
 
 runner_address() {
@@ -71,9 +81,9 @@ proc_net_address() {
 start_resolver_relay() {
     local nameserver="$1" address="$2" local_address udp_pid tcp_pid attempt
     local udp_target="UDP4-SENDTO:$nameserver:53" tcp_target="TCP4:$nameserver:53"
-    if [ "$nameserver" = ::1 ]; then
-        udp_target='UDP6-SENDTO:[::1]:53'
-        tcp_target='TCP6:[::1]:53'
+    if [[ "$nameserver" == *:* ]]; then
+        udp_target="UDP6-SENDTO:[$nameserver]:53"
+        tcp_target="TCP6:[$nameserver]:53"
     fi
     socat -T "$RESOLVER_RELAY_UDP_IDLE_SECONDS" \
         "UDP4-RECVFROM:53,bind=$address,fork" "$udp_target" &

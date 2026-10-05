@@ -120,7 +120,8 @@ run_entrypoint() {
 encoded_reference() {
     LC_ALL=C awk -v relay=192.0.2.99 '/^[[:space:]]*(nameserver|search|domain|options|sortlist)[[:space:]]/ {
         sub(/\r$/, ""); $1 = $1
-        if ($1 == "nameserver" && ($2 ~ /^127\./ || $2 == "::1")) { if (loop == "") loop = $2; if ($2 != loop) next; $2 = relay }
+        address = tolower($2)
+        if ($1 == "nameserver" && (address ~ /^127\./ || address ~ /^[0:]*:0*1$/ || address ~ /^::ffff:127\./)) { if (loop == "") loop = $2; if ($2 != loop) next; $2 = relay }
         print
     }' "$1" | paste -sd '|' -
 }
@@ -182,6 +183,19 @@ printf 'nameserver 127.0.0.11\nnameserver ::1\n' > "$TEST_DIR/mixed-loopback-res
 run_entrypoint "$TEST_DIR/mixed-loopback-resolv.conf"
 [[ "$(cat "$TEST_DIR/forwarded")" == 'nameserver 192.0.2.99' ]]
 assert_relayed UDP4-SENDTO:127.0.0.11:53 TCP4:127.0.0.11:53
+# Every spelling the guest would canonicalize to loopback is relayed too.
+for spelling in 0:0:0:0:0:0:0:1 0000::0001 ::FFFF:127.0.0.11; do
+    printf 'nameserver %s\nnameserver 10.0.0.2\n' "$spelling" > "$TEST_DIR/spelled-loopback-resolv.conf"
+    run_entrypoint "$TEST_DIR/spelled-loopback-resolv.conf"
+    [[ "$(cat "$TEST_DIR/forwarded")" == 'nameserver 192.0.2.99|nameserver 10.0.0.2' ]]
+    [[ "$(cat "$TEST_DIR/forwarded")" == "$(encoded_reference "$TEST_DIR/spelled-loopback-resolv.conf")" ]]
+    assert_relayed "UDP6-SENDTO:[$spelling]:53" "TCP6:[$spelling]:53"
+done
+# Routable IPv6 resolvers are not mistaken for loopback.
+printf 'nameserver 2001:db8::1\nnameserver fd00::11\n' > "$TEST_DIR/ipv6-resolv.conf"
+run_entrypoint "$TEST_DIR/ipv6-resolv.conf"
+[[ "$(cat "$TEST_DIR/forwarded")" == 'nameserver 2001:db8::1|nameserver fd00::11' ]]
+[[ ! -e "$TEST_DIR/socat-calls" ]]
 
 # A relay that never listens, or a runner without a routable address, fails
 # startup instead of booting a guest that cannot resolve service names.
