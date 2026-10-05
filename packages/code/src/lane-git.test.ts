@@ -224,6 +224,50 @@ test('the probe is skipped until lane_git is negotiated, then runs', async (t) =
   assert.deepEqual('laneGit' in after && after.laneGit, { branch: 'main', head: await sha(source) });
 });
 
+test('the probe is skipped when the command left too little of its settlement budget', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const timed = { ...commandRequest, timeoutMs: 1_000 };
+  // Budget is timeoutMs plus a 5 s grace (6 s here), minus a 1 s settlement reserve; the clock jumps while the command runs.
+  for (const [elapsedMs, probed] of [
+    [100, true],
+    [4_000, true],
+    [4_800, false],
+    [7_000, false],
+  ] as const) {
+    let clock = 0;
+    let resolved = 0;
+    const tools = new LaneGitWorkspaceTools({
+      delegate: delegate(async () => {
+        clock += elapsedMs;
+      }),
+      now: () => clock,
+      resolveRoot: async () => {
+        resolved++;
+        return source;
+      },
+    });
+    const result = await tools.execute(timed);
+    assert.equal(resolved, probed ? 1 : 0, `elapsed ${elapsedMs}`);
+    assert.equal('laneGit' in result, probed, `elapsed ${elapsedMs}`);
+  }
+});
+
+test('a slow probe is cut short and never fails the command', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const tools = new LaneGitWorkspaceTools({
+    delegate: delegate(),
+    probeTimeoutMs: 1,
+    resolveRoot: async (_request, signal) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      signal?.throwIfAborted();
+      return source;
+    },
+  });
+  assert.deepEqual(await tools.execute(commandRequest), commandResult);
+});
+
 // Compatibility: negotiation with old and new Code API servers.
 
 function quarantine() {
