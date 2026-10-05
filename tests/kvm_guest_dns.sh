@@ -183,18 +183,36 @@ printf 'nameserver 127.0.0.11\nnameserver ::1\n' > "$TEST_DIR/mixed-loopback-res
 run_entrypoint "$TEST_DIR/mixed-loopback-resolv.conf"
 [[ "$(cat "$TEST_DIR/forwarded")" == 'nameserver 192.0.2.99' ]]
 assert_relayed UDP4-SENDTO:127.0.0.11:53 TCP4:127.0.0.11:53
-# Every spelling the guest would canonicalize to loopback is relayed too.
-for spelling in 0:0:0:0:0:0:0:1 0000::0001 ::FFFF:127.0.0.11; do
+# Every spelling glibc accepts for a loopback resolver is relayed to its
+# canonical address: compressed or zero-padded ::1, IPv4-mapped 127/8 in any
+# IPv6 form, and inet_aton(3) IPv4 forms.
+while read -r spelling udp_target tcp_target; do
     printf 'nameserver %s\nnameserver 10.0.0.2\n' "$spelling" > "$TEST_DIR/spelled-loopback-resolv.conf"
     run_entrypoint "$TEST_DIR/spelled-loopback-resolv.conf"
     [[ "$(cat "$TEST_DIR/forwarded")" == 'nameserver 192.0.2.99|nameserver 10.0.0.2' ]]
-    [[ "$(cat "$TEST_DIR/forwarded")" == "$(encoded_reference "$TEST_DIR/spelled-loopback-resolv.conf")" ]]
-    assert_relayed "UDP6-SENDTO:[$spelling]:53" "TCP6:[$spelling]:53"
-done
-# Routable IPv6 resolvers are not mistaken for loopback.
-printf 'nameserver 2001:db8::1\nnameserver fd00::11\n' > "$TEST_DIR/ipv6-resolv.conf"
-run_entrypoint "$TEST_DIR/ipv6-resolv.conf"
-[[ "$(cat "$TEST_DIR/forwarded")" == 'nameserver 2001:db8::1|nameserver fd00::11' ]]
+    assert_relayed "$udp_target" "$tcp_target"
+done <<'SPELLINGS'
+0:0:0:0:0:0:0:1 UDP6-SENDTO:[::1]:53 TCP6:[::1]:53
+0000::0001 UDP6-SENDTO:[::1]:53 TCP6:[::1]:53
+::1%lo UDP6-SENDTO:[::1]:53 TCP6:[::1]:53
+::FFFF:127.0.0.11 UDP4-SENDTO:127.0.0.11:53 TCP4:127.0.0.11:53
+0:0:0:0:0:ffff:127.0.0.11 UDP4-SENDTO:127.0.0.11:53 TCP4:127.0.0.11:53
+::ffff:7f00:b UDP4-SENDTO:127.0.0.11:53 TCP4:127.0.0.11:53
+127.1 UDP4-SENDTO:127.0.0.1:53 TCP4:127.0.0.1:53
+2130706443 UDP4-SENDTO:127.0.0.11:53 TCP4:127.0.0.11:53
+0x7f.0.0.0xb UDP4-SENDTO:127.0.0.11:53 TCP4:127.0.0.11:53
+0177.0.0.013 UDP4-SENDTO:127.0.0.11:53 TCP4:127.0.0.11:53
+SPELLINGS
+# Spellings of the same loopback resolver collapse into one relayed entry.
+printf 'nameserver 127.0.0.11\nnameserver ::ffff:7f00:b\nnameserver 127.0.0.53\n' > "$TEST_DIR/same-loopback-resolv.conf"
+run_entrypoint "$TEST_DIR/same-loopback-resolv.conf"
+[[ "$(cat "$TEST_DIR/forwarded")" == 'nameserver 192.0.2.99|nameserver 192.0.2.99' ]]
+assert_relayed UDP4-SENDTO:127.0.0.11:53 TCP4:127.0.0.11:53
+# Routable resolvers and addresses glibc rejects are forwarded unchanged, without
+# a relay: 0127 is octal 87, and ::7f00:1 is not IPv4-mapped.
+printf 'nameserver 2001:db8::1\nnameserver fd00::11\nnameserver ::ffff:10.0.0.2\nnameserver ::7f00:1\nnameserver 0127.0.0.1\nnameserver 127.0.0.256\nnameserver 1:2:3:4:5:6:7:8:\nnameserver 127..1\n' > "$TEST_DIR/routable-resolv.conf"
+run_entrypoint "$TEST_DIR/routable-resolv.conf"
+[[ "$(cat "$TEST_DIR/forwarded")" == 'nameserver 2001:db8::1|nameserver fd00::11|nameserver ::ffff:10.0.0.2|nameserver ::7f00:1|nameserver 0127.0.0.1|nameserver 127.0.0.256|nameserver 1:2:3:4:5:6:7:8:|nameserver 127..1' ]]
 [[ ! -e "$TEST_DIR/socat-calls" ]]
 
 # A relay that never listens, or a runner without a routable address, fails

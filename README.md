@@ -248,8 +248,8 @@ rather than leaving the guest with an unrelated public DNS server.
 The guest kernel keeps loopback traffic on its own loopback device instead of
 proxying it through TSI, so it cannot reach a loopback resolver such as Docker's
 embedded `127.0.0.11`. The launcher entrypoint relays the first loopback
-nameserver (`127.0.0.0/8`, `::1` in any spelling, or IPv4-mapped
-`127.0.0.0/8`) over UDP and TCP port 53 from the runner's
+nameserver (`127.0.0.0/8`, `::1` or IPv4-mapped `127.0.0.0/8`, in any spelling
+glibc accepts) over UDP and TCP port 53 from the runner's
 own IPv4 address with `socat`, and forwards that address to the guest in its
 place; further loopback nameservers are dropped, and startup fails if the relay
 cannot listen. Relay children exit when idle, and the TCP relay caps its

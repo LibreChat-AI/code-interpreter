@@ -26,19 +26,92 @@ RESOLVER_RELAY_MAX_CHILDREN=64
 RESOLVER_RELAY_UDP_IDLE_SECONDS=5
 RESOLVER_RELAY_TCP_IDLE_SECONDS=30
 
-# IPv4 127.0.0.0/8, IPv6 ::1 in any zero-padded or compressed spelling, and
-# IPv4-mapped 127.0.0.0/8.
-is_loopback_nameserver() {
-    local address="${1,,}"
-    [[ "$address" == 127.* || "$address" =~ ^[0:]*:0*1$ || "$address" == ::ffff:127.* ]]
+# One inet_aton(3) part: hex with 0x, octal with a leading 0, else decimal.
+inet_aton_part() {
+    case "$1" in
+        0x*) [[ "$1" =~ ^0x[0-9a-f]+$ ]] && echo $((16#${1#0x})) ;;
+        0*) [[ "$1" =~ ^0[0-7]*$ ]] && echo $((8#$1)) ;;
+        *) [[ "$1" =~ ^[0-9]+$ ]] && echo $((10#$1)) ;;
+    esac
+}
+
+# Numeric value of an IPv4 address in the inet_aton(3) forms glibc accepts in
+# resolv.conf: one to four parts, the last filling the remaining bytes.
+ipv4_value() {
+    local parts part value=0 index last
+    IFS=. read -ra parts <<< "$1"
+    [[ "$1" != *. ]] && (( ${#parts[@]} >= 1 && ${#parts[@]} <= 4 )) || return 1
+    last=$(( ${#parts[@]} - 1 ))
+    for ((index = 0; index < last; index++)); do
+        part="$(inet_aton_part "${parts[index]}")" || return 1
+        (( part <= 255 )) || return 1
+        value=$(( value | part << (24 - 8 * index) ))
+    done
+    part="$(inet_aton_part "${parts[last]}")" || return 1
+    (( part < 1 << (32 - 8 * last) )) || return 1
+    echo $(( value | part ))
+}
+
+# The eight 16-bit groups of an IPv6 address in decimal, accepting compressed
+# zeros and a dotted IPv4 tail.
+ipv6_groups() {
+    local address="$1" head tail octets octet group groups=() tail_groups=() fill
+    if [[ "$address" =~ ^(.*:)([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+        address="${BASH_REMATCH[1]}"
+        IFS=. read -ra octets <<< "${BASH_REMATCH[2]}"
+        for octet in "${octets[@]}"; do
+            [[ "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( octet <= 255 )) || return 1
+        done
+        address+="$(printf '%x:%x' $(( octets[0] << 8 | octets[1] )) $(( octets[2] << 8 | octets[3] )))"
+    fi
+    [[ "$address" =~ ^[0-9a-f:]+$ && "$address" != :[!:]* && "$address" != *[!:]: && "$address" != *:::* ]] || return 1
+    if [[ "$address" == *::* ]]; then
+        head="${address%%::*}"
+        tail="${address#*::}"
+        [[ "$tail" != *::* ]] || return 1
+        [ -z "$head" ] || IFS=: read -ra groups <<< "$head"
+        [ -z "$tail" ] || IFS=: read -ra tail_groups <<< "$tail"
+        fill=$(( 8 - ${#groups[@]} - ${#tail_groups[@]} ))
+        (( fill >= 1 )) || return 1
+        for ((; fill > 0; fill--)); do groups+=(0); done
+        groups+=("${tail_groups[@]}")
+    else
+        IFS=: read -ra groups <<< "$address"
+    fi
+    (( ${#groups[@]} == 8 )) || return 1
+    for group in "${groups[@]}"; do
+        [[ "$group" =~ ^[0-9a-f]{1,4}$ ]] || return 1
+        printf '%d ' $((16#$group))
+    done
+}
+
+# Canonical form of a loopback nameserver in any spelling glibc accepts: IPv4
+# 127.0.0.0/8, IPv6 ::1, or IPv4-mapped 127.0.0.0/8 (relayed as IPv4). Fails for
+# every other address.
+canonical_loopback() {
+    local address="${1,,}" text groups value
+    address="${address%%\%*}"
+    if [[ "$address" == *:* ]]; then
+        text="$(ipv6_groups "$address")" || return 1
+        read -ra groups <<< "$text"
+        if [ "${groups[*]}" = '0 0 0 0 0 0 0 1' ]; then
+            echo ::1
+            return 0
+        fi
+        [ "${groups[*]:0:6}" = '0 0 0 0 0 65535' ] || return 1
+        value=$(( groups[6] << 16 | groups[7] ))
+    else
+        value="$(ipv4_value "$address")" || return 1
+    fi
+    (( value >> 24 == 127 )) || return 1
+    printf '%d.%d.%d.%d' $(( value >> 24 )) $(( value >> 16 & 255 )) $(( value >> 8 & 255 )) $(( value & 255 ))
 }
 
 loopback_nameserver() {
     local line words
     while IFS= read -r line || [ -n "$line" ]; do
         read -ra words <<< "${line%$'\r'}"
-        if [ "${words[0]:-}" = nameserver ] && is_loopback_nameserver "${words[1]:-}"; then
-            printf '%s' "${words[1]}"
+        if [ "${words[0]:-}" = nameserver ] && canonical_loopback "${words[1]:-}"; then
             return 0
         fi
     done < "$1"
@@ -51,15 +124,15 @@ runner_address() {
 encode_resolv_conf() {
     local loopback="${1:-}" relay="${2:-}"
     local LC_ALL=C
-    local line words encoded=''
+    local line words canonical encoded=''
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"
         if [[ ! "$line" =~ ^[[:space:]]*(nameserver|search|domain|options|sortlist)[[:space:]] ]]; then
             continue
         fi
         read -ra words <<< "$line"
-        if [ "${words[0]}" = nameserver ] && is_loopback_nameserver "${words[1]}"; then
-            [ "${words[1]}" = "$loopback" ] || continue
+        if [ "${words[0]}" = nameserver ] && canonical="$(canonical_loopback "${words[1]}")"; then
+            [ "$canonical" = "$loopback" ] || continue
             words[1]="$relay"
         fi
         line="${words[*]}"
@@ -81,9 +154,9 @@ proc_net_address() {
 start_resolver_relay() {
     local nameserver="$1" address="$2" local_address udp_pid tcp_pid attempt
     local udp_target="UDP4-SENDTO:$nameserver:53" tcp_target="TCP4:$nameserver:53"
-    if [[ "$nameserver" == *:* ]]; then
-        udp_target="UDP6-SENDTO:[$nameserver]:53"
-        tcp_target="TCP6:[$nameserver]:53"
+    if [ "$nameserver" = ::1 ]; then
+        udp_target='UDP6-SENDTO:[::1]:53'
+        tcp_target='TCP6:[::1]:53'
     fi
     socat -T "$RESOLVER_RELAY_UDP_IDLE_SECONDS" \
         "UDP4-RECVFROM:53,bind=$address,fork" "$udp_target" &
