@@ -363,14 +363,19 @@ _PIPE_SEQUENCE = 0
 _PIPE_READER = None
 _PIPE_FAILURE = None
 
-for _fd in (_PIPE_WRITE_FD, _PIPE_READ_FD):
-    try:
-        if not _stat.S_ISFIFO(os.fstat(_fd).st_mode):
-            raise OSError("tool-call descriptor is not an anonymous pipe")
-        os.set_inheritable(_fd, False)
-    except OSError as _error:
-        raise RuntimeError("blocking tool calls require a pipe-enabled runner") from _error
-os.set_blocking(_PIPE_WRITE_FD, False)
+# Spawned multiprocessing workers re-import this module without the granted
+# descriptors. They may import tool definitions, but cannot use the capability.
+if __name__ == "__mp_main__":
+    _PIPE_OWNER_PID = None
+else:
+    for _fd in (_PIPE_WRITE_FD, _PIPE_READ_FD):
+        try:
+            if not _stat.S_ISFIFO(os.fstat(_fd).st_mode):
+                raise OSError("tool-call descriptor is not an anonymous pipe")
+            os.set_inheritable(_fd, False)
+        except OSError as _error:
+            raise RuntimeError("blocking tool calls require a pipe-enabled runner") from _error
+    os.set_blocking(_PIPE_WRITE_FD, False)
 
 def _pipe_fail(error):
     global _PIPE_FAILURE

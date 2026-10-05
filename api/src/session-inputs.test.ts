@@ -151,6 +151,7 @@ describe('pushed input cache', () => {
 
     const readOnly = cachedInputResponse((await openCachedInput('s1', 'ro'))!);
     expect(readOnly.headers.get('x-read-only')).toBe('true');
+    await readOnly.text(); // Consume the response so its FileHandle is closed.
   });
 
   test('an opened cache hit remains readable when concurrent pruning unlinks its path', async () => {

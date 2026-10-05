@@ -30,11 +30,12 @@ an explicit option after validating FIFO type and write/read access; all
 unrelated inherited descriptors are closed. API/broker parent death, channel failure and
 job exit terminate the relay and its invocation and abort outstanding upstream
 requests. The Python client clears descriptor inheritance and refuses calls
-from forked children. stdout/stderr and user stdin remain separate.
+from forked or spawned children. Spawned workers may re-import tool definitions
+without receiving or using the pipe capability. stdout/stderr and user stdin remain separate.
 
 Deny all socket creation. Permit only protocol-0 Unix stream socketpairs for
 runtime IPC, retaining the sendmsg/sendmmsg/io_uring denials. This preserves
-asyncio and ordinary multiprocessing without permitting named socket access
+asyncio and pipe-based multiprocessing using explicit spawn/fork contexts without permitting named socket access
 or descriptor passing. No legacy TCP/socket fallback is provided.
 
 ## Consequences
@@ -42,7 +43,10 @@ or descriptor passing. No legacy TCP/socket fallback is provided.
 New service preambles and runner images require coordinated deployment;
 blocking jobs must be drained or version-routed during upgrades and rollbacks.
 Bash/replay mode has no pipe grant. Unix listeners/managers, non-stream pairs,
-and descriptor-sharing APIs are unsupported. Each active invocation adds two
+and descriptor-sharing APIs are unsupported. Python 3.14 defaults to forkserver,
+which requires a named Unix listener and is denied; use an explicit spawn or
+fork context. Semaphore-based queues/pools also require `/dev/shm`, which the
+normal jail currently does not mount. Each active invocation adds two
 trusted processes outside its job cgroup; runner sizing must account for them.
 
 A shared post-restore broker could reduce process overhead, but would require

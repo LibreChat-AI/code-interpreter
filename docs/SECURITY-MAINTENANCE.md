@@ -95,6 +95,40 @@ cleanup, and run the actual broker/relay/NsJail/guard/generated Python client
 with concurrent replies. These checks do not boot libkrun or establish deployed
 kernel patch status.
 
+### Local Mac/Docker canary
+
+`tests/tool_call_runner.cjs` exercises signed API authorization, the normal
+NsJail mount/user/PID/network/IPC/UTS/cgroup namespaces, the generated Python
+client, concurrent tool calls, descriptor cleanup, spawn/fork pipe IPC, ordinary
+Python jobs and basic Bun JavaScript/TypeScript execution. Spawned workers can
+import the preamble but cannot issue tool calls. Python 3.14's default forkserver
+requires a named Unix listener and is denied; select an explicit spawn or fork
+context. Semaphore-based pools/queues require `/dev/shm`, which the default jail
+does not mount. The namespace-disabled native policy tests cover those APIs
+when shared memory exists, not their availability in the default jail.
+
+With runtime packages built by `build-packages.sh` (or a compatible `/pkgs`
+tree containing Python 3.14.4 and Bun 1.4.2), run from the repository root:
+
+```sh
+bun service/scripts/dump-pipe-preamble.ts > /tmp/codeapi-pipe-client.py
+docker build -f api/Dockerfile --target sandbox-build -t codeapi-pipe-canary .
+docker run --rm --init \
+  --cap-add SYS_ADMIN --cap-add SYS_CHROOT --cap-add SETUID \
+  --cap-add SETGID --cap-add NET_ADMIN \
+  --security-opt seccomp=./seccomp/nsjail.json \
+  --mount "type=bind,source=$PWD/data/pkgs,target=/pkgs,readonly" \
+  --mount "type=bind,source=/tmp/codeapi-pipe-client.py,target=/client.py,readonly" \
+  --mount "type=bind,source=$PWD/tests,target=/tests,readonly" \
+  --entrypoint /usr/local/bin/node \
+  codeapi-pipe-canary /tests/tool_call_runner.cjs /client.py
+```
+
+The canary disables resource cgroup enforcement as the Mac compose override
+does, while retaining the cgroup namespace and all remaining NsJail isolation.
+It exercises Docker's Linux VM, not a libkrun guest. It does not establish
+production kernel patch status or third-party language-package compatibility.
+
 ### Coordinated rollout
 
 Deploy the service's new blocking preamble together with rebuilt runner images

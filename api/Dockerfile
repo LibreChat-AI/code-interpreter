@@ -39,7 +39,7 @@ RUN gcc -O2 -static -Wall -Wextra -Werror -o /usr/local/bin/tool-call-pipe-bridg
 # Native policy/transport verification without building the full runner.
 FROM nsjail-builder AS nsjail-ipc-test
 COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
-COPY --from=oven/bun:1.3.14-debian /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=oven/bun:1.4.2-debian /usr/local/bin/bun /usr/local/bin/bun
 
 # ============================================================================
 # Stage 1b: Build language runtime packages (only consumed by sandbox-runner-baked)
@@ -53,7 +53,7 @@ FROM buildpack-deps:bookworm AS package-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHON_VERSION=3.14.4
-ENV BUN_VERSION=1.3.14
+ENV BUN_VERSION=1.4.2
 
 COPY docker/apt-install.sh /usr/local/bin/apt-install
 RUN chmod +x /usr/local/bin/apt-install
@@ -75,7 +75,7 @@ RUN chmod +x /package-init.sh && FORCE_REBUILD=true /package-init.sh
 # ============================================================================
 # Stage 2: Build sandbox rootfs
 # ============================================================================
-FROM oven/bun:1.3.14-debian AS sandbox-build
+FROM oven/bun:1.4.2-debian AS sandbox-build
 
 ENV DEBIAN_FRONTEND=noninteractive
 

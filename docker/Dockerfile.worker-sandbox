@@ -60,7 +60,7 @@ FROM buildpack-deps:bookworm AS package-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHON_VERSION=3.14.4
-ENV BUN_VERSION=1.3.14
+ENV BUN_VERSION=1.4.2
 
 COPY docker/apt-install.sh /usr/local/bin/apt-install
 RUN chmod +x /usr/local/bin/apt-install
@@ -82,7 +82,7 @@ RUN chmod +x /package-init.sh && FORCE_REBUILD=true /package-init.sh
 # ============================================================================
 # Stage 2: Build worker
 # ============================================================================
-FROM oven/bun:1.3.14 AS worker-builder
+FROM oven/bun:1.4.2 AS worker-builder
 WORKDIR /app
 COPY service/package.json service/bun.lock ./
 RUN bun install --frozen-lockfile
@@ -95,7 +95,7 @@ RUN bun build ./src/worker-server.ts --minify --outdir .build --target bun --ext
 # ============================================================================
 # Stage 3: Build sandbox API
 # ============================================================================
-FROM oven/bun:1.3.14 AS sandbox-builder
+FROM oven/bun:1.4.2 AS sandbox-builder
 WORKDIR /app
 COPY api/package.json ./
 RUN bun install --frozen-lockfile
@@ -108,7 +108,7 @@ RUN bun build ./src/index.ts --minify --outdir .build --target bun --external '@
 # ============================================================================
 # Stage 4: Build sandbox rootfs (full OS layer for the microVM guest)
 # ============================================================================
-FROM oven/bun:1.3.14-debian AS sandbox-rootfs
+FROM oven/bun:1.4.2-debian AS sandbox-rootfs
 
 ENV DEBIAN_FRONTEND=noninteractive
 

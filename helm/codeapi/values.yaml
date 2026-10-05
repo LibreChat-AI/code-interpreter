@@ -310,7 +310,7 @@ workerSandbox:
         pullPolicy: IfNotPresent
       pythonVersion: "3.14.4"
       nodeVersion: "24.15.0"
-      bunVersion: "1.3.14"
+      bunVersion: "1.4.2"
       bashPackageVersion: "5.2.0"
       backoffLimit: 2
       ttlSecondsAfterFinished: 3600

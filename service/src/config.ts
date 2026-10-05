@@ -10,10 +10,10 @@ import {
 
 export const languageConfig: Record<Languages | string, t.LanguageConfig | undefined> = {
   [Languages.bash]: { language: 'bash', version: '5.2.0', fileName: 'script.sh' },
-  [Languages.js]: { language: 'bun-js', version: '1.3.14', fileName: 'index.js' },
+  [Languages.js]: { language: 'bun-js', version: '1.4.2', fileName: 'index.js' },
   [Languages.node]: { language: 'node', version: '24.15.0', fileName: 'index.js' },
   [Languages.py]: { language: 'python', version: '3.14.4', fileName: 'main.py' },
-  [Languages.ts]: { language: 'bun-ts', version: '1.3.14', fileName: 'main.ts' },
+  [Languages.ts]: { language: 'bun-ts', version: '1.4.2', fileName: 'main.ts' },
 };
 
 const languageAliases: Record<string, Languages> = {
