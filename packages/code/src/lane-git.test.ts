@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { LaneGitWorkspaceTools, readLaneGit } from './lane-git.js';
+import { LaneGitWorkspaceTools, ownsGitMetadata, readLaneGit } from './lane-git.js';
 import { isValidBridgeWorkspaceToolCapabilities, isWorkspaceLaneGit, isWorkspaceToolResult } from './protocol.js';
 import { BridgeWorker } from './worker.js';
 
@@ -382,6 +382,59 @@ test('a valid non-ASCII branch name survives the byte level read', async (t) => 
   const source = await repo(root, 'source');
   await exec('git', ['-C', source, 'checkout', '-b', 'feature/caf\u00e9-\u65e5\u672c']);
   assert.equal((await readLaneGit(source))?.branch, 'feature/caf\u00e9-\u65e5\u672c');
+});
+
+test('an own Git directory is accepted, and a commit made there keeps it accepted', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  assert.equal(await ownsGitMetadata(source), true);
+  await exec('git', ['-C', source, ...identity, 'commit', '--allow-empty', '-m', 'second']);
+  await exec('git', ['-C', source, 'pack-refs', '--all']);
+  assert.equal(await ownsGitMetadata(source), true);
+});
+
+test('a .git rewritten to point at another repository is not probed', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const victim = await repo(root, 'victim');
+  await exec('git', ['-C', victim, 'checkout', '-b', 'victim-secret-branch']);
+  await rm(join(source, '.git'), { recursive: true });
+  await writeFile(join(source, '.git'), `gitdir: ${join(victim, '.git')}\n`);
+  assert.equal(await ownsGitMetadata(source), false);
+  const tools = new LaneGitWorkspaceTools({
+    delegate: delegate(),
+    resolveRoot: async () => ((await ownsGitMetadata(source)) ? source : undefined),
+  });
+  const result = await tools.execute(commandRequest);
+  assert.equal('laneGit' in result, false);
+  assert.equal(JSON.stringify(result).includes('victim-secret-branch'), false);
+});
+
+test('Git storage redirected by a symlink, commondir or a swapped directory is not probed', async (t) => {
+  const root = await scratch(t);
+  const victim = await repo(root, 'victim');
+  const cases: Array<[string, (source: string) => Promise<void>]> = [
+    ['.git symlink', async (s) => { await rm(join(s, '.git'), { recursive: true }); await symlink(join(victim, '.git'), join(s, '.git')); }],
+    ['commondir', async (s) => { await writeFile(join(s, '.git', 'commondir'), `${join(victim, '.git')}\n`); }],
+    ['HEAD symlink', async (s) => { await rm(join(s, '.git', 'HEAD')); await symlink(join(victim, '.git', 'HEAD'), join(s, '.git', 'HEAD')); }],
+    ['refs symlink', async (s) => { await rm(join(s, '.git', 'refs'), { recursive: true }); await symlink(join(victim, '.git', 'refs'), join(s, '.git', 'refs')); }],
+    ['packed-refs symlink', async (s) => { await symlink(join(victim, '.git', 'HEAD'), join(s, '.git', 'packed-refs')); }],
+    ['no .git', async (s) => { await rename(join(s, '.git'), join(root, `moved-${Math.random()}`)); }],
+  ];
+  for (const [name, tamper] of cases) {
+    const source = await repo(root, `source-${name.replace(/\W/g, '')}`);
+    await tamper(source);
+    assert.equal(await ownsGitMetadata(source), false, name);
+  }
+});
+
+test('a linked worktree .git file is not claimed by the source checkout check', async (t) => {
+  const root = await scratch(t);
+  const source = await repo(root, 'source');
+  const lane = join(root, 'lane');
+  await exec('git', ['-C', source, 'worktree', 'add', '-b', 'lane-branch', lane]);
+  assert.equal(await ownsGitMetadata(lane), false);
+  assert.equal((await readLaneGit(lane))?.branch, 'lane-branch');
 });
 
 test('a laneGit supplied by the delegate is never forwarded, only the probe value is', async (t) => {

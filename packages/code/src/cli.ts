@@ -41,7 +41,7 @@ import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { NativeWorkspaceCommandPool } from './native-pool.js';
 import { GitWorktreeWorkspaceTools, internalWorkspaceId } from './workspace-instances.js';
-import { LaneGitWorkspaceTools } from './lane-git.js';
+import { LaneGitWorkspaceTools, ownsGitMetadata } from './lane-git.js';
 import { LINKED_WORKTREE_DIRECTORY, LinkedWorktreeWorkspaceTools, verifyLinkedWorktree } from './linked-worktrees.js';
 import { GitWorktreeManager } from './worktrees.js';
 import {
@@ -1323,13 +1323,14 @@ async function run(
         const source = roots.find((root) => root.id === request.workspaceId);
         if (!source) return undefined;
         if (request.workspaceInstanceId != null) {
-          return await conversationWorktrees?.plannedRoot(request.workspaceId, request.workspaceInstanceId);
+          const root = await conversationWorktrees?.plannedRoot(request.workspaceId, request.workspaceInstanceId);
+          return root != null && (await ownsGitMetadata(root)) ? root : undefined;
         }
         if (request.worktree != null) {
           signal?.throwIfAborted();
           return (await verifyLinkedWorktree(source.root, request.worktree, source.identity)).root;
         }
-        return source.root;
+        return (await ownsGitMetadata(source.root)) ? source.root : undefined;
       },
     });
   }

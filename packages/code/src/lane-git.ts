@@ -1,3 +1,6 @@
+import { lstat, realpath } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import { BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS, boundedBranch, boundedHead } from './protocol.js';
 import { gitBytes } from './worktree-retirement.js';
 
@@ -63,6 +66,49 @@ export async function readLaneGit(
   ]);
   if (branch === undefined || head === undefined) return undefined;
   return { branch: boundedBranch(branch), head: boundedHead(head) };
+}
+
+async function absent(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
+async function plain(path: string, kind: 'file' | 'directory'): Promise<boolean> {
+  try {
+    const status = await lstat(path);
+    return !status.isSymbolicLink() && (kind === 'file' ? status.isFile() : status.isDirectory());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `<root>/.git` is the checkout's own Git directory, so the host-side probe cannot be
+ * steered at another repository. A command can rewrite its own `.git` after it ran: replace it
+ * with a `gitdir:` file, add a `commondir` redirect, or link `HEAD`, `refs` or `packed-refs` to
+ * another checkout, and the unsandboxed probe would then report that checkout's branch and head.
+ * Anything else, including a `.git` file (a linked worktree or submodule as a source root), is
+ * not probed: the field is simply omitted. Linked worktree lanes are verified separately.
+ */
+export async function ownsGitMetadata(root: string): Promise<boolean> {
+  const dotGit = join(root, '.git');
+  try {
+    if (!(await plain(dotGit, 'directory')) || (await realpath(dotGit)) !== join(await realpath(root), '.git')) {
+      return false;
+    }
+    return (
+      (await plain(join(dotGit, 'HEAD'), 'file')) &&
+      (await plain(join(dotGit, 'refs'), 'directory')) &&
+      (await absent(join(dotGit, 'commondir'))) &&
+      ((await absent(join(dotGit, 'packed-refs'))) || (await plain(join(dotGit, 'packed-refs'), 'file')))
+    );
+  } catch {
+    return false;
+  }
 }
 
 export interface LaneGitWorkspaceToolsOptions {
