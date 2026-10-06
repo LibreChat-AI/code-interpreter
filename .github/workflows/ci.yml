@@ -184,6 +184,8 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
             --entrypoint /usr/local/bin/node \
             launcher-guest-test /tests/pipe_runtime_image.cjs
+      - name: Load legacy netfilter modules for hosted-app isolation
+        run: sudo modprobe -a ip_tables ip6_tables iptable_filter ip6table_filter xt_conntrack xt_owner ipt_REJECT ip6t_REJECT
       - name: Verify supervisor filter and anonymous stdio
         run: |
           docker run --rm --init --security-opt seccomp=unconfined \

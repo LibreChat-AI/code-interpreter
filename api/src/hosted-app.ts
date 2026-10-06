@@ -12,15 +12,19 @@ import { getLatestRuntimeMatchingLanguageVersion, getRuntimes, type Runtime } fr
 import { getBoundSessionWorkspace, type SessionWorkspace } from './session-workspace';
 import { ValidationError, validateFilePath } from './validation';
 
-// These commands need only an exit status; inheriting no pipe descriptors also
-// avoids Node/Bun's socketpair-based execFile capture.
+// Capture bounded diagnostics through an anonymous pipe; execFile's runtime
+// capture would create socketpairs prohibited by the supervisor policy.
 function execFileAsync(binary: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { stdio: 'ignore' });
+    const child = spawn(binary, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let diagnostics = Buffer.alloc(0);
+    child.stderr.on('data', (chunk: Buffer) => {
+      diagnostics = Buffer.concat([diagnostics, chunk]).subarray(-8192);
+    });
     child.once('error', reject);
-    child.once('exit', (code, signal) => {
+    child.once('close', (code, signal) => {
       if (code === 0) resolve();
-      else reject(new Error(`${binary} failed (${signal ?? code})`));
+      else reject(new Error(`${binary} failed (${signal ?? code}): ${diagnostics.toString().trim()}`));
     });
   });
 }
