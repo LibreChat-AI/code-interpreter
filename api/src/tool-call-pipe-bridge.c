@@ -100,8 +100,10 @@ int main(int argc, char **argv) {
         if (done == child) break;
         if (done < 0 && errno != EINTR) return 125;
         struct pollfd pollfds[] = {
-            {.fd = response_upstream, .events = response.length ? 0 : POLLIN},
-            {.fd = request.source, .events = request.length ? 0 : POLLIN},
+            /* HUP is reported even with events=0. Omit buffered sources
+             * until their destinations drain, or a closed writer spins poll. */
+            {.fd = response.length ? -1 : response_upstream, .events = POLLIN},
+            {.fd = request.length ? -1 : request.source, .events = POLLIN},
             {.fd = responses[1], .events = response.length ? POLLOUT : 0},
             {.fd = request_upstream, .events = request.length ? POLLOUT : 0},
         };

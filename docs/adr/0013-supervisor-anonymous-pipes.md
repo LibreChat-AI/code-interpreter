@@ -27,7 +27,9 @@ spawn; Linux container tests on the Mac verify the real filter and pipe adapter.
 
 The tool-call broker uses separate request/response pipes to its relay. The relay
 retains bounded buffers, parent-death signals, and immediate termination when a
-response reader disappears, even without a pending response. Untrusted jobs now
+response reader disappears, even without a pending response. Buffered sources
+are omitted from poll until drained so a closed writer cannot cause a CPU spin.
+Untrusted jobs now
 receive anonymous pipes for stdin/stdout/stderr as well as tool-call FDs 3/4.
 
 Patch the pinned NsJail build to replace its supervisor/child handshake with
