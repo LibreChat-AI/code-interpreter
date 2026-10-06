@@ -1,0 +1,82 @@
+--- a/subproc.cc
++++ b/subproc.cc
+@@ -510,6 +510,12 @@
+ }
+ 
+ pid_t runChild(nsj_t* nsj, int netfd, int fd_in, int fd_out, int fd_err) {
++	// This runner uses anonymous control pipes. Descriptor-passing user-mode
++	// networking and seccomp notification transports are intentionally unsupported.
++	if (nsj->njc.seccomp_unotify() || nsj->njc.has_user_net()) {
++		LOG_E("Descriptor-passing NsJail modes are disabled by runner hardening");
++		return -1;
++	}
+ 	if (!net::limitConns(nsj, netfd)) {
+ 		return 0;
+ 	}
+@@ -535,26 +541,34 @@
+ 	LOG_D("Creating new process with clone flags:%s and exit_signal:SIGCHLD",
+ 	    cloneFlagsToStr(flags).c_str());
+ 
+-	int sv[2];
+-	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) == -1) {
+-		PLOG_E("socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC) failed");
++	int ready[2], errors[2];
++	if (pipe2(ready, O_CLOEXEC) == -1) {
++		PLOG_E("pipe2(ready) failed");
+ 		return -1;
+ 	}
+-	int child_fd = sv[0];
+-	int parent_fd = sv[1];
++	if (pipe2(errors, O_CLOEXEC) == -1) {
++		close(ready[0]); close(ready[1]);
++		PLOG_E("pipe2(errors) failed");
++		return -1;
++	}
++	int child_fd = ready[0];
++	int parent_fd = ready[1];
+ 
+ 	pid_t pid = cloneProc(flags, SIGCHLD);
+ 	if (pid == 0) {
+ 		close(parent_fd);
++		close(errors[0]);
+ 		newProc(nsj, netfd, fd_in, fd_out, fd_err, child_fd);
+-		util::writeToFd(child_fd, &kSubprocErrorChar, sizeof(kSubprocErrorChar));
++		util::writeToFd(errors[1], &kSubprocErrorChar, sizeof(kSubprocErrorChar));
+ 		LOG_F("Launching child process failed");
+ 	}
+ 	close(child_fd);
++	close(errors[1]);
+ 	if (pid == -1) {
+ 		auto saved_errno = errno;
+ 		PLOG_W("clone(flags=%s) failed", cloneFlagsToStr(flags).c_str());
+ 		close(parent_fd);
++		close(errors[0]);
+ 		errno = saved_errno;
+ 		return pid;
+ 	}
+@@ -562,20 +576,22 @@
+ 
+ 	if (!initParent(nsj, pid, parent_fd)) {
+ 		close(parent_fd);
++		close(errors[0]);
+ 		return -1;
+ 	}
++	close(parent_fd);
+ 
+ 	char rcvChar;
+-	while (util::readFromFd(parent_fd, &rcvChar, sizeof(rcvChar)) == sizeof(rcvChar)) {
++	while (util::readFromFd(errors[0], &rcvChar, sizeof(rcvChar)) == sizeof(rcvChar)) {
+ 		if (rcvChar == kSubprocErrorChar) {
+ 			LOG_W("Received error message from the child process before it has been "
+ 			      "executed");
+-			close(parent_fd);
++			close(errors[0]);
+ 			return -1;
+ 		}
+ 	}
+ 
+-	close(parent_fd);
++	close(errors[0]);
+ 	return pid;
+ }
+ 

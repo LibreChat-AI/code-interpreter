@@ -178,7 +178,7 @@ if [ "$SANDBOX_USE_CGROUPV2" = "true" ]; then
     NSJAIL_CGROUP_ARGS=(--use_cgroupv2)
 fi
 
-if timeout 10 "${NSJAIL_PATH:-/usr/sbin/nsjail}" --config "${NSJAIL_CONFIG:-/sandbox_api/config/sandbox.cfg}" \
+if timeout 10 /usr/local/bin/sandbox-supervisor-policy "${NSJAIL_PATH:-/usr/sbin/nsjail}" --config "${NSJAIL_CONFIG:-/sandbox_api/config/sandbox.cfg}" \
     "${NSJAIL_CGROUP_ARGS[@]}" --log "$SMOKE_LOG" \
     --user "65534:${SMOKE_OUTSIDE_UID}:1" --group "65534:${SMOKE_OUTSIDE_GID}:1" \
     -s /usr/bin:/bin -s /usr/lib:/lib -s /usr/lib64:/lib64 \
@@ -201,4 +201,4 @@ rm -f "$SMOKE_STDERR"
 rm -rf "$SMOKE_DIR"
 
 echo "Starting sandbox API server..."
-exec bun run /sandbox_api/.build/index.js
+exec /usr/local/bin/sandbox-supervisor-policy bun run /sandbox_api/.build/index.js

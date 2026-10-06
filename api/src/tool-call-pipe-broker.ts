@@ -1,5 +1,5 @@
-import { spawn } from 'node:child_process';
-import type { Duplex } from 'node:stream';
+import { spawnPipeProcess as spawn, toolCallPipes } from './pipe-process';
+import { Duplex, Readable, Writable } from 'node:stream';
 import * as http from 'node:http';
 import * as https from 'node:https';
 
@@ -150,10 +150,17 @@ export function serveToolCallPipe(channel: Duplex, rawTarget: string, options: {
 if (require.main === module) {
   const target = process.env.SANDBOX_FORWARD_TARGET?.trim();
   if (!target || !process.argv[2]) throw new Error('tool-call pipe broker is not configured');
-  const child = spawn(process.env.TCS_PIPE_BRIDGE || '/usr/local/bin/tool-call-pipe-bridge', process.argv.slice(2), {
-    stdio: [0, 1, 2, 'pipe'],
-  });
-  const channel = child.stdio[3] as Duplex;
+  const pipes = toolCallPipes();
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(process.env.TCS_PIPE_BRIDGE || '/usr/local/bin/tool-call-pipe-bridge', ['--job-pipes', ...process.argv.slice(2)], {
+      stdio: [0, 1, 2, ...pipes.child],
+    });
+  } catch (error) {
+    pipes.reader.destroy(); pipes.writer.destroy();
+    throw error;
+  } finally { pipes.closeChild(); }
+  const channel = Duplex.fromWeb({ readable: Readable.toWeb(pipes.reader), writable: Writable.toWeb(pipes.writer) });
   const stop = serveToolCallPipe(channel, target, {
     requestTimeoutMs: Math.min(600_000, Math.max(5_000, Number(process.env.TCS_REQUEST_TIMEOUT_MS) || 300_000)),
     onFailure: () => child.kill('SIGKILL'),

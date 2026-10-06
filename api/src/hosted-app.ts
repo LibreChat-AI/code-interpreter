@@ -1,10 +1,10 @@
-import { execFile, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { spawnPipeProcess as spawn } from './pipe-process';
+import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as net from 'node:net';
 import * as path from 'node:path';
 import type { Readable } from 'node:stream';
-import { promisify } from 'node:util';
 import { config } from './config';
 import { aggregateBashExtras, filterExtraEnvVars } from './job';
 import { logger } from './logger';
@@ -12,7 +12,18 @@ import { getLatestRuntimeMatchingLanguageVersion, getRuntimes, type Runtime } fr
 import { getBoundSessionWorkspace, type SessionWorkspace } from './session-workspace';
 import { ValidationError, validateFilePath } from './validation';
 
-const execFileAsync = promisify(execFile);
+// These commands need only an exit status; inheriting no pipe descriptors also
+// avoids Node/Bun's socketpair-based execFile capture.
+function execFileAsync(binary: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { stdio: 'ignore' });
+    child.once('error', reject);
+    child.once('exit', (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${binary} failed (${signal ?? code})`));
+    });
+  });
+}
 const APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -342,7 +353,10 @@ async function commandSucceeds(binary: string, args: string[]): Promise<boolean>
  * packets for accepted inbound connections remain allowed by conntrack.
  */
 export async function installHostedAppNetworkGuard(uid: number): Promise<void> {
-  for (const binary of ['/usr/sbin/iptables', '/usr/sbin/ip6tables']) {
+  // nft's netlink transport needs sendmsg, which the supervisor denies. The
+  // packaged legacy backend uses getsockopt/setsockopt instead. Failure to
+  // install either family remains fatal before admitting any hosted app.
+  for (const binary of ['/usr/sbin/iptables-legacy', '/usr/sbin/ip6tables-legacy']) {
     if (!(await commandSucceeds(binary, ['-w', '5', '-L', HOSTED_APP_EGRESS_CHAIN]))) {
       await execFileAsync(binary, ['-w', '5', '-N', HOSTED_APP_EGRESS_CHAIN]);
     }

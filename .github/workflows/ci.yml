@@ -106,6 +106,16 @@ jobs:
       - name: Install dependencies
         run: bun ci
 
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - name: Compile anonymous-pipe addon
+        run: |
+          mkdir -p .build
+          NODE_HEADERS="$(dirname "$(dirname "$(command -v node)")")/include/node"
+          gcc -shared -fPIC -O2 -Wall -Wextra -Werror -I"$NODE_HEADERS" -o .build/anonymous-pipes.node src/anonymous-pipes.c
+
       - name: Build API
         run: bun run build
 
@@ -174,6 +184,24 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
             --entrypoint /usr/local/bin/node \
             launcher-guest-test /tests/pipe_runtime_image.cjs
+      - name: Verify supervisor filter and anonymous stdio
+        run: |
+          docker run --rm --init --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            nsjail-ipc-test python3 /tests/supervisor_policy.py
+          docker run --rm --init --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+            --entrypoint /usr/local/bin/sandbox-supervisor-policy \
+            nsjail-ipc-test bun test /work/api/src/pipe-process.test.ts
+          docker run --rm --init --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            --entrypoint /usr/local/bin/sandbox-supervisor-policy \
+            launcher-guest-test node /tests/pipe_runtime_image.cjs
+          docker run --rm --init --cap-add NET_ADMIN --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+            --entrypoint /usr/local/bin/sandbox-supervisor-policy \
+            launcher-guest-test bun /work/tests/supervisor_hosted_network.ts
+
       - name: Verify descriptor denial and runtime IPC with the installed filter
         run: |
           docker run --rm --init --security-opt seccomp=unconfined \

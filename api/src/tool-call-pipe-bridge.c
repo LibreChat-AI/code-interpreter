@@ -12,9 +12,9 @@
 #include <sys/prctl.h>
 #endif
 
-/* Node/Bun extra stdio uses socketpairs. Keep that trusted-side socket in
- * this relay; only two anonymous pipe ends ever reach NsJail/the job.
- * FD 3 in the job writes requests; FD 4 reads responses. */
+/* Both broker-facing and job-facing transports are anonymous pipes.
+ * FD 3 writes requests; FD 4 reads responses. The relay retains bounded
+ * buffering and detects lost readers even with no queued response. */
 struct flow {
     int source, destination;
     unsigned char bytes[65536];
@@ -63,50 +63,55 @@ int main(int argc, char **argv) {
         perror("tool-call broker exec");
         return 125;
     }
-    int ipc = fcntl(3, F_DUPFD_CLOEXEC, 5);
+    if (strcmp(argv[1], "--job-pipes") != 0 || argc < 3) return 125;
+    int request_upstream = fcntl(3, F_DUPFD_CLOEXEC, 5);
+    int response_upstream = fcntl(4, F_DUPFD_CLOEXEC, 5);
+    if (request_upstream < 0 || response_upstream < 0) return 125;
+    close(3); close(4);
     int requests[2], responses[2];
-    if (ipc < 0 || pipe(requests) != 0 || pipe(responses) != 0) return 125;
+    if (pipe2(requests, O_CLOEXEC) != 0 || pipe2(responses, O_CLOEXEC) != 0) return 125;
     pid_t relay = getpid();
     pid_t child = fork();
     if (child < 0) return 125;
     if (child == 0) {
         if (parent_death(relay) != 0 || dup2(requests[1], 3) < 0
             || dup2(responses[0], 4) < 0) _exit(125);
-        int fds[] = {ipc, requests[0], requests[1], responses[0], responses[1]};
+        int fds[] = {request_upstream, response_upstream, requests[0], requests[1], responses[0], responses[1]};
         for (unsigned i = 0; i < sizeof(fds) / sizeof(fds[0]); i++) {
             if (fds[i] > 4) close(fds[i]);
         }
-        execvp(argv[1], &argv[1]);
+        execvp(argv[2], &argv[2]);
         perror("tool-call pipe exec");
         _exit(125);
     }
-    close(3);
     close(requests[1]);
     close(responses[0]);
     signal(SIGPIPE, SIG_IGN);
-    if (nonblock(ipc) < 0 || nonblock(requests[0]) < 0 || nonblock(responses[1]) < 0) {
+    if (nonblock(request_upstream) < 0 || nonblock(response_upstream) < 0 || nonblock(requests[0]) < 0 || nonblock(responses[1]) < 0) {
         kill(child, SIGKILL);
         waitpid(child, NULL, 0);
         return 125;
     }
-    struct flow request = {.source = requests[0], .destination = ipc};
-    struct flow response = {.source = ipc, .destination = responses[1]};
+    struct flow request = {.source = requests[0], .destination = request_upstream};
+    struct flow response = {.source = response_upstream, .destination = responses[1]};
     int status = 125 << 8;
     for (;;) {
         pid_t done = waitpid(child, &status, WNOHANG);
         if (done == child) break;
         if (done < 0 && errno != EINTR) return 125;
         struct pollfd pollfds[] = {
-            {.fd = ipc, .events = (response.length || response.source < 0 ? 0 : POLLIN) | (request.length ? POLLOUT : 0)},
+            {.fd = response_upstream, .events = response.length ? 0 : POLLIN},
             {.fd = request.source, .events = request.length ? 0 : POLLIN},
             {.fd = responses[1], .events = response.length ? POLLOUT : 0},
+            {.fd = request_upstream, .events = request.length ? POLLOUT : 0},
         };
-        int result = poll(pollfds, 3, 100);
+        int result = poll(pollfds, 4, 100);
         if (result < 0 && errno == EINTR) continue;
         if (result < 0 || (pollfds[0].revents & (POLLERR | POLLNVAL))
             || (pollfds[1].revents & (POLLERR | POLLNVAL))
             || (pollfds[2].revents & (POLLERR | POLLHUP | POLLNVAL))
-            || transfer(&request, pollfds[1].revents & (POLLIN | POLLHUP), pollfds[0].revents & POLLOUT) < 0
+            || (pollfds[3].revents & (POLLERR | POLLHUP | POLLNVAL))
+            || transfer(&request, pollfds[1].revents & (POLLIN | POLLHUP), pollfds[3].revents & POLLOUT) < 0
             || transfer(&response, pollfds[0].revents & (POLLIN | POLLHUP), pollfds[2].revents & POLLOUT) < 0 || response.source < 0) {
             /* EOF/error terminates the entire invocation, including an
              * abandoned tool call. Never leave an orphaned NsJail monitor. */
@@ -116,7 +121,8 @@ int main(int argc, char **argv) {
             break;
         }
     }
-    close(ipc);
+    close(request_upstream);
+    close(response_upstream);
     close(requests[0]);
     close(responses[1]);
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);

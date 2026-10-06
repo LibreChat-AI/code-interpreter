@@ -66,7 +66,7 @@ def _mp_echo(sender):
 if __name__ == '__main__':
     assert sys.version.split()[0] == ${JSON.stringify(version)}
     assert os.getuid() == 65534
-    assert _stat.S_ISFIFO(os.fstat(3).st_mode) and _stat.S_ISFIFO(os.fstat(4).st_mode)
+    assert all(_stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in range(5))
     for _namespace, _outside in ${JSON.stringify(outerNamespaces)}.items():
         assert os.readlink('/proc/self/ns/' + _namespace) != _outside, _namespace
     for domain in (socket.AF_UNIX, socket.AF_INET, socket.AF_INET6):

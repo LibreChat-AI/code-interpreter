@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawnPipeProcess as spawn } from './pipe-process';
 import * as fsp from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';

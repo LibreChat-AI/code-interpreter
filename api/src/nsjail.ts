@@ -1,6 +1,7 @@
+import { spawnPipeProcess as spawn } from './pipe-process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { nanoid } from 'nanoid';
 import { config } from './config';
 import { logger } from './logger';
