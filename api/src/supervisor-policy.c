@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -42,6 +43,18 @@ int main(int argc, char **argv) {
         || prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0) {
         perror("sandbox supervisor policy"); return 125;
     }
+    /* glibc's resolver batches queries with sendmmsg. Use sequential sendto
+     * queries so hostname-based API/broker traffic needs no policy exception. */
+    const char *existing = getenv("RES_OPTIONS");
+    char *resolver_options = NULL;
+    if (asprintf(&resolver_options, "%s%ssingle-request", existing ? existing : "",
+                 existing && *existing ? " " : "") < 0) {
+        perror("sandbox supervisor DNS options"); return 125;
+    }
+    if (setenv("RES_OPTIONS", resolver_options, 1) != 0) {
+        perror("sandbox supervisor DNS options"); free(resolver_options); return 125;
+    }
+    free(resolver_options);
     execvp(argv[1], &argv[1]);
     perror("sandbox supervisor exec"); return 125;
 }

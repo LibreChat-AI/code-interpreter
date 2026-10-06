@@ -17,7 +17,9 @@ socket creation, every socketpair, sendmsg/sendmmsg (including inherited
 sockets), and all io_uring entry points. Validate the native audit architecture
 and reject x32 syscall encodings. TCP remains available for API requests,
 hosted previews, and the broker's fixed upstream. This is a targeted deny filter,
-not a complete supervisor syscall allowlist. Startup fails if installation fails.
+not a complete supervisor syscall allowlist. Startup fails if installation fails. Force sequential resolver queries with
+`RES_OPTIONS=single-request` (preserving existing options), so glibc DNS uses
+sendto instead of its blocked sendmmsg batching.
 
 A small N-API addon creates CLOEXEC anonymous pipes. Linux subprocess launches
 pass integer pipe ends to Node/Bun rather than requesting runtime-created pipes.

@@ -194,6 +194,9 @@ jobs:
           docker run --rm --init --security-opt seccomp=unconfined \
             --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
             nsjail-ipc-test python3 /tests/pipe_relay_backpressure.py
+          docker run --rm --init --dns 127.0.0.1 --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            nsjail-ipc-test python3 /tests/supervisor_dns.py
           docker run --rm --init --security-opt seccomp=unconfined \
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
             --entrypoint /usr/local/bin/sandbox-supervisor-policy \
