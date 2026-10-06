@@ -47,5 +47,7 @@ else:
                '--disable_proc', '--disable_rlimits', '--', '/missing-codeapi-executable']
     result = subprocess.run(command, capture_output=True, timeout=5)
     assert result.returncode != 0
-    assert b'Launching child process failed' in result.stderr, result.stderr
+    # The parent can kill the failed child before its final log is flushed.
+    # Its error-pipe diagnostic proves the startup handshake reported failure.
+    assert b'Received error message from the child process before it has been executed' in result.stderr, result.stderr
     print('PASS: anonymous NsJail startup handshake reports child exec failure')
