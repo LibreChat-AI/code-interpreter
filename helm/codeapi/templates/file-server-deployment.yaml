@@ -48,10 +48,6 @@ spec:
       labels:
         {{- include "codeapi.podLabels" (dict "root" . "component" "fileServer" "values" .Values.fileServer) | nindent 8 }}
     spec:
-      {{- with .Values.fileServer.topologySpreadConstraints }}
-      topologySpreadConstraints:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       {{- with .Values.fileServer.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -175,6 +171,14 @@ spec:
             {{- toYaml .Values.fileServer.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 ---

@@ -134,10 +134,6 @@ spec:
       labels:
         {{- include "codeapi.podLabels" (dict "root" . "component" "serviceWorker" "values" .Values.workerSandbox.serviceWorker) | nindent 8 }}
     spec:
-      {{- with .Values.workerSandbox.serviceWorker.topologySpreadConstraints }}
-      topologySpreadConstraints:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       {{- with .Values.workerSandbox.serviceWorker.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -290,10 +286,6 @@ spec:
       labels:
         {{- include "codeapi.podLabels" (dict "root" . "component" "sandboxRunner" "values" .Values.workerSandbox.sandboxRunner) | nindent 8 }}
     spec:
-      {{- with .Values.workerSandbox.sandboxRunner.topologySpreadConstraints }}
-      topologySpreadConstraints:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       {{- if or .Values.workerSandbox.sandboxServiceAccount.create .Values.workerSandbox.sandboxServiceAccount.name }}
       serviceAccountName: {{ $sandboxRunnerServiceAccount }}
       {{- end }}

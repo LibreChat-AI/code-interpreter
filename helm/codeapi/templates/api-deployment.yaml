@@ -33,10 +33,6 @@ spec:
       labels:
         {{- include "codeapi.podLabels" (dict "root" . "component" "api" "values" .Values.api) | nindent 8 }}
     spec:
-      {{- with .Values.api.topologySpreadConstraints }}
-      topologySpreadConstraints:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       {{- with .Values.api.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}

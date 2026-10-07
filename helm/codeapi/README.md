@@ -117,9 +117,12 @@ Each of `api`, `fileServer`, `toolCallServer`, `egressGateway`,
 | `podSecurityContext` | Pod `securityContext` |
 | `securityContext` | Main container `securityContext` |
 | `extraVolumes`, `extraVolumeMounts` | Pod volumes and main-container mounts |
-| `topologySpreadConstraints` | Pod topology spreading |
 | `strategy` | Deployment rollout strategy |
 | `resources` | Main container resource requests/limits |
+
+Placement uses the existing shared `affinity` and `tolerations` values for the
+API, file server, tool-call server and egress gateway; worker and runner
+scheduling remains configurable through their existing scheduling values.
 
 These settings are opt-in and preserve existing defaults. An empty per-worker
 `resources` map inherits `workerSandbox.resources`; a nonempty map replaces it.
@@ -131,7 +134,7 @@ capability additions; setting `drop: [ALL]` alone leaves those additions intact.
 Runner volumes/mounts append to package and KVM mounts: use distinct volume
 names and mount paths. Device-plugin resource requests/limits remain chart-managed.
 
-For example, a hardened API with writable scratch space and host spreading:
+For example, a hardened API with writable scratch space:
 
 ```yaml
 api:
@@ -156,14 +159,6 @@ api:
   extraVolumeMounts:
     - name: tmp
       mountPath: /tmp
-  topologySpreadConstraints:
-    - maxSkew: 1
-      topologyKey: kubernetes.io/hostname
-      whenUnsatisfiable: DoNotSchedule
-      labelSelector:
-        matchLabels:
-          app.kubernetes.io/instance: codeapi # Helm release name
-          app.kubernetes.io/component: api
   autoscaling:
     behavior:
       scaleDown:

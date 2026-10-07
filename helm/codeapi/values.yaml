@@ -95,7 +95,6 @@ api:
   securityContext: {}
   extraVolumes: []
   extraVolumeMounts: []
-  topologySpreadConstraints: []
   serviceAccount:
     create: false
     name: ""
@@ -253,7 +252,6 @@ workerSandbox:
     securityContext: {}
     extraVolumes: []
     extraVolumeMounts: []
-    topologySpreadConstraints: []
     strategy: {}
     # Empty resources inherit workerSandbox.resources; nonempty replaces it.
     resources: {}
@@ -274,7 +272,6 @@ workerSandbox:
     securityContext: {}
     extraVolumes: []
     extraVolumeMounts: []
-    topologySpreadConstraints: []
     strategy: {}
     # Empty resources inherit workerSandbox.resources; nonempty replaces it.
     resources: {}
@@ -408,7 +405,6 @@ fileServer:
   securityContext: {}
   extraVolumes: []
   extraVolumeMounts: []
-  topologySpreadConstraints: []
   strategy: {}
   objectIndexEnabled: false
   metadataConcurrency: 1
@@ -466,7 +462,6 @@ toolCallServer:
   securityContext: {}
   extraVolumes: []
   extraVolumeMounts: []
-  topologySpreadConstraints: []
   strategy: {}
   serviceAccount:
     create: false
@@ -514,7 +509,6 @@ egressGateway:
   securityContext: {}
   extraVolumes: []
   extraVolumeMounts: []
-  topologySpreadConstraints: []
   strategy: {}
   serviceAccount:
     create: false

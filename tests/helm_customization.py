@@ -231,14 +231,6 @@ class HelmCustomization(unittest.TestCase):
                 },
                 "extraVolumes": [{"name": "scratch", "emptyDir": {}}],
                 "extraVolumeMounts": [{"name": "scratch", "mountPath": "/tmp"}],
-                "topologySpreadConstraints": [
-                    {
-                        "maxSkew": 1,
-                        "topologyKey": "kubernetes.io/hostname",
-                        "whenUnsatisfiable": "DoNotSchedule",
-                        "labelSelector": {"matchLabels": {"team": str(i)}},
-                    }
-                ],
                 "strategy": {
                     "type": "RollingUpdate",
                     "rollingUpdate": {"maxSurge": 0, "maxUnavailable": 1},
@@ -276,10 +268,6 @@ class HelmCustomization(unittest.TestCase):
                 )
                 pod = self.pod(resources, component)
                 self.assertEqual(pod["securityContext"]["runAsUser"], 1000 + i)
-                self.assertEqual(
-                    pod["topologySpreadConstraints"][0]["labelSelector"]["matchLabels"],
-                    {"team": str(i)},
-                )
                 self.assertIn({"name": "scratch", "emptyDir": {}}, pod["volumes"])
                 c = pod["containers"][0]
                 self.assertFalse(c["securityContext"]["allowPrivilegeEscalation"])
@@ -450,6 +438,32 @@ class HelmCustomization(unittest.TestCase):
         ]
         self.assertEqual(context["seccompProfile"], {"type": "RuntimeDefault"})
         self.assertIs(context["privileged"], False)
+
+    def test_shared_affinity_and_tolerations_reach_all_service_deployments(self):
+        values = {
+            "affinity": {
+                "podAntiAffinity": {
+                    "preferredDuringSchedulingIgnoredDuringExecution": [
+                        {
+                            "weight": 100,
+                            "podAffinityTerm": {
+                                "topologyKey": "kubernetes.io/hostname",
+                                "labelSelector": {
+                                    "matchLabels": {"app.kubernetes.io/name": "codeapi"}
+                                },
+                            },
+                        }
+                    ]
+                }
+            },
+            "tolerations": [{"key": "example.org/spot", "operator": "Exists"}],
+        }
+        resources = self.render(values)
+        for component in ["api", "file-server", "tool-call-server", "egress-gateway"]:
+            with self.subTest(component=component):
+                pod = self.pod(resources, component)
+                self.assertEqual(pod.get("affinity"), values["affinity"])
+                self.assertEqual(pod.get("tolerations"), values["tolerations"])
 
 
 if __name__ == "__main__":

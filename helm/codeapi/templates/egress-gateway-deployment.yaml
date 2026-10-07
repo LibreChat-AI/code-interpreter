@@ -32,10 +32,6 @@ spec:
       labels:
         {{- include "codeapi.podLabels" (dict "root" . "component" "egressGateway" "values" .Values.egressGateway) | nindent 8 }}
     spec:
-      {{- with .Values.egressGateway.topologySpreadConstraints }}
-      topologySpreadConstraints:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       {{- with .Values.egressGateway.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
