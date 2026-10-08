@@ -12,7 +12,7 @@ import {
   type ThrottledOp,
 } from '../runtime-session/throttle';
 import type { ResidentHostedAppSpec } from './spec';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 export interface HostedAppMicrovmConfig {
   imageArn: string;
@@ -73,11 +73,14 @@ export function hostedAppLaunchRequestFingerprint(config: HostedAppMicrovmConfig
   });
 }
 
-/** Keep reset Redis counters in an image/config-specific safe-integer range. */
+/** Keep reset Redis counters in a safe-integer range. The random salt makes
+ * every reset counter start somewhere new, because AWS rejects a reused token
+ * it still remembers even when the request body is identical. */
 export function hostedAppLaunchGenerationSeed(config: HostedAppMicrovmConfig): number {
   const offset = Number.parseInt(
     createHash('sha256')
       .update(hostedAppLaunchRequestFingerprint(config), 'utf8')
+      .update(randomBytes(16))
       .digest('hex')
       .slice(0, 13),
     16,

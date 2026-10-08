@@ -162,14 +162,14 @@ describe('HostedAppMicrovmRuntime', () => {
     expect(error).toBeInstanceOf(HostedAppMicrovmError);
     expect(error.transient).toBe(true);
   });
-  test('seeds idempotency from exact wire inputs while keeping semantic matching order-independent', () => {
+  test('fingerprints exact wire inputs, keeps semantic matching order-independent, and salts seeds', () => {
     const first = { ...config(), ingressConnectorArns: ['arn:b', 'arn:a'] };
     const reordered = { ...config(), ingressConnectorArns: ['arn:a', 'arn:b'] };
     expect(hostedAppLaunchFingerprint(first)).toBe(hostedAppLaunchFingerprint(reordered));
     expect(hostedAppLaunchRequestFingerprint(first)).not.toBe(
       hostedAppLaunchRequestFingerprint(reordered),
     );
-    expect(hostedAppLaunchGenerationSeed(first)).not.toBe(hostedAppLaunchGenerationSeed(reordered));
+    expect(hostedAppLaunchGenerationSeed(first)).not.toBe(hostedAppLaunchGenerationSeed(first));
   });
 
   test('launches the dedicated image with bounded idle policy and no egress connector', async () => {
