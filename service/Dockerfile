@@ -59,7 +59,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=install /temp/prod/node_modules ./node_modules
 COPY --from=builder /app/.build-egress-gateway ./.build-egress-gateway
-CMD ["bun", "run", ".build-egress-gateway/egress-gateway.js"]
+CMD ["bun", "run", "--max-http-header-size=262144", ".build-egress-gateway/egress-gateway.js"]
 
 # Development stage  
 FROM base AS development

@@ -22,7 +22,7 @@ COPY packages/code/src /packages/code/src
 EXPOSE 3190
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:3190/health || exit 1
-CMD ["bun", "run", "src/egress-gateway.ts"]
+CMD ["bun", "run", "--max-http-header-size=262144", "src/egress-gateway.ts"]
 
 FROM base AS development
 ENV NODE_ENV=development
@@ -31,4 +31,4 @@ COPY service/src ./src
 COPY shared /shared
 COPY packages/code/src /packages/code/src
 EXPOSE 3190 9230
-CMD ["bun", "run", "--watch", "src/egress-gateway.ts"]
+CMD ["bun", "run", "--watch", "--max-http-header-size=262144", "src/egress-gateway.ts"]
