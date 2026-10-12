@@ -58,12 +58,14 @@ services:
             - tool_call_server
 
     service-worker:
+        stop_grace_period: 400s
         build:
             context: .
             dockerfile: service/Dockerfile
             target: worker
         container_name: service-worker
         environment:
+            - CODEAPI_SHUTDOWN_TIMEOUT_MS=${CODEAPI_SHUTDOWN_TIMEOUT_MS:-}
             - LOCAL_MODE=${LOCAL_MODE:-true}
             - CODEAPI_HARDENED_SANDBOX_MODE=${CODEAPI_HARDENED_SANDBOX_MODE:-true}
             - CODEAPI_BRIDGE_TOKEN=${CODEAPI_BRIDGE_TOKEN:-}

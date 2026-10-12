@@ -280,6 +280,28 @@ development value by default. Production deployments must override it with a
 strong secret; when it is unset, file object routes and Tool Call Server
 session-management routes stay unauthenticated for backwards compatibility.
 
+## Graceful shutdown
+
+Workers pause new work and drain active executions before closing their queues.
+Their default shutdown deadline includes `JOB_TIMEOUT`, the configured MicroVM
+cleanup and egress-revocation budgets, and five seconds for job settlement.
+With service defaults this is 370 seconds. Hosted-app workers retain their
+longer operation budget when it exceeds that deadline. API-only processes keep
+30 seconds. `CODEAPI_SHUTDOWN_TIMEOUT_MS` overrides the deadline; unset, blank,
+or invalid values use the default.
+
+Container stop grace must exceed the service deadline. The supplied Compose
+worker deployments allow 400 seconds, and the combined worker/sandbox supervisor
+keeps the sandbox alive until its worker exits. Override `stop_grace_period` when
+increasing job/cleanup timeouts or enabling hosted apps. During a full stack
+shutdown, keep Redis, storage, egress, and separate sandbox services running
+until workers have drained.
+
+The Helm service-worker pod defaults to `workerSandbox.config.jobTimeout`
+rounded up to seconds plus 100 seconds. Set
+`workerSandbox.serviceWorker.terminationGracePeriodSeconds` explicitly for
+longer cleanup budgets, hosted apps, or a custom service shutdown deadline.
+
 ## Health Checks
 
 - API: `GET /v1/health`
