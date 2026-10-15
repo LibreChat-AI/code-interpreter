@@ -5,8 +5,10 @@
 #
 # Entry points:
 #
-#   * push to main — build every image, push `sha-<commit>` tags, and refresh
-#     each image's registry build cache. The promote job then points the
+#   * push to main — build every image for linux/amd64 and linux/arm64 on a
+#     native runner each, push `sha-<commit>-<arch>` tags, and refresh each
+#     image's registry build cache. The merge job joins both architectures
+#     into the `sha-<commit>` manifest, and the promote job then points the
 #     `main` tags at the newest main commit that has all images.
 #   * pull_request — build every image without pushing, reading the cache that
 #     main wrote, so Dockerfile breakage surfaces before merge.
@@ -59,6 +61,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       images: ${{ steps.images.outputs.images }}
+      matrix: ${{ steps.images.outputs.matrix }}
       publish: ${{ github.repository == 'LibreChat-AI/code-interpreter' && github.ref == 'refs/heads/main' }}
     steps:
       - name: List images
@@ -91,10 +94,19 @@ jobs:
           )
           echo "images=$images" >> "$GITHUB_OUTPUT"
 
+          # Every image is built for both architectures, each on a runner of
+          # that architecture: emulation would spend hours compiling the
+          # runner's Python and native wheels. `images` stays the per-image
+          # list the merge and promote jobs iterate.
+          matrix=$(jq -c '[ .[]
+            | (. + {platform: "amd64", runner: "ubuntu-24.04"}),
+              (. + {platform: "arm64", runner: "ubuntu-24.04-arm"}) ]' <<<"$images")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   build:
-    name: ${{ matrix.image }}
+    name: ${{ matrix.image }} (${{ matrix.platform }})
     needs: plan
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
     permissions:
       contents: read
@@ -105,7 +117,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.images) }}
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -148,12 +160,13 @@ jobs:
 
       - name: Check for an existing tag
         # `sha-` tags are written once. A re-run (or a dispatch on the same
-        # commit) builds only the images whose tag is missing, so a failed
-        # re-run cannot leave the commit's set mixed across two builds.
+        # commit) builds only the image and architecture pairs whose tag is
+        # missing, so a failed re-run cannot leave the commit's set mixed
+        # across two builds.
         id: existing
         if: needs.plan.outputs.publish == 'true'
         env:
-          REF: ${{ env.NAMESPACE }}/${{ matrix.image }}:sha-${{ github.sha }}
+          REF: ${{ env.NAMESPACE }}/${{ matrix.image }}:sha-${{ github.sha }}-${{ matrix.platform }}
         # A registry that cannot answer fails the job rather than risk
         # rebuilding over a tag that may exist.
         run: |
@@ -185,7 +198,7 @@ jobs:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
         with:
           images: ${{ env.NAMESPACE }}/${{ matrix.image }}
-          tags: type=sha,format=long
+          tags: type=sha,format=long,suffix=-${{ matrix.platform }}
           labels: |
             org.opencontainers.image.title=${{ matrix.image }}
             org.opencontainers.image.description=${{ matrix.description }}
@@ -201,7 +214,7 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.platform }}
           push: ${{ needs.plan.outputs.publish == 'true' }}
           # Without a push, keep the result in the builder only: nothing is
           # loaded into the runner's Docker engine, which would need a second
@@ -210,30 +223,32 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
-          # A registry cache next to each image, written only from main.
-          # mode=max keeps the intermediate stages (the KVM runner's package
-          # stage above all), which the GitHub Actions cache could not hold:
-          # its 10 GB repository limit would evict them between pushes.
-          cache-from: type=registry,ref=${{ env.NAMESPACE }}/${{ matrix.image }}:buildcache
-          cache-to: ${{ needs.plan.outputs.publish == 'true' && format('type=registry,ref={0}/{1}:buildcache,mode=max,ignore-error=true', env.NAMESPACE, matrix.image) || '' }}
+          # A registry cache next to each image, one per architecture, written
+          # only from main. mode=max keeps the intermediate stages (the KVM
+          # runner's package stage above all), which the GitHub Actions cache
+          # could not hold: its 10 GB repository limit would evict them
+          # between pushes.
+          cache-from: type=registry,ref=${{ env.NAMESPACE }}/${{ matrix.image }}:buildcache-${{ matrix.platform }}
+          cache-to: ${{ needs.plan.outputs.publish == 'true' && format('type=registry,ref={0}/{1}:buildcache-{2},mode=max,ignore-error=true', env.NAMESPACE, matrix.image, matrix.platform) || '' }}
 
       - name: Summarize
         if: always()
         env:
           IMAGE_NAME: ${{ matrix.image }}
+          PLATFORM: ${{ matrix.platform }}
           PUSHED: ${{ needs.plan.outputs.publish == 'true' && steps.build.outcome == 'success' }}
           EXISTED: ${{ steps.existing.outputs.exists == 'true' }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           lowest=$(sort -n "$RUNNER_TEMP/disk-avail-mib.log" 2>/dev/null | head -n1)
           {
-            echo "### $IMAGE_NAME"
+            echo "### $IMAGE_NAME ($PLATFORM)"
             if [ "$EXISTED" = true ]; then
-              echo "\`$NAMESPACE/$IMAGE_NAME:sha-$GITHUB_SHA\` was already published; left unchanged."
+              echo "\`$NAMESPACE/$IMAGE_NAME:sha-$GITHUB_SHA-$PLATFORM\` was already published; left unchanged."
               echo
             fi
             if [ "$PUSHED" = true ]; then
-              echo "Pushed \`$NAMESPACE/$IMAGE_NAME:sha-$GITHUB_SHA\`, pinnable as \`$NAMESPACE/$IMAGE_NAME@$DIGEST\`."
+              echo "Pushed \`$NAMESPACE/$IMAGE_NAME:sha-$GITHUB_SHA-$PLATFORM\`, pinnable as \`$NAMESPACE/$IMAGE_NAME@$DIGEST\`."
               echo
             fi
             echo "Lowest free space on / while building: ${lowest:-unknown} MiB"
@@ -243,9 +258,46 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+  merge:
+    name: Join architectures
+    needs: [plan, build]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Join the per-architecture tags into one manifest
+        # `sha-<commit>` is the tag hosts pull: a manifest listing both
+        # architectures, so Docker picks the one the host runs. It is written
+        # only after every leg of every image succeeded, and writing it again
+        # from the same per-architecture tags produces the same manifest, so a
+        # re-run is harmless.
+        env:
+          IMAGES: ${{ needs.plan.outputs.images }}
+        run: |
+          set -euo pipefail
+          while IFS=$'\t' read -r image description; do
+            ref="$NAMESPACE/$image"
+            docker buildx imagetools create --tag "$ref:sha-$GITHUB_SHA" \
+              --annotation "index:org.opencontainers.image.title=$image" \
+              --annotation "index:org.opencontainers.image.description=$description" \
+              --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" \
+              "$ref:sha-$GITHUB_SHA-amd64" \
+              "$ref:sha-$GITHUB_SHA-arm64"
+            echo "$ref:sha-$GITHUB_SHA <- amd64 + arm64" | tee -a "$GITHUB_STEP_SUMMARY"
+          done < <(jq -r '.[] | [.image, .description] | @tsv' <<<"$IMAGES")
+
   promote:
     name: Move main tags
-    needs: [plan, build]
+    needs: [plan, merge]
     if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
