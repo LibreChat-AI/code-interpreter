@@ -164,6 +164,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "codeapi.fullname" . }}-secrets
                   key: redis-password
+            {{- with include "codeapi.redis.tlsEnv" . }}{{ . | trim | nindent 12 }}{{ end }}
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
