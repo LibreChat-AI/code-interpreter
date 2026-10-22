@@ -52,9 +52,12 @@ const runtimeConfig: HostedAppMicrovmConfig = {
   tokenTps: 8,
 };
 
+/* The seed is salted per call, so fixtures share one allocation. */
+const seededGeneration = hostedAppLaunchGenerationSeed(runtimeConfig);
+
 class MemoryRegistry implements HostedAppRegistry {
   record: RuntimeSessionRecord | null = null;
-  generation = hostedAppLaunchGenerationSeed(runtimeConfig);
+  generation = seededGeneration;
   writes: RuntimeSessionRecord[] = [];
   allocations = 0;
 
@@ -260,7 +263,7 @@ test('does not report an expired pending intent as starting', () => {
 });
 
 function pendingRecord(): RuntimeSessionRecord {
-  const generation = hostedAppLaunchGenerationSeed(runtimeConfig);
+  const generation = seededGeneration;
   return {
     runtime_session_id: input.hostedAppRuntimeId,
     tenant_id: input.tenantId,

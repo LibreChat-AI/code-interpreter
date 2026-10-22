@@ -289,11 +289,11 @@ describe('normalizeMicrovmEndpoint', () => {
 });
 
 describe('runtime session launch tokens', () => {
-  test('uses a deterministic launch namespace and stays within the AWS limit', () => {
+  test('salts every launch namespace seed and stays within the AWS limit', () => {
     const cfg = config();
     const seed = runtimeSessionLaunchGenerationSeed(cfg);
     expect(seed).toBeGreaterThanOrEqual(RUNTIME_SESSION_NAMESPACED_GENERATION_MIN);
-    expect(runtimeSessionLaunchGenerationSeed({ ...cfg, imageVersion: '4' })).not.toBe(seed);
+    expect(runtimeSessionLaunchGenerationSeed(cfg)).not.toBe(seed);
 
     const runtimeSessionId = `rt_${'a'.repeat(40)}`;
     const token = runtimeSessionLaunchClientToken(runtimeSessionId, Number.MAX_SAFE_INTEGER);
@@ -690,10 +690,7 @@ describe('LambdaMicrovmSandboxBackend session execution', () => {
      * (image builds stay hookless), so RunMicrovm carries no runHookPayload. */
     expect(runArgs.runHookPayload).toBeUndefined();
     expect(runArgs.idlePolicy?.autoResume).toBe(true);
-    expect(runArgs.clientToken).toBe(runtimeSessionLaunchClientToken(
-      'rt_session_1',
-      runtimeSessionLaunchGenerationSeed(config()),
-    ));
+    expect(runArgs.clientToken).toMatch(/^sess-rt_session_1-\d+$/);
     expect(runArgs.maximumDurationSeconds).toBe(28_800);
 
     const executeReq = captured.find((c) => c.path === '/api/v2/execute');
@@ -704,6 +701,7 @@ describe('LambdaMicrovmSandboxBackend session execution', () => {
     expect(record?.microvm_id).toBe([...fake.vms.keys()][0]);
     expect(record?.generation).toBeGreaterThanOrEqual(RUNTIME_SESSION_NAMESPACED_GENERATION_MIN);
     expect(record?.launch_client_token).toBe(runArgs.clientToken);
+    expect(runArgs.clientToken).toBe(runtimeSessionLaunchClientToken('rt_session_1', record?.generation as number));
   });
 
   test('replays a legacy recorded launch intent after the RunMicrovm response is lost', async () => {
@@ -873,6 +871,53 @@ describe('LambdaMicrovmSandboxBackend session execution', () => {
     expect(secondToken).not.toBe(firstToken);
     expect(secondToken?.length).toBeLessThanOrEqual(128);
     expect((await readRuntimeSessionRecord('rt_session_1'))?.image_version).toBe('4');
+  });
+
+  test('never reissues a launch token after registry loss on an unchanged config', async () => {
+    const fake = fakeClient();
+    await makeBackend(fake).execute(request(), sessionContext());
+    const firstToken = (fake.callsFor('runMicrovm')[0].args as { clientToken?: string }).clientToken;
+
+    /* The rtsx:gen counter expires after an idle night while AWS still
+     * remembers the token and rejects its reuse ("The provided clientToken was
+     * used with different request parameters"), even for an identical body.
+     * A relaunch on the same config must therefore never resend the token. */
+    await fake.terminateMicrovm([...fake.vms.keys()][0]);
+    await mock.del('rtsx:sess:rt_session_1', 'rtsx:gen:rt_session_1');
+
+    const second = await makeBackend(fake).execute(request(), sessionContext())
+      .catch((error: unknown) => error);
+    const secondToken = (fake.callsFor('runMicrovm')[1].args as { clientToken?: string }).clientToken;
+    expect(secondToken).not.toBe(firstToken);
+    expect(second).toEqual(EXECUTE_RESPONSE);
+  });
+
+  test('stops replaying a PENDING token that AWS rejected as reused', async () => {
+    const fake = fakeClient();
+    /* An ambiguous failure persists the PENDING intent and its token. */
+    fake.failNext('runMicrovm', new LambdaMicrovmApiError('other', 'RunMicrovm', 'connection lost'));
+    await expect(makeBackend(fake).execute(request(), sessionContext())).rejects.toMatchObject({
+      code: 'MICROVM_LAUNCH_FAILED',
+    });
+    const poisoned = (await readRuntimeSessionRecord('rt_session_1'))?.launch_client_token;
+    expect(poisoned).toBeDefined();
+
+    fake.failNext('runMicrovm', new LambdaMicrovmApiError(
+      'validation',
+      'RunMicrovm',
+      'The provided clientToken was used with different request parameters.',
+    ));
+    await expect(makeBackend(fake).execute(request(), sessionContext())).rejects.toMatchObject({
+      code: 'MICROVM_LAUNCH_FAILED',
+    });
+
+    await expect(makeBackend(fake).execute(request(), sessionContext()))
+      .resolves.toEqual(EXECUTE_RESPONSE);
+    const tokens = fake.callsFor('runMicrovm')
+      .map(call => (call.args as { clientToken?: string }).clientToken);
+    expect(tokens).toHaveLength(3);
+    expect(tokens.slice(0, 2)).toEqual([poisoned, poisoned]);
+    expect(tokens[2]).not.toBe(poisoned);
   });
 
   test('does not replay a persisted token when the exact connector request changed', async () => {
