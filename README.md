@@ -17,6 +17,10 @@ Code Interpreter (internally `codeapi`, the prefix used by its env vars, images,
   development
 - **Remote Code Bridge** - Lets an operator-owned VM connect outbound and serve
   as a fenced, stateful sandbox through the `@librechat/code` worker
+- **Coding Tool Definitions** - The `@librechat/dev-tools` npm package: the
+  LLM-visible surface (canonical names, schemas, descriptions) of the
+  harness-native coding tools, shared by `@librechat/agents` and LibreChat
+  provisioning
 
 ## Architecture
 
