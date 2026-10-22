@@ -14,7 +14,7 @@
     "start:api:dev": "ts-node src/api-server.ts",
     "start:worker": "node .build-service/src/worker-server.js",
     "start:worker:dev": "ts-node src/worker-server.ts",
-    "start:egress-gateway": "bun run src/egress-gateway.ts",
+    "start:egress-gateway": "bun run --max-http-header-size=262144 src/egress-gateway.ts",
     "build": "rollup -c",
     "deploy": "serverless deploy",
     "test": "bun test ./src/*.test.ts ./src/*.spec.ts ./src/**/*.test.ts ./src/**/*.spec.ts",
