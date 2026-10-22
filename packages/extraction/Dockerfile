@@ -1,4 +1,4 @@
-FROM node:24.16.0-bookworm-slim AS build
+FROM node:24.22.1-bookworm-slim AS build
 WORKDIR /build
 COPY packages/extraction/package*.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund

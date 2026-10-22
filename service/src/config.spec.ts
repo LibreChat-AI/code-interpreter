@@ -22,7 +22,7 @@ describe('node language configuration', () => {
   it('maps Node.js requests to the node sandbox runtime', () => {
     expect(languageConfig[Languages.node]).toEqual({
       language: 'node',
-      version: '24.15.0',
+      version: '24.22.1',
       fileName: 'index.js',
     });
   });
@@ -45,7 +45,7 @@ describe('node language configuration', () => {
 
     expect(payload).toMatchObject({
       language: 'node',
-      version: '24.15.0',
+      version: '24.22.1',
       session_id: 'session-node',
       args: ['--trace-warnings'],
       files: [

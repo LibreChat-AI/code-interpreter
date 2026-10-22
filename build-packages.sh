@@ -9,7 +9,7 @@
 #
 # Environment Variables:
 #   PYTHON_VERSION=3.14.4    # Python version to install
-#   NODE_VERSION=24.15.0     # Node.js version to install
+#   NODE_VERSION=24.22.1     # Node.js version to install
 #   BUN_VERSION=1.4.2       # Bun version to install
 #   BASH_PACKAGE_VERSION=5.2.0 # Bash package registration version (semver-like x.y.z)
 #   SKIP_PYTHON_PACKAGES=1   # Skip Python pip packages
@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 PYTHON_VERSION="${PYTHON_VERSION:-3.14.4}"
-NODE_VERSION="${NODE_VERSION:-24.15.0}"
+NODE_VERSION="${NODE_VERSION:-24.22.1}"
 BUN_VERSION="${BUN_VERSION:-1.4.2}"
 PACKAGES_DIR="./data/pkgs"
 JS_PACKAGE_MANIFEST="${JS_PACKAGE_MANIFEST:-${SCRIPT_DIR}/javascript-packages.txt}"
