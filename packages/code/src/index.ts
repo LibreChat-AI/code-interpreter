@@ -1,5 +1,6 @@
 export * from './protocol.js';
 export * from './identity.js';
+export * from './browser-enrollment-protocol.js';
 export * from './pairing.js';
 export * from './storage.js';
 export * from './runtime.js';

@@ -5,6 +5,12 @@ import { access, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { WorkspaceToolError } from './workspace.js';
+import {
+  commandFailureDiagnostic,
+  commandSetupFailureDiagnostic,
+  readCommandFailureDiagnostic,
+} from './command-diagnostics.js';
+import type { CommandFailureReason, CommandSetupStage } from './command-diagnostics.js';
 import { NATIVE_PROGRAMMATIC_COMMAND } from './native-programmatic.js';
 import {
     BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
@@ -171,11 +177,13 @@ export function nativeExecutorEnvironment(
 /** The executor process was lost, refused a send, or stalled past its
  * deadline, as opposed to a failure the executor reported explicitly. */
 class NativeExecutorUnavailableError extends WorkspaceToolError {
-  constructor(mutation: boolean) {
+  constructor(mutation: boolean, reason: CommandFailureReason = 'executor_unavailable') {
         super(
             'Native executor is unavailable',
             'COMMAND_UNAVAILABLE',
             mutation,
+            mutation,
+            commandFailureDiagnostic('executor_transport', reason),
         );
     this.name = 'NativeExecutorUnavailableError';
   }
@@ -227,8 +235,8 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
     return this.ready;
   }
 
-  private unavailable(mutation: boolean): WorkspaceToolError {
-    return new NativeExecutorUnavailableError(mutation);
+  private unavailable(mutation: boolean, reason?: CommandFailureReason): WorkspaceToolError {
+    return new NativeExecutorUnavailableError(mutation, reason);
   }
 
   private async resolveProgrammaticExecutables(): Promise<{
@@ -271,6 +279,7 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
         errorMessage?: unknown;
         fatal?: unknown;
         phase?: unknown;
+        diagnostic?: unknown;
       };
       if (
         !message ||
@@ -323,13 +332,14 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
             code,
             mutationMayHaveCommitted,
             mutationMayHaveCommitted && !processTerminationConfirmed,
+            readCommandFailureDiagnostic(message.diagnostic) ?? commandFailureDiagnostic('dispatch', 'executor_rejected'),
           ),
         );
       }
     });
     const lost = () => {
       this.failed = true;
-      this.pending?.reject(this.unavailable(this.pending.mutation));
+      this.pending?.reject(this.unavailable(this.pending.mutation, 'executor_lost'));
     };
     child.on('error', lost);
     child.on('exit', lost);
@@ -407,6 +417,8 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
       throw new WorkspaceToolError(
         'Native programmatic file transport is unavailable',
         'COMMAND_UNAVAILABLE',
+        false, false,
+        commandFailureDiagnostic('programmatic_preflight', 'prerequisite_failed'),
       );
     }
         const active = this.executeProgrammaticOnce(
@@ -435,16 +447,20 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
     let credentials: Record<string, string> | undefined;
     let wrappedCommand: string | undefined;
     let programmaticExecutables: { shellPath: string; jqPath: string };
+    let setupStage: CommandSetupStage = 'sandbox_startup';
     try {
       await this.prepare();
       if (signal?.aborted) throw new Error('aborted');
+      setupStage = 'programmatic_preflight';
       programmaticExecutables = await this.resolveProgrammaticExecutables();
       if (signal?.aborted) throw new Error('aborted');
+      setupStage = 'credential_resolution';
       credentials = await this.options.maskedEnvironment?.resolve(
         signal,
         this.options.workspaceRoot,
       );
       if (signal?.aborted) throw new Error('aborted');
+      setupStage = 'command_wrapping';
       wrappedCommand = this.options.maskedEnvironment?.wrapCommand?.(
         NATIVE_PROGRAMMATIC_COMMAND,
         process.platform,
@@ -458,11 +474,13 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
           'EXECUTION_ABORTED',
         );
       }
+      const diagnostic = commandSetupFailureDiagnostic(setupStage, error);
       throw error instanceof WorkspaceToolError
-        ? new WorkspaceToolError(error.message, error.code, false)
+        ? new WorkspaceToolError(error.message, error.code, false, false, error.commandDiagnostic ?? diagnostic)
         : new WorkspaceToolError(
             'Native programmatic executor setup failed before dispatch',
             'COMMAND_UNAVAILABLE',
+            false, false, diagnostic,
           );
     }
     const result = await this.rpc(
@@ -534,12 +552,15 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
             );
     let credentials: Record<string, string> | undefined;
     let wrappedCommand: string | undefined;
+    let setupStage: CommandSetupStage = 'sandbox_startup';
     try {
       await this.prepare();
       if (signal?.aborted) throw new Error('aborted');
       const cwd = resolve(this.options.workspaceRoot, request.cwd ?? '.');
+      setupStage = 'credential_resolution';
       credentials = await this.options.maskedEnvironment?.resolve(signal, cwd);
       if (signal?.aborted) throw new Error('aborted');
+      setupStage = 'command_wrapping';
       wrappedCommand = this.options.maskedEnvironment?.wrapCommand?.(
         request.command,
         process.platform,
@@ -554,11 +575,13 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
                     'Command aborted',
                     'EXECUTION_ABORTED',
                 );
+      const diagnostic = commandSetupFailureDiagnostic(setupStage, error);
       throw error instanceof WorkspaceToolError
-        ? new WorkspaceToolError(error.message, error.code, false)
+        ? new WorkspaceToolError(error.message, error.code, false, false, error.commandDiagnostic ?? diagnostic)
         : new WorkspaceToolError(
             'Native executor setup failed before dispatch',
             'COMMAND_UNAVAILABLE',
+            false, false, diagnostic,
           );
     }
     const result = await this.rpc(
@@ -610,8 +633,8 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
           if (timer) clearTimeout(timer);
           timer = this.scheduleRpcTimeout(() => {
             this.failed = true;
+            reject(this.unavailable(this.pending?.mutation ?? mutation, 'rpc_timeout'));
             this.terminate();
-            reject(this.unavailable(this.pending?.mutation ?? mutation));
           }, timeoutMs);
         };
         this.pending = {
@@ -627,8 +650,8 @@ export class NativeProcessWorkspaceCommandSandbox implements WorkspaceCommandSan
         signal?.addEventListener('abort', abort, { once: true });
         const sendFailed = () => {
           this.failed = true;
+          reject(this.unavailable(mutation, 'send_failed'));
           this.terminate();
-          reject(this.unavailable(mutation));
         };
         try {
                     child.send({ type, id, ...payload }, error => {

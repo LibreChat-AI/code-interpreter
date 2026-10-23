@@ -32,6 +32,7 @@ import {
   NativeSrtWorkspaceCommandSandbox,
 } from './native-sandbox.js';
 import { restoreScratchTraversal } from './native-scratch.js';
+import { browserSetupAttemptPath, browserSetupProtectedPaths } from './browser-setup.js';
 import { WorkspaceToolError } from './workspace.js';
 import { isWorkspaceToolResult } from './protocol.js';
 
@@ -1309,6 +1310,30 @@ test('fails closed when SRT dependencies are unavailable', async t => {
   );
 });
 
+test('protects retained browser setup keys outside home from command reads and writes', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-enrollment-protection-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, 'workspace');
+  const state = join(root, 'state');
+  await mkdir(workspace);
+  await mkdir(state);
+  const attempt = browserSetupAttemptPath(join(state, 'profile.json'));
+  const paths = browserSetupProtectedPaths(attempt);
+  await mkdir(paths[0], { mode: 0o700 });
+  for (const path of [attempt, `${attempt}.lock`, `${attempt}.0123456789abcdef.tmp`])
+    await writeFile(path, 'private setup state', { mode: 0o600 });
+  const fake = fakeManager();
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({ workspaceRoot: workspace, protectedPaths: paths, manager: fake.manager });
+  t.after(() => sandbox.close());
+  await sandbox.prepare();
+  for (const path of paths) {
+    const canonical = await realpath(path);
+    assert.ok(fake.config?.credentials?.files?.some(file => file.path === canonical && file.mode === 'deny'),
+      'setup keys must be denied through the sandbox credential-file policy');
+    assert.ok(fake.config?.filesystem.denyWrite.includes(canonical), 'commands must not replace setup state');
+  }
+});
+
 test('refuses workspace roots that expose worker home or control files', async t => {
   const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
   const controlDirectory = join(root, '.control');
@@ -1714,7 +1739,9 @@ test('cleans allocated command state exactly once on every execution exit', asyn
                                     (outcome === 'abort-after-spawn') &&
             error.requiresQuarantine ===
                                     (outcome === 'abort-after-spawn' &&
-                                        process.platform === 'win32'),
+                                        process.platform === 'win32') &&
+            (outcome.startsWith('abort') || (error.commandDiagnostic?.stage ===
+              (outcome === 'wrap-throw' ? 'command_wrapping' : 'dispatch'))),
           );
         }
         assert.equal(

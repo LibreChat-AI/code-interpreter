@@ -99,6 +99,13 @@ export class RedisWorkspaceRequests {
     request: WorkspaceToolRequest;
     queueWaitMs: number;
     executionTimeoutMs: number;
+    /**
+     * Derives the request a worker receives, such as an import carrying its
+     * egress grant. Runs only for a new request ID; the fingerprint, and so
+     * idempotent retries, cover the caller's request. `release` undoes the
+     * preparation when the queue does not adopt this submission.
+     */
+    prepare?: () => Promise<{ request: WorkspaceToolRequest; release?: () => Promise<void> }>;
   }): Promise<WorkspaceRequestStatus> {
     if (!WORKSPACE_REQUEST_ID_PATTERN.test(args.requestId)) {
       throw new BridgeStoreError('ASSIGNMENT_INVALID', 'Invalid durable workspace request ID');
@@ -117,21 +124,31 @@ export class RedisWorkspaceRequests {
     const registration = await this.bridge.prepareDurableWorkspaceTool({
       ...args, tenantId: args.owner.tenantId,
     });
+    const prepared = args.prepare == null ? undefined : await args.prepare();
+    const release = async (): Promise<void> => { await prepared?.release?.().catch(() => undefined); };
+    const request = prepared?.request ?? args.request;
     const now = Date.now();
     const record: StoredWorkspaceRequest = {
       id: `durable-${randomBytes(18).toString('base64url')}`, key, fingerprint,
       workerId: args.workerId, tenantId: args.owner.tenantId,
       requireTenantBinding: args.requireTenantBinding,
-      request: args.request, registration, createdAtMs: now,
+      request, registration, createdAtMs: now,
       queueDeadlineAtMs: now + args.queueWaitMs,
       executionTimeoutMs: args.executionTimeoutMs, state: 'queued',
     };
     const queue = new BridgeAdmissionQueue(this.redis);
-    const accepted = await queue.submit({
-      workerId: record.workerId, id: record.id, deadlineAtMs: record.queueDeadlineAtMs,
-      workspaceId: workspaceAdmissionId(record.request.workspaceId, record.request.workspaceInstanceId, record.request.worktree),
-      key, activeKey: this.activeKey, fingerprint, record: JSON.stringify(record), retentionMs: RETENTION_MS,
-    });
+    let accepted: Awaited<ReturnType<BridgeAdmissionQueue['submit']>>;
+    try {
+      accepted = await queue.submit({
+        workerId: record.workerId, id: record.id, deadlineAtMs: record.queueDeadlineAtMs,
+        workspaceId: workspaceAdmissionId(record.request.workspaceId, record.request.workspaceInstanceId, record.request.worktree),
+        key, activeKey: this.activeKey, fingerprint, record: JSON.stringify(record), retentionMs: RETENTION_MS,
+      });
+    } catch (error) {
+      await release();
+      throw error;
+    }
+    if (accepted !== 'accepted') await release();
     if (accepted === 'conflict') throw new WorkspaceRequestConflict('Request ID was already used for different work');
     if (accepted === 'full') throw new BridgeStoreError('WORKER_QUEUE_FULL', 'Bridge worker pending request limit reached');
     const submitted = (await this.read(key))!;

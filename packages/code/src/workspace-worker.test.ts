@@ -8,6 +8,61 @@ import { SandboxWorkspaceTools, WorkspaceToolError } from './workspace.js';
 
 const incarnationId = 'incarnation-00000001';
 
+test('worker logs command failures locally without changing bridge settlements', async () => {
+  for (const sink of ['sync', 'async', 'pending'] as const) {
+  for (const operation of ['execute_command', 'list_files'] as const) {
+    const events: unknown[] = [];
+    let settlement: Record<string, unknown> | undefined;
+    const capabilities = {
+      protocolVersion: 1 as const,
+      operations: ['execute_command' as const, 'list_files' as const],
+      workspaces: [{ id: 'primary' }],
+    };
+    const worker = new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1', token: 'worker-secret', workerId: 'vm-1', incarnationId,
+      sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: { statefulWorkspace: false, sandboxProfile: 'anthropic-srt', runtimes: [], workspaceTools: capabilities },
+      workspaceTools: {
+        capabilities, mutationFailuresAreAtomic: true,
+        async execute() {
+          throw new WorkspaceToolError('private error', 'COMMAND_UNAVAILABLE', false, false,
+            { stage: 'credential_resolution', reason: 'credential_failed' });
+        },
+      },
+      workspaceQuarantines: new Map([['primary', mutationQuarantine()]]),
+      onCommandFailure(event) {
+        events.push(event);
+        if (sink === 'sync') throw new Error('private log sink error');
+        if (sink === 'async') return Promise.reject(new Error('private log sink error'));
+        return new Promise<void>(() => {});
+      },
+      fetchImpl: async (_input, init) => {
+        settlement = JSON.parse(String(init?.body));
+        return Response.json({ protocolVersion: 1, accepted: true });
+      },
+    });
+    await worker.executeAndSettle({
+      protocolVersion: 1, assignmentId: 'assignment-1', workerId: 'vm-1', incarnationId, generation: 4,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing', expiresAt: new Date(Date.now() + 5000).toISOString(),
+      executionKind: 'workspace_tool',
+      request: operation === 'execute_command'
+        ? { protocolVersion: 1, operation, workspaceId: 'primary', command: 'echo secret' }
+        : { protocolVersion: 1, operation, workspaceId: 'primary', path: '.' },
+    });
+    assert.equal(events.length, operation === 'execute_command' ? 1 : 0);
+    if (events.length) assert.deepEqual(events[0], {
+      event: 'workspace_command_unavailable', stage: 'credential_resolution', reason: 'credential_failed',
+      assignmentId: 'assignment-1', workerId: 'vm-1', incarnationId, workspaceId: 'primary',
+      operation: 'execute_command', mutationMayHaveCommitted: false, requiresQuarantine: false,
+    });
+    assert.equal(settlement?.status, 'rejected');
+    assert.equal(settlement?.errorCode, 'COMMAND_UNAVAILABLE');
+    assert.equal('diagnostic' in settlement!, false);
+    assert.equal(JSON.stringify(events).includes('secret'), false);
+  }
+  }
+});
+
 test('instance advertisement requires a guard resolver even for reads and with base guards', () => {
   for (const operation of ['read_file', 'write_file'] as const) {
     const workspaceTools = { protocolVersion: 1 as const, operations: [operation], workspaces: [{ id: 'primary', workspaceInstances: ['git_worktree'] as ['git_worktree'] }] };
@@ -1308,6 +1363,7 @@ test('worker executes programmatic Bash in the selected workspace and preserves 
 
 test('worker keeps a selected workspace usable after an atomic programmatic setup failure', async () => {
   const lifecycle: string[] = [];
+  const diagnostics: unknown[] = [];
   let settlement: Record<string, unknown> | undefined;
   const workspaceCapabilities = {
     protocolVersion: 1 as const,
@@ -1342,6 +1398,10 @@ test('worker keeps a selected workspace usable after an atomic programmatic setu
           'COMMAND_UNAVAILABLE',
         );
       },
+    },
+    onCommandFailure(event) {
+      diagnostics.push(event);
+      throw new Error('logging sink failed');
     },
     workspaceQuarantines: new Map([
       [
@@ -1383,6 +1443,14 @@ test('worker keeps a selected workspace usable after an atomic programmatic setu
   assert.deepEqual(lifecycle, ['arm', 'clear']);
   assert.equal(settlement?.status, 'rejected');
   assert.equal(settlement?.errorCode, 'COMMAND_UNAVAILABLE');
+  assert.deepEqual(diagnostics, [{
+    event: 'workspace_command_unavailable', stage: 'dispatch', reason: 'executor_rejected',
+    assignmentId: 'assignment-programmatic-setup-failure', workerId: 'vm-1', incarnationId,
+    workspaceId: 'primary', operation: 'workspace_programmatic',
+    mutationMayHaveCommitted: false, requiresQuarantine: false,
+  }]);
+  assert.equal('commandDiagnostic' in settlement!, false);
+  assert.equal('diagnostic' in settlement!, false);
 });
 
 test('worker keeps a selected workspace usable after confirmed programmatic cancellation cleanup', async () => {

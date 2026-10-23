@@ -20,7 +20,7 @@ PYTHON_ALIAS="python${PYTHON_SITE_VERSION}"
 # below — that's inherent to installing unpinned packages, not specific to uv.
 PYTHON_PACKAGE_INSTALLER="${PYTHON_PACKAGE_INSTALLER:-uv}"
 UV_VERSION="${UV_VERSION:-0.11.26}"
-NODE_VERSION="${NODE_VERSION:-24.15.0}"
+NODE_VERSION="${NODE_VERSION:-24.22.1}"
 BUN_VERSION="${BUN_VERSION:-1.4.2}"
 BASH_PACKAGE_VERSION="${BASH_PACKAGE_VERSION:-5.2.0}"
 INSTALL_FAILED=false
@@ -101,8 +101,64 @@ packages_ready() {
     [ -f "/pkgs/bash/${BASH_PACKAGE_VERSION}/.package-installed" ]
 }
 
+write_node_launcher() {
+    local destination="$1"
+    local launcher
+    launcher="$(mktemp "${destination}/.run.XXXXXX")"
+    cat > "$launcher" << 'EOF'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODULE_DIR="${SCRIPT_DIR}/node_modules"
+if [ -d "$MODULE_DIR" ]; then
+    if [ -L /mnt/data/node_modules ]; then
+        LINK_TARGET="$(readlink -m /mnt/data/node_modules)"
+        if [ "$LINK_TARGET" != "$MODULE_DIR" ]; then
+            case "$LINK_TARGET" in
+                "${SCRIPT_DIR%/*/*}/"*/node_modules)
+                    ln -sfnT "$MODULE_DIR" /mnt/data/node_modules ;;
+            esac
+        fi
+    elif [ ! -e /mnt/data/node_modules ]; then
+        ln -s "$MODULE_DIR" /mnt/data/node_modules 2>/dev/null || true
+    fi
+fi
+"${SCRIPT_DIR}/bin/node" "$@"
+EOF
+    chmod 0755 "$launcher"
+    mv -f "$launcher" "${destination}/run"
+}
+
+write_bun_launcher() {
+    local destination="$1"
+    local launcher
+    launcher="$(mktemp "${destination}/.run.XXXXXX")"
+    cat > "$launcher" << 'EOF'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODULE_DIR="${SCRIPT_DIR}/node_modules"
+if [ -d "$MODULE_DIR" ]; then
+    if [ -L /mnt/data/node_modules ]; then
+        LINK_TARGET="$(readlink -m /mnt/data/node_modules)"
+        if [ "$LINK_TARGET" != "$MODULE_DIR" ]; then
+            case "$LINK_TARGET" in
+                "${SCRIPT_DIR%/*/*}/"*/node_modules)
+                    ln -sfnT "$MODULE_DIR" /mnt/data/node_modules ;;
+            esac
+        fi
+    elif [ ! -e /mnt/data/node_modules ]; then
+        ln -s "$MODULE_DIR" /mnt/data/node_modules 2>/dev/null || true
+    fi
+fi
+"${SCRIPT_DIR}/bun" run "$@"
+EOF
+    chmod 0755 "$launcher"
+    mv -f "$launcher" "${destination}/run"
+}
+
 if [ -f "$MARKER_FILE" ] && [ "$FORCE_REBUILD" != "true" ]; then
     if packages_ready; then
+        write_node_launcher "/pkgs/node/${NODE_VERSION}"
+        write_bun_launcher "/pkgs/bun/${BUN_VERSION}"
         echo "Packages already initialized (marker file exists)"
         echo "Set FORCE_REBUILD=true to force reinstall"
         echo ""
@@ -301,16 +357,7 @@ if [ -n "$NODE_ARCH" ]; then
 }
 EOF
 
-            cat > "$NODE_DEST/run" << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODULE_DIR="${SCRIPT_DIR}/node_modules"
-if [ -d "$MODULE_DIR" ] && [ ! -e /mnt/data/node_modules ]; then
-    ln -s "$MODULE_DIR" /mnt/data/node_modules 2>/dev/null || true
-fi
-"${SCRIPT_DIR}/bin/node" "$@"
-EOF
-            chmod +x "$NODE_DEST/run"
+            write_node_launcher "$NODE_DEST"
 
             {
                 echo "PATH=${NODE_DEST}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:."
@@ -413,16 +460,7 @@ if [ -n "$BUN_ARCH" ]; then
 }
 EOF
 
-            cat > "$BUN_DEST/run" << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODULE_DIR="${SCRIPT_DIR}/node_modules"
-if [ -d "$MODULE_DIR" ] && [ ! -e /mnt/data/node_modules ]; then
-    ln -s "$MODULE_DIR" /mnt/data/node_modules 2>/dev/null || true
-fi
-"${SCRIPT_DIR}/bun" run "$@"
-EOF
-            chmod +x "$BUN_DEST/run"
+            write_bun_launcher "$BUN_DEST"
 
             {
                 echo "PATH=${BUN_DEST}:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:."

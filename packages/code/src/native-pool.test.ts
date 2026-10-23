@@ -14,6 +14,37 @@ const request = (workspaceId: string): WorkspaceExecuteCommandRequest => ({
   command: 'fixture',
 });
 
+test('pool distinguishes same-root contention from exhausted machine capacity', async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const running = new Promise<void>(resolve => { entered = resolve; });
+  const finish = new Promise<void>(resolve => { release = resolve; });
+  const pool = new NativeWorkspaceCommandPool(roots, 1, () => ({
+    async prepare() {}, async close() {},
+    async execute(req) {
+      entered();
+      await finish;
+      return { ...req, stdout: '', stderr: '', exitCode: 0, timedOut: false, truncated: false };
+    },
+  }));
+  const first = pool.execute(request('a'));
+  await running;
+  try {
+    for (const [root, reason] of [['a', 'workspace_busy'], ['b', 'capacity_exhausted']]) {
+      await assert.rejects(pool.execute(request(root!)), error => {
+        assert.ok(error instanceof WorkspaceToolError);
+        assert.deepEqual(error.commandDiagnostic, { stage: 'allocation', reason });
+        assert.equal(error.mutationMayHaveCommitted, false);
+        return true;
+      });
+    }
+  } finally {
+    release();
+    await first;
+    await pool.close();
+  }
+});
+
 test('failed provisioning roots are removed only after confirmed executor cleanup', async () => {
   let failClose = true;
   const pool = new NativeWorkspaceCommandPool(roots, 2, () => ({

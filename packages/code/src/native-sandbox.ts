@@ -15,6 +15,8 @@ import type { Dirent, Stats } from 'node:fs';
 import { access, mkdtemp, open, readdir, realpath, rm, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { matchesWorkspaceRoot } from './root-identity.js';
+import { commandFailureDiagnostic, commandSetupFailureDiagnostic } from './command-diagnostics.js';
+import type { CommandSetupStage } from './command-diagnostics.js';
 import { assertEnvironmentResourcesStable, environmentResourceVariables } from './environment-resources.js';
 import type { WorkspaceRootIdentity } from './root-identity.js';
 import { withWorkspaceRoot, WorkspaceRootAccessError, spawnWithinWorkspace, realpath as rootedRealpath, stat as rootedStat } from './root-access.js';
@@ -1071,9 +1073,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
         // permissive proxy session through a live updateConfig.
         await this.manager.reset();
         await this.manager.initialize(config, config.network.strictAllowlist ? undefined : async () => true);
-      } catch {
+      } catch (error) {
         this.resetFailed = true;
-        throw new WorkspaceToolError('Native probe network cleanup failed', 'COMMAND_UNAVAILABLE');
+        throw new WorkspaceToolError('Native probe network cleanup failed', 'COMMAND_UNAVAILABLE', false, false,
+          commandFailureDiagnostic('cleanup', 'cleanup_failed', error));
       }
     }
   }
@@ -1175,10 +1178,13 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
     let wrapped: Awaited<
       ReturnType<NativeSandboxManager['wrapWithSandboxArgv']>
     >;
+    let setupStage: CommandSetupStage = 'command_wrapping';
     try {
       const commandConfig = customConfig ?? (await this.rootCommandConfig());
+      setupStage = 'credential_resolution';
       const credentialEnvironment =
         await this.options.maskedEnvironment?.resolve(signal, cwd);
+      setupStage = 'command_wrapping';
       const sandboxedCommand = this.options.maskedEnvironment?.wrapCommand
         ? this.options.maskedEnvironment.wrapCommand(
             request.command,
@@ -1215,6 +1221,10 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
       throw new WorkspaceToolError(
         'Native sandbox command could not start',
         'COMMAND_UNAVAILABLE',
+        false, false,
+        error instanceof WorkspaceToolError && error.commandDiagnostic
+          ? error.commandDiagnostic
+          : commandSetupFailureDiagnostic(setupStage, error),
       );
     }
     try {
@@ -1314,11 +1324,13 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
                         },
                     );
           child.stdin.end();
-        } catch {
+        } catch (error) {
           reject(
             new WorkspaceToolError(
               'Native sandbox command could not start',
               'COMMAND_UNAVAILABLE',
+              false, false,
+              commandFailureDiagnostic('dispatch', 'executor_rejected', error),
             ),
           );
           return;
@@ -1344,7 +1356,7 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
           clearTimeout(timer);
           signal?.removeEventListener('abort', abort);
         };
-        child.once('error', () => {
+        child.once('error', error => {
           if (settled) return;
           settled = true;
           const mayHaveStarted = child.pid != null;
@@ -1355,6 +1367,8 @@ export class NativeSrtWorkspaceCommandSandbox implements WorkspaceCommandSandbox
               'Native sandbox command could not start',
               'COMMAND_UNAVAILABLE',
               mayHaveStarted,
+              mayHaveStarted,
+              commandFailureDiagnostic('dispatch', 'executor_rejected', error),
             ),
           );
         });

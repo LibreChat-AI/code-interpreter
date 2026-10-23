@@ -561,6 +561,22 @@ To keep every worktree, add `--no-worktree-retirement` (or
     plist.
 -   **Worker online but not ready:** check native sandbox preparation, definition
     validation, setup, quarantine, and readiness logs.
+-   **Files work but commands return `503 COMMAND_UNAVAILABLE`:** inspect the
+    worker's stderr/service journal for `workspace_command_unavailable`, and
+    correlate its `assignmentId` with the bridge request. Updated workers emit
+    one JSON record for a rejected command or programmatic assignment, with
+    `stage`, `reason`, workspace/worker/incarnation IDs, mutation uncertainty,
+    quarantine requirement, and an allowlisted `osCode` when available. Stages
+    distinguish allocation, sandbox startup, programmatic prerequisites,
+    credential resolution, command wrapping, dispatch, executor transport, and
+    cleanup. For example, `sandbox_startup` with `osCode: ENOSPC` points to
+    storage; `credential_resolution` identifies credential setup rather than
+    command execution. Missing errno does not rule out either cause.
+    Commands, arguments, paths, credentials, output, and free-form exception
+    messages are excluded from these records. Diagnostics stay worker-local;
+    the bridge response and quarantine/retry behavior are unchanged. A worker
+    package update is required; a Code API restart alone does not enable this.
+    These records cover assignment failures, not failures before worker startup.
 -   **Setup repeats on restart:** setup is intentionally per-start; make it
     idempotent, remove it, or opt in to the bounded `setup.reuse` readiness
     contract in the [worker package guide](../../packages/code/README.md#reusing-a-prepared-checkout).

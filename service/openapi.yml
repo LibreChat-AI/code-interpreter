@@ -72,7 +72,12 @@ components:
         protocolVersion: { type: integer, enum: [1] }
         operation:
           type: string
-          enum: [list_files, search_text, read_file, write_file, preview_edit, edit_file, execute_command]
+          enum: [list_files, search_text, read_file, write_file, preview_edit, edit_file, execute_command, import_file]
+          description: >-
+            `import_file` copies a stored object the caller owns into the
+            workspace: `path`, `source` ({ storage_session_id, id }), `bytes`,
+            lowercase hex `sha256`, optional `overwrite`. Send it only when the
+            worker advertises it. Callers never send `egressGrant`.
         workspaceId: { type: string }
       additionalProperties: true
 

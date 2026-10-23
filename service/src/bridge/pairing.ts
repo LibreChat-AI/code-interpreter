@@ -1,4 +1,6 @@
 import {
+  createCipheriv,
+  createDecipheriv,
   createHash,
   createPublicKey,
   randomBytes,
@@ -6,6 +8,21 @@ import {
 
 import type Redis from 'ioredis';
 
+import {
+  BROWSER_ENROLLMENT_MAX_TTL_MS,
+  canonicalBrowserEnrollmentRedemption,
+  isBrowserEnrollmentApproval,
+  isBrowserEnrollmentRedemption,
+  isBrowserEnrollmentRedemptionContract,
+  isBrowserEnrollmentStatusRequest,
+  verifyBrowserEnrollmentRedemption,
+} from '../../../packages/code/src/browser-enrollment-protocol';
+import type {
+  BrowserEnrollmentApproval,
+  BrowserEnrollmentRedemption,
+  BrowserEnrollmentRedemptionContract,
+  BrowserEnrollmentStatusRequest,
+} from '../../../packages/code/src/browser-enrollment-protocol';
 import {
   verifyBridgeRecovery,
   verifyBridgeRecoveryStart,
@@ -74,6 +91,66 @@ else
 end
 return 1
 `;
+const ISSUE_BROWSER_ENROLLMENT_SCRIPT = `
+local now = redis.call('TIME')
+local remaining = tonumber(ARGV[3]) - (tonumber(now[1]) * 1000.0 + math.floor(tonumber(now[2]) / 1000))
+if remaining <= 0 or remaining > tonumber(ARGV[4]) then return 0 end
+if (redis.call('GET', KEYS[5]) or '0') ~= '0' then return 0 end
+local saved = redis.call('GET', KEYS[1])
+local tombstone = redis.call('GET', KEYS[13])
+if tombstone and (not saved or tombstone ~= ARGV[5]) then return 0 end
+if saved then
+  if saved ~= ARGV[1] or redis.call('GET', KEYS[4]) ~= KEYS[3] or redis.call('GET', KEYS[3]) ~= 'browser-enrollment' then return 0 end
+  local enrollment = redis.call('GET', KEYS[8])
+  if enrollment then
+    if enrollment ~= redis.call('GET', KEYS[2]) then return 0 end
+  else
+    for i = 6, 12 do
+      if i ~= 8 and redis.call('EXISTS', KEYS[i]) == 1 then return 0 end
+    end
+  end
+  redis.call('SETNX', KEYS[5], '0')
+  return 1
+end
+for i = 4, 12 do
+  if i ~= 5 and redis.call('EXISTS', KEYS[i]) == 1 then return 0 end
+end
+redis.call('SETNX', KEYS[5], '0')
+redis.call('SET', KEYS[13], ARGV[5])
+redis.call('SET', KEYS[1], ARGV[1], 'PX', remaining)
+redis.call('SET', KEYS[2], ARGV[2], 'PX', remaining)
+redis.call('SET', KEYS[3], 'browser-enrollment', 'PX', remaining)
+redis.call('SET', KEYS[4], KEYS[3], 'PX', remaining)
+return 1
+`;
+const REDEEM_BROWSER_ENROLLMENT_SCRIPT = `
+local now = redis.call('TIME')
+local remaining = tonumber(ARGV[3]) - (tonumber(now[1]) * 1000.0 + math.floor(tonumber(now[2]) / 1000))
+if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[2]) ~= ARGV[2] or
+  redis.call('GET', KEYS[3]) ~= 'browser-enrollment' or redis.call('GET', KEYS[4]) ~= KEYS[3] or
+  (redis.call('GET', KEYS[5]) or '0') ~= '0' then return nil end
+local replay = redis.call('GET', KEYS[11])
+if replay then
+  if redis.call('GET', KEYS[9]) ~= ARGV[2] or redis.call('GET', KEYS[10]) ~= ARGV[9] then return nil end
+  return replay
+end
+if remaining <= 0 or ARGV[11] ~= '1' then return nil end
+for i = 7, 14 do
+  if i ~= 11 and redis.call('EXISTS', KEYS[i]) == 1 then return nil end
+end
+redis.call('SET', KEYS[6], ARGV[4], 'EX', ARGV[5])
+redis.call('SET', KEYS[7], ARGV[6], 'EX', ARGV[5])
+redis.call('SET', KEYS[8], ARGV[7], 'EX', ARGV[5])
+if tonumber(ARGV[8]) > 0 then
+  redis.call('SET', KEYS[9], ARGV[2], 'EX', ARGV[8])
+else
+  redis.call('SET', KEYS[9], ARGV[2])
+end
+redis.call('SET', KEYS[10], ARGV[9])
+redis.call('SET', KEYS[11], ARGV[10], 'EX', ARGV[5])
+for i = 1, 4 do redis.call('EXPIRE', KEYS[i], ARGV[5]) end
+return ARGV[10]
+`;
 const ROTATE_CREDENTIAL_SCRIPT = `
 if ARGV[6] ~= '' then
   if redis.call('GET', KEYS[5]) ~= ARGV[6] or (redis.call('GET', KEYS[6]) or '0') ~= ARGV[7] or redis.call('GET', KEYS[7]) ~= ARGV[8] then
@@ -127,7 +204,7 @@ if redis.call('EXISTS', KEYS[6]) == 1 then return -2 end
 local count = redis.call('INCR', KEYS[2])
 if count == 1 then redis.call('EXPIRE', KEYS[2], 60) end
 if count > tonumber(ARGV[2]) then return -1 end
-if redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[5], 'NX') ~= 'OK' then return 0 end
+if not redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[5], 'NX') then return 0 end
 redis.call('SET', KEYS[6], '1', 'EX', ARGV[7])
 return 1
 `;
@@ -223,6 +300,7 @@ interface StoredEnrollment {
   pairingGeneration: number;
   publicKey: string;
   binding?: BridgeWorkerBinding;
+  browserEnrollment?: BrowserEnrollmentRedemptionContract;
 }
 
 export interface BridgeRecoveryOptions {
@@ -275,6 +353,54 @@ function digest(value: string): string {
 
 function pairingKey(code: string): string {
   return `${PREFIX}:pairing:${digest(code)}`;
+}
+
+function browserEnrollmentKey(instance: string, attemptId: string): string {
+  return `${PREFIX}:browser-enrollment:${digest(JSON.stringify([instance, attemptId]))}`;
+}
+
+function canonicalApproval(approval: BrowserEnrollmentApproval): string {
+  return JSON.stringify({
+    protocolVersion: 1,
+    operation: approval.operation,
+    serverId: approval.serverId,
+    instance: approval.instance,
+    attemptId: approval.attemptId,
+    requestHash: approval.requestHash,
+    workerId: approval.workerId,
+    expiresAt: approval.expiresAt,
+    publicKey: approval.publicKey,
+    binding: {
+      tenantId: approval.binding.tenantId,
+      principal: { type: approval.binding.principal.type, id: approval.binding.principal.id },
+    },
+  });
+}
+
+function enrollmentReplayKey(adminToken: string, serverId: string): Buffer {
+  if (!adminToken) throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment requires an administrator token');
+  return createHash('sha256').update('librechat-code:browser-enrollment-replay:v1\0')
+    .update(serverId).update('\0').update(adminToken).digest();
+}
+
+function encryptEnrollmentReplay(credential: BridgeWorkerCredential, approval: string, key: Buffer): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from(approval));
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(credential), 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url');
+}
+
+function decryptEnrollmentReplay(ciphertext: string, approval: string, key: Buffer): BridgeWorkerCredential {
+  try {
+    const bytes = Buffer.from(ciphertext, 'base64url');
+    const decipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(0, 12));
+    decipher.setAAD(Buffer.from(approval));
+    decipher.setAuthTag(bytes.subarray(12, 28));
+    return JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8')) as BridgeWorkerCredential;
+  } catch {
+    throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment replay is unavailable');
+  }
 }
 
 function credentialDigestKey(credentialDigest: string): string {
@@ -406,6 +532,215 @@ export class RedisBridgePairingStore {
 
   get recoveryEnabled(): boolean {
     return this.recovery != null;
+  }
+
+  get recoveryServerId(): string | undefined {
+    return this.recovery?.serverId;
+  }
+
+  async limitBrowserEnrollmentPeer(peer: string): Promise<void> {
+    if (this.recovery == null) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment is disabled');
+    }
+    const allowed = await this.redis.eval(
+      LIMIT_RECOVERY_ATTEMPTS_SCRIPT,
+      1,
+      `${PREFIX}:browser-enrollment:peer:${digest(peer)}`,
+      String(this.recovery.maxUntrustedRequestsPerMinute ?? DEFAULT_UNTRUSTED_RECOVERY_REQUESTS_PER_MINUTE),
+    );
+    if (allowed !== 1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many browser enrollment requests from this peer');
+    }
+  }
+
+  async issueBrowserEnrollment(approval: BrowserEnrollmentApproval): Promise<BrowserEnrollmentApproval> {
+    if (!isBrowserEnrollmentApproval(approval) || this.recovery == null || approval.serverId !== this.recovery.serverId ||
+      Date.parse(approval.expiresAt) <= Date.now() || Date.parse(approval.expiresAt) - Date.now() > BROWSER_ENROLLMENT_MAX_TTL_MS) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Invalid browser enrollment approval');
+    }
+    await this.removeLegacyPairings(approval.workerId);
+    const approvalRaw = canonicalApproval(approval);
+    const normalized = JSON.parse(approvalRaw) as BrowserEnrollmentApproval;
+    const enrollment: StoredEnrollment = {
+      workerId: approval.workerId,
+      serverId: approval.serverId,
+      identityId: randomBytes(18).toString('base64url'),
+      generation: randomBytes(18).toString('base64url'),
+      pairingGeneration: 0,
+      browserEnrollment: {
+        operation: approval.operation,
+        serverId: approval.serverId,
+        instance: approval.instance,
+        attemptId: approval.attemptId,
+        requestHash: approval.requestHash,
+        workerId: approval.workerId,
+        expiresAt: approval.expiresAt,
+      },
+      publicKey: approval.publicKey,
+      binding: normalized.binding,
+    };
+    const key = browserEnrollmentKey(approval.instance, approval.attemptId);
+    const workerPrefix = `${PREFIX}:worker:${encodeURIComponent(approval.workerId)}`;
+    // The manual-pairing index points at a separate fence, never the immutable
+    // approval. Manual issue/revoke consumes that fence without erasing the tombstone.
+    const accepted = await this.redis.eval(
+      ISSUE_BROWSER_ENROLLMENT_SCRIPT,
+      13,
+      key,
+      `${key}:enrollment`,
+      `${key}:fence`,
+      workerPairingIndexKey(approval.workerId),
+      workerPairingGenerationKey(approval.workerId),
+      workerIdentityKey(approval.workerId),
+      workerStableIdentityKey(approval.workerId),
+      workerEnrollmentKey(approval.workerId),
+      workerEnrollmentRequiredKey(approval.workerId),
+      workerPrefix,
+      `${workerPrefix}:incarnation`,
+      `${workerPrefix}:registration-generation`,
+      `${key}:tombstone`,
+      approvalRaw,
+      JSON.stringify(enrollment),
+      String(Date.parse(approval.expiresAt)),
+      String(BROWSER_ENROLLMENT_MAX_TTL_MS),
+      `${digest(approvalRaw)}:${digest(canonicalBrowserEnrollmentRedemption(approval))}`,
+    );
+    if (accepted !== 1) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment is expired, revoked, superseded, or conflicts with an existing worker');
+    }
+    return normalized;
+  }
+
+  async browserEnrollmentStatus(proof: BrowserEnrollmentStatusRequest): Promise<{
+    protocolVersion: 1;
+    status: 'pending' | 'completed' | 'revoked';
+    workerId: string;
+  }> {
+    if (!isBrowserEnrollmentStatusRequest(proof) || this.recovery == null || proof.serverId !== this.recovery.serverId) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Invalid browser enrollment status request');
+    }
+    const key = browserEnrollmentKey(proof.instance, proof.attemptId);
+    const [raw, generation, requiredGeneration, approvalRaw, tombstone, fence, indexed, planned] = await this.redis.mget(
+      workerEnrollmentKey(proof.workerId),
+      workerPairingGenerationKey(proof.workerId),
+      workerEnrollmentRequiredKey(proof.workerId),
+      key,
+      `${key}:tombstone`,
+      `${key}:fence`,
+      workerPairingIndexKey(proof.workerId),
+      `${key}:enrollment`,
+    );
+    const contract = canonicalBrowserEnrollmentRedemption(proof);
+    try {
+      const enrollment = this.checkedEnrollment(proof.workerId, raw, generation, requiredGeneration);
+      if (isBrowserEnrollmentRedemptionContract(enrollment.browserEnrollment) &&
+        canonicalBrowserEnrollmentRedemption(enrollment.browserEnrollment) === contract) {
+        return { protocolVersion: 1, status: 'completed', workerId: proof.workerId };
+      }
+    } catch (error) {
+      if (!(error instanceof BridgePairingError)) throw error;
+    }
+    if (tombstone?.split(':')[1] !== digest(contract)) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment does not match a known contract');
+    }
+    let pending = false;
+    try {
+      const approval = JSON.parse(approvalRaw ?? 'null') as unknown;
+      pending = (generation ?? '0') === '0' && raw == null && requiredGeneration == null && planned != null &&
+        isBrowserEnrollmentApproval(approval) && canonicalBrowserEnrollmentRedemption(approval) === contract &&
+        Date.parse(approval.expiresAt) > Date.now() && fence === 'browser-enrollment' && indexed === `${key}:fence`;
+    } catch {
+      pending = false;
+    }
+    return { protocolVersion: 1, status: pending ? 'pending' : 'revoked', workerId: proof.workerId };
+  }
+
+  async redeemBrowserEnrollment(
+    proof: BrowserEnrollmentRedemption,
+    adminToken: string,
+  ): Promise<BridgeWorkerCredential> {
+    if (!isBrowserEnrollmentRedemption(proof) || this.recovery == null || proof.serverId !== this.recovery.serverId) {
+      throw new BridgePairingError('PROOF_INVALID', 'Invalid browser enrollment proof');
+    }
+    const replayKey = enrollmentReplayKey(adminToken, proof.serverId);
+    const key = browserEnrollmentKey(proof.instance, proof.attemptId);
+    const attempts = await this.redis.eval(
+      LIMIT_RECOVERY_ATTEMPTS_SCRIPT,
+      1,
+      `${key}:attempts`,
+      String(this.recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE),
+    );
+    if (attempts !== 1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many browser enrollment attempts');
+    }
+    const [raw, enrollmentRaw] = await this.redis.mget(key, `${key}:enrollment`);
+    let approval: BrowserEnrollmentApproval;
+    let enrollment: StoredEnrollment;
+    try {
+      approval = JSON.parse(raw ?? 'null') as BrowserEnrollmentApproval;
+      enrollment = JSON.parse(enrollmentRaw ?? 'null') as StoredEnrollment;
+      if (!isBrowserEnrollmentApproval(approval) || canonicalBrowserEnrollmentRedemption(approval) !== canonicalBrowserEnrollmentRedemption(proof) ||
+        enrollment?.workerId !== approval.workerId || enrollment.serverId !== approval.serverId ||
+        enrollment.publicKey !== approval.publicKey || enrollment.pairingGeneration !== 0 ||
+        enrollment.browserEnrollment == null || canonicalBrowserEnrollmentRedemption(enrollment.browserEnrollment) !== canonicalBrowserEnrollmentRedemption(proof) ||
+        JSON.stringify(enrollment.binding) !== JSON.stringify(approval.binding) ||
+        !/^[A-Za-z0-9_-]{24}$/.test(enrollment.identityId) || !/^[A-Za-z0-9_-]{24}$/.test(enrollment.generation)) {
+        throw new Error('Invalid approval');
+      }
+    } catch {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment is unavailable or does not match its approval');
+    }
+    if (!verifyBrowserEnrollmentRedemption(approval.publicKey, proof, proof.signature)) {
+      throw new BridgePairingError('PROOF_INVALID', 'Browser enrollment requires the approved machine key');
+    }
+    const credential: BridgeWorkerCredential = {
+      workerId: approval.workerId,
+      credential: randomBytes(32).toString('base64url'),
+      expiresAt: new Date(Date.now() + this.credentialTtlSeconds * 1000).toISOString(),
+    };
+    const credentialDigest = digest(credential.credential);
+    const stored: StoredCredential = {
+      workerId: approval.workerId,
+      identityId: enrollment.identityId,
+      publicKey: approval.publicKey,
+      expiresAt: credential.expiresAt,
+      binding: approval.binding,
+      enrollmentGeneration: enrollment.generation,
+    };
+    const workerPrefix = `${PREFIX}:worker:${encodeURIComponent(approval.workerId)}`;
+    const encrypted = await this.redis.eval(
+      REDEEM_BROWSER_ENROLLMENT_SCRIPT,
+      14,
+      key,
+      `${key}:enrollment`,
+      `${key}:fence`,
+      workerPairingIndexKey(approval.workerId),
+      workerPairingGenerationKey(approval.workerId),
+      credentialDigestKey(credentialDigest),
+      workerIdentityKey(approval.workerId),
+      workerStableIdentityKey(approval.workerId),
+      workerEnrollmentKey(approval.workerId),
+      workerEnrollmentRequiredKey(approval.workerId),
+      `${key}:result`,
+      workerPrefix,
+      `${workerPrefix}:incarnation`,
+      `${workerPrefix}:registration-generation`,
+      raw!,
+      enrollmentRaw!,
+      String(Date.parse(approval.expiresAt)),
+      JSON.stringify(stored),
+      String(this.credentialTtlSeconds),
+      credentialDigest,
+      enrollment.identityId,
+      String(this.recovery.enrollmentTtlSeconds ?? 0),
+      enrollment.generation,
+      encryptEnrollmentReplay(credential, raw!, replayKey),
+      Date.parse(proof.expiresAt) > Date.now() ? '1' : '0',
+    );
+    if (typeof encrypted !== 'string') {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment is expired, revoked, or superseded');
+    }
+    return decryptEnrollmentReplay(encrypted, raw!, replayKey);
   }
 
   async limitUntrustedRecovery(

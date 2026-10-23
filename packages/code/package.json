@@ -19,6 +19,10 @@
       "types": "./dist/identity.d.ts",
       "import": "./dist/identity.js"
     },
+    "./browser-enrollment": {
+      "types": "./dist/browser-enrollment-protocol.d.ts",
+      "import": "./dist/browser-enrollment-protocol.js"
+    },
     "./worker": {
       "types": "./dist/worker.d.ts",
       "import": "./dist/worker.js"

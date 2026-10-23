@@ -35,6 +35,12 @@ export function programmaticTransferReserveMs(jobTimeoutMs: number): number {
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES = 10 * 1024 * 1024;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_HISTORY_BYTES = 40_000_000;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
+/** Default per-file `import_file` ceiling; Code API and each worker may configure their own. */
+export const BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
+/** Longest execution budget Code API grants one `import_file` transfer. */
+export const BRIDGE_WORKSPACE_IMPORT_FILE_TIMEOUT_MS = 5 * 60_000;
+const BRIDGE_WORKSPACE_IMPORT_FILE_HANDLE_MAX_LENGTH = 32_768;
+const BRIDGE_WORKSPACE_IMPORT_FILE_GRANT_MAX_LENGTH = 256 * 1024;
 /** How long Code API drains a clean rejection after Stop cancels a workspace mutation. */
 export const BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS = 5_000;
 
@@ -313,7 +319,20 @@ export type BridgeWorkspaceToolOperation =
   | 'write_file'
   | 'preview_edit'
   | 'edit_file'
-  | 'execute_command';
+  | 'execute_command'
+  | 'import_file';
+
+/** Operations that may change workspace contents and therefore arm the durable mutation guard. */
+export function isWorkspaceMutationOperation(
+  operation: BridgeWorkspaceToolOperation,
+): boolean {
+  return (
+    operation === 'write_file' ||
+    operation === 'edit_file' ||
+    operation === 'execute_command' ||
+    operation === 'import_file'
+  );
+}
 
 export type WorkspaceWriteFileMode = 'replace' | 'create';
 export type WorkspaceEditFileMode = 'single' | 'batch';
@@ -674,6 +693,54 @@ export interface WorkspaceExecuteCommandResult {
   laneGit?: WorkspaceLaneGit;
 }
 
+/** A stored object the caller owns, named exactly as Code API file storage names it. */
+export interface WorkspaceImportFileSource {
+  storage_session_id: string;
+  id: string;
+}
+
+/**
+ * Copies one stored object into the workspace as a binary-safe file. The
+ * worker streams it through its file relay upstream, refuses `.git` paths and
+ * symlinked parents, verifies `bytes` and `sha256`, and installs it atomically
+ * with mode 0644.
+ */
+export interface WorkspaceImportFileRequest {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'import_file';
+  workspaceId: string;
+  workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
+  path: string;
+  source: WorkspaceImportFileSource;
+  /** Exact object size, enforced as a hard cap while streaming. */
+  bytes: number;
+  /** Lowercase hex SHA-256 of the object's bytes. */
+  sha256: string;
+  /** False or omitted refuses to replace a file whose content differs. */
+  overwrite?: boolean;
+  /**
+   * Set only by Code API when it relays the request to a worker: a short-lived
+   * read grant scoped to `source`, whose ids are then opaque grant handles.
+   * Callers never send it.
+   */
+  egressGrant?: string;
+}
+
+export interface WorkspaceImportFileResult {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'import_file';
+  workspaceId: string;
+  path: string;
+  created: boolean;
+  /** True when the target already held these exact bytes; nothing was written. */
+  unchanged?: boolean;
+  /** Bytes installed, or 0 when `unchanged`. */
+  bytesWritten: number;
+  sha256: string;
+}
+
 export type WorkspaceToolRequest =
   | WorkspaceReadFileRequest
   | WorkspaceSearchTextRequest
@@ -681,7 +748,8 @@ export type WorkspaceToolRequest =
   | WorkspaceWriteFileRequest
   | WorkspacePreviewEditRequest
   | WorkspaceEditFileRequest
-  | WorkspaceExecuteCommandRequest;
+  | WorkspaceExecuteCommandRequest
+  | WorkspaceImportFileRequest;
 export type WorkspaceToolResult =
   | WorkspaceReadFileResult
   | WorkspaceSearchTextResult
@@ -689,7 +757,8 @@ export type WorkspaceToolResult =
   | WorkspaceWriteFileResult
   | WorkspacePreviewEditResult
   | WorkspaceEditFileResult
-  | WorkspaceExecuteCommandResult;
+  | WorkspaceExecuteCommandResult
+  | WorkspaceImportFileResult;
 
 const WORKSPACE_READ_REQUEST_KEYS = new Set([
   'instructionSha256',
@@ -770,6 +839,30 @@ const WORKSPACE_COMMAND_REQUEST_KEYS = new Set([
   'cwd',
   'timeoutMs',
   'maxOutputBytes',
+]);
+const WORKSPACE_IMPORT_REQUEST_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'workspaceInstanceId',
+  'worktree',
+  'path',
+  'source',
+  'bytes',
+  'sha256',
+  'overwrite',
+  'egressGrant',
+]);
+const WORKSPACE_IMPORT_SOURCE_KEYS = new Set(['storage_session_id', 'id']);
+const WORKSPACE_IMPORT_RESULT_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'path',
+  'created',
+  'unchanged',
+  'bytesWritten',
+  'sha256',
 ]);
 const WORKSPACE_READ_RESULT_KEYS = new Set([
   'protocolVersion',
@@ -1275,6 +1368,94 @@ export function isSafePortableRelativePath(value: unknown): value is string {
     return value.split('/').every(segment => segment !== '..');
 }
 
+/**
+ * Whether a path segment names Git metadata on any host filesystem: case
+ * folding (macOS, Windows), ignorable code points (HFS+), trailing dots and
+ * spaces (Windows), NTFS stream syntax such as `.git::$INDEX_ALLOCATION`, and
+ * the NTFS short name all alias `.git`.
+ */
+function isDotGitPathSegment(segment: string): boolean {
+  const folded = segment
+    .split(':', 1)[0]!
+    .toLowerCase()
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '')
+    .replace(/[. ]+$/, '');
+  return folded === '.git' || folded === 'git~1';
+}
+
+/** `write_file` path rules, plus no `.git` segment and a file-like final segment. */
+export function isWorkspaceImportFilePath(value: unknown): value is string {
+  if (!isSafePortableRelativePath(value)) return false;
+  const segments = value.split('/');
+  const last = segments[segments.length - 1];
+  return (
+    last !== undefined &&
+    last !== '' &&
+    last !== '.' &&
+    !segments.some(isDotGitPathSegment)
+  );
+}
+
+function isWorkspaceImportFileHandle(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= BRIDGE_WORKSPACE_IMPORT_FILE_HANDLE_MAX_LENGTH &&
+    !/[\0\r\n]/.test(value)
+  );
+}
+
+function isWorkspaceImportFileRequestShape(
+  request: Record<string, unknown>,
+): boolean {
+  const source = request.source;
+  return (
+    hasOnlyKeys(request, WORKSPACE_IMPORT_REQUEST_KEYS) &&
+    isWorkspaceImportFilePath(request.path) &&
+    typeof source === 'object' &&
+    source !== null &&
+    !Array.isArray(source) &&
+    hasOnlyKeys(source as Record<string, unknown>, WORKSPACE_IMPORT_SOURCE_KEYS) &&
+    isWorkspaceImportFileHandle((source as Record<string, unknown>).storage_session_id) &&
+    isWorkspaceImportFileHandle((source as Record<string, unknown>).id) &&
+    Number.isSafeInteger(request.bytes) &&
+    Number(request.bytes) >= 0 &&
+    typeof request.sha256 === 'string' &&
+    /^[a-f0-9]{64}$/.test(request.sha256) &&
+    (request.overwrite === undefined || typeof request.overwrite === 'boolean') &&
+    (request.egressGrant === undefined ||
+      (typeof request.egressGrant === 'string' &&
+        request.egressGrant.length > 0 &&
+        request.egressGrant.length <= BRIDGE_WORKSPACE_IMPORT_FILE_GRANT_MAX_LENGTH &&
+        !/[\0\r\n]/.test(request.egressGrant)))
+  );
+}
+
+/**
+ * The caller-facing `import_file` request LibreChat sends to Code API. A
+ * caller may never supply `egressGrant`; Code API mints it when relaying.
+ */
+export function isBridgeWorkspaceImportFileRequest(
+  value: unknown,
+): value is WorkspaceImportFileRequest & { egressGrant?: never } {
+  return (
+    isWorkspaceToolRequest(value) &&
+    value.operation === 'import_file' &&
+    value.egressGrant === undefined
+  );
+}
+
+/** The relayed `import_file` request a worker executes: it must carry Code API's grant. */
+export function isRelayedWorkspaceImportFileRequest(
+  value: unknown,
+): value is WorkspaceImportFileRequest & { egressGrant: string } {
+  return (
+    isWorkspaceToolRequest(value) &&
+    value.operation === 'import_file' &&
+    value.egressGrant !== undefined
+  );
+}
+
 function normalizePortableRelativePath(value: string): string {
   return (
     value
@@ -1573,6 +1754,9 @@ export function isWorkspaceToolRequest(
             BRIDGE_WORKSPACE_COMMAND_MAX_OUTPUT_BYTES))
     );
   }
+  if (request.operation === 'import_file') {
+    return isWorkspaceImportFileRequestShape(request);
+  }
   return false;
 }
 
@@ -1706,6 +1890,26 @@ export function isWorkspaceToolResult(
     );
   }
 
+  if (request.operation === 'import_file') {
+    if (
+      !hasOnlyKeys(result, WORKSPACE_IMPORT_RESULT_KEYS) ||
+      result.path !== request.path ||
+      result.sha256 !== request.sha256 ||
+      typeof result.created !== 'boolean' ||
+      (result.unchanged !== undefined && typeof result.unchanged !== 'boolean') ||
+      !Number.isSafeInteger(result.bytesWritten)
+    ) {
+      return false;
+    }
+    if (result.unchanged === true) {
+      return result.created === false && result.bytesWritten === 0;
+    }
+    return (
+      result.bytesWritten === request.bytes &&
+      (request.overwrite === true || result.created === true)
+    );
+  }
+
   if (request.operation === 'edit_file') {
     const replacements = request.edits?.length ?? 1;
     return (
@@ -1808,7 +2012,7 @@ export function isValidBridgeWorkspaceToolCapabilities(
     capabilities.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
     !Array.isArray(capabilities.operations) ||
     capabilities.operations.length < 1 ||
-    capabilities.operations.length > 7 ||
+    capabilities.operations.length > 8 ||
     !capabilities.operations.every(
             operation =>
         operation === 'read_file' ||
@@ -1817,7 +2021,8 @@ export function isValidBridgeWorkspaceToolCapabilities(
         operation === 'write_file' ||
         operation === 'preview_edit' ||
         operation === 'edit_file' ||
-        operation === 'execute_command',
+        operation === 'execute_command' ||
+        operation === 'import_file',
     ) ||
         new Set(capabilities.operations).size !==
             capabilities.operations.length ||

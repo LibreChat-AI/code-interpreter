@@ -484,6 +484,7 @@ test('programmatic staging watchdog expires without claiming a workspace mutatio
     execution,
     (error: unknown) =>
       error instanceof WorkspaceToolError &&
+      error.commandDiagnostic?.reason === 'rpc_timeout' &&
       !error.mutationMayHaveCommitted &&
       !error.requiresQuarantine,
   );
@@ -875,4 +876,93 @@ test('executor classifies every pre-dispatch setup failure as mutation-atomic', 
     );
     await sandbox.close();
   }
+});
+
+test('executor diagnoses setup stages without dispatching or retaining private exception values', async () => {
+  for (const failure of ['fork', 'credential', 'wrapper'] as const) {
+    const fake = fixture();
+    const privateError = Object.assign(new Error('secret /private/path command'), { code: 'ENOSPC' });
+    const sandbox = new NativeProcessWorkspaceCommandSandbox({
+      workspaceRoot: '/workspace',
+      maskedEnvironment: {
+        variables: [],
+        async resolve() {
+          if (failure === 'credential') throw privateError;
+          return {};
+        },
+        wrapCommand(command) {
+          if (failure === 'wrapper') throw privateError;
+          return command;
+        },
+      },
+    }, failure === 'fork' ? () => { throw privateError; } : fake.fork);
+    await assert.rejects(sandbox.execute(request), error => {
+      assert.ok(error instanceof WorkspaceToolError);
+      assert.equal(error.code, 'COMMAND_UNAVAILABLE');
+      assert.equal(error.mutationMayHaveCommitted, false);
+      assert.equal(error.requiresQuarantine, false);
+      assert.deepEqual(error.commandDiagnostic, {
+        stage: failure === 'fork' ? 'sandbox_startup' : failure === 'credential' ? 'credential_resolution' : 'command_wrapping',
+        reason: failure === 'fork' ? 'startup_failed' : failure === 'credential' ? 'credential_failed' : 'wrapping_failed',
+        osCode: 'ENOSPC',
+      });
+      assert.equal(JSON.stringify(error.commandDiagnostic).includes('secret'), false);
+      return true;
+    });
+    assert.equal(fake.messages.some(m => m.type === 'execute'), false);
+    await sandbox.close();
+  }
+});
+
+test('executor preserves sanitized child diagnostics and mutation uncertainty', async () => {
+  const fake = fixture((child, message) => child.emit('message', {
+    id: message.id, ok: false, mutation: true,
+    diagnostic: { stage: 'dispatch', reason: 'executor_rejected', osCode: 'EIO', secret: 'token' },
+  }));
+  const sandbox = new NativeProcessWorkspaceCommandSandbox({ workspaceRoot: '/workspace' }, fake.fork);
+  await assert.rejects(sandbox.execute(request), error => {
+    assert.ok(error instanceof WorkspaceToolError);
+    assert.deepEqual(error.commandDiagnostic, { stage: 'dispatch', reason: 'executor_rejected', osCode: 'EIO' });
+    assert.equal(error.mutationMayHaveCommitted, true);
+    assert.equal(error.requiresQuarantine, true);
+    return true;
+  });
+  await sandbox.close();
+});
+
+test('programmatic startup diagnoses child preparation failures before mutation', async () => {
+  const fake = fixture(undefined, (child, message) => child.emit('message', {
+    id: message.id, ok: false,
+    diagnostic: { stage: 'sandbox_startup', reason: 'startup_failed', osCode: 'ENOSPC' },
+  }));
+  const sandbox = new NativeProcessWorkspaceCommandSandbox({
+    workspaceRoot: '/workspace', programmaticFileUpstream: 'http://127.0.0.1:3190',
+  }, fake.fork);
+  await assert.rejects(sandbox.executeProgrammatic('primary', {
+    body: { language: 'bash', version: '5.2', session_id: 'session-1', files: [{ name: 'main.sh', content: 'echo ok' }] }, headers: {},
+  }), error => {
+    assert.ok(error instanceof WorkspaceToolError);
+    assert.deepEqual(error.commandDiagnostic, { stage: 'sandbox_startup', reason: 'startup_failed', osCode: 'ENOSPC' });
+    assert.equal(error.mutationMayHaveCommitted, false);
+    return true;
+  });
+  assert.equal(fake.messages.some(m => m.type === 'programmatic'), false);
+  await sandbox.close();
+});
+
+test('real executor IPC carries a startup errno without including the workspace path in diagnostics', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'command-diagnostic-'));
+  const sandbox = new NativeProcessWorkspaceCommandSandbox({ workspaceRoot: join(directory, 'missing-private-root') });
+  t.after(async () => {
+    await sandbox.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await assert.rejects(sandbox.execute(request), error => {
+    assert.ok(error instanceof WorkspaceToolError);
+    assert.equal(error.code, 'COMMAND_UNAVAILABLE');
+    assert.equal(error.mutationMayHaveCommitted, false);
+    assert.deepEqual(error.commandDiagnostic, { stage: 'sandbox_startup', reason: 'startup_failed', osCode: 'ENOENT' });
+    assert.equal(JSON.stringify(error.commandDiagnostic).includes(directory), false);
+    return true;
+  });
 });

@@ -12,12 +12,13 @@ import type {
   WorkspaceToolRequest,
   WorkspaceToolResult,
 } from './protocol.js';
-import type { WorkspaceToolExecutor } from './workspace.js';
+import type { WorkspaceFileImporter, WorkspaceToolExecutor } from './workspace.js';
 
 interface WorkspaceInstanceSource {
   command?: NativeProcessSandboxOptions;
   repositoryInstructions: boolean;
   writable: boolean;
+  importer?: WorkspaceFileImporter;
 }
 
 export interface GitWorktreeWorkspaceToolsOptions {
@@ -119,6 +120,7 @@ export class GitWorktreeWorkspaceTools implements WorkspaceToolExecutor {
         identity: instance.identity,
         value: LocalWorkspaceTools.create({
           repositoryInstructions: source.repositoryInstructions,
+          importer: source.importer,
           workspaces: [
             {
               id: internalId,

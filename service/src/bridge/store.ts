@@ -15,6 +15,7 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
+    isWorkspaceMutationOperation,
     isWorkspaceToolRequest,
     isWorkspaceToolResult,
     workspaceIsolationKey,
@@ -169,7 +170,7 @@ export interface BridgeWorkerStatus {
 }
 
 function isWorkspaceMutation(request: WorkspaceToolRequest): boolean {
-  return request.operation === 'write_file' || request.operation === 'edit_file' || request.operation === 'execute_command';
+  return isWorkspaceMutationOperation(request.operation);
 }
 
 function supportsWorkspaceTool(

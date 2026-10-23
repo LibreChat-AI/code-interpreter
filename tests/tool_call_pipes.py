@@ -36,6 +36,25 @@ class Upstream(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def wait_for_killed_descendant(pid, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            reaped, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            # Adoption is asynchronous, and the original parent may reap it.
+            # ECHILD alone does not prove that a live descendant has exited.
+            if not os.path.exists(f'/proc/{pid}'):
+                return
+        else:
+            if reaped:
+                assert os.waitstatus_to_exitcode(status) == -9
+                return
+        time.sleep(0.01)
+    os.kill(pid, 9)
+    raise AssertionError('orphan survived broker death')
+
+
 def main():
     policy, broker, preamble = sys.argv[1:]
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Upstream)
@@ -148,16 +167,7 @@ time.sleep(30)
             running.kill()
             running.communicate(timeout=5)
             for pid in [job_pid, relay_pid, broker_pid]:
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    reaped, status = os.waitpid(pid, os.WNOHANG)
-                    if reaped:
-                        assert os.waitstatus_to_exitcode(status) == -9
-                        break
-                    time.sleep(0.01)
-                else:
-                    os.kill(pid, 9)
-                    raise AssertionError('orphan survived broker death')
+                wait_for_killed_descendant(pid)
         finally:
             if running.poll() is None:
                 running.kill()

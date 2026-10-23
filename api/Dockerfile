@@ -35,7 +35,7 @@ COPY api/src/spec-guard.c /tmp/spec-guard.c
 COPY api/src/tool-call-pipe-bridge.c /tmp/tool-call-pipe-bridge.c
 COPY api/src/anonymous-pipes.c /tmp/anonymous-pipes.c
 COPY api/src/supervisor-policy.c /tmp/supervisor-policy.c
-COPY --from=node:22-slim /usr/local/include/node /usr/local/include/node
+COPY --from=node:22.23.4-slim /usr/local/include/node /usr/local/include/node
 COPY docker/rootfs-setup.c /tmp/rootfs-setup.c
 RUN gcc -shared -fPIC -O2 -Wall -Wextra -Werror -I/usr/local/include/node -o /usr/local/lib/anonymous-pipes.node /tmp/anonymous-pipes.c \
     && gcc -O2 -static -Wall -Wextra -Werror -o /usr/local/bin/sandbox-supervisor-policy /tmp/supervisor-policy.c \
@@ -49,7 +49,7 @@ FROM nsjail-builder AS nsjail-ipc-test
 ENV SANDBOX_PIPE_ADDON=/usr/local/lib/anonymous-pipes.node
 COPY docker/python-runtime /python-runtime
 RUN python3 /python-runtime/install.py
-COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22.23.4-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=oven/bun:1.4.2-debian /usr/local/bin/bun /usr/local/bin/bun
 
 # ============================================================================
@@ -138,7 +138,7 @@ RUN chmod +x /usr/sbin/nsjail
 # The per-invocation broker starts Node after restore, so its OpenSSL process
 # state is not captured in the MicroVM snapshot. Pulling the Node binary
 # is ~30 MB and avoids inheriting npm/node_modules from a full apt install.
-COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22.23.4-slim /usr/local/bin/node /usr/local/bin/node
 
 WORKDIR /sandbox_api
 

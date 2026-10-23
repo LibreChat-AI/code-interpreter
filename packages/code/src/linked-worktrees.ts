@@ -18,7 +18,7 @@ import type {
   WorkspaceToolRequest,
   WorkspaceToolResult,
 } from './protocol.js';
-import type { WorkspaceToolExecutor } from './workspace.js';
+import type { WorkspaceFileImporter, WorkspaceToolExecutor } from './workspace.js';
 
 /** Linked worktrees are only admitted from this directory beneath a checkout. */
 export const LINKED_WORKTREE_DIRECTORY = '.worktrees';
@@ -60,6 +60,7 @@ export interface LinkedWorktreeSource {
   command?: NativeProcessSandboxOptions;
   repositoryInstructions: boolean;
   writable: boolean;
+  importer?: WorkspaceFileImporter;
 }
 
 export interface VerifiedLinkedWorktree {
@@ -324,6 +325,7 @@ export class LinkedWorktreeWorkspaceTools implements WorkspaceToolExecutor, Link
         fingerprint,
         value: LocalWorkspaceTools.create({
           repositoryInstructions: source.repositoryInstructions,
+          importer: source.importer,
           workspaces: [
             { id: internalId, identity: lane.identity, root: lane.root, writable: source.writable },
           ],

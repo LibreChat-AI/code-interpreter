@@ -4,14 +4,19 @@ import type { RequestHandler, Response } from 'express';
 import type { AuthenticatedRequest } from '../types';
 import type { RedisBridgeStore } from '../bridge/store';
 import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
+import type { PreparedWorkspaceImport, WorkspaceImportService } from './import';
 
+import logger from '../logger';
 import { getWorkspaceToolOutcome } from './outcome';
+import { WorkspaceImportError } from './import';
 import { getPrincipalOrReject } from '../auth/principal';
 import { BridgeStoreError } from '../bridge/store';
 import { checkServiceShutDown } from '../lifecycle';
 import {
   isWorkspaceToolRequest,
+  isBridgeWorkspaceImportFileRequest,
   BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS,
+  BRIDGE_WORKSPACE_IMPORT_FILE_TIMEOUT_MS,
 } from '../../../packages/code/src/protocol';
 import {
   CODEAPI_BRIDGE_WORKER_HEADER,
@@ -35,6 +40,8 @@ interface WorkspaceToolsRouterOptions {
   timeoutMs?: number;
   queueTimeoutMs?: number;
   isShuttingDown?: () => boolean;
+  /** Present only when this Code API can mint egress grants for `import_file`. */
+  imports?: WorkspaceImportService;
 }
 
 function asyncRoute(handler: (req: AuthenticatedRequest, res: Response) => Promise<void>): RequestHandler {
@@ -82,12 +89,27 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
       res.status(503).json({ error: 'Service is shutting down' });
       return;
     }
-    if (!isWorkspaceToolRequest(req.body)) {
+    if (
+      !isWorkspaceToolRequest(req.body) ||
+      (req.body.operation === 'import_file' && !isBridgeWorkspaceImportFileRequest(req.body))
+    ) {
       outcome.errorCode = 'INVALID_WORKSPACE_TOOL_REQUEST';
       res.status(400).json({
         error: 'Invalid workspace tool request',
       });
       return;
+    }
+    if (req.body.operation === 'import_file') {
+      if (options.imports == null) {
+        outcome.errorCode = 'IMPORT_UNAVAILABLE';
+        res.status(503).json({ error: 'Workspace file import is not available on this Code API', code: 'IMPORT_UNAVAILABLE' });
+        return;
+      }
+      if (req.body.bytes > options.imports.maxBytes) {
+        outcome.errorCode = 'WRITE_LIMIT_EXCEEDED';
+        res.status(413).json({ error: 'Imported file exceeds the Code API file limit', code: 'WRITE_LIMIT_EXCEEDED' });
+        return;
+      }
     }
     const advertisedQueueWait = req.header(WORKSPACE_QUEUE_WAIT_HEADER);
     if (advertisedQueueWait !== undefined && !/^[1-9]\d*$/.test(advertisedQueueWait)) {
@@ -121,9 +143,14 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
         options.timeoutMs ?? Number.MAX_SAFE_INTEGER,
       ) }
       : principalRequest;
-    const executionBudgetMs = request.operation === 'execute_command'
-      ? request.timeoutMs! + 5_000
-      : Math.min(options.timeoutMs ?? 30_000, 30_000);
+    let executionBudgetMs = Math.min(options.timeoutMs ?? 30_000, 30_000);
+    if (request.operation === 'execute_command') executionBudgetMs = request.timeoutMs! + 5_000;
+    if (request.operation === 'import_file') {
+      executionBudgetMs = Math.min(
+        options.timeoutMs ?? BRIDGE_WORKSPACE_IMPORT_FILE_TIMEOUT_MS,
+        BRIDGE_WORKSPACE_IMPORT_FILE_TIMEOUT_MS,
+      );
+    }
     outcome.deadlineBudgetMs = queueBudgetMs + executionBudgetMs;
 
     let selection: { workerId: string; explicit: boolean } | undefined;
@@ -152,20 +179,47 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
     }
     outcome.workerId = selection.workerId;
 
+    const sendImportError = (error: unknown): boolean => {
+      if (!(error instanceof WorkspaceImportError)) return false;
+      outcome.errorCode = error.code;
+      res.status(error.status).json({ error: error.message, code: error.code });
+      return true;
+    };
+    const imports = options.imports;
+    const importRequest = request.operation === 'import_file' ? request : undefined;
+    /** Ownership and the grant are settled only for work about to be queued or dispatched,
+     * so a durable retry of an existing request never depends on the upload still existing. */
+    const prepareImport = imports == null || importRequest == null
+      ? undefined
+      : async (): Promise<PreparedWorkspaceImport> => {
+        const sessionKey = await imports.authorize(req, importRequest);
+        // The grant must outlive admission and execution, never more.
+        const ttlSeconds = Math.ceil((queueBudgetMs + executionBudgetMs) / 1000);
+        return imports.prepare({ req, request: importRequest, sessionKey, ttlSeconds });
+      };
+
     if (durable) {
       if (options.requests == null) {
         res.status(404).json({ error: 'Durable workspace requests are unavailable' });
         return;
       }
       try {
+        const prepare = prepareImport;
         const status = await options.requests.submit({
           owner: principal, requestId: req.header('X-LibreChat-Workspace-Request-Id') ?? '',
           workerId: selection.workerId,
           requireTenantBinding: selection.explicit && (options.dynamicWorkers || selection.workerId !== options.configuredWorkerId),
           request, queueWaitMs: queueBudgetMs, executionTimeoutMs: executionBudgetMs,
+          ...(prepare == null || imports == null ? {} : {
+            prepare: async () => {
+              const prepared = await prepare();
+              return { request: prepared.request, release: () => imports.revoke(prepared.grantId) };
+            },
+          }),
         });
         res.status(202).json(status);
       } catch (error) {
+        if (sendImportError(error)) return;
         if (error instanceof WorkspaceRequestConflict) {
           res.status(409).json({ error: error.message, code: 'REQUEST_CONFLICT' });
         } else if (error instanceof BridgeStoreError) {
@@ -182,7 +236,24 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
       if (!res.writableEnded) abort();
     };
     res.once('close', abortClosedResponse);
+    // Events that fired before these listeners existed are visible only on the socket.
+    if (req.socket?.destroyed === true) abort();
+    let preparedImport: PreparedWorkspaceImport | undefined;
     try {
+      if (prepareImport != null) {
+        try {
+          preparedImport = await prepareImport();
+        } catch (error) {
+          if (sendImportError(error)) return;
+          throw error;
+        }
+        // A caller that left while ownership or the grant was settled must not start a mutation.
+        if (controller.signal.aborted) {
+          outcome.errorCode = 'CLIENT_DISCONNECTED';
+          return;
+        }
+      }
+      const dispatchRequest: WorkspaceToolRequest = preparedImport?.request ?? request;
       outcome.dispatchPending = true;
       const dispatchStartedAt = performance.now();
       const settlement = await options.store.dispatchWorkspaceTool({
@@ -190,7 +261,7 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
         tenantId: principal.tenantId,
         requireTenantBinding:
             selection.explicit && (options.dynamicWorkers || selection.workerId !== options.configuredWorkerId),
-        request,
+        request: dispatchRequest,
         deadlineAtMs: Date.now() + queueBudgetMs,
         executionTimeoutMs: executionBudgetMs,
         signal: controller.signal,
@@ -243,6 +314,12 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
       outcome.flush();
       req.removeListener('aborted', abort);
       res.removeListener('close', abortClosedResponse);
+      if (preparedImport != null && options.imports != null) {
+        const { grantId } = preparedImport;
+        void options.imports.revoke(grantId).catch(error => {
+          logger.warn('Failed to revoke workspace import grant', { grantId, error });
+        });
+      }
     }
   });
   router.post('/workspace-tools/execute', execute(false));

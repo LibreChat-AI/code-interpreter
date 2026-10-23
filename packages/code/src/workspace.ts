@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { deferWorkspaceRootCleanup, holdsWorkspaceRoot, link, lstat, mkdir, open, realpath, rename, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
+import { deferWorkspaceRootCleanup, holdsWorkspaceRoot, link, lstat, mkdir, open, realpath, rename, rmdir, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
+import type { CommandFailureDiagnostic } from './command-diagnostics.js';
 import { matchesWorkspaceRoot } from './root-identity.js';
 import type { WorkspaceRootIdentity } from './root-identity.js';
 
@@ -17,6 +18,7 @@ import {
   BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH,
   comparePortableRelativePaths,
   isSafePortableRelativePath,
+  isWorkspaceImportFilePath,
   isValidBridgeWorkspaceToolCapabilities,
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
@@ -42,6 +44,8 @@ import type {
   WorkspacePreviewEditResult,
   WorkspaceExecuteCommandRequest,
   WorkspaceExecuteCommandResult,
+  WorkspaceImportFileRequest,
+  WorkspaceImportFileResult,
   WorkspaceListFilesRequest,
   WorkspaceListFilesResult,
   WorkspaceSearchMatch,
@@ -65,6 +69,8 @@ export type {
   WorkspacePreviewEditResult,
   WorkspaceExecuteCommandRequest,
   WorkspaceExecuteCommandResult,
+  WorkspaceImportFileRequest,
+  WorkspaceImportFileResult,
   WorkspaceListFilesRequest,
   WorkspaceListFilesResult,
   WorkspaceSearchMatch,
@@ -85,9 +91,27 @@ export interface LocalWorkspaceConfig {
   writable?: boolean;
 }
 
+/**
+ * Fetches a stored object for `import_file`. Only a worker with a configured
+ * file relay upstream has one, and `import_file` is advertised only then.
+ */
+export interface WorkspaceFileImporter {
+  /** Largest file this worker imports; larger requests fail before any transfer. */
+  readonly maxBytes: number;
+  /** Streams the granted object. Failures are WorkspaceToolErrors. */
+  open(
+    request: WorkspaceImportFileRequest & { egressGrant: string },
+    signal?: AbortSignal,
+  ): Promise<AsyncIterable<Uint8Array>>;
+  /** Bytes a new file in `directory` may still use on its filesystem. */
+  availableBytes(directory: string): Promise<number>;
+}
+
 export interface LocalWorkspaceToolsOptions {
   workspaces: LocalWorkspaceConfig[];
   repositoryInstructions?: boolean;
+  /** Enables `import_file` on writable workspaces. */
+  importer?: WorkspaceFileImporter;
 }
 
 export interface WorkspaceToolExecutor {
@@ -144,6 +168,12 @@ const READ_OPERATIONS = [
   'list_files',
 ] as const;
 const WRITE_OPERATIONS = ['write_file', 'preview_edit', 'edit_file'] as const;
+const IMPORT_OPERATIONS = ['import_file'] as const;
+const IMPORT_DIRECTORY_MODE = 0o755;
+const IMPORT_FILE_MODE = 0o644;
+const IMPORT_HASH_CHUNK_BYTES = 1024 * 1024;
+/** Headroom left on the target filesystem after an import lands. */
+export const WORKSPACE_IMPORT_FREE_SPACE_RESERVE_BYTES = 64 * 1024 * 1024;
 
 function isUtf8ScalarString(value: string): boolean {
   return Buffer.from(value).toString('utf8') === value;
@@ -197,6 +227,8 @@ export class WorkspaceToolError extends Error {
     public readonly mutationMayHaveCommitted = false,
     /** Retain the durable mutation guard when process or write settlement is uncertain. */
     public readonly requiresQuarantine = mutationMayHaveCommitted,
+    /** Worker-local diagnostic metadata; never serialized into bridge settlements. */
+    public readonly commandDiagnostic?: CommandFailureDiagnostic,
   ) {
     super(message);
     this.name = 'WorkspaceToolError';
@@ -682,6 +714,7 @@ async function classifyMissingWorkspacePath(
 async function createMissingParentDirectories(
   root: string,
   candidate: string,
+  mode = 0o777,
 ): Promise<string[]> {
   const created: string[] = [];
   if (!holdsWorkspaceRoot()) return created;
@@ -699,7 +732,7 @@ async function createMissingParentDirectories(
       let createdHere = false;
       if (entry == null) {
         try {
-          await mkdir(current, 0o777);
+          await mkdir(current, mode);
           created.push(current);
           createdHere = true;
         } catch (error) {
@@ -1068,6 +1101,373 @@ async function writeWorkspaceFile(
     created,
     bytesWritten: content.byteLength,
   };
+}
+
+interface ImportTargetIdentity {
+  dev: bigint | number;
+  ino: bigint | number;
+}
+
+type ImportTarget =
+  | { state: 'missing' }
+  | { state: 'unchanged' }
+  | ({ state: 'different' } & ImportTargetIdentity);
+
+function importIntegrityError(message: string): WorkspaceToolError {
+  return new WorkspaceToolError(message, 'INVALID_REQUEST');
+}
+
+/** Size and SHA-256 of everything an open file holds now, read through its descriptor. */
+async function hashOpenFile(
+  handle: FileHandle,
+  signal?: AbortSignal,
+): Promise<{ bytes: number; sha256: string }> {
+  const hash = createHash('sha256');
+  const chunk = Buffer.allocUnsafe(IMPORT_HASH_CHUNK_BYTES);
+  let position = 0;
+  for (;;) {
+    throwIfAborted(signal);
+    const { bytesRead } = await handle.read(chunk, 0, chunk.byteLength, position);
+    if (bytesRead === 0) break;
+    hash.update(chunk.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+  return { bytes: position, sha256: hash.digest('hex') };
+}
+
+/** Hash an existing target only when its size already matches the import. */
+async function inspectImportTarget(
+  root: string,
+  request: WorkspaceImportFileRequest,
+  signal?: AbortSignal,
+): Promise<ImportTarget> {
+  try {
+    return await withConfinedFile(root, request.path, async (handle, size) => {
+      const { dev, ino } = await handle.stat();
+      if (size !== request.bytes) return { state: 'different', dev, ino };
+      const existing = await hashOpenFile(handle, signal);
+      return existing.bytes === request.bytes && existing.sha256 === request.sha256
+        ? { state: 'unchanged' }
+        : { state: 'different', dev, ino };
+    });
+  } catch (error) {
+    if (error instanceof WorkspaceToolError && error.code === 'NOT_FOUND') {
+      return { state: 'missing' };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Undo parent directories this import created; true when every one is gone
+ * again. A directory is removed only while it is still the inode this import
+ * created, so a replacement made by another local process is never deleted.
+ */
+async function removeCreatedDirectories(
+  created: readonly string[],
+  identities: readonly ImportTargetIdentity[],
+): Promise<boolean> {
+  if (identities.length !== created.length) return false;
+  for (let index = created.length - 1; index >= 0; index -= 1) {
+    const directory = created[index]!;
+    try {
+      const current = await lstat(directory);
+      if (
+        current.isSymbolicLink() ||
+        !current.isDirectory() ||
+        current.dev !== identities[index]!.dev ||
+        current.ino !== identities[index]!.ino
+      ) {
+        return false;
+      }
+      await rmdir(directory);
+      await syncWorkspaceDirectory(dirname(directory));
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Record each directory this import created, then give it the documented mode
+ * regardless of the worker's umask. `identities` fills as each is opened.
+ */
+async function setImportDirectoryModes(
+  created: readonly string[],
+  identities: ImportTargetIdentity[],
+): Promise<void> {
+  for (const directory of created) {
+    const handle = await open(
+      directory,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    try {
+      const { dev, ino } = await handle.stat();
+      identities.push({ dev, ino });
+      await handle.chmod(IMPORT_DIRECTORY_MODE);
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+async function writeImportChunk(handle: FileHandle, chunk: Uint8Array, position: number): Promise<void> {
+  let offset = 0;
+  while (offset < chunk.byteLength) {
+    const { bytesWritten } = await handle.write(chunk, offset, chunk.byteLength - offset, position + offset);
+    if (bytesWritten < 1) throw new Error('short workspace write');
+    offset += bytesWritten;
+  }
+}
+
+/** Confirm the installed entry is the staged inode, inside the root, after syncing its directory. */
+async function confirmInstalledImport(
+  root: string,
+  installTarget: string,
+  staged: ImportTargetIdentity,
+): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    await syncWorkspaceDirectory(dirname(installTarget));
+    handle = await open(
+      installTarget,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const [installed, canonicalPath] = await Promise.all([handle.stat(), realpath(installTarget)]);
+    if (
+      !installed.isFile() ||
+      !isWithinRoot(root, canonicalPath) ||
+      installed.dev !== staged.dev ||
+      installed.ino !== staged.ino
+    ) {
+      throw new Error('installed workspace import changed');
+    }
+  } catch {
+    throw new WorkspaceToolError(
+      'Workspace import durability could not be confirmed',
+      'WRITE_UNAVAILABLE',
+      true,
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Stream one object into a same-directory temporary file, verify the synced
+ * file's size and SHA-256 through its own descriptor, then install it
+ * atomically. A create links exclusively so a racing file is never replaced.
+ * An overwrite rechecks the inspected inode immediately before its rename, the
+ * same check-then-rename `write_file` uses; bridge mutations of one root are
+ * serialized, so only an out-of-band local writer can race that last step.
+ */
+async function installImportedFile(
+  root: string,
+  candidate: string,
+  request: WorkspaceImportFileRequest & { egressGrant: string },
+  importer: WorkspaceFileImporter,
+  target: Exclude<ImportTarget, { state: 'unchanged' }>,
+  signal?: AbortSignal,
+): Promise<{ created: boolean }> {
+  const parent = dirname(candidate);
+  let canonicalParent: string;
+  let parentIdentity: Awaited<ReturnType<typeof lstat>>;
+  try {
+    canonicalParent = await realpath(parent);
+    parentIdentity = await verifyDirectoryPathHasNoSymlinks(root, parent);
+    if (!isWithinRoot(root, canonicalParent) || !parentIdentity.isDirectory()) {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    }
+  } catch (error) {
+    if (isMissingEntry(error)) throw await classifyMissingWorkspacePath(root, parent);
+    throw classifyWritePathValidationError(error);
+  }
+  let available: number;
+  try {
+    available = await importer.availableBytes(canonicalParent);
+  } catch {
+    throw new WorkspaceToolError('Workspace free space could not be determined', 'WRITE_UNAVAILABLE');
+  }
+  if (available < request.bytes + WORKSPACE_IMPORT_FREE_SPACE_RESERVE_BYTES) {
+    throw new WorkspaceToolError(
+      'Workspace filesystem does not have enough free space for this file',
+      'WRITE_LIMIT_EXCEEDED',
+    );
+  }
+
+  const temporary = resolve(canonicalParent, `.librechat-code-${randomBytes(18).toString('hex')}.tmp`);
+  const installTarget = resolve(canonicalParent, basename(candidate));
+  let handle: FileHandle | undefined;
+  let temporaryNeedsCleanup = false;
+  try {
+    handle = await open(
+      temporary,
+      constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    temporaryNeedsCleanup = true;
+    let written = 0;
+    for await (const chunk of await importer.open(request, signal)) {
+      throwIfAborted(signal);
+      if (written + chunk.byteLength > request.bytes) {
+        throw importIntegrityError('Imported file is larger than its declared size');
+      }
+      await writeImportChunk(handle, chunk, written);
+      written += chunk.byteLength;
+    }
+    throwIfAborted(signal);
+    if (written !== request.bytes) {
+      throw importIntegrityError('Imported file is smaller than its declared size');
+    }
+    await handle.chmod(IMPORT_FILE_MODE);
+    await handle.sync();
+    // Verify what will be installed, not what arrived: the staged file is a workspace entry.
+    const staged = await hashOpenFile(handle, signal);
+    if (staged.bytes !== request.bytes) {
+      throw importIntegrityError('Imported file does not match its declared size');
+    }
+    if (staged.sha256 !== request.sha256) {
+      throw importIntegrityError('Imported file does not match its declared SHA-256');
+    }
+    const stagedStat = await handle.stat();
+    const stagedIdentity = { dev: stagedStat.dev, ino: stagedStat.ino };
+    if (process.platform === 'win32') {
+      await handle.close();
+      handle = undefined;
+    }
+
+    const [currentParent, currentParentIdentity] = await Promise.all([
+      realpath(parent),
+      verifyDirectoryPathHasNoSymlinks(root, parent),
+    ]);
+    if (
+      currentParent !== canonicalParent ||
+      currentParentIdentity.dev !== parentIdentity.dev ||
+      currentParentIdentity.ino !== parentIdentity.ino
+    ) {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    }
+    let current: Awaited<ReturnType<typeof lstat>> | undefined;
+    try {
+      current = await lstat(candidate);
+    } catch (error) {
+      if (!isMissingEntry(error)) throw error;
+    }
+    if (
+      target.state === 'missing'
+        ? current != null
+        : current == null || current.isSymbolicLink() || current.dev !== target.dev || current.ino !== target.ino
+    ) {
+      throw new WorkspaceToolError(
+        'Workspace file changed before import could be committed',
+        'EDIT_CONFLICT',
+      );
+    }
+    throwIfAborted(signal);
+    if (target.state === 'different') {
+      await rename(temporary, installTarget);
+      temporaryNeedsCleanup = false;
+    } else {
+      try {
+        await link(temporary, installTarget);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new WorkspaceToolError('Workspace file already exists', 'EDIT_CONFLICT');
+        }
+        throw error;
+      }
+      try {
+        await unlink(temporary);
+        temporaryNeedsCleanup = false;
+      } catch {
+        throw new WorkspaceToolError(
+          'Workspace import cleanup could not be confirmed',
+          'WRITE_UNAVAILABLE',
+          true,
+        );
+      }
+    }
+    await confirmInstalledImport(root, installTarget, stagedIdentity);
+    return { created: target.state === 'missing' };
+  } catch (error) {
+    if (error instanceof WorkspaceToolError) throw error;
+    throw new WorkspaceToolError('Workspace storage is unavailable', 'WRITE_UNAVAILABLE');
+  } finally {
+    await handle?.close().catch(() => undefined);
+    if (temporaryNeedsCleanup) await removeImportStaging(temporary);
+  }
+}
+
+/** A staging file that cannot be removed is upload bytes left in the workspace: never a clean failure. */
+async function removeImportStaging(temporary: string): Promise<void> {
+  try {
+    await unlink(temporary);
+  } catch (error) {
+    if (isMissingEntry(error)) return;
+    throw new WorkspaceToolError(
+      'Workspace import staging file could not be removed',
+      'WRITE_UNAVAILABLE',
+      true,
+    );
+  }
+}
+
+async function importWorkspaceFile(
+  root: string,
+  request: WorkspaceImportFileRequest,
+  importer: WorkspaceFileImporter,
+  signal?: AbortSignal,
+): Promise<WorkspaceImportFileResult> {
+  throwIfAborted(signal);
+  if (!isWorkspaceImportFilePath(request.path)) {
+    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  }
+  const { egressGrant } = request;
+  if (egressGrant === undefined) {
+    throw new WorkspaceToolError('Import source grant is unavailable', 'INVALID_REQUEST');
+  }
+  if (request.bytes > importer.maxBytes) {
+    throw new WorkspaceToolError('Imported file exceeds the worker file limit', 'WRITE_LIMIT_EXCEEDED');
+  }
+  const result = (created: boolean, bytesWritten: number, unchanged = false): WorkspaceImportFileResult => ({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    operation: 'import_file',
+    workspaceId: request.workspaceId,
+    path: request.path,
+    created,
+    ...(unchanged ? { unchanged: true } : {}),
+    bytesWritten,
+    sha256: request.sha256,
+  });
+  const candidate = resolveWorkspacePath(root, request.path);
+  const target = await inspectImportTarget(root, request, signal);
+  if (target.state === 'unchanged') return result(false, 0, true);
+  if (target.state === 'different' && request.overwrite !== true) {
+    throw new WorkspaceToolError(
+      'Workspace file already exists with different content',
+      'EDIT_CONFLICT',
+    );
+  }
+  const directories = await createMissingParentDirectories(root, candidate, IMPORT_DIRECTORY_MODE);
+  const identities: ImportTargetIdentity[] = [];
+  try {
+    await setImportDirectoryModes(directories, identities);
+    const { created } = await installImportedFile(
+      root,
+      candidate,
+      { ...request, egressGrant },
+      importer,
+      target,
+      signal,
+    );
+    return result(created, request.bytes);
+  } catch (error) {
+    const failure = classifyWritePathValidationError(error);
+    if (directories.length === 0 || failure.mutationMayHaveCommitted) throw failure;
+    if (await removeCreatedDirectories(directories, identities)) throw failure;
+    throw afterCreatedDirectories(directories, failure);
+  }
 }
 
 async function editWorkspaceFile(
@@ -1878,6 +2278,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     editFileModes?: BridgeWorkspaceToolCapabilities['editFileModes'],
     editFileFeatures?: BridgeWorkspaceToolCapabilities['editFileFeatures'],
     listFileFeatures?: BridgeWorkspaceToolCapabilities['listFileFeatures'],
+    private readonly importer?: WorkspaceFileImporter,
   ) {
     this.capabilities = {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -1897,9 +2298,13 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     const anyWritable = options.workspaces.some(
       (workspace) => workspace.writable === true,
     );
+    const mutations = [
+      ...WRITE_OPERATIONS,
+      ...(options.importer != null ? IMPORT_OPERATIONS : []),
+    ];
     const operations: BridgeWorkspaceToolCapabilities['operations'] = [
       ...READ_OPERATIONS,
-      ...(anyWritable ? WRITE_OPERATIONS : []),
+      ...(anyWritable ? mutations : []),
     ];
     const workspaces: BridgeWorkspaceDescriptor[] = options.workspaces.map(
       (workspace) => ({
@@ -1909,7 +2314,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
           ? {
               operations: [
                 ...READ_OPERATIONS,
-                ...(workspace.writable === true ? WRITE_OPERATIONS : []),
+                ...(workspace.writable === true ? mutations : []),
               ],
             }
           : {}),
@@ -1959,6 +2364,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       capabilities.editFileModes,
       capabilities.editFileFeatures,
       capabilities.listFileFeatures,
+      anyWritable ? options.importer : undefined,
     );
     tools.repositoryInstructions = options.repositoryInstructions === true;
     return tools;
@@ -1999,6 +2405,22 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       throw new WorkspaceToolError('Unknown workspace', 'INVALID_REQUEST');
     }
     const { root } = workspace;
+
+    if (request.operation === 'import_file') {
+      if (!workspace.writable) {
+        throw new WorkspaceToolError(
+          'Workspace mutations are disabled by the worker',
+          'WRITE_DISABLED',
+        );
+      }
+      if (this.importer == null) {
+        throw new WorkspaceToolError(
+          'Workspace file import is not configured on this worker',
+          'WRITE_UNAVAILABLE',
+        );
+      }
+      return importWorkspaceFile(root, request, this.importer, signal);
+    }
 
     if (
       request.operation === 'write_file' ||
@@ -2163,7 +2585,7 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
         ) {
           throw error;
         }
-        throw new WorkspaceToolError(error.message, error.code, true);
+        throw new WorkspaceToolError(error.message, error.code, true, true, error.commandDiagnostic);
       }
       throw new WorkspaceToolError(
         'Sandboxed command execution unavailable',

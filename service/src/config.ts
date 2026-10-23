@@ -7,11 +7,12 @@ import {
   resolveExecutionProfile,
   resolveExecutionProfileSource,
 } from './execution-profile';
+import { BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES } from '../../packages/code/src/protocol';
 
 export const languageConfig: Record<Languages | string, t.LanguageConfig | undefined> = {
   [Languages.bash]: { language: 'bash', version: '5.2.0', fileName: 'script.sh' },
   [Languages.js]: { language: 'bun-js', version: '1.4.2', fileName: 'index.js' },
-  [Languages.node]: { language: 'node', version: '24.15.0', fileName: 'index.js' },
+  [Languages.node]: { language: 'node', version: '24.22.1', fileName: 'index.js' },
   [Languages.py]: { language: 'python', version: '3.14.4', fileName: 'main.py' },
   [Languages.ts]: { language: 'bun-ts', version: '1.4.2', fileName: 'main.ts' },
 };
@@ -425,6 +426,14 @@ export const env = {
    * Off by default: enable only after the LibreChat talking to this service accepts the field.
    */
   BRIDGE_LANE_GIT: process.env.CODEAPI_BRIDGE_LANE_GIT === 'true',
+  /**
+   * Largest stored object relayed into a worker by `import_file`. The operation
+   * is offered only when EGRESS_GATEWAY_URL can mint its one-object grant.
+   */
+  BRIDGE_IMPORT_FILE_MAX_BYTES: resolvePositiveIntEnv(
+    process.env.CODEAPI_BRIDGE_IMPORT_FILE_MAX_BYTES,
+    BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES,
+  ),
   /** Outbound worker selected by the remote-bridge backend. */
   BRIDGE_WORKER_ID: process.env.CODEAPI_BRIDGE_WORKER_ID ?? '',
   /** Static compatibility auth or short-lived proof-of-possession credentials. */

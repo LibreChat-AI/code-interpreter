@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { readdir, realpath, stat } from 'node:fs/promises';
+import { lstat, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
+import { commandFailureLogLine } from './command-diagnostics.js';
+import { runSetupCommand } from './setup-cli.js';
+import { browserSetupProtectedPaths } from './browser-setup.js';
+import { assertPrivateStorageAncestors } from './private-storage.js';
+import { profileRunConfiguration } from './setup.js';
+import { assertWorkerProfileIsolation } from './worker-profile.js';
+import type { WorkerProfile } from './worker-profile.js';
 import { discoverProjects } from './projects.js';
 import { loadProjectRoots, projectRootArguments } from './project-roots.js';
 import {
@@ -33,6 +40,7 @@ import {
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
 import { LocalWorkspaceTools, SandboxWorkspaceTools } from './workspace.js';
+import { createWorkspaceFileImporter } from './workspace-import.js';
 import {
   DockerRuntimeSupervisor,
   EndpointRuntimeSupervisor,
@@ -72,6 +80,7 @@ import type { RuntimeSupervisor } from './runtime.js';
 import type { GitHubCredentialProvider } from './github.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
 import {
+  BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES,
   BRIDGE_WORKSPACE_NAME_MAX_LENGTH,
   BridgeProtocolError,
     isValidBridgeWorkerCapabilities,
@@ -358,6 +367,7 @@ async function relay(): Promise<void> {
 async function run(
   runtimeSessionId?: string,
   args: string[] = [],
+  savedProfile?: { path: string; config: WorkerProfile },
 ): Promise<void> {
     const projectArgs = projectRootArguments(args);
     if (
@@ -422,7 +432,7 @@ async function run(
     }
   const configuredWorkerId = process.env.LIBRECHAT_CODE_WORKER_ID?.trim();
   const configuredIdentityPath =
-    process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
+    savedProfile?.config.identityPath ?? process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
   const configuredToken = process.env.LIBRECHAT_CODE_WORKER_TOKEN?.trim();
   const identityPath =
     configuredIdentityPath ??
@@ -432,6 +442,7 @@ async function run(
   const pairedIdentity = identityPath
     ? await loadBridgeIdentity(identityPath)
     : undefined;
+  const setupProtectedPaths = browserSetupProtectedPaths(pairedIdentity?.setupAttemptPath);
   const workerId = required(
     'LIBRECHAT_CODE_WORKER_ID',
     configuredWorkerId ?? pairedIdentity?.workerId,
@@ -645,6 +656,9 @@ async function run(
       throw new Error('Invalid workspace registration');
     }
   }
+  if (savedProfile) {
+    await assertWorkerProfileIsolation(savedProfile.path, identityPath!, canonicalWorkerDirectory);
+  }
   const mutationQuarantinePath =
         (allowWorkspaceWrites || allowWorkspaceCommands) &&
         canonicalWorkerDirectory
@@ -842,6 +856,19 @@ async function run(
       }),
     ]),
   );
+  for (const path of setupProtectedPaths) {
+    const namespace = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!namespace) continue;
+    if (!namespace.isDirectory() || namespace.isSymbolicLink())
+      throw new Error('Setup journal namespace must be a private directory, not a symlink');
+    const sourceParents = await assertPrivateStorageAncestors(path);
+    await assertEnvironmentDefinitionsOutsideRoots([{
+      path, sourceParents, definition: { name: 'setup-state', root: path }, fingerprint: '',
+    }], roots);
+  }
   const preparationDirectory = join(dirname(identityPath ?? defaultBridgeIdentityPath(workerId)), 'environment-preparation');
   if (environments.some(environment => environment.definition.setup?.reuse)) {
     const sourceParents = await prepareEnvironmentPreparationDirectory(preparationDirectory);
@@ -857,13 +884,13 @@ async function run(
     definition: { name: 'shared-resource', root: resource.path }, fingerprint: '',
   })));
   await assertEnvironmentResourceIsolation(environments.flatMap(environment => environment.resources ?? []), roots.map(root => root.root), [
-    identityPath, preparationDirectory, github.privateKeyPath,
+    identityPath, ...setupProtectedPaths, preparationDirectory, github.privateKeyPath,
     ...environments.map(environment => environment.path), ...rootQuarantinePaths.values(),
   ].filter((path): path is string => path != null));
   await assertEnvironmentDefinitionsOutsideRoots(resourceRoots, roots);
   const snapshotStores = environments.flatMap(environment => environment.snapshotStore ? [environment.snapshotStore] : []);
   await assertEnvironmentResourceIsolation(snapshotStores.map(store => ({ kind: 'npm-cache' as const, path: store.store, access: 'read-only' as const })), roots.map(root => root.root), [
-    identityPath, preparationDirectory, github.privateKeyPath, ...environments.map(environment => environment.path),
+    identityPath, ...setupProtectedPaths, preparationDirectory, github.privateKeyPath, ...environments.map(environment => environment.path),
     ...rootQuarantinePaths.values(), ...environments.flatMap(environment => (environment.resources ?? []).map(resource => resource.path)),
   ].filter((path): path is string => path != null));
   await assertEnvironmentDefinitionsOutsideRoots(snapshotStores.map(store => ({ path: store.store, sourceParents: store.controlPaths,
@@ -890,10 +917,25 @@ async function run(
         ]),
       )
     : undefined;
+  // A chat upload reaches the workspace only through the same relay upstream
+  // programmatic inputs use; without one the worker never advertises import_file.
+  const workspaceImporter = createWorkspaceFileImporter({
+    optOut: args.includes('--no-workspace-imports'),
+    enabled: process.env.LIBRECHAT_CODE_ALLOW_WORKSPACE_IMPORTS,
+    writable: allowWorkspaceWrites,
+    upstreamUrl: fileRelayUpstream,
+    maxBytes: positiveInteger(
+      'LIBRECHAT_CODE_IMPORT_FILE_MAX_BYTES',
+      option(args, '--import-file-max-bytes') ??
+        process.env.LIBRECHAT_CODE_IMPORT_FILE_MAX_BYTES,
+      BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES,
+    ),
+  });
   const localWorkspaceTools = workerDirectory
     ? await LocalWorkspaceTools.create({
         workspaces: roots,
         repositoryInstructions: args.includes('--repository-instructions'),
+        importer: workspaceImporter,
       })
     : undefined;
   let workspaceTools: WorkspaceToolExecutor | undefined = localWorkspaceTools;
@@ -1092,6 +1134,8 @@ async function run(
     commandPolicy,
     protectedPaths: [
       identityPath,
+      savedProfile?.path,
+      ...setupProtectedPaths,
       ...(environments.some(environment => environment.definition.setup?.reuse) ? [preparationDirectory] : []),
       ...snapshotStores.map(store => store.store),
             ...environments.map(environment => environment.path),
@@ -1272,6 +1316,7 @@ async function run(
             },
             repositoryInstructions: args.includes('--repository-instructions'),
             writable: root.writable ?? false,
+            importer: workspaceImporter,
           },
         ]),
       ),
@@ -1307,6 +1352,7 @@ async function run(
             command: nativeOptionsForWorkspace(root.id),
             repositoryInstructions: args.includes('--repository-instructions'),
             writable: root.writable ?? false,
+            importer: workspaceImporter,
           },
         ]),
       ),
@@ -1482,8 +1528,17 @@ async function run(
     throw error;
   }
   worktreeRetirementScheduler?.start();
+  let readinessReported = false;
   try {
     const worker = new BridgeWorker({
+      onCommandFailure: event => {
+        process.stderr.write(commandFailureLogLine(event));
+      },
+      onReady: () => {
+        if (readinessReported) return;
+        readinessReported = true;
+        process.stdout.write('librechat-code: connected and ready\n');
+      },
       instructionDescriptors: () => localWorkspaceTools?.instructionDescriptors() ?? Promise.resolve(undefined),
       codeApiUrl,
       token: configuredToken,
@@ -1766,6 +1821,26 @@ async function clearMutationQuarantine(args: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (args.length === 1 && (args[0] === '--help' || args[0] === 'help')) {
+    process.stdout.write(`Usage: librechat-code <command>
+
+  setup --instance <url>  Browser-approved enrollment and private profile setup
+  run [--profile <file>]  Start a saved profile or existing worker configuration
+  pair <url> <code> --worker-id <id>  Existing one-time pairing flow
+  projects --root <directory>       Inspect local Git projects
+  reset-workspace <id>              Existing runtime maintenance
+  clear-workspace-quarantine       Existing workspace maintenance
+
+Run librechat-code setup --help for setup options.
+Legacy LIBRECHAT_CODE_* configuration takes precedence over the default profile.
+Explicit profiles cannot be mixed with legacy settings or run options.
+`);
+    return;
+  }
+  if (args[0] === 'setup') {
+    await runSetupCommand(args.slice(1));
+    return;
+  }
   if (args[0] === 'prune-environment-storage') {
     const paths: string[] = [];
     for (let i = 1; i < args.length; i++) {
@@ -1823,7 +1898,10 @@ async function main(): Promise<void> {
   if (args[0] && args[0] !== 'run') {
     throw new Error(`Unknown command: ${args[0]}`);
   }
-  await run(undefined, args.slice(1));
+  const configuration = await profileRunConfiguration(args.slice(1));
+  await run(undefined, configuration.args, configuration.profile && configuration.profilePath
+    ? { path: configuration.profilePath, config: configuration.profile }
+    : undefined);
 }
 main().catch((error: Error) => {
   process.stderr.write(`librechat-code: ${error.message}\n`);

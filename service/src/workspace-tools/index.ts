@@ -9,7 +9,9 @@ import { connection } from '../queue';
 import logger from '../logger';
 import { checkServiceStartUp, checkServiceShutDown } from '../lifecycle';
 import { withSpan } from '../telemetry';
-import { isBridgeEnabled } from '../bridge/enabled';
+import { isBridgeEnabled, isWorkspaceImportEnabled } from '../bridge/enabled';
+import { createWorkspaceImportService } from './import';
+import { createGatewayEgressGrant, revokeGatewayEgressGrant } from '../egress-gateway-client';
 import { workspaceRequestCoordinationScope } from './coordination';
 
 const router = Router();
@@ -53,6 +55,14 @@ router.use(['/workspace-tools/execute', '/workspace-tools/requests'], (req, res,
   if (req.method === 'POST') executionLimiter(req, res, next);
   else next();
 });
+const imports = isWorkspaceImportEnabled()
+  ? createWorkspaceImportService({
+    maxBytes: env.BRIDGE_IMPORT_FILE_MAX_BYTES,
+    store: connection,
+    createGrant: args => createGatewayEgressGrant(args),
+    revokeGrant: grantId => revokeGatewayEgressGrant({ grantId, reason: 'completed' }),
+  })
+  : undefined;
 router.use(
   createWorkspaceToolsRouter({
     store: bridgeStore,
@@ -61,6 +71,7 @@ router.use(
     configuredWorkerId: env.BRIDGE_WORKER_ID,
     dynamicWorkers: env.BRIDGE_DYNAMIC_WORKERS,
     timeoutMs: env.JOB_TIMEOUT,
+    imports,
   }),
 );
 

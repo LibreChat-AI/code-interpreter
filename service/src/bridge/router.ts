@@ -7,6 +7,12 @@ import type { BridgePrincipalType, BridgeWorkerBinding } from './pairing';
 import type { CodeBridgeAssignment, CodeBridgeSettlement } from './store';
 
 import {
+  BROWSER_ENROLLMENT_PROTOCOL_VERSION,
+  isBrowserEnrollmentApproval,
+  isBrowserEnrollmentRedemption,
+  isBrowserEnrollmentStatusRequest,
+} from '../../../packages/code/src/browser-enrollment-protocol';
+import {
   BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
   BRIDGE_PROTOCOL_VERSION,
   isValidBridgeWorkerCapabilities,
@@ -39,6 +45,8 @@ export interface BridgeRouterOptions {
   configuredWorkerId?: string;
   allowDynamicWorkers?: boolean;
   maxCommandTimeoutMs?: number;
+  /** Offer `import_file`; true only when this Code API can mint its egress grant. */
+  workspaceImportFile?: boolean;
 }
 
 function sameToken(left: string, right: string): boolean {
@@ -242,6 +250,73 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
 
   const workerAuth =
     options.authMode === 'paired' ? pairedWorkerAuth : staticWorkerAuth;
+
+  const browserEnrollmentEnabled = options.authMode === 'paired' &&
+    options.pairings.recoveryEnabled && options.allowDynamicWorkers === true &&
+    options.adminToken.length > 0;
+
+  const browserEnrollmentAvailable: RequestHandler = (_req, res, next) => {
+    if (!browserEnrollmentEnabled) {
+      res.status(404).json({ error: 'Browser enrollment is disabled' });
+      return;
+    }
+    next();
+  };
+
+  const sendEnrollmentError = (error: unknown, res: Response): void => {
+    if (!(error instanceof BridgePairingError)) throw error;
+    if (error.code === 'RECOVERY_RATE_LIMITED') {
+      res.set('Retry-After', '60').status(429).json({ error: error.message, code: error.code });
+      return;
+    }
+    res.status(error.code === 'PROOF_INVALID' ? 401 : 409)
+      .json({ error: error.message, code: error.code });
+  };
+
+  router.get('/enrollments/capabilities', adminAuth, browserEnrollmentAvailable, (_req, res) => {
+    res.json({
+      browserEnrollmentVersion: BROWSER_ENROLLMENT_PROTOCOL_VERSION,
+      serverId: options.pairings.recoveryServerId,
+    });
+  });
+
+  router.post('/enrollments', adminAuth, browserEnrollmentAvailable, asyncRoute(async (req, res) => {
+    if (!isBrowserEnrollmentApproval(req.body)) {
+      res.status(400).json({ error: 'Invalid browser enrollment approval' });
+      return;
+    }
+    try {
+      res.json(await options.pairings.issueBrowserEnrollment(req.body));
+    } catch (error) {
+      sendEnrollmentError(error, res);
+    }
+  }));
+
+  router.post('/enrollments/status', adminAuth, browserEnrollmentAvailable, asyncRoute(async (req, res) => {
+    if (!isBrowserEnrollmentStatusRequest(req.body)) {
+      res.status(400).json({ error: 'Invalid browser enrollment status request' });
+      return;
+    }
+    try {
+      res.json(await options.pairings.browserEnrollmentStatus(req.body));
+    } catch (error) {
+      sendEnrollmentError(error, res);
+    }
+  }));
+
+  router.post('/enrollments/redeem', adminAuth, browserEnrollmentAvailable, asyncRoute(async (req, res) => {
+    try {
+      await options.pairings.limitBrowserEnrollmentPeer(req.socket.remoteAddress ?? '');
+      if (!isBrowserEnrollmentRedemption(req.body)) {
+        res.status(400).json({ error: 'Invalid browser enrollment redemption' });
+        return;
+      }
+      const credential = await options.pairings.redeemBrowserEnrollment(req.body, options.adminToken);
+      res.json({ protocolVersion: BROWSER_ENROLLMENT_PROTOCOL_VERSION, ...credential });
+    } catch (error) {
+      sendEnrollmentError(error, res);
+    }
+  }));
 
   router.post('/pairings', adminAuth, asyncRoute(async (req, res) => {
     if (options.authMode !== 'paired') {
@@ -533,6 +608,7 @@ router.post(
           'preview_edit',
           'edit_file',
           'execute_command',
+          ...(options.workspaceImportFile === true ? ['import_file' as const] : []),
         ],
         supportedWorkspaceWriteFileModes: ['replace', 'create'],
         supportedWorkspaceEditFileModes: ['single', 'batch'],

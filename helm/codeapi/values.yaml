@@ -310,7 +310,7 @@ workerSandbox:
         tag: latest
         pullPolicy: Always
       pythonVersion: "3.14.4"
-      nodeVersion: "24.15.0"
+      nodeVersion: "24.22.1"
       bunVersion: "1.4.2"
       bashPackageVersion: "5.2.0"
       backoffLimit: 2

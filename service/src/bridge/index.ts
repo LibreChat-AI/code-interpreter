@@ -3,7 +3,7 @@ import { env } from '../config';
 import { RedisBridgePairingStore } from './pairing';
 import { createBridgeRouter } from './router';
 import { RedisBridgeStore } from './store';
-import { isBridgeEnabled } from './enabled';
+import { isBridgeEnabled, isWorkspaceImportEnabled } from './enabled';
 
 export const bridgeStore = new RedisBridgeStore(
   connection,
@@ -39,4 +39,5 @@ export default createBridgeRouter({
   configuredWorkerId: env.BRIDGE_WORKER_ID,
   allowDynamicWorkers: env.BRIDGE_DYNAMIC_WORKERS,
   maxCommandTimeoutMs: env.JOB_TIMEOUT,
+  workspaceImportFile: isWorkspaceImportEnabled(),
 });

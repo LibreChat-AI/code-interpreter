@@ -15,8 +15,13 @@ import {
   isSafePortableRelativePath,
   isSupportedBridgeArtifactName,
 } from './protocol.js';
-import { validateFileRelayUpstream } from './relay.js';
+import {
+  FILE_RELAY_GRANT_HEADER,
+  fileRelayObjectUrl,
+  validateFileRelayUpstream,
+} from './relay.js';
 import { WorkspaceToolError } from './workspace.js';
+import { commandFailureDiagnostic, commandSetupFailureDiagnostic } from './command-diagnostics.js';
 
 import type {
   BridgeProgrammaticPayloadFile,
@@ -25,7 +30,6 @@ import type {
 } from './protocol.js';
 import type { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
 
-const EGRESS_GRANT_HEADER = 'X-CodeAPI-Egress-Grant';
 const EXECUTION_MAIN_FILE = 'main.sh';
 const EXECUTION_HISTORY_FILE = '_ptc_history.json';
 const EXECUTION_CONTROL_FILE = '_ptc_pending_result.json';
@@ -248,6 +252,25 @@ export class NativeWorkspaceProgrammaticExecutor {
    * real replay will use, then removes the snapshot before registration.
    */
   async prepare(signal?: AbortSignal): Promise<void> {
+    try {
+      await this.prepareOnce(signal);
+    } catch (error) {
+      const diagnostic = commandSetupFailureDiagnostic(
+        'programmatic_preflight', error,
+      );
+      throw error instanceof WorkspaceToolError
+        ? new WorkspaceToolError(
+            error.message, error.code, error.mutationMayHaveCommitted,
+            error.requiresQuarantine, error.commandDiagnostic ?? diagnostic,
+          )
+        : new WorkspaceToolError(
+            'Native executor request failed', 'COMMAND_UNAVAILABLE',
+            false, false, diagnostic,
+          );
+    }
+  }
+
+  private async prepareOnce(signal?: AbortSignal): Promise<void> {
     const createProbeWorkspace =
       this.options.sandbox.createProgrammaticProbeWorkspace;
     if (createProbeWorkspace == null) {
@@ -265,7 +288,14 @@ export class NativeWorkspaceProgrammaticExecutor {
         signal,
       );
     } finally {
-      await rm(executionDirectory, { recursive: true, force: true });
+      try {
+        await rm(executionDirectory, { recursive: true, force: true });
+      } catch (error) {
+        throw new WorkspaceToolError(
+          'Native executor request failed', 'COMMAND_UNAVAILABLE', false, false,
+          commandFailureDiagnostic('cleanup', 'cleanup_failed', error),
+        );
+      }
     }
   }
 
@@ -327,12 +357,9 @@ export class NativeWorkspaceProgrammaticExecutor {
     const timer = setTimeout(() => controller.abort(), transferTimeoutMs);
     try {
       const response = await this.fetchImpl(
-        new URL(
-          `sessions/${encodeURIComponent(file.storage_session_id)}/objects/${encodeURIComponent(file.id)}`,
-          `${this.upstream.toString().replace(/\/+$/, '')}/`,
-        ),
+        fileRelayObjectUrl(this.upstream, file.storage_session_id, file.id),
         {
-          headers: { [EGRESS_GRANT_HEADER]: grant },
+          headers: { [FILE_RELAY_GRANT_HEADER]: grant },
           redirect: 'error',
           signal: controller.signal,
         },
@@ -704,14 +731,11 @@ export class NativeWorkspaceProgrammaticExecutor {
             let response: Response;
             try {
               response = await this.fetchImpl(
-                new URL(
-                  `sessions/${encodeURIComponent(outputSessionId!)}/objects/${id}`,
-                  `${this.upstream.toString().replace(/\/+$/, '')}/`,
-                ),
+                fileRelayObjectUrl(this.upstream, outputSessionId!, id),
                 {
                   method: 'PUT',
                   headers: {
-                    [EGRESS_GRANT_HEADER]: grant!,
+                    [FILE_RELAY_GRANT_HEADER]: grant!,
                     'Content-Type': bridgeArtifactMediaType(name),
                     'Content-Length': String(bytes.byteLength),
                     'X-Original-Filename': encodeURIComponent(name),
@@ -773,6 +797,9 @@ export class NativeWorkspaceProgrammaticExecutor {
           error instanceof WorkspaceToolError ? error.code : 'COMMAND_UNAVAILABLE',
           false,
           false,
+          error instanceof WorkspaceToolError && error.commandDiagnostic
+            ? error.commandDiagnostic
+            : commandSetupFailureDiagnostic('programmatic_preflight', error),
         );
       }
       if (error instanceof WorkspaceToolError) {
@@ -787,6 +814,7 @@ export class NativeWorkspaceProgrammaticExecutor {
                     error.code,
                     true,
                     true,
+                    error.commandDiagnostic,
                 );
       }
       throw new WorkspaceToolError(
@@ -794,16 +822,18 @@ export class NativeWorkspaceProgrammaticExecutor {
         'COMMAND_UNAVAILABLE',
         true,
         true,
+        commandFailureDiagnostic('dispatch', 'executor_rejected', error),
       );
     } finally {
       try {
                 await rm(executionDirectory, { recursive: true, force: true });
-      } catch {
+      } catch (error) {
         throw new WorkspaceToolError(
           'Native programmatic execution cleanup failed',
           'COMMAND_UNAVAILABLE',
           commandDispatched,
           commandDispatched,
+          commandFailureDiagnostic('cleanup', 'cleanup_failed', error),
         );
       }
     }

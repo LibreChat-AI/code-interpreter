@@ -1,5 +1,6 @@
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { WorkspaceToolError } from './workspace.js';
+import { commandFailureDiagnostic } from './command-diagnostics.js';
 import type { NativeProcessSandboxOptions } from './native-process.js';
 import type {
   BridgeWorkspaceProgrammaticRequest,
@@ -122,7 +123,8 @@ export class NativeWorkspaceCommandPool {
       if (entry?.busy)
         throw new WorkspaceToolError(
           'Native workspace already executing',
-          'COMMAND_UNAVAILABLE'
+          'COMMAND_UNAVAILABLE', false, false,
+          commandFailureDiagnostic('allocation', 'workspace_busy'),
         );
       if (!entry) {
         if (this.entries.size >= this.capacity) {
@@ -132,9 +134,18 @@ export class NativeWorkspaceCommandPool {
           if (!idle)
             throw new WorkspaceToolError(
               'Native executor capacity reached',
-              'COMMAND_UNAVAILABLE'
+              'COMMAND_UNAVAILABLE', false, false,
+              commandFailureDiagnostic('allocation', 'capacity_exhausted'),
             );
-          await idle[1].sandbox.close();
+          try {
+            await idle[1].sandbox.close();
+          } catch (error) {
+            const diagnostic = commandFailureDiagnostic('cleanup', 'cleanup_failed', error);
+            throw error instanceof WorkspaceToolError
+              ? new WorkspaceToolError(error.message, error.code, error.mutationMayHaveCommitted,
+                  error.requiresQuarantine, error.commandDiagnostic ?? diagnostic)
+              : new WorkspaceToolError('Native executor allocation failed', 'COMMAND_UNAVAILABLE', false, false, diagnostic);
+          }
           this.entries.delete(idle[0]);
         }
         entry = {
@@ -151,10 +162,15 @@ export class NativeWorkspaceCommandPool {
     const checked = pending.catch((error) => {
       // Allocation/idle eviction precedes dispatch into the requested root.
       // Do not turn a pool resource failure into an uncertain mutation there.
-      if (error instanceof WorkspaceToolError) throw error;
+      if (error instanceof WorkspaceToolError) {
+        if (error.commandDiagnostic) throw error;
+        throw new WorkspaceToolError(error.message, error.code, error.mutationMayHaveCommitted,
+          error.requiresQuarantine, commandFailureDiagnostic('allocation', 'allocation_failed', error));
+      }
       throw new WorkspaceToolError(
         'Native executor allocation failed',
-        'COMMAND_UNAVAILABLE'
+        'COMMAND_UNAVAILABLE', false, false,
+        commandFailureDiagnostic('allocation', 'allocation_failed', error),
       );
     });
     this.allocation = checked.catch(() => undefined);
@@ -236,7 +252,8 @@ export class NativeWorkspaceCommandPool {
       if (!entry.sandbox.executeProgrammatic) {
         throw new WorkspaceToolError(
           'Native programmatic executor is unavailable',
-          'COMMAND_UNAVAILABLE'
+          'COMMAND_UNAVAILABLE', false, false,
+          commandFailureDiagnostic('programmatic_preflight', 'prerequisite_failed'),
         );
       }
       return await entry.sandbox.executeProgrammatic(

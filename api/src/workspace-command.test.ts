@@ -1,10 +1,11 @@
-import { mkdtemp, mkdir, realpath, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import semver from 'semver';
 
-import type { Runtime } from './runtime';
+import { config } from './config';
+import { getRuntimes, type Runtime } from './runtime';
 import {
   executeWorkspaceCommand,
   hasWorkspaceCommandToken,
@@ -78,6 +79,80 @@ describe('sandboxed workspace commands', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  for (const existingModules of ['absent', 'removed', 'retained', 'directory', 'external']) {
+    test(`prepares ${existingModules} modules before workspace-command ESM execution`, async () => {
+      const parent = await mkdtemp(join(tmpdir(), 'workspace-command-modules-'));
+      const savedPackages = config.packages_directory;
+      const registered = getRuntimes();
+      const savedRuntimes = registered.splice(0);
+      try {
+        const packages = join(parent, 'pkgs');
+        const root = join(parent, 'workspace');
+        const modules = join(packages, 'node/24.22.1/node_modules');
+        const link = join(root, 'node_modules');
+        await mkdir(join(root, 'src'), { recursive: true });
+        await mkdir(join(modules, 'runtime-fixture'), { recursive: true });
+        await writeFile(join(modules, 'runtime-fixture/package.json'), JSON.stringify({ type: 'module', exports: './index.js' }));
+        await writeFile(join(modules, 'runtime-fixture/index.js'), 'export default "upgraded";');
+        config.packages_directory = packages;
+        registered.push({
+          ...runtime,
+          language: 'node',
+          version: new semver.SemVer('24.22.1'),
+          pkgdir: join(packages, 'node/24.22.1'),
+          env_vars: { NODE_PATH: modules },
+        });
+        let userTarget: string | undefined;
+        if (existingModules === 'directory') {
+          await mkdir(link);
+          await writeFile(join(link, 'keep'), 'user module');
+        } else if (existingModules === 'external') {
+          userTarget = join(packages, '../user/node_modules');
+          await mkdir(userTarget, { recursive: true });
+          await symlink(userTarget, link);
+        } else if (existingModules !== 'absent') {
+          const oldModules = join(packages, 'node/24.15.0/node_modules');
+          if (existingModules === 'retained') await mkdir(oldModules, { recursive: true });
+          await symlink(oldModules, link);
+        }
+        let executed = false;
+        await executeWorkspaceCommand({ command: 'node app.mjs', cwd: 'src' }, {
+          workspaceRoot: root,
+          runtime,
+          executeNsJail: async options => {
+            executed = true;
+            expect(options.extraPkgdirs).toContain(join(packages, 'node/24.22.1'));
+            expect(options.envVars.NODE_PATH).toBe(modules);
+            if (existingModules === 'directory') {
+              expect(await readFile(join(link, 'keep'), 'utf8')).toBe('user module');
+            } else if (existingModules === 'external') {
+              expect(await readlink(link)).toBe(userTarget!);
+            } else {
+              expect(await readlink(link)).toBe(modules);
+              const result = Bun.spawnSync({
+                cmd: [process.env.NODE_RUNTIME_TEST_BINARY ?? 'node', '--input-type=module', '-e',
+                  'import value from "runtime-fixture"; console.log(value);'],
+                cwd: join(root, 'src'),
+              });
+              expect(result.stderr.toString()).toBe('');
+              expect(result.exitCode).toBe(0);
+              expect(result.stdout.toString().trim()).toBe('upgraded');
+            }
+            return {
+              stdout: '', stderr: '', code: 0, signal: null, output: '',
+              memory: null, message: null, status: null, cpu_time: null, wall_time: 1,
+            };
+          },
+        });
+        expect(executed).toBe(true);
+      } finally {
+        registered.splice(0, registered.length, ...savedRuntimes);
+        config.packages_directory = savedPackages;
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+  }
 
   test('rejects a cwd symlink that escapes the mounted workspace', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'workspace-command-'));

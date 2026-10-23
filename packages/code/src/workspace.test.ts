@@ -2603,7 +2603,8 @@ test('fails closed on invalid or failed sandbox command results', async (t) => {
   for (const execute of [
     async () => ({ ...request, exitCode: 0, stdout: 'ok', stderr: '' }),
     async () => { throw new Error('container details'); },
-    async () => { throw new WorkspaceToolError('untrusted clean claim', 'COMMAND_UNAVAILABLE'); },
+    async () => { throw new WorkspaceToolError('untrusted clean claim', 'COMMAND_UNAVAILABLE', false, false,
+      { stage: 'command_wrapping', reason: 'wrapping_failed' }); },
   ]) {
     const tools = new SandboxWorkspaceTools({
       workspaceTools: local,
@@ -2616,6 +2617,7 @@ test('fails closed on invalid or failed sandbox command results', async (t) => {
         error instanceof WorkspaceToolError &&
         error.code === 'COMMAND_UNAVAILABLE' &&
         error.mutationMayHaveCommitted === true &&
+        (error.message !== 'untrusted clean claim' || error.commandDiagnostic?.stage === 'command_wrapping') &&
         !error.message.includes('container details'),
     );
     assert.equal(tools.mutationFailuresAreAtomic, undefined);

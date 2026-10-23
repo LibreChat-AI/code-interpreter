@@ -16,6 +16,7 @@ function render(overrides) {
       CODEAPI_BRIDGE_TOKEN: '',
       CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS: '',
       CODEAPI_BRIDGE_LANE_GIT: '',
+      CODEAPI_BRIDGE_IMPORT_FILE_MAX_BYTES: '',
       CODEAPI_BRIDGE_RECOVERY_SERVER_ID: '',
       CODEAPI_BRIDGE_ENROLLMENT_TTL_SECONDS: '',
       CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS: '',
@@ -36,6 +37,7 @@ for (const overrides of [
     CODEAPI_BRIDGE_WORKER_ID: 'test-worker',
     CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS: '4',
     CODEAPI_BRIDGE_LANE_GIT: 'true',
+    CODEAPI_BRIDGE_IMPORT_FILE_MAX_BYTES: '1048576',
     CODEAPI_BRIDGE_RECOVERY_SERVER_ID: 'https://code.example.test',
     CODEAPI_BRIDGE_ENROLLMENT_TTL_SECONDS: '86400',
     CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS: '90',
@@ -61,6 +63,10 @@ for (const overrides of [
     assert.equal(env.CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE, overrides.CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE ?? '30');
     assert.equal(env.CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE, overrides.CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE ?? '240');
   }
+  assert.equal(
+    config.services.api.environment.CODEAPI_BRIDGE_IMPORT_FILE_MAX_BYTES,
+    overrides.CODEAPI_BRIDGE_IMPORT_FILE_MAX_BYTES ?? '104857600',
+  );
   for (const name of ['egress_gateway', 'sandbox-runner']) {
     assert.equal(config.services[name].environment.CODEAPI_BRIDGE_TOKEN, undefined);
     assert.equal(config.services[name].environment.CODEAPI_BRIDGE_RECOVERY_SERVER_ID, undefined);

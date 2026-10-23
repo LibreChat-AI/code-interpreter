@@ -169,8 +169,11 @@ export function ensureNodeModulesSymlink(
   if (!nodeModulesPath) return;
   const linkPath = path.join(submissionDir, 'node_modules');
   try {
-    fs.lstatSync(linkPath);
-    return;
+    if (!fs.lstatSync(linkPath).isSymbolicLink()) return;
+    const target = path.resolve(submissionDir, fs.readlinkSync(linkPath));
+    const packageRoot = `${path.resolve(config.packages_directory)}${path.sep}`;
+    if (!target.startsWith(packageRoot) || target === path.resolve(nodeModulesPath)) return;
+    fs.unlinkSync(linkPath);
   } catch (err) {
     if (errorCode(err) !== 'ENOENT') throw err;
   }

@@ -15,6 +15,11 @@ render() {
         --set workerSandbox.enabled=true \
         --set workerSandbox.packages.source=pvc "$@"
 }
+# The hook installs the runtime selected by service requests.
+render | grep -A 1 'name: NODE_VERSION' | grep -q 'value: "24.22.1"'
+# Explicit runtime selections still override the chart default.
+render --set workerSandbox.packages.initJob.nodeVersion=24.22.0 \
+    | grep -A 1 'name: NODE_VERSION' | grep -q 'value: "24.22.0"'
 # Default mutable image must refresh on every pre-install/pre-upgrade hook.
 render | grep -q 'imagePullPolicy: Always'
 # Reused historical values must not bypass the runtime migration.
