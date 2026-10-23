@@ -188,6 +188,7 @@ install_python_packages() {
         beautifulsoup4 \
         tabulate \
         xlrd \
+        python-calamine \
         numba \
         patsy \
         numexpr \

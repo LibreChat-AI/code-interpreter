@@ -264,6 +264,7 @@ if [ -f "$PIP_PATH" ]; then
         beautifulsoup4 \
         tabulate \
         xlrd \
+        python-calamine \
         numba \
         patsy \
         numexpr \

@@ -988,6 +988,15 @@ test('bridge artifact policy and media types match the hardened gateway contract
   assert.equal(bridgeArtifactMediaType('preview.png'), 'image/png');
   assert.equal(bridgeArtifactMediaType('reports/result.json'), 'application/json');
   assert.equal(bridgeArtifactMediaType('Dockerfile'), 'application/octet-stream');
+  // XLSB (Excel Binary Workbook) — sandboxed code can produce these via
+  // `pd.read_excel(path, engine='calamine')`-backed workflows; the egress
+  // gateway must accept them with the correct Content-Type rather than
+  // falling back to application/octet-stream.
+  assert.equal(isSupportedBridgeArtifactName('report.xlsb'), true);
+  assert.equal(
+    bridgeArtifactMediaType('report.xlsb'),
+    'application/vnd.ms-excel.sheet.binary.macroenabled.12',
+  );
 });
 
 test('linked-worktree lanes nest beneath their checkout key and conflict only with it', () => {
