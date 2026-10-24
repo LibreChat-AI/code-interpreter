@@ -44,6 +44,9 @@ Create chart name and version as used by the chart label.
 Common labels - applied to all resources
 */}}
 {{- define "codeapi.labels" -}}
+{{- with omit .Values.commonLabels "helm.sh/chart" "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component" "app.kubernetes.io/version" "app.kubernetes.io/managed-by" }}
+{{ toYaml . }}
+{{- end }}
 helm.sh/chart: {{ include "codeapi.chart" . }}
 {{ include "codeapi.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
@@ -280,5 +283,64 @@ your collector's namespace and pod labels.
   ports:
     - protocol: TCP
       port: {{ .Values.networkPolicy.otel.port }}
+{{- end }}
+{{- end }}
+
+{{/* Secret ownership is independent of the component using a particular key. */}}
+{{- define "codeapi.secretName" -}}
+{{- .Values.secrets.existingSecret | default (printf "%s-secrets" (include "codeapi.fullname" .)) -}}
+{{- end }}
+
+{{/* Extra pod labels cannot change Service/Deployment selectors. */}}
+{{- define "codeapi.podLabels" -}}
+{{- $selectors := include (printf "codeapi.%s.selectorLabels" .component) .root | fromYaml -}}
+{{- mergeOverwrite (deepCopy (.values.podLabels | default dict)) $selectors | toYaml -}}
+{{- end }}
+
+{{/* null means omit; unlike `with`, this preserves an explicit false. */}}
+{{- define "codeapi.automountServiceAccountToken" -}}
+{{- if ne .automountServiceAccountToken nil }}
+automountServiceAccountToken: {{ .automountServiceAccountToken }}
+{{- end }}
+{{- end }}
+
+{{/* Preserve KVM/direct-mode defaults when adding container overrides. */}}
+{{- define "codeapi.sandboxRunner.defaultSecurityContext" -}}
+{{- if .Values.workerSandbox.kvmEnabled }}
+privileged: false
+{{- if and .Values.workerSandbox.seccomp .Values.workerSandbox.seccomp.enabled }}
+seccompProfile:
+  type: Localhost
+  localhostProfile: profiles/nsjail.json
+{{- else }}
+seccompProfile:
+  type: RuntimeDefault
+{{- end }}
+{{- else }}
+privileged: false
+{{- if and .Values.workerSandbox.seccomp .Values.workerSandbox.seccomp.enabled }}
+seccompProfile:
+  type: Localhost
+  localhostProfile: profiles/nsjail.json
+{{- else }}
+seccompProfile:
+  type: Unconfined
+{{- end }}
+capabilities:
+  add:
+    - SYS_ADMIN
+    - SYS_CHROOT
+    - SYS_PTRACE
+    - SETUID
+    - SETGID
+    - NET_ADMIN
+    - DAC_OVERRIDE
+    - DAC_READ_SEARCH
+    - CHOWN
+    - FOWNER
+    - FSETID
+    - KILL
+    - SETFCAP
+    - MKNOD
 {{- end }}
 {{- end }}

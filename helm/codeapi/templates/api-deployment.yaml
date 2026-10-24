@@ -13,6 +13,10 @@ metadata:
   name: {{ include "codeapi.fullname" . }}-api
   labels:
     {{- include "codeapi.api.labels" . | nindent 4 }}
+  {{- with .Values.api.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   {{- if not .Values.api.autoscaling.enabled }}
   replicas: {{ .Values.api.replicaCount }}
@@ -25,16 +29,36 @@ spec:
   template:
     metadata:
       annotations:
-        codeapi.librechat.ai/pairing-fence-version: "1"
+        {{- mergeOverwrite (deepCopy .Values.api.podAnnotations) (dict "codeapi.librechat.ai/pairing-fence-version" "1") | toYaml | nindent 8 }}
       labels:
-        {{- include "codeapi.api.selectorLabels" . | nindent 8 }}
+        {{- include "codeapi.podLabels" (dict "root" . "component" "api" "values" .Values.api) | nindent 8 }}
     spec:
+      {{- with .Values.api.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.api.serviceAccount.create .Values.api.serviceAccount.name }}
+      serviceAccountName: {{ .Values.api.serviceAccount.name | default (printf "%s-api" (include "codeapi.fullname" .)) }}
+      {{- end }}
+      {{- include "codeapi.automountServiceAccountToken" .Values.api.serviceAccount | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: api
+          {{- with .Values.api.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.api.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
           ports:
@@ -57,8 +81,8 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: redis-password
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.redisPassword }}
             - name: CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH
               valueFrom:
                 configMapKeyRef:
@@ -75,8 +99,8 @@ spec:
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: codeapi-internal-service-token
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.internalServiceToken }}
             - name: EGRESS_GRANT_TTL_SECONDS
               value: {{ .Values.egressGrant.ttlSeconds | quote }}
             # Server config
