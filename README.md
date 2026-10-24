@@ -130,9 +130,9 @@ cut.
 
 ## Prebuilt images
 
-The [Images workflow](.github/workflows/images.yml) builds one `linux/amd64`
-image per Compose build and publishes it to GHCR whenever a push to `main`
-changes an image input:
+The [Images workflow](.github/workflows/images.yml) builds one image per
+Compose build, for `linux/amd64` and `linux/arm64`, and publishes it to GHCR
+whenever a push to `main` changes an image input:
 
 | Image (`ghcr.io/librechat-ai/…`) | Dockerfile (target) | Compose service |
 |---|---|---|
@@ -147,14 +147,19 @@ changes an image input:
 Tags:
 
 - `sha-<full commit SHA>` for every commit on `main` that changes an image
-  input. Commits that change none (docs, Helm, tests) get no tags, so take the
+  input: a manifest listing both architectures, so a host pulls the one it
+  runs. Commits that change none (docs, Helm, tests) get no tags, so take the
   SHA from a successful Images run or the package page.
+- `sha-<full commit SHA>-amd64` and `-arm64`, what each architecture's build
+  pushes before they are joined. Pull these only to force an architecture the
+  host does not run.
 - `main`, pointed at the newest commit on `main` that has all seven images.
   The seven tags move one after another, so pin `sha-` tags for deployments
   and treat `main` as a convenience.
 
 There is no `latest`. `sha-` tags are written once: re-running the workflow
-for a commit builds only the images whose tag is missing. For exact bytes,
+for a commit builds only the image and architecture pairs whose tag is
+missing. For exact bytes,
 replace a service's
 `image:` below with `ghcr.io/librechat-ai/<image>@sha256:<digest>`; each image
 has its own digest, listed in the summary of the run that pushed it.
