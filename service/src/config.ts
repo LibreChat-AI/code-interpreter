@@ -251,6 +251,19 @@ export function hostedAppOperationTimeoutMs(): number {
     + env.HOSTED_APP_START_TIMEOUT_MS + 30_000;
 }
 
+export function gracefulShutdownTimeoutMs(hasWorkers: boolean): number {
+  const defaultTimeout = hasWorkers
+    ? Math.max(
+        jobCompletionWaitTimeoutMs(env.JOB_TIMEOUT, env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS, env.EGRESS_GATEWAY_REVOKE_TIMEOUT_MS),
+        env.HOSTED_APPS_ENABLED
+          ? hostedAppOperationTimeoutMs() + env.LAMBDA_MICROVM_LAUNCH_TIMEOUT_MS + 30_000
+          : 0,
+      )
+    : 30_000;
+  // Node/Bun timers overflow to an immediate timeout above this limit.
+  return Math.min(resolvePositiveIntEnv(process.env.CODEAPI_SHUTDOWN_TIMEOUT_MS, defaultTimeout), 2_147_483_647);
+}
+
 function configuredNumber(raw: string | undefined, fallback: number): number {
   return raw == null || raw.trim() === '' ? fallback : Number(raw);
 }
