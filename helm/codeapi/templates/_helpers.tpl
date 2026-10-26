@@ -174,6 +174,25 @@ Redis port
 {{- end }}
 
 {{/*
+Redis TLS env vars for control-plane containers. Only applies to external
+Redis; the bundled subchart is not configured for TLS. Never include this in
+the sandbox-runner container.
+*/}}
+{{- define "codeapi.redis.tlsEnv" -}}
+{{- $external := .Values.redis.external | default dict }}
+{{- if not .Values.redis.enabled }}
+{{- if (get $external "tls") }}
+- name: REDIS_TLS
+  value: "true"
+{{- end }}
+{{- if (get $external "useAlternativeDnsLookup") }}
+- name: REDIS_USE_ALTERNATIVE_DNS_LOOKUP
+  value: "true"
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 Redis NetworkPolicy egress. Kubernetes NetworkPolicy cannot match DNS names,
 so external Redis can be scoped with CIDRs when available; otherwise the chart
 allows the configured Redis port to any destination for the control-plane pods

@@ -452,11 +452,15 @@ redis:
       enabled: true
       size: 1Gi
 
-  # If using external Redis, configure here:
-  # external:
-  #   host: redis.example.com
-  #   port: 6379
-  #   password: secret
+  # External Redis, used only when redis.enabled is false.
+  external:
+    host: ""
+    port: 6379
+    password: ""
+    # Connect over TLS (required by e.g. AWS ElastiCache with in-transit encryption).
+    tls: false
+    # Skip DNS resolution of the host before the TLS handshake (recommended by ioredis for ElastiCache + TLS).
+    useAlternativeDnsLookup: false
 
 # =============================================================================
 # MINIO (S3-compatible storage)

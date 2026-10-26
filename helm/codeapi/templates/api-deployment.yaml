@@ -59,6 +59,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "codeapi.fullname" . }}-secrets
                   key: redis-password
+            {{- with include "codeapi.redis.tlsEnv" . }}{{ . | trim | nindent 12 }}{{ end }}
             - name: CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH
               valueFrom:
                 configMapKeyRef:
