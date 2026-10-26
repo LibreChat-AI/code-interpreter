@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { nanoid } from 'nanoid';
 import * as fs from 'fs';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import type { LambdaMicrovmClient, MicrovmAuthToken, MicrovmDescription, MicrovmIdlePolicy } from '../runtime-session/lambda-client';
 import type { SandboxBackend, SandboxExecuteContext, SandboxRawResponse, SandboxTransportRequest } from './types';
 import type { RuntimeSessionRecord } from '../runtime-session/registry';
@@ -96,8 +96,8 @@ export function runtimeSessionLaunchFingerprint(config: LambdaMicrovmBackendConf
 }
 
 /** Generations below this boundary were allocated by the original INCR-only
- * scheme. New launches start in a fingerprint-seeded namespace so losing the
- * Redis counter cannot reuse an AWS clientToken after launch inputs change.
+ * scheme. New launches start in a randomly seeded namespace so losing the
+ * Redis counter cannot reuse an AWS clientToken.
  *
  * Keep the provider token itself in the legacy `sess-<id>-<generation>` shape:
  * an older worker taking over a PENDING record during a rolling deployment
@@ -124,13 +124,17 @@ function runtimeSessionLaunchRequestFingerprint(config: LambdaMicrovmBackendConf
   });
 }
 
-/** A 52-bit digest leaves ample safe-integer headroom for later INCRs while
- * making a reset counter's first generation depend on the exact launch
- * request. Token collisions are scoped to one runtime session. */
+/** A 52-bit digest leaves ample safe-integer headroom for later INCRs. The
+ * random salt makes every reset counter start somewhere new: the rtsx:gen key
+ * expires after an idle night while AWS still remembers the old tokens, and AWS
+ * rejects a reused token ("The provided clientToken was used with different
+ * request parameters") even when the request body is identical. Token
+ * collisions are scoped to one runtime session. */
 export function runtimeSessionLaunchGenerationSeed(config: LambdaMicrovmBackendConfig): number {
   const offset = Number.parseInt(
     createHash('sha256')
       .update(runtimeSessionLaunchRequestFingerprint(config), 'utf8')
+      .update(randomBytes(16))
       .digest('hex')
       .slice(0, 13),
     16,
@@ -730,10 +734,18 @@ export class LambdaMicrovmSandboxBackend implements SandboxBackend {
       && error.cause.kind === 'validation';
   }
 
+  /** AWS reports a reused idempotency token only as a generic
+   * ValidationException, so the message text is the only discriminator. */
+  private isClientTokenReuseRejection(error: unknown): boolean {
+    return this.isValidationLaunchFailure(error)
+      && /client ?token\b.*\bdifferent (request )?parameters/i.test((error as Error).message);
+  }
+
   /** Both the base token and its single retry reached a terminal state and
-   * were successfully terminated. Keeping that PENDING intent would replay
-   * two known-dead tokens forever, so let the next request allocate a new
-   * generation. Ambiguous provider failures remain persisted for recovery. */
+   * were successfully terminated, or AWS refused the token as already used and
+   * launched nothing. Keeping that PENDING intent would replay a known-dead
+   * token forever, so let the next request allocate a new generation.
+   * Ambiguous provider failures remain persisted for recovery. */
   private async retireExhaustedLaunchIntent(
     launchIntent: RuntimeSessionRecord,
     lockToken: string,
@@ -742,7 +754,7 @@ export class LambdaMicrovmSandboxBackend implements SandboxBackend {
     const cleanlyExhausted =
       error instanceof SandboxBackendError
       && error.code === 'MICROVM_LAUNCH_FAILED'
-      && error.transient;
+      && (error.transient || this.isClientTokenReuseRejection(error));
     if (!cleanlyExhausted) return;
     try {
       const retired = await writeRuntimeSessionRecord({
