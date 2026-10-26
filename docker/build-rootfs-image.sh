@@ -12,7 +12,7 @@ fi
 mkdir -p "$rootfs/dev" "$rootfs/proc" "$rootfs/sys" "$rootfs/tmp" "$rootfs/run" "$rootfs/mnt"
 chmod 1777 "$rootfs/tmp"
 
-used_kib=$(du -sk "$rootfs" | awk '{print $1}')
+used_kib=$(du -sk --apparent-size "$rootfs" | awk '{print $1}')
 # Give ext4 enough headroom for metadata and future small additions, then shrink
 # the filesystem after population so the final raw image stays compact.
 size_mib=$(( (used_kib * 13 / 10 + 262144 + 1023) / 1024 ))
