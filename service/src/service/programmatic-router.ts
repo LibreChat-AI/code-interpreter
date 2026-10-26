@@ -1,3 +1,4 @@
+import { mergeContinuationFiles } from './continuation-files';
 import axios from 'axios';
 import { nanoid } from 'nanoid';
 import { Router } from 'express';
@@ -882,6 +883,18 @@ async function handleReplayContinuation(
       return;
     }
 
+    try {
+      const referenceResults = validatedResults.filter(result => result.files?.length);
+      const requested = referenceResults.flatMap(result => result.files ?? []);
+      if (requested.length > 100) throw new Error('continuation_file_limit_exceeded');
+      await authorizeRequestedFiles({ req, files: requested, store: connection });
+      state.files = mergeContinuationFiles(state.files ?? [], referenceResults,
+        new Set((state.emittedToolCalls ?? []).map(call => call.id)));
+    } catch {
+      res.status(400).json({ error: 'continuation_file_delivery_failed' });
+      return;
+    }
+
     logger.info('Replay continuation received', {
       execution_id: state.execution_id,
       resultCount: validatedResults.length,
@@ -1158,6 +1171,7 @@ async function runAndRespond(
     }
     res.status(200).json({
       status: 'tool_call_required',
+      continuation_files: 1,
       continuation_token: generateContinuationToken(state.execution_id),
       tool_calls: pending.map(p => ({
         id: p.call_id,
@@ -1457,6 +1471,8 @@ router.post(
           tool_results,
         }, cancellation);
       }
+      if (tool_results.some(result => result.files?.length))
+        return res.status(409).json({ error: 'ptc_continuation_files_unsupported' });
       return await handleBlocking(req, res, { apiKeyId, userId });
     }
 
