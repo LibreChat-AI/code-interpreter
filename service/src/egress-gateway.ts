@@ -556,6 +556,9 @@ app.get('/sessions/:sessionHandle/objects', async (req, res) => {
 
     const allowedFiles = inputFileSet(grant);
     const allowedDirkeeps = requiredDirkeepSet(grant);
+    const explicitObjectIds = new Set(grant.input_files
+      .filter(file => file.session_id === sessionId)
+      .map(file => file.id));
     const now = Math.floor(Date.now() / 1000);
     const normalized = data
       .filter((obj): obj is { id: string; name: string; storage_session_id: string } => (
@@ -572,6 +575,8 @@ app.get('/sessions/:sessionHandle/objects', async (req, res) => {
         allowedFiles,
         allowedDirkeeps,
       ))
+      // Avoid auto-restoring a renamed explicit marker twice at its stored path.
+      .filter(obj => !isDirkeepName(obj.name) || !explicitObjectIds.has(obj.id))
       .map(obj => ({
         ...obj,
         storage_session_id: req.params.sessionHandle,

@@ -664,6 +664,45 @@ describe('egress gateway routes', () => {
     expect(header(upstreamCalls[0].init, EGRESS_GRANT_HEADER)).toBeUndefined();
   });
 
+  test('does not auto-restore an explicitly referenced marker again under its unsanitized name', async () => {
+    const grant = claims({
+      input_files: [
+        { id: 'marker_explicit', session_id: 'sess_input', name: 'tps_extract/_.dirkeep-dd1fdd' },
+        { id: 'file_123', session_id: 'sess_input', name: 'tps_extract/chapter.pdf' },
+        // An identical object id from another session must not suppress this session's marker.
+        { id: 'marker_inherited', session_id: 'sess_other', name: 'tps_extract/sub/_.dirkeep-alias' },
+        { id: 'file_sub', session_id: 'sess_input', name: 'tps_extract/sub/data.txt' },
+      ],
+      read_sessions: ['sess_input', 'sess_other'],
+    });
+    upstreamResponse = Response.json([
+      { id: 'marker_explicit', name: 'tps_extract/.dirkeep', storage_session_id: 'sess_input' },
+      { id: 'file_123', name: 'tps_extract/chapter.pdf', storage_session_id: 'sess_input' },
+      { id: 'marker_inherited', name: 'tps_extract/sub/.dirkeep', storage_session_id: 'sess_input' },
+      { id: 'private_marker', name: 'private/.dirkeep', storage_session_id: 'sess_input' },
+    ]);
+    const readSession = sessionHandle({ dir: 'read', sessionId: 'sess_input' });
+    const response = await gatewayFetch(`/sessions/${readSession}/objects?detail=normalized`, {
+      headers: grantHeader(grant),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json() as Array<{ name: string }>;
+    expect(body.map(file => file.name)).toEqual(['tps_extract/chapter.pdf', 'tps_extract/sub/.dirkeep']);
+
+    // The explicit reference still downloads its original bytes, even if the
+    // user's file named .dirkeep is non-empty. Suppress only the extra listing.
+    upstreamResponse = new Response('user marker content', {
+      headers: { 'Content-Disposition': 'attachment; filename="tps_extract/.dirkeep"' },
+    });
+    const marker = objectHandle({ fileId: 'marker_explicit', name: 'tps_extract/_.dirkeep-dd1fdd' });
+    const download = await gatewayFetch(`/sessions/${readSession}/objects/${marker}`, {
+      headers: grantHeader(grant),
+    });
+    expect(download.status).toBe(200);
+    expect(await download.text()).toBe('user marker content');
+    expect(download.headers.get('content-disposition')).toContain('tps_extract/.dirkeep');
+  });
+
   test('accepts legacy rollout grants and handles while ledger-required mode is enabled', async () => {
     const redis = await startTestRedis();
     env.EGRESS_LEDGER_REQUIRED = true;
