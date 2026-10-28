@@ -7,3 +7,8 @@ export function isBridgeEnabled(): boolean {
     || env.BRIDGE_DYNAMIC_WORKERS
     || env.BRIDGE_TOKEN.length > 0;
 }
+
+/** `import_file` relays need the egress gateway to mint each one-object read grant. */
+export function isWorkspaceImportEnabled(): boolean {
+  return env.EGRESS_GATEWAY_URL.trim() !== '';
+}

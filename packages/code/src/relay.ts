@@ -34,6 +34,21 @@ const LOCAL_HTTP_HOSTS = new Set([
 class RelayPayloadTooLargeError extends Error {}
 class UpstreamPayloadTooLargeError extends Error {}
 
+/** Header carrying Code API's egress grant on every file relay object request. */
+export const FILE_RELAY_GRANT_HEADER = 'X-CodeAPI-Egress-Grant';
+
+/** `<upstream>/sessions/<session>/objects/<object>`, the egress gateway's object route. */
+export function fileRelayObjectUrl(
+  upstream: URL,
+  storageSessionId: string,
+  objectId: string,
+): URL {
+  return new URL(
+    `sessions/${encodeURIComponent(storageSessionId)}/objects/${encodeURIComponent(objectId)}`,
+    `${upstream.toString().replace(/\/+$/, '')}/`,
+  );
+}
+
 export function validateFileRelayUpstream(value: string): URL {
   const upstream = new URL(value);
   if (

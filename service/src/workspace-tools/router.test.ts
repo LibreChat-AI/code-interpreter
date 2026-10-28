@@ -13,6 +13,7 @@ import { executionProfileMiddleware } from '../middleware/execution-profile';
 import { hostedAppPreviewGateway } from '../hosted-app/preview-gateway';
 import { applyPrincipal } from '../auth/principal';
 import { BridgeStoreError } from '../bridge/store';
+import { principalWorkspaceInstanceId } from '../bridge/workspace-instance';
 import { bridgeStoreStatus, createWorkspaceToolsRouter } from './router';
 import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 
@@ -36,13 +37,47 @@ test('maps invalid worker results to an upstream failure', () => {
   expect(bridgeStoreStatus(new BridgeStoreError('WORKER_QUEUE_FULL', 'queue full'))).toBe(429);
 });
 
-test.each<[WorkspaceToolRequest, number, number?]>([
-  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 300_000 }, 305_000, undefined],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 6000, 1000],
-  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, 600_000],
-])('separates the admission deadline from execution budget for %j', async (request, expectedExecution, ceiling) => {
+test('binds instance admission to the authenticated tenant and user while preserving legacy requests', async () => {
+  const app = express();
+  app.use(json());
+  app.use((req, _res, next) => {
+    applyPrincipal(req, { userId: 'user-1', tenantId: 'tenant-1', principalSource: 'librechat_jwt', codeWorkerId: 'user-worker' });
+    next();
+  });
+  const dispatched: WorkspaceToolRequest[] = [];
+  app.use(createWorkspaceToolsRouter({
+    backend: 'remote-bridge', configuredWorkerId: 'user-worker', dynamicWorkers: false,
+    store: { async dispatchWorkspaceTool(args) {
+      dispatched.push(args.request);
+      return { protocolVersion: 1, generation: 1, leaseToken: 'lease', incarnationId: 'incarnation', status: 'rejected', error: 'fixture' };
+    } },
+  }));
+  server = createServer(app);
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Missing listener');
+  for (const workspaceInstanceId of ['a'.repeat(64), undefined]) {
+    const response = await fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', workspaceInstanceId, path: 'README.md' }),
+    });
+    await response.json();
+  }
+  expect(dispatched[0]?.workspaceInstanceId).toBe(principalWorkspaceInstanceId({ instanceId: 'a'.repeat(64), tenantId: 'tenant-1', principalId: 'user-1' }));
+  expect(dispatched[1]?.workspaceInstanceId).toBeUndefined();
+});
+
+test.each<[WorkspaceToolRequest, number, number?, number?, number?]>([
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, undefined, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, 125_000, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, undefined, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 90_000 }, 95_000, 125_000, undefined, 90_000],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready', timeoutMs: 300_000 }, 305_000, undefined, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 6000, 1000, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ready' }, 35_000, 600_000, undefined, undefined],
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, 125_000, 5000, 90_000],
+  [{ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }, 30_000, undefined, undefined, 300_000],
+])('separates the admission deadline from execution budget for %j', async (request, expectedExecution, ceiling, queueTimeoutMs, advertisedQueueWaitMs) => {
   const app = express();
   app.use(json());
   app.use((req, _res, next) => {
@@ -55,6 +90,7 @@ test.each<[WorkspaceToolRequest, number, number?]>([
   app.use(createWorkspaceToolsRouter({
     backend: 'remote-bridge', configuredWorkerId: 'user-worker', dynamicWorkers: false,
     timeoutMs: ceiling,
+    queueTimeoutMs,
     store: { async dispatchWorkspaceTool(args) {
       executionBudget = args.executionTimeoutMs;
       if (args.request.operation === 'execute_command') commandTimeout = args.request.timeoutMs;
@@ -67,13 +103,53 @@ test.each<[WorkspaceToolRequest, number, number?]>([
   const address = server.address();
   if (address == null || typeof address === 'string') throw new Error('Missing listener');
   const response = await fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+    method: 'POST', headers: {
+      'Content-Type': 'application/json',
+      ...(advertisedQueueWaitMs === undefined ? {} : { 'X-LibreChat-Workspace-Queue-Wait-Ms': String(advertisedQueueWaitMs) }),
+    }, body: JSON.stringify(request),
   });
   await response.json();
   expect(executionBudget).toBe(expectedExecution);
   if (request.operation === 'execute_command') expect(commandTimeout).toBe(expectedExecution - 5000);
-  expect(queueRemaining).toBeGreaterThan(29_000);
-  expect(queueRemaining).toBeLessThanOrEqual(30_000);
+  const expectedQueueBudget = Math.min(advertisedQueueWaitMs ?? 30_000, queueTimeoutMs ?? 300_000);
+  expect(queueRemaining).toBeGreaterThan(expectedQueueBudget - 1000);
+  expect(queueRemaining).toBeLessThanOrEqual(expectedQueueBudget);
+});
+
+test.each([0, 300_001, Number.POSITIVE_INFINITY])('rejects an unbounded queue override (%s)', (queueTimeoutMs) => {
+  expect(() => createWorkspaceToolsRouter({
+    backend: 'remote-bridge',
+    configuredWorkerId: 'user-worker',
+    dynamicWorkers: false,
+    queueTimeoutMs,
+    store: { async dispatchWorkspaceTool() { throw new Error('must not dispatch'); } },
+  })).toThrow('Workspace queue timeout must be between 1 and 300000 milliseconds');
+});
+
+test.each(['0', '-1', '300001', '1.5', '01', '1, 2', '999999999999999999999'])('rejects invalid per-request queue allowance %j before dispatch', async (queueWait) => {
+  const app = express();
+  app.use(json());
+  app.use((req, _res, next) => {
+    applyPrincipal(req, { userId: 'user-1', tenantId: 'tenant-1', principalSource: 'librechat_jwt', codeWorkerId: 'user-worker' });
+    next();
+  });
+  let dispatched = false;
+  app.use(createWorkspaceToolsRouter({
+    backend: 'remote-bridge', configuredWorkerId: 'user-worker', dynamicWorkers: false,
+    store: { async dispatchWorkspaceTool() { dispatched = true; throw new Error('must not dispatch'); } },
+  }));
+  server = createServer(app);
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Missing listener');
+  const response = await fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-LibreChat-Workspace-Queue-Wait-Ms': queueWait },
+    body: JSON.stringify({ protocolVersion: 1, operation: 'read_file', workspaceId: 'primary', path: 'README.md' }),
+  });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ code: 'INVALID_WORKSPACE_QUEUE_WAIT' });
+  expect(dispatched).toBe(false);
 });
 
 test('rejects new workspace dispatches while the service is shutting down', async () => {
@@ -147,6 +223,8 @@ test.each([
   ['COMMAND_TIMEOUT', 504],
   ['COMMAND_UNAVAILABLE', 503],
   ['COMMAND_DISABLED', 403],
+  ['INVALID_PATH', 422],
+  ['NOT_FOUND', 422],
 ] as const)('maps worker %s rejections to HTTP %i', async (errorCode, expectedStatus) => {
   const app = express();
   app.use(json());
@@ -320,6 +398,7 @@ test.each([
   ['ASSIGNMENT_EXPIRED', 504],
   ['WORKER_OFFLINE', 503],
   ['WORKER_BUSY', 503],
+  ['WORKSPACE_QUEUE_TIMEOUT', 503],
   ['WORKER_MISMATCH', 409],
 ] as const)('logs store rejection %s with actual HTTP %i', async (errorCode, expectedStatus) => {
   const app = express();
@@ -360,6 +439,7 @@ test.each([
     }),
   });
   expect(response.status).toBe(expectedStatus);
+  expect(response.headers.get('retry-after')).toBe(errorCode === 'WORKSPACE_QUEUE_TIMEOUT' ? '1' : null);
   await response.text();
   expect(logSpy).toHaveBeenCalledTimes(1);
   expect(logSpy).toHaveBeenCalledWith(
@@ -453,11 +533,10 @@ test('logs a disconnected dispatch once without inventing HTTP 200', async () =>
   const closed = Promise.withResolvers<void>();
   const settlementGate = Promise.withResolvers<void>();
   let dispatchAborted = false;
-  let closeConnection = (): void => { throw new Error('connection not ready'); };
+  let queueRemaining: number | undefined;
   app.use(json());
   app.use((req, res, next) => {
     applyPrincipal(req, { userId: 'user-1', tenantId: 'tenant-1', principalSource: 'librechat_jwt', codeWorkerId: 'user-worker' });
-    closeConnection = (): void => { res.destroy(); };
     res.once('close', () => closed.resolve());
     next();
   });
@@ -466,8 +545,10 @@ test('logs a disconnected dispatch once without inventing HTTP 200', async () =>
       backend: 'remote-bridge',
       configuredWorkerId: 'user-worker',
       dynamicWorkers: true,
+      timeoutMs: 125_000,
       store: {
-        async dispatchWorkspaceTool({ signal }) {
+        async dispatchWorkspaceTool({ deadlineAtMs, signal }) {
+          queueRemaining = deadlineAtMs - Date.now();
           started.resolve();
           return await new Promise((_resolve, reject) => {
             signal.addEventListener(
@@ -495,9 +576,11 @@ test('logs a disconnected dispatch once without inventing HTTP 200', async () =>
     body: JSON.stringify({ protocolVersion: 1, operation: 'list_files', workspaceId: 'primary' }),
   });
   await started.promise;
-  closeConnection();
+  controller.abort();
   await expect(response).rejects.toThrow();
   await closed.promise;
+  expect(queueRemaining).toBeGreaterThan(29_000);
+  expect(queueRemaining).toBeLessThanOrEqual(30_000);
   expect(dispatchAborted).toBe(true);
   expect(logSpy).not.toHaveBeenCalled();
   settlementGate.resolve();

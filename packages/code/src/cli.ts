@@ -1,15 +1,27 @@
 #!/usr/bin/env node
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
-import { basename, resolve, relative, isAbsolute, sep } from 'node:path';
+import { lstat, readdir, realpath, stat } from 'node:fs/promises';
+import { basename, dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 
 import { pairBridgeWorker } from './pairing.js';
+import { commandFailureLogLine } from './command-diagnostics.js';
+import { runSetupCommand } from './setup-cli.js';
+import { browserSetupProtectedPaths } from './browser-setup.js';
+import { assertPrivateStorageAncestors } from './private-storage.js';
+import { profileRunConfiguration } from './setup.js';
+import { assertWorkerProfileIsolation } from './worker-profile.js';
+import type { WorkerProfile } from './worker-profile.js';
+import { discoverProjects } from './projects.js';
+import { loadProjectRoots, projectRootArguments } from './project-roots.js';
 import {
     loadCodeEnvironment,
     assertEnvironmentDefinitionsOutsideRoots,
     EnvironmentWorkspaceTools,
 } from './environment.js';
+import { prepareCodeEnvironment } from './environment-preparation.js';
+import { assertEnvironmentResourceIsolation } from './environment-resources.js';
+import { pruneDependencySnapshots } from './snapshot-lifecycle.js';
 import { startFileRelay } from './relay.js';
 import { DockerFileRelaySupervisor } from './relay-runtime.js';
 import {
@@ -24,9 +36,11 @@ import {
   loadWorkspaceMutationQuarantine,
   saveBridgeIdentity,
   saveWorkspaceMutationQuarantine,
+  prepareEnvironmentPreparationDirectory,
 } from './storage.js';
 import { BridgeWorker } from './worker.js';
 import { LocalWorkspaceTools, SandboxWorkspaceTools } from './workspace.js';
+import { createWorkspaceFileImporter } from './workspace-import.js';
 import {
   DockerRuntimeSupervisor,
   EndpointRuntimeSupervisor,
@@ -34,6 +48,15 @@ import {
 import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { NativeWorkspaceCommandPool } from './native-pool.js';
+import { GitWorktreeWorkspaceTools, internalWorkspaceId } from './workspace-instances.js';
+import { LaneGitWorkspaceTools, ownsGitMetadata, ownsLinkedWorktreeMetadata } from './lane-git.js';
+import { LINKED_WORKTREE_DIRECTORY, LinkedWorktreeWorkspaceTools, verifyLinkedWorktree } from './linked-worktrees.js';
+import { GitWorktreeManager } from './worktrees.js';
+import {
+  WorktreeRetirementScheduler,
+  worktreeRetirementSettings,
+} from './worktree-retirement.js';
+import { captureWorkspaceRootIdentity } from './root-identity.js';
 import {
   resolveNativeSrtCommandPolicy,
   serializeNativeSrtCommandPolicy,
@@ -44,6 +67,8 @@ import type { LocalWorkspaceConfig } from './workspace.js';
 import {
   GITHUB_ALLOWED_DOMAINS,
   GitHubAppCredentialProvider,
+  gitHubRepositoryForCommand,
+  gitHubRepositoryForDirectory,
   gitHubCommandCredentialEnvironment,
   gitHubMaskedCredentialVariables,
   StaticGitHubCredentialProvider,
@@ -55,10 +80,13 @@ import type { RuntimeSupervisor } from './runtime.js';
 import type { GitHubCredentialProvider } from './github.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
 import {
+  BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES,
   BRIDGE_WORKSPACE_NAME_MAX_LENGTH,
   BridgeProtocolError,
-  isValidBridgeWorkerCapabilities,
-  isValidBridgeWorkerId,
+    isValidBridgeWorkerCapabilities,
+    isValidBridgeWorkerId,
+    isValidLinkedWorktreeName,
+    workspaceIsolationKey,
 } from './protocol.js';
 
 function workspaceSecurityIdentity(
@@ -142,11 +170,14 @@ function nonEmpty(value: string | undefined): string | undefined {
   return value?.trim().length ? value : undefined;
 }
 
-function githubCredentials(): {
+function githubCredentials(args: string[]): {
   provider?: GitHubCredentialProvider;
   host: string;
   privateKeyPath?: string;
   mode?: 'app' | 'token';
+  repositoryRouting?: boolean;
+  checkoutRouting?: boolean;
+  installationTokenScope?: boolean;
   policyIdentity: string;
 } {
   const token = nonEmpty(process.env.LIBRECHAT_CODE_GITHUB_TOKEN);
@@ -154,19 +185,43 @@ function githubCredentials(): {
   const installationId = nonEmpty(
     process.env.LIBRECHAT_CODE_GITHUB_INSTALLATION_ID,
   );
+  const routing =
+    option(args, '--github-repository-routing')?.trim().toLowerCase() ??
+    process.env.LIBRECHAT_CODE_GITHUB_REPOSITORY_ROUTING?.trim().toLowerCase() ??
+    'admitted';
+  if (routing !== 'admitted' && routing !== 'checkout') {
+    throw new Error('GitHub repository routing must be admitted or checkout');
+  }
   const privateKeyPath = nonEmpty(
     process.env.LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE,
   );
   const appValues = [appId, installationId, privateKeyPath];
   const hasApp = appValues.some(Boolean);
-  if (hasApp && !appValues.every(Boolean)) {
+  if (hasApp && (!appId || !privateKeyPath)) {
     throw new Error(
-      'GitHub App authentication requires LIBRECHAT_CODE_GITHUB_APP_ID, LIBRECHAT_CODE_GITHUB_INSTALLATION_ID, and LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE',
+      'GitHub App authentication requires LIBRECHAT_CODE_GITHUB_APP_ID and LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE; LIBRECHAT_CODE_GITHUB_INSTALLATION_ID is an optional legacy fallback',
     );
   }
   if (hasApp && token) {
     throw new Error(
       'Configure either GitHub App authentication or a GitHub token, not both',
+    );
+  }
+  if (routing === 'checkout' && (!hasApp || installationId)) {
+    throw new Error(
+      'Checkout GitHub repository routing requires a GitHub App without a fixed installation ID',
+    );
+  }
+  const tokenScope =
+    option(args, '--github-token-scope')?.trim().toLowerCase() ??
+    process.env.LIBRECHAT_CODE_GITHUB_TOKEN_SCOPE?.trim().toLowerCase() ??
+    'repository';
+  if (tokenScope !== 'repository' && tokenScope !== 'installation') {
+    throw new Error('GitHub token scope must be repository or installation');
+  }
+  if (tokenScope === 'installation' && (!hasApp || installationId)) {
+    throw new Error(
+      'Installation-scoped GitHub tokens require a GitHub App without a fixed installation ID',
     );
   }
   const configuredHostValue = nonEmpty(
@@ -201,16 +256,21 @@ function githubCredentials(): {
     return {
       host,
       mode: 'app',
+      repositoryRouting: !installationId,
+      checkoutRouting: routing === 'checkout',
+      installationTokenScope: tokenScope === 'installation',
       policyIdentity: gitHubAuthenticationPolicyIdentity({
         mode: 'app',
         host,
         appId,
         installationId,
-      }),
+      }) + (routing === 'checkout' ? ':routing:checkout' : '') +
+        (tokenScope === 'installation' ? ':scope:installation' : ''),
       privateKeyPath,
       provider: new GitHubAppCredentialProvider({
         appId: appId!,
-        installationId: installationId!,
+        installationId,
+        tokenScope,
         privateKeyPath: privateKeyPath!,
         host,
         apiUrl,
@@ -307,7 +367,28 @@ async function relay(): Promise<void> {
 async function run(
   runtimeSessionId?: string,
   args: string[] = [],
+  savedProfile?: { path: string; config: WorkerProfile },
 ): Promise<void> {
+    const projectArgs = projectRootArguments(args);
+    if (
+        projectArgs &&
+        (runtimeSessionId != null ||
+            args.some(arg =>
+                ['--environment', '--worker-dir', '--default-workspace',
+                    '--workspace', '--workspace-id', '--workspace-name'].some(
+                    flag => arg === flag || arg.startsWith(`${flag}=`),
+                ),
+            ) ||
+            [process.env.LIBRECHAT_CODE_WORKER_DIR,
+                process.env.LIBRECHAT_CODE_WORKSPACE_ID,
+                process.env.LIBRECHAT_CODE_WORKSPACE_NAME].some(value => value?.trim()) ||
+            process.env.LIBRECHAT_CODE_DEFAULT_WORKSPACE?.trim().toLowerCase() === 'true')
+    ) {
+        throw new Error('Project selection cannot be combined with other workspace registration settings');
+    }
+    const projectRoots = projectArgs
+        ? await loadProjectRoots(projectArgs.root, projectArgs.projects)
+        : [];
     const environmentPaths: string[] = [];
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '--environment') {
@@ -351,7 +432,7 @@ async function run(
     }
   const configuredWorkerId = process.env.LIBRECHAT_CODE_WORKER_ID?.trim();
   const configuredIdentityPath =
-    process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
+    savedProfile?.config.identityPath ?? process.env.LIBRECHAT_CODE_IDENTITY_FILE?.trim();
   const configuredToken = process.env.LIBRECHAT_CODE_WORKER_TOKEN?.trim();
   const identityPath =
     configuredIdentityPath ??
@@ -361,6 +442,7 @@ async function run(
   const pairedIdentity = identityPath
     ? await loadBridgeIdentity(identityPath)
     : undefined;
+  const setupProtectedPaths = browserSetupProtectedPaths(pairedIdentity?.setupAttemptPath);
   const workerId = required(
     'LIBRECHAT_CODE_WORKER_ID',
     configuredWorkerId ?? pairedIdentity?.workerId,
@@ -425,11 +507,13 @@ async function run(
     runtimeSessionId == null &&
     (fileRelayUpstream?.length ?? 0) > 0;
   const workspaceId =
+        projectRoots[0]?.id ??
         environments[0]?.definition.name ??
     option(args, '--workspace-id') ??
     process.env.LIBRECHAT_CODE_WORKSPACE_ID?.trim() ??
     'primary';
   const explicitWorkerDirectory =
+        projectRoots[0]?.root ??
         environments[0]?.definition.root ??
         (runtimeSessionId == null
       ? nonEmpty(
@@ -452,6 +536,11 @@ async function run(
     (args.includes('--allow-workspace-commands') ||
       process.env.LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS?.trim().toLowerCase() ===
         'true');
+  const linkedWorktreeLanes =
+    runtimeSessionId == null &&
+    (args.includes('--linked-worktree-lanes') ||
+      process.env.LIBRECHAT_CODE_LINKED_WORKTREE_LANES?.trim().toLowerCase() ===
+        'true');
   const commandSandboxMode =
     option(args, '--command-sandbox') ??
     process.env.LIBRECHAT_CODE_COMMAND_SANDBOX?.trim().toLowerCase() ??
@@ -466,6 +555,9 @@ async function run(
   }
     if (environments.length && commandSandboxMode !== 'native-srt') {
         throw new Error('Environment definitions require native-srt');
+    }
+    if (projectRoots.length && commandSandboxMode !== 'native-srt') {
+        throw new Error('Project selections require native-srt');
     }
     if (
         environments.some(environment => environment.definition.setup) &&
@@ -495,9 +587,11 @@ async function run(
   }
   const github =
     runtimeSessionId == null
-      ? githubCredentials()
+      ? githubCredentials(args)
       : {
           host: 'github.com',
+          repositoryRouting: false,
+          checkoutRouting: false,
           policyIdentity: gitHubAuthenticationPolicyIdentity({
             host: 'github.com',
           }),
@@ -510,6 +604,16 @@ async function run(
   if (github.provider && commandSandboxMode !== 'native-srt') {
     throw new Error(
       'GitHub authentication currently requires the native-srt command sandbox',
+    );
+  }
+  if (github.checkoutRouting && commandPolicy.preset !== 'trusted-vm') {
+    throw new Error(
+      'Checkout GitHub repository routing requires the trusted-vm command policy',
+    );
+  }
+  if (github.installationTokenScope && commandPolicy.preset !== 'trusted-vm') {
+    throw new Error(
+      'Installation-scoped GitHub tokens require the trusted-vm command policy',
     );
   }
   const githubDomains = github.provider
@@ -552,6 +656,9 @@ async function run(
       throw new Error('Invalid workspace registration');
     }
   }
+  if (savedProfile) {
+    await assertWorkerProfileIsolation(savedProfile.path, identityPath!, canonicalWorkerDirectory);
+  }
   const mutationQuarantinePath =
         (allowWorkspaceWrites || allowWorkspaceCommands) &&
         canonicalWorkerDirectory
@@ -569,13 +676,41 @@ async function run(
   );
   if (workspaceLeaseSlots > 8)
     throw new Error('Workspace lease slots cannot exceed 8');
+  const conversationWorktreeRoot =
+    option(args, '--conversation-worktree-root') ??
+    process.env.LIBRECHAT_CODE_CONVERSATION_WORKTREE_ROOT?.trim();
+  const conversationWorktreeMax = positiveInteger(
+    'LIBRECHAT_CODE_CONVERSATION_WORKTREE_MAX',
+    option(args, '--conversation-worktree-max') ??
+      process.env.LIBRECHAT_CODE_CONVERSATION_WORKTREE_MAX,
+    64,
+  );
+  if (conversationWorktreeMax > 1024) {
+    throw new Error('Conversation worktree capacity cannot exceed 1024');
+  }
+  const conversationWorktreeCloneTimeoutMs = positiveInteger(
+    'LIBRECHAT_CODE_CONVERSATION_WORKTREE_CLONE_TIMEOUT_MS',
+    option(args, '--conversation-worktree-clone-timeout-ms') ??
+      process.env.LIBRECHAT_CODE_CONVERSATION_WORKTREE_CLONE_TIMEOUT_MS,
+    5 * 60_000,
+  );
+  if (
+    conversationWorktreeCloneTimeoutMs < 30_000 ||
+    conversationWorktreeCloneTimeoutMs > 30 * 60_000
+  ) {
+    throw new Error(
+      'Conversation worktree clone timeout must be between 30000 and 1800000 milliseconds',
+    );
+  }
   const roots: LocalWorkspaceConfig[] = canonicalWorkerDirectory
     ? [
         {
           id: workspaceId,
           root: canonicalWorkerDirectory,
+          identity: projectRoots[0]?.identity,
           writable: allowWorkspaceWrites,
           name:
+                      projectRoots[0]?.name ??
                       environments[0]?.definition.name ??
             option(args, '--workspace-name') ??
             process.env.LIBRECHAT_CODE_WORKSPACE_NAME?.trim() ??
@@ -595,6 +730,9 @@ async function run(
             root: environment.definition.root,
             writable: allowWorkspaceWrites,
         });
+    }
+    for (const project of projectRoots.slice(1)) {
+        roots.push({ ...project, writable: allowWorkspaceWrites });
     }
     await assertEnvironmentDefinitionsOutsideRoots(environments, roots);
   for (let i = 0; i < args.length; i++) {
@@ -666,6 +804,41 @@ async function run(
         );
   }
   if (
+    conversationWorktreeRoot &&
+    (!allowWorkspaceCommands ||
+      commandSandboxMode !== 'native-srt' ||
+      workspaceLeaseSlots < 2)
+  ) {
+    throw new Error(
+      'Conversation worktrees require native-srt commands and at least two workspace lease slots',
+    );
+  }
+  if (
+    linkedWorktreeLanes &&
+    (!allowWorkspaceCommands ||
+      commandSandboxMode !== 'native-srt' ||
+      workspaceLeaseSlots < 2)
+  ) {
+    throw new Error(
+      'Linked worktree lanes require native-srt commands and at least two workspace lease slots',
+    );
+  }
+  if (linkedWorktreeLanes && conversationWorktreeRoot) {
+    throw new Error(
+      'Linked worktree lanes cannot be combined with conversation worktrees',
+    );
+  }
+  if (linkedWorktreeLanes && process.platform === 'win32') {
+    throw new Error('Linked worktree Git guard requires a POSIX host');
+  }
+  const worktreeRetirement = worktreeRetirementSettings({
+    optOut: args.includes('--no-worktree-retirement'),
+    enabled: process.env.LIBRECHAT_CODE_WORKTREE_RETIREMENT,
+    idleDays:
+      option(args, '--worktree-idle-days') ??
+      process.env.LIBRECHAT_CODE_WORKTREE_IDLE_DAYS,
+  });
+  if (
     roots.length > 1 &&
     process.env.LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE?.trim()
   ) {
@@ -683,11 +856,89 @@ async function run(
       }),
     ]),
   );
-  let workspaceTools: WorkspaceToolExecutor | undefined = workerDirectory
+  for (const path of setupProtectedPaths) {
+    const namespace = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!namespace) continue;
+    if (!namespace.isDirectory() || namespace.isSymbolicLink())
+      throw new Error('Setup journal namespace must be a private directory, not a symlink');
+    const sourceParents = await assertPrivateStorageAncestors(path);
+    await assertEnvironmentDefinitionsOutsideRoots([{
+      path, sourceParents, definition: { name: 'setup-state', root: path }, fingerprint: '',
+    }], roots);
+  }
+  const preparationDirectory = join(dirname(identityPath ?? defaultBridgeIdentityPath(workerId)), 'environment-preparation');
+  if (environments.some(environment => environment.definition.setup?.reuse)) {
+    const sourceParents = await prepareEnvironmentPreparationDirectory(preparationDirectory);
+    // Reuse the mount/ancestor isolation checks for this worker-owned state directory.
+    await assertEnvironmentDefinitionsOutsideRoots([{
+      path: preparationDirectory, sourceParents,
+      definition: { name: 'preparation-state', root: preparationDirectory }, fingerprint: '',
+    }], roots);
+  }
+  // Cache contents may be shared explicitly; their grants must never authorize source or control state.
+  const resourceRoots = environments.flatMap(environment => (environment.resources ?? []).map(resource => ({
+    path: resource.path, sourceParents: resource.controlPaths,
+    definition: { name: 'shared-resource', root: resource.path }, fingerprint: '',
+  })));
+  await assertEnvironmentResourceIsolation(environments.flatMap(environment => environment.resources ?? []), roots.map(root => root.root), [
+    identityPath, ...setupProtectedPaths, preparationDirectory, github.privateKeyPath,
+    ...environments.map(environment => environment.path), ...rootQuarantinePaths.values(),
+  ].filter((path): path is string => path != null));
+  await assertEnvironmentDefinitionsOutsideRoots(resourceRoots, roots);
+  const snapshotStores = environments.flatMap(environment => environment.snapshotStore ? [environment.snapshotStore] : []);
+  await assertEnvironmentResourceIsolation(snapshotStores.map(store => ({ kind: 'npm-cache' as const, path: store.store, access: 'read-only' as const })), roots.map(root => root.root), [
+    identityPath, ...setupProtectedPaths, preparationDirectory, github.privateKeyPath, ...environments.map(environment => environment.path),
+    ...rootQuarantinePaths.values(), ...environments.flatMap(environment => (environment.resources ?? []).map(resource => resource.path)),
+  ].filter((path): path is string => path != null));
+  await assertEnvironmentDefinitionsOutsideRoots(snapshotStores.map(store => ({ path: store.store, sourceParents: store.controlPaths,
+    definition: { name: 'dependency-store', root: store.store }, fingerprint: '' })), roots);
+  const preparationReceipt = (root: string) => join(preparationDirectory,
+    `${createHash('sha256').update(JSON.stringify([codeApiUrl, workerId, root])).digest('hex')}.json`);
+  // Keep an admission boundary even when trusted-VM checkout routing uses a
+  // nested repository's remote for the current command.
+  const admittedGitHubRepositories = github.provider && github.repositoryRouting
+    ? new Map(
+        await Promise.all(
+          roots.map(async root => [
+            root.root,
+            await gitHubRepositoryForDirectory(root.root, github.host),
+          ] as const),
+        ),
+      )
+    : undefined;
+  const repositoriesByWorkspace = admittedGitHubRepositories
+    ? new Map(
+        roots.map((root) => [
+          root.id,
+          admittedGitHubRepositories.get(root.root),
+        ]),
+      )
+    : undefined;
+  // A chat upload reaches the workspace only through the same relay upstream
+  // programmatic inputs use; without one the worker never advertises import_file.
+  const workspaceImporter = createWorkspaceFileImporter({
+    optOut: args.includes('--no-workspace-imports'),
+    enabled: process.env.LIBRECHAT_CODE_ALLOW_WORKSPACE_IMPORTS,
+    writable: allowWorkspaceWrites,
+    upstreamUrl: fileRelayUpstream,
+    maxBytes: positiveInteger(
+      'LIBRECHAT_CODE_IMPORT_FILE_MAX_BYTES',
+      option(args, '--import-file-max-bytes') ??
+        process.env.LIBRECHAT_CODE_IMPORT_FILE_MAX_BYTES,
+      BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES,
+    ),
+  });
+  const localWorkspaceTools = workerDirectory
     ? await LocalWorkspaceTools.create({
         workspaces: roots,
+        repositoryInstructions: args.includes('--repository-instructions'),
+        importer: workspaceImporter,
       })
     : undefined;
+  let workspaceTools: WorkspaceToolExecutor | undefined = localWorkspaceTools;
   if (allowWorkspaceCommands && !canonicalWorkerDirectory) {
     throw new Error('Workspace commands require a registered directory');
   }
@@ -879,9 +1130,14 @@ async function run(
         });
   const nativeOptions: NativeProcessSandboxOptions = {
     workspaceRoot: canonicalWorkerDirectory!,
+    workspaceIdentity: roots[0]?.identity,
     commandPolicy,
     protectedPaths: [
       identityPath,
+      savedProfile?.path,
+      ...setupProtectedPaths,
+      ...(environments.some(environment => environment.definition.setup?.reuse) ? [preparationDirectory] : []),
+      ...snapshotStores.map(store => store.store),
             ...environments.map(environment => environment.path),
       ...rootQuarantinePaths.values(),
       github.privateKeyPath,
@@ -893,37 +1149,60 @@ async function run(
     ...(github.provider
       ? {
           maskedEnvironment: {
-            variables: gitHubMaskedCredentialVariables(github.host),
-            async resolve(signal?: AbortSignal) {
+            variables: gitHubMaskedCredentialVariables(
+              github.host,
+            ),
+            async resolve(signal?: AbortSignal, cwd?: string) {
+              const repository = cwd && admittedGitHubRepositories
+                ? await gitHubRepositoryForCommand(
+                    cwd,
+                    admittedGitHubRepositories,
+                    github.checkoutRouting ? 'checkout' : 'admitted',
+                    github.host,
+                    signal,
+                  )
+                : undefined;
+              if (!repository && github.repositoryRouting) {
+                return {};
+              }
               return gitHubCommandCredentialEnvironment(
-                await github.provider!.getCredential(signal),
+                await github.provider!.getCredential(signal, repository),
                 github.host,
               );
             },
-            wrapCommand(command: string, platform: NodeJS.Platform) {
+            wrapCommand(
+              command: string,
+              platform: NodeJS.Platform,
+              environment: Readonly<Record<string, string>>,
+            ) {
               return wrapGitHubCredentialCommand(
                 command,
                 github.host,
                 platform,
+                environment,
               );
             },
           },
         }
       : {}),
   };
+  const nativeOptionsForWorkspace = (workspaceId: string): NativeProcessSandboxOptions => ({
+    ...nativeOptions,
+    resources: environments.find(environment => environment.definition.name === workspaceId)?.resources,
+  });
   const nativeCommandSandbox =
     allowWorkspaceCommands && commandSandboxMode === 'native-srt'
-      ? roots.length > 1 || workspaceLeaseSlots > 1
+      ? roots.length > 1 || workspaceLeaseSlots > 1 || conversationWorktreeRoot || linkedWorktreeLanes
         ? new NativeWorkspaceCommandPool(
             new Map(
                           roots.map(root => [
                 root.id,
-                { ...nativeOptions, workspaceRoot: root.root },
+                { ...nativeOptionsForWorkspace(root.id), workspaceRoot: root.root, workspaceIdentity: root.identity },
               ]),
             ),
             workspaceLeaseSlots,
           )
-        : new NativeProcessWorkspaceCommandSandbox(nativeOptions)
+        : new NativeProcessWorkspaceCommandSandbox(nativeOptionsForWorkspace(roots[0].id))
       : undefined;
   if (allowWorkspaceCommands && workspaceTools) {
     workspaceTools = new SandboxWorkspaceTools({
@@ -941,6 +1220,202 @@ async function run(
         }),
     });
   }
+  const conversationWorktrees = conversationWorktreeRoot
+    ? new GitWorktreeManager({
+        cloneTimeoutMs: conversationWorktreeCloneTimeoutMs,
+        maxCount: conversationWorktreeMax,
+        root: conversationWorktreeRoot,
+        ...(nativeCommandSandbox instanceof NativeWorkspaceCommandPool
+          ? {
+              prepareInstance: async (instance, signal) => {
+                const environment = environments.find(
+                  (environment) =>
+                    environment.definition.name === instance.sourceWorkspaceId,
+                );
+                const setup = environment?.definition.setup;
+                if (!setup) return;
+                if (admittedGitHubRepositories) {
+                  admittedGitHubRepositories.set(
+                    instance.root,
+                    repositoriesByWorkspace?.get(instance.sourceWorkspaceId),
+                  );
+                }
+                const id = internalWorkspaceId(instance.sourceWorkspaceId, instance.id);
+                await nativeCommandSandbox.registerRoot(id, {
+                  ...nativeOptionsForWorkspace(instance.sourceWorkspaceId),
+                  workspaceIdentity: instance.identity,
+                  workspaceRoot: instance.root,
+                });
+                await prepareCodeEnvironment({
+                  snapshotStore: environment!.snapshotStore,
+                  storage: environment!.definition.storage,
+                  snapshotScope: environment!.definition.repo ?? environment!.definition.name,
+                  root: instance.root, identity: instance.identity, setup,
+                  receiptPath: preparationReceipt(instance.root),
+                  context: JSON.stringify([serializeNativeSrtCommandPolicy(commandPolicy), commandAllowedDomains, github.policyIdentity,
+                    nativeOptionsForWorkspace(instance.sourceWorkspaceId).resources]),
+                  signal,
+                  execute: (command, timeoutMs) => nativeCommandSandbox.execute({
+                    protocolVersion: 1,
+                    operation: 'execute_command',
+                    workspaceId: id,
+                    command,
+                    timeoutMs,
+                    maxOutputBytes: 8192,
+                  }, signal),
+                });
+              },
+              discardInstance: async (instance) => {
+                await nativeCommandSandbox.unregisterRoot(
+                  internalWorkspaceId(instance.sourceWorkspaceId, instance.id),
+                );
+                admittedGitHubRepositories?.delete(instance.root);
+              },
+            }
+          : {}),
+        sources: new Map(
+          await Promise.all(
+            roots.map(async (root) => [
+              root.id,
+              {
+                root: root.root,
+                identity:
+                  root.identity ??
+                  (await captureWorkspaceRootIdentity(root.root)),
+              },
+            ] as const),
+          ),
+        ),
+      })
+    : undefined;
+  let conversationWorkspaceTools: GitWorktreeWorkspaceTools | undefined;
+  if (conversationWorktrees && workspaceTools) {
+    if (!(nativeCommandSandbox instanceof NativeWorkspaceCommandPool)) {
+      throw new Error('Conversation worktrees require a native command pool');
+    }
+    conversationWorkspaceTools = new GitWorktreeWorkspaceTools({
+      commandPool: nativeCommandSandbox,
+      delegate: workspaceTools,
+      manager: conversationWorktrees,
+      onResolve(workspaceId, root) {
+        if (admittedGitHubRepositories) {
+          admittedGitHubRepositories.set(
+            root,
+            repositoriesByWorkspace?.get(workspaceId),
+          );
+        }
+      },
+      sources: new Map(
+        roots.map((root) => [
+          root.id,
+          {
+            command: {
+              ...nativeOptionsForWorkspace(root.id),
+              workspaceIdentity: root.identity,
+              workspaceRoot: root.root,
+            },
+            repositoryInstructions: args.includes('--repository-instructions'),
+            writable: root.writable ?? false,
+            importer: workspaceImporter,
+          },
+        ]),
+      ),
+    });
+    workspaceTools = conversationWorkspaceTools;
+  }
+  let linkedWorktreeTools: LinkedWorktreeWorkspaceTools | undefined;
+  if (linkedWorktreeLanes && workspaceTools) {
+    if (!(nativeCommandSandbox instanceof NativeWorkspaceCommandPool)) {
+      throw new Error('Linked worktree lanes require a native command pool');
+    }
+    linkedWorktreeTools = new LinkedWorktreeWorkspaceTools({
+      commandPool: nativeCommandSandbox,
+      delegate: workspaceTools,
+      programmaticDelegate: conversationWorkspaceTools ?? nativeCommandSandbox,
+      onResolve(workspaceId, root) {
+        if (admittedGitHubRepositories) {
+          admittedGitHubRepositories.set(
+            root,
+            repositoriesByWorkspace?.get(workspaceId),
+          );
+        }
+      },
+      onRelease(root) {
+        admittedGitHubRepositories?.delete(root);
+      },
+      sources: new Map(
+        roots.map((root) => [
+          root.id,
+          {
+            root: root.root,
+            identity: root.identity,
+            command: nativeOptionsForWorkspace(root.id),
+            repositoryInstructions: args.includes('--repository-instructions'),
+            writable: root.writable ?? false,
+            importer: workspaceImporter,
+          },
+        ]),
+      ),
+    });
+    workspaceTools = linkedWorktreeTools;
+  }
+  // Probe Git only while the active registration advertises lane_git, which the worker decides.
+  let laneGitWorker: BridgeWorker | undefined;
+  if (workspaceTools?.capabilities.operations.includes('execute_command')) {
+    workspaceTools = new LaneGitWorkspaceTools({
+      delegate: workspaceTools,
+      isEnabled: () => laneGitWorker?.commandResultFeatureActive('lane_git') === true,
+      async resolveRoot(request, signal) {
+        const source = roots.find((root) => root.id === request.workspaceId);
+        if (!source) return undefined;
+        if (request.workspaceInstanceId != null) {
+          const root = await conversationWorktrees?.plannedRoot(request.workspaceId, request.workspaceInstanceId);
+          return root != null && (await ownsGitMetadata(root, signal)) ? root : undefined;
+        }
+        if (request.worktree != null) {
+          signal?.throwIfAborted();
+          const lane = await verifyLinkedWorktree(source.root, request.worktree, source.identity);
+          return (await ownsLinkedWorktreeMetadata(lane.commonGitDir, request.worktree, signal)) ? lane.root : undefined;
+        }
+        return (await ownsGitMetadata(source.root, signal)) ? source.root : undefined;
+      },
+    });
+  }
+  const retirementSources = roots.filter((root) => root.writable);
+  const debugLogs =
+    process.env.LIBRECHAT_CODE_LOG_LEVEL?.trim().toLowerCase() === 'debug';
+  const worktreeRetirementScheduler =
+    linkedWorktreeTools &&
+    worktreeRetirement.enabled &&
+    retirementSources.length > 0 &&
+    option(args, '--reset-workspace-quarantine') == null
+      ? new WorktreeRetirementScheduler({
+          activity: linkedWorktreeTools,
+          idleMs: worktreeRetirement.idleMs,
+          sources: retirementSources.map((root) => ({
+            workspaceId: root.id,
+            root: root.root,
+            identity: root.identity,
+          })),
+          async isQuarantined(selectedWorkspaceId, worktree) {
+            const source = roots.find((root) => root.id === selectedWorkspaceId);
+            if (!source) return true;
+            const path =
+              worktree == null
+                ? rootQuarantinePaths.get(selectedWorkspaceId)!
+                : defaultWorkspaceQuarantinePath({
+                    codeApiUrl,
+                    workerId,
+                    workspaceRoot: join(source.root, LINKED_WORKTREE_DIRECTORY, worktree),
+                  });
+            return (await loadWorkspaceMutationQuarantine(path)) != null;
+          },
+          log(level, message) {
+            if (level === 'debug' && !debugLogs) return;
+            process.stdout.write(`librechat-code: ${message}\n`);
+          },
+        })
+      : undefined;
     if (workspaceTools && environments.length) {
         workspaceTools = new EnvironmentWorkspaceTools(
             workspaceTools,
@@ -987,7 +1462,11 @@ async function run(
     );
   }
   try {
-    await github.provider?.getCredential(controller.signal);
+    await github.provider?.validate?.(controller.signal);
+    if (github.provider && !github.provider.validate) {
+      await github.provider.getCredential(controller.signal);
+    }
+    await conversationWorktrees?.prepare();
     await nativeCommandSandbox?.prepare();
         for (const environment of option(args, '--reset-workspace-quarantine') == null ? environments : []) {
             const setup = environment.definition.setup;
@@ -1000,35 +1479,67 @@ async function run(
                 incarnationId,
             );
             await guard.assertAvailable();
-            await guard.arm('Environment setup did not settle', 'setup');
-            const result = await nativeCommandSandbox.execute(
-                {
+            let armed = false;
+            const preparation = await prepareCodeEnvironment({
+                snapshotStore: environment.snapshotStore,
+                storage: environment.definition.storage,
+                snapshotScope: environment.definition.repo ?? environment.definition.name,
+                beforeMutation: async () => {
+                  if (!armed) { await guard.arm('Dependency restoration did not settle', 'setup'); armed = true; }
+                },
+                root: environment.definition.root,
+                identity: roots.find(root => root.id === id)!.identity!,
+                setup, receiptPath: preparationReceipt(environment.definition.root),
+                reclaimSpace: worktreeRetirementScheduler
+                  ? () => worktreeRetirementScheduler.runNow()
+                  : undefined,
+                context: JSON.stringify([serializeNativeSrtCommandPolicy(commandPolicy), commandAllowedDomains, github.policyIdentity,
+                  nativeOptionsForWorkspace(id).resources]),
+                signal: controller.signal,
+                execute: async (command, timeoutMs) => {
+                  if (!armed) {
+                    await guard.arm('Environment preparation did not settle', 'setup');
+                    armed = true;
+                  }
+                  return nativeCommandSandbox.execute({
                     protocolVersion: 1,
                     operation: 'execute_command',
                     workspaceId: id,
-                    command: setup.command,
-                    timeoutMs: setup.timeoutMs,
+                    command,
+                    timeoutMs,
                     maxOutputBytes: 8192,
+                  }, controller.signal);
                 },
-                controller.signal,
-            );
-            if (result.exitCode !== 0 || result.timedOut) {
+            }).catch(error => {
                 throw new Error(
                     `Environment ${id} setup failed; inspect the workspace and use clear-workspace-quarantine with its root and workspace ID before restarting`,
+                    { cause: error },
                 );
-            }
+            });
             await guard.clear('setup');
             process.stdout.write(
-                `librechat-code: environment ${id} prepared\n`,
+                `librechat-code: environment ${id} ${preparation}\n`,
             );
         }
   } catch (error) {
+    await worktreeRetirementScheduler?.stop().catch(() => undefined);
     await nativeCommandSandbox?.close().catch(() => undefined);
     await fileRelaySupervisor?.stop().catch(() => undefined);
     throw error;
   }
+  worktreeRetirementScheduler?.start();
+  let readinessReported = false;
   try {
     const worker = new BridgeWorker({
+      onCommandFailure: event => {
+        process.stderr.write(commandFailureLogLine(event));
+      },
+      onReady: () => {
+        if (readinessReported) return;
+        readinessReported = true;
+        process.stdout.write('librechat-code: connected and ready\n');
+      },
+      instructionDescriptors: () => localWorkspaceTools?.instructionDescriptors() ?? Promise.resolve(undefined),
       codeApiUrl,
       token: configuredToken,
       identity: workerIdentity,
@@ -1038,7 +1549,68 @@ async function run(
       capabilities,
       workspaceTools,
       ...(nativeProgrammaticEnabled && nativeCommandSandbox
-        ? { workspaceProgrammatic: nativeCommandSandbox }
+        ? {
+            workspaceProgrammatic:
+              linkedWorktreeTools ?? conversationWorkspaceTools ?? nativeCommandSandbox,
+          }
+        : {}),
+      ...(conversationWorktrees
+        ? {
+            workspaceQuarantineResolver: async (
+              selectedWorkspaceId: string,
+              workspaceInstanceId: string,
+            ) =>
+              workspaceMutationGuard(
+                defaultWorkspaceQuarantinePath({
+                  codeApiUrl,
+                  workerId,
+                  workspaceRoot: await conversationWorktrees.plannedRoot(
+                    selectedWorkspaceId,
+                    workspaceInstanceId,
+                  ),
+                }),
+                workerId,
+                workspaceIsolationKey(
+                  selectedWorkspaceId,
+                  workspaceInstanceId,
+                ),
+                incarnationId,
+              ),
+          }
+        : {}),
+      ...(linkedWorktreeTools
+        ? {
+            linkedWorktreeQuarantineResolver: (
+              selectedWorkspaceId: string,
+              worktree: string,
+            ) => {
+              const source = roots.find((root) => root.id === selectedWorkspaceId);
+              if (!source) {
+                throw new BridgeProtocolError('Linked worktree source is not registered');
+              }
+              return workspaceMutationGuard(
+                defaultWorkspaceQuarantinePath({
+                  codeApiUrl,
+                  workerId,
+                  workspaceRoot: join(source.root, LINKED_WORKTREE_DIRECTORY, worktree),
+                }),
+                workerId,
+                workspaceIsolationKey(selectedWorkspaceId, undefined, worktree),
+                incarnationId,
+              );
+            },
+            linkedWorktreeNames: async (selectedWorkspaceId: string) => {
+              const source = roots.find((root) => root.id === selectedWorkspaceId);
+              if (!source) return [];
+              try {
+                const entries = await readdir(join(source.root, LINKED_WORKTREE_DIRECTORY));
+                return entries.filter(isValidLinkedWorktreeName);
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+                throw error;
+              }
+            },
+          }
         : {}),
       ...(workspaceLeaseSlots > 1 || roots.length > 1
         ? {
@@ -1139,6 +1711,7 @@ async function run(
                 );
       },
     });
+    laneGitWorker = worker;
     if (runtimeSessionId !== undefined) {
       await worker.refreshCredential(controller.signal);
       await worker.register(controller.signal);
@@ -1150,20 +1723,31 @@ async function run(
     }
     const resetNativeRoot = option(args, '--reset-workspace-quarantine');
     if (resetNativeRoot != null) {
+      const resetWorkspaceInstance = option(
+        args,
+        '--reset-workspace-instance',
+      );
+      const resetWorkspaceWorktree = option(
+        args,
+        '--reset-workspace-worktree',
+      );
       await worker.refreshCredential(controller.signal);
       await worker.registerForMaintenance(controller.signal);
             await worker.resetNativeWorkspace(
                 resetNativeRoot,
                 controller.signal,
+                resetWorkspaceInstance,
+                resetWorkspaceWorktree,
             );
       process.stdout.write(
-        `librechat-code: reset acknowledged for native workspace ${resetNativeRoot}\n`,
+        `librechat-code: reset acknowledged for native workspace ${resetNativeRoot}${resetWorkspaceInstance ? ` instance ${resetWorkspaceInstance}` : ''}${resetWorkspaceWorktree ? ` worktree ${resetWorkspaceWorktree}` : ''}\n`,
       );
       return;
     }
     await worker.run(controller.signal);
   } finally {
     try {
+      await worktreeRetirementScheduler?.stop();
       await nativeCommandSandbox?.close();
     } finally {
       await fileRelaySupervisor?.stop();
@@ -1237,6 +1821,58 @@ async function clearMutationQuarantine(args: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (args.length === 1 && (args[0] === '--help' || args[0] === 'help')) {
+    process.stdout.write(`Usage: librechat-code <command>
+
+  setup --instance <url>  Browser-approved enrollment and private profile setup
+  run [--profile <file>]  Start a saved profile or existing worker configuration
+  pair <url> <code> --worker-id <id>  Existing one-time pairing flow
+  projects --root <directory>       Inspect local Git projects
+  reset-workspace <id>              Existing runtime maintenance
+  clear-workspace-quarantine       Existing workspace maintenance
+
+Run librechat-code setup --help for setup options.
+Legacy LIBRECHAT_CODE_* configuration takes precedence over the default profile.
+Explicit profiles cannot be mixed with legacy settings or run options.
+`);
+    return;
+  }
+  if (args[0] === 'setup') {
+    await runSetupCommand(args.slice(1));
+    return;
+  }
+  if (args[0] === 'prune-environment-storage') {
+    const paths: string[] = [];
+    for (let i = 1; i < args.length; i++) {
+      if (args[i] === '--apply') continue;
+      if (args[i] !== '--environment' || !args[i + 1] || args[i + 1].startsWith('--'))
+        throw new Error('Usage: librechat-code prune-environment-storage --environment <file> [--environment <file> ...] [--apply]');
+      paths.push(args[++i]);
+    }
+    if (!paths.length || paths.length > 32) throw new Error('Supply between one and 32 environment definitions');
+    const loaded = await Promise.all(paths.map(loadCodeEnvironment));
+    const roots = loaded.map(environment => ({ id: environment.definition.name, root: environment.definition.root }));
+    const stores = loaded.flatMap(environment => environment.snapshotStore ? [environment.snapshotStore] : []);
+    if (!stores.length) throw new Error('No dependency snapshot stores configured');
+    await assertEnvironmentDefinitionsOutsideRoots(loaded, roots);
+    await assertEnvironmentDefinitionsOutsideRoots(stores.map(store => ({ path: store.store, sourceParents: store.controlPaths,
+      definition: { name: 'dependency-store', root: store.store }, fingerprint: '' })), roots);
+    await assertEnvironmentResourceIsolation(stores.map(store => ({ kind: 'npm-cache' as const, path: store.store, access: 'read-only' as const })),
+      roots.map(root => root.root), [...loaded.map(environment => environment.path),
+        ...loaded.flatMap(environment => (environment.resources ?? []).map(resource => resource.path))]);
+    for (const store of stores) process.stdout.write(`${JSON.stringify(await pruneDependencySnapshots(store, { dryRun: !args.includes('--apply') }))}\n`);
+    return;
+  }
+  if (args[0] === 'projects') {
+    const root = option(args, '--root');
+    if (!root || args.slice(1).some((arg, index, rest) =>
+        arg !== '--root' && rest[index - 1] !== '--root' && !arg.startsWith('--root='))) {
+      throw new Error('Usage: librechat-code projects --root <directory>');
+    }
+    const inventory = await discoverProjects({ root });
+    process.stdout.write(`${JSON.stringify(inventory, null, 2)}\n`);
+    return;
+  }
   if (args[0] === 'relay') {
     await relay();
     return;
@@ -1262,7 +1898,10 @@ async function main(): Promise<void> {
   if (args[0] && args[0] !== 'run') {
     throw new Error(`Unknown command: ${args[0]}`);
   }
-  await run(undefined, args.slice(1));
+  const configuration = await profileRunConfiguration(args.slice(1));
+  await run(undefined, configuration.args, configuration.profile && configuration.profilePath
+    ? { path: configuration.profilePath, config: configuration.profile }
+    : undefined);
 }
 main().catch((error: Error) => {
   process.stderr.write(`librechat-code: ${error.message}\n`);

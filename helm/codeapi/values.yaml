@@ -306,11 +306,12 @@ workerSandbox:
       forceRebuild: false
       image:
         repository: codeapi-package-init
+        # Pin this tag to the same immutable release as the runner in production.
         tag: latest
-        pullPolicy: IfNotPresent
+        pullPolicy: Always
       pythonVersion: "3.14.4"
-      nodeVersion: "24.15.0"
-      bunVersion: "1.3.14"
+      nodeVersion: "24.22.1"
+      bunVersion: "1.4.4"
       bashPackageVersion: "5.2.0"
       backoffLimit: 2
       ttlSecondsAfterFinished: 3600
@@ -512,6 +513,11 @@ metrics:
   enabled: false    # Set to true to create PodMonitors for Prometheus scraping
   interval: "30s"
   scrapeTimeout: "10s"
+  sandboxRunner:
+    # Explicit NetworkPolicy peers allowed to scrape the runner when metrics and
+    # networkPolicy are enabled. Empty preserves worker-only ingress. This port
+    # also serves /execute, so select only trusted Prometheus pods (see README).
+    ingressFrom: []
 
 # =============================================================================
 # NETWORK POLICIES

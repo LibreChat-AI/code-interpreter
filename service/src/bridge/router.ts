@@ -7,10 +7,18 @@ import type { BridgePrincipalType, BridgeWorkerBinding } from './pairing';
 import type { CodeBridgeAssignment, CodeBridgeSettlement } from './store';
 
 import {
+  BROWSER_ENROLLMENT_PROTOCOL_VERSION,
+  isBrowserEnrollmentApproval,
+  isBrowserEnrollmentRedemption,
+  isBrowserEnrollmentStatusRequest,
+} from '../../../packages/code/src/browser-enrollment-protocol';
+import {
+  BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
   BRIDGE_PROTOCOL_VERSION,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
   isWorkspaceToolErrorCode,
+  WORKSPACE_EDIT_FILE_FEATURES,
 } from '../../../packages/code/src/protocol';
 import { BridgePairingError, RedisBridgePairingStore } from './pairing';
 import { BridgeStoreError, RedisBridgeStore } from './store';
@@ -36,6 +44,9 @@ export interface BridgeRouterOptions {
   adminToken: string;
   configuredWorkerId?: string;
   allowDynamicWorkers?: boolean;
+  maxCommandTimeoutMs?: number;
+  /** Offer `import_file`; true only when this Code API can mint its egress grant. */
+  workspaceImportFile?: boolean;
 }
 
 function sameToken(left: string, right: string): boolean {
@@ -132,6 +143,16 @@ function isSettlement(value: unknown): value is CodeBridgeSettlement {
 export function createBridgeRouter(options: BridgeRouterOptions): Router {
   const router = Router();
   if (options.enabled === false) return router;
+  if (
+    options.maxCommandTimeoutMs !== undefined &&
+    (!Number.isSafeInteger(options.maxCommandTimeoutMs) || options.maxCommandTimeoutMs < 1)
+  ) {
+    throw new RangeError('Workspace command timeout must be a positive safe integer');
+  }
+  const maxCommandTimeoutMs =
+    options.maxCommandTimeoutMs == null
+      ? undefined
+      : Math.min(options.maxCommandTimeoutMs, BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS);
 
   const configuredWorker = (workerId: string): boolean =>
     options.allowDynamicWorkers === true ||
@@ -230,6 +251,73 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
   const workerAuth =
     options.authMode === 'paired' ? pairedWorkerAuth : staticWorkerAuth;
 
+  const browserEnrollmentEnabled = options.authMode === 'paired' &&
+    options.pairings.recoveryEnabled && options.allowDynamicWorkers === true &&
+    options.adminToken.length > 0;
+
+  const browserEnrollmentAvailable: RequestHandler = (_req, res, next) => {
+    if (!browserEnrollmentEnabled) {
+      res.status(404).json({ error: 'Browser enrollment is disabled' });
+      return;
+    }
+    next();
+  };
+
+  const sendEnrollmentError = (error: unknown, res: Response): void => {
+    if (!(error instanceof BridgePairingError)) throw error;
+    if (error.code === 'RECOVERY_RATE_LIMITED') {
+      res.set('Retry-After', '60').status(429).json({ error: error.message, code: error.code });
+      return;
+    }
+    res.status(error.code === 'PROOF_INVALID' ? 401 : 409)
+      .json({ error: error.message, code: error.code });
+  };
+
+  router.get('/enrollments/capabilities', adminAuth, browserEnrollmentAvailable, (_req, res) => {
+    res.json({
+      browserEnrollmentVersion: BROWSER_ENROLLMENT_PROTOCOL_VERSION,
+      serverId: options.pairings.recoveryServerId,
+    });
+  });
+
+  router.post('/enrollments', adminAuth, browserEnrollmentAvailable, asyncRoute(async (req, res) => {
+    if (!isBrowserEnrollmentApproval(req.body)) {
+      res.status(400).json({ error: 'Invalid browser enrollment approval' });
+      return;
+    }
+    try {
+      res.json(await options.pairings.issueBrowserEnrollment(req.body));
+    } catch (error) {
+      sendEnrollmentError(error, res);
+    }
+  }));
+
+  router.post('/enrollments/status', adminAuth, browserEnrollmentAvailable, asyncRoute(async (req, res) => {
+    if (!isBrowserEnrollmentStatusRequest(req.body)) {
+      res.status(400).json({ error: 'Invalid browser enrollment status request' });
+      return;
+    }
+    try {
+      res.json(await options.pairings.browserEnrollmentStatus(req.body));
+    } catch (error) {
+      sendEnrollmentError(error, res);
+    }
+  }));
+
+  router.post('/enrollments/redeem', adminAuth, browserEnrollmentAvailable, asyncRoute(async (req, res) => {
+    try {
+      await options.pairings.limitBrowserEnrollmentPeer(req.socket.remoteAddress ?? '');
+      if (!isBrowserEnrollmentRedemption(req.body)) {
+        res.status(400).json({ error: 'Invalid browser enrollment redemption' });
+        return;
+      }
+      const credential = await options.pairings.redeemBrowserEnrollment(req.body, options.adminToken);
+      res.json({ protocolVersion: BROWSER_ENROLLMENT_PROTOCOL_VERSION, ...credential });
+    } catch (error) {
+      sendEnrollmentError(error, res);
+    }
+  }));
+
   router.post('/pairings', adminAuth, asyncRoute(async (req, res) => {
     if (options.authMode !== 'paired') {
       res.status(409).json({ error: 'Paired worker authentication is disabled' });
@@ -298,6 +386,114 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
     }
   }));
 
+  const untrustedRecoveryLimit = (operation: 'challenge' | 'recover'): RequestHandler =>
+    (req, res, next) => {
+      if (options.authMode !== 'paired' || !options.pairings.recoveryEnabled) {
+        next();
+        return;
+      }
+      // req.ip trusts X-Forwarded-For in our server. Use the connection peer so
+      // untrusted headers and arbitrary worker IDs cannot create new buckets.
+      void options.pairings.limitUntrustedRecovery(req.socket.remoteAddress ?? '', operation)
+        .then(() => next(), (error: unknown) => {
+          if (error instanceof BridgePairingError && error.code === 'RECOVERY_RATE_LIMITED') {
+            res.set('Retry-After', '60').status(429).json({ error: error.message, code: error.code });
+            return;
+          }
+          next(error);
+        });
+    };
+
+  router.post('/workers/:workerId/credentials/challenge', untrustedRecoveryLimit('challenge'), asyncRoute(async (req, res) => {
+    if (options.authMode !== 'paired' || !options.pairings.recoveryEnabled) {
+      res.status(404).json({ error: 'Machine recovery is disabled' });
+      return;
+    }
+    const workerId = req.params.workerId;
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      !validWorkerId(workerId) || !configuredWorker(workerId) ||
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      body.operation !== 'credential.challenge' ||
+      typeof body.serverId !== 'string' || body.serverId.length > 256 ||
+      body.workerId !== workerId ||
+      typeof body.timestamp !== 'string' || body.timestamp.length > 64 ||
+      typeof body.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.nonce) ||
+      typeof body.signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(body.signature)
+    ) {
+      res.status(400).json({ error: 'Invalid machine recovery challenge request' });
+      return;
+    }
+    try {
+      const challenge = await options.pairings.createRecoveryChallenge(
+        workerId,
+        {
+          operation: 'credential.challenge',
+          serverId: body.serverId,
+          workerId,
+          timestamp: body.timestamp,
+          nonce: body.nonce,
+        },
+        body.signature,
+      );
+      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ...challenge });
+    } catch (error) {
+      if (error instanceof BridgePairingError) {
+        res.status(error.code === 'RECOVERY_RATE_LIMITED' ? 429 : 401)
+          .json({ error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
+  }));
+
+  router.post('/workers/:workerId/credentials/recover', untrustedRecoveryLimit('recover'), asyncRoute(async (req, res) => {
+    if (options.authMode !== 'paired' || !options.pairings.recoveryEnabled) {
+      res.status(404).json({ error: 'Machine recovery is disabled' });
+      return;
+    }
+    const workerId = req.params.workerId;
+    const body = isRecord(req.body) ? req.body : {};
+    if (
+      !validWorkerId(workerId) || !configuredWorker(workerId) ||
+      body.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+      body.operation !== 'credential.recover' ||
+      typeof body.serverId !== 'string' || body.serverId.length > 256 ||
+      typeof body.enrollmentGeneration !== 'string' ||
+      !/^[A-Za-z0-9_-]{24}$/.test(body.enrollmentGeneration) ||
+      typeof body.challenge !== 'string' ||
+      !/^[A-Za-z0-9_-]{43}$/.test(body.challenge) ||
+      typeof body.expiresAt !== 'string' || body.expiresAt.length > 64 ||
+      typeof body.signature !== 'string' ||
+      !/^[A-Za-z0-9_-]{86}$/.test(body.signature)
+    ) {
+      res.status(400).json({ error: 'Invalid machine recovery proof' });
+      return;
+    }
+    try {
+      const credential = await options.pairings.recoverCredential(
+        workerId,
+        {
+          operation: 'credential.recover',
+          serverId: body.serverId,
+          workerId,
+          enrollmentGeneration: body.enrollmentGeneration,
+          challenge: body.challenge,
+          expiresAt: body.expiresAt,
+        },
+        body.signature,
+      );
+      res.json({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ...credential });
+    } catch (error) {
+      if (error instanceof BridgePairingError) {
+        res.status(error.code === 'RECOVERY_RATE_LIMITED' ? 429 : 401)
+          .json({ error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
+  }));
+
   router.post(
     '/workers/:workerId/revoke',
     adminAuth,
@@ -324,10 +520,13 @@ export function createBridgeRouter(options: BridgeRouterOptions): Router {
         return;
       }
       const status = await options.store.workerStatus(workerId);
+      const supportsCommands =
+        status.capabilities?.workspaceTools?.operations.includes('execute_command') === true;
       res.json({
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         workerId,
         ...status,
+        ...(supportsCommands && maxCommandTimeoutMs != null ? { maxCommandTimeoutMs } : {}),
       });
     }),
   );
@@ -409,12 +608,19 @@ router.post(
           'preview_edit',
           'edit_file',
           'execute_command',
+          ...(options.workspaceImportFile === true ? ['import_file' as const] : []),
         ],
         supportedWorkspaceWriteFileModes: ['replace', 'create'],
         supportedWorkspaceEditFileModes: ['single', 'batch'],
-        supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
+        supportedWorkspaceEditFileFeatures: [...WORKSPACE_EDIT_FILE_FEATURES],
         supportedWorkspaceListFileFeatures: ['after_path'],
+        ...(options.store.laneGitEnabled
+          ? { supportedWorkspaceCommandResultFeatures: ['lane_git'] }
+          : {}),
         supportedWorkspaceProgrammaticLanguages: ['bash'],
+        supportedWorkspaceInstanceTypes: ['git_worktree'],
+        supportedWorkspaceScopes: ['git_linked_worktree'],
+        supportedWorkspaceToolErrorCodes: ['NOT_FOUND'],
       });
     } catch (error) {
       if (error instanceof BridgeStoreError) {
@@ -751,7 +957,6 @@ router.post(
       }
     }),
   );
-
 
   return router;
 }

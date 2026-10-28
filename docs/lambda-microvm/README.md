@@ -511,7 +511,7 @@ appear in `api/src/config.ts`.
 | `EGRESS_GATEWAY_FILE_SERVER_URL` / `_TOOL_CALL_SERVER_URL` | Gateway only | Private upstream origins. Do not expose them to the runner. |
 | `FILE_SERVER_URL` | Worker only | Direct source used to fetch authorized by-reference inputs before pushing them into the runner cache. Do not bake it into the runner. |
 | `CODEAPI_EGRESS_LEDGER_REQUIRED=true` / `REDIS_*` | Gateway | Makes grant replay/revocation state fail closed in Redis. |
-| `SANDBOX_ALLOWED_LOCAL_NETWORK_PORT` / `SANDBOX_FORWARD_TARGET` | Runner image | Configures the narrow tool-call socket proxy; it does not start or expose the socket by itself. The target host/port must match `EGRESS_GATEWAY_URL`. |
+| `SANDBOX_ALLOWED_LOCAL_NETWORK_PORT` / `SANDBOX_FORWARD_TARGET` | Runner image | Configures the per-invocation tool-call pipe broker; Node starts only on an authorized post-restore execution. The target host/port must match `EGRESS_GATEWAY_URL`. |
 | `CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY` | Worker only | Signs the manifest after the gateway returns the scoped grant. |
 | `SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY` / `SANDBOX_REQUIRE_EGRESS_MANIFEST=true` | Runner image | Verifies and requires the signed per-execution manifest. |
 

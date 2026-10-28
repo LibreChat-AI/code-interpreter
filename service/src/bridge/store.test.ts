@@ -4,7 +4,7 @@ import RedisMock from 'ioredis-mock';
 import type Redis from 'ioredis';
 import type * as t from '../types';
 import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
-import { RedisBridgeStore } from './store';
+import { RedisBridgeStore, workspaceAdmissionId } from './store';
 
 import type { RegisteredBridgeWorker } from './store';
 
@@ -27,6 +27,16 @@ afterEach(async () => {
 });
 
 describe('RedisBridgeStore', () => {
+  test('uses disjoint admission identities for roots and worktree instances', () => {
+    const instanceId = 'a'.repeat(64);
+    expect(
+      workspaceAdmissionId(`foo:git-worktree:${instanceId}`),
+    ).not.toBe(workspaceAdmissionId('foo', instanceId));
+    expect(workspaceAdmissionId('foo')).not.toBe(
+      workspaceAdmissionId('workspace:foo'),
+    );
+  });
+
   test('reports an atomic, capability-limited worker status snapshot', async () => {
     const store = new RedisBridgeStore(redis);
     const capabilities = {

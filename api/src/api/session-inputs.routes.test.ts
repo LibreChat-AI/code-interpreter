@@ -26,6 +26,7 @@ let baseUrl: string;
 const savedSessionWorkspaceEnabled = config.session_workspace_enabled;
 
 beforeAll(async () => {
+  await fsp.rm(SESSION_INPUT_CACHE_DIR, { recursive: true, force: true });
   config.session_workspace_enabled = true;
   const app = express();
   /* Mirror index.ts: no global JSON parser, router mounted under /api/v2. */

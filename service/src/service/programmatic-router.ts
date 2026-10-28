@@ -44,6 +44,7 @@ import {
     SessionKeyResolutionError,
 } from '../session-key';
 import { getCredentialId, getPrincipalOrReject } from '../auth/principal';
+import { principalWorkspaceInstanceId } from '../bridge/workspace-instance';
 import { getExecutionIdentity } from '../execution-identity';
 import { PROGRAMMATIC_RUNTIME_SESSION_EXEMPTION } from '../runtime-session/job-policy';
 import {
@@ -81,6 +82,7 @@ import {
     authorizeRequestedFiles,
 } from './file-authorization';
 import {
+  bindReplayWorkspaceInstance,
   buildReplayExecutionState,
   resolveReplayStateSandboxBackend,
 } from './programmatic-state';
@@ -90,7 +92,11 @@ import {
   CODEAPI_BRIDGE_WORKSPACE_HEADER,
   resolveBridgeWorkerSelection,
 } from '../bridge/selection';
-import { isValidBridgeWorkerId, BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_INPUT_FILES } from '../../../packages/code/src/protocol';
+import {
+  isValidBridgeWorkerId,
+  isValidLinkedWorktreeName,
+  BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_INPUT_FILES,
+} from '../../../packages/code/src/protocol';
 import logger from '../logger';
 import {
   type ExecutionState,
@@ -313,7 +319,7 @@ function waitForExecutionState(
                 () =>
                     axios.get<BlockingPendingState>(
           `${env.TOOL_CALL_SERVER_URL}/sessions/${id}/pending`,
-          { headers: internalServiceHeaders() },
+          { maxRedirects: 0, headers: internalServiceHeaders() },
         ),
         'Get pending tool calls',
       );
@@ -335,7 +341,7 @@ function buildReplayPayload(
   state: ExecutionState,
   history: Record<string, HistoryEntry>,
 ): t.PayloadBody {
-  return createProgrammaticPayload({
+  const payload = createProgrammaticPayload({
     req,
     session_id: state.session_id,
     execution_id: state.execution_id,
@@ -347,6 +353,7 @@ function buildReplayPayload(
     filesOverride: state.files,
     language: state.language ?? 'python',
   });
+  return bindReplayWorkspaceInstance(payload, state);
 }
 
 async function runReplayIteration(
@@ -501,10 +508,19 @@ async function handleReplayInitial(
     userId: string;
     bridgeWorkerId?: string;
     workspaceId?: string;
+    workspaceInstanceId?: string;
+    workspaceWorktree?: string;
   },
   cancellation: ReplayRequestCancellation,
 ): Promise<void> {
-  const { apiKeyId, userId, bridgeWorkerId, workspaceId } = params;
+  const {
+    apiKeyId,
+    userId,
+    bridgeWorkerId,
+    workspaceId,
+    workspaceInstanceId,
+    workspaceWorktree,
+  } = params;
     const { code, tools, user_id, files } =
         req.body as t.ProgrammaticRequestBody;
   let timeout: number;
@@ -660,6 +676,8 @@ async function handleReplayInitial(
     language,
     bridgeWorkerId,
     workspaceId,
+    workspaceInstanceId,
+    workspaceWorktree,
     executionProfile: env.EXECUTION_PROFILE,
     executionProfileSource: env.EXECUTION_PROFILE_SOURCE,
     sandboxBackend: resolveReplayStateSandboxBackend({
@@ -1279,6 +1297,8 @@ router.post(
   const requestedLanguage: unknown = rawBody.language ?? rawBody.lang;
   let bridgeWorkerId: string | undefined;
   let workspaceId: string | undefined;
+  let workspaceInstanceId: string | undefined;
+  let workspaceWorktree: string | undefined;
   if (continuation_token == null || continuation_token === '') {
     try {
       const bridgeSelection = resolveBridgeWorkerSelection({
@@ -1311,6 +1331,32 @@ router.post(
                             .json({ error: 'Invalid code workspace ID' });
         }
         workspaceId = requestedWorkspaceId;
+      }
+      const requestedWorkspaceInstanceId = rawBody.workspace_instance_id;
+      if (requestedWorkspaceInstanceId !== undefined) {
+        if (
+          workspaceId == null ||
+          typeof requestedWorkspaceInstanceId !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(requestedWorkspaceInstanceId)
+        ) {
+          return res.status(400).json({
+            error: 'Invalid code workspace instance ID',
+          });
+        }
+        workspaceInstanceId = principalWorkspaceInstanceId({
+          instanceId: requestedWorkspaceInstanceId,
+          tenantId: principal.tenantId,
+          principalId: principal.userId,
+        });
+      }
+      const requestedWorktree = rawBody.workspace_worktree;
+      if (requestedWorktree !== undefined) {
+        if (workspaceId == null || !isValidLinkedWorktreeName(requestedWorktree)) {
+          return res.status(400).json({
+            error: 'Invalid code workspace worktree',
+          });
+        }
+        workspaceWorktree = requestedWorktree;
       }
     } catch (error) {
       if (error instanceof BridgeWorkerSelectionError) {
@@ -1428,6 +1474,8 @@ router.post(
         userId,
         bridgeWorkerId,
         workspaceId,
+        workspaceInstanceId,
+        workspaceWorktree,
       }, cancellation);
     }
     if (workspaceId != null) {
@@ -1550,7 +1598,7 @@ async function handleBlocking(
             error_message: r.error_message,
           })),
                         },
-                        { headers: internalServiceHeaders() },
+                        { maxRedirects: 0, headers: internalServiceHeaders() },
                     ),
         'Submit tool results',
       );
@@ -1735,7 +1783,7 @@ async function handleBlocking(
           timeout,
           tools,
                         },
-                        { headers: internalServiceHeaders() },
+                        { maxRedirects: 0, headers: internalServiceHeaders() },
                     ),
         'Create Tool Call Server session',
       );

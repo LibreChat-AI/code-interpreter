@@ -75,11 +75,12 @@ test('worker confirms readiness only after local registration activation succeed
     onRegistered: async () => {
       events.push('activated');
     },
+    onReady: () => { events.push('observed-ready'); },
   });
 
   await worker.register();
 
-  assert.deepEqual(events, ['registered', 'activated', 'ready']);
+  assert.deepEqual(events, ['registered', 'activated', 'ready', 'observed-ready']);
 });
 
 test('worker does not confirm readiness when local activation fails', async () => {
@@ -110,10 +111,27 @@ test('worker does not confirm readiness when local activation fails', async () =
     onRegistered: async () => {
       throw new Error('relay activation failed');
     },
+    onReady: () => { assert.fail('failed activation is not readiness'); },
   });
 
   await assert.rejects(worker.register(), /relay activation failed/);
   assert.equal(readinessRequests, 0);
+});
+
+test('worker never reports ready for an absent or negative readiness acknowledgement', async () => {
+  for (const ready of [undefined, false]) {
+    const worker = new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1', token: 'worker-secret', workerId: 'vm-1', incarnationId,
+      sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: { statefulWorkspace: false, sandboxProfile: 'nsjail', runtimes: ['bash'], requiresReadyConfirmation: true },
+      fetchImpl: async input => Response.json(String(input).endsWith('/ready')
+        ? { protocolVersion: 1, ready }
+        : { protocolVersion: 1, workerId: 'vm-1', incarnationId, registrationGeneration: 1,
+          registeredAt: new Date().toISOString(), leaseTtlMs: 60_000 }),
+      onReady: () => { assert.fail('readiness was not confirmed'); },
+    });
+    await assert.rejects(worker.register(), /did not confirm worker readiness/);
+  }
 });
 
 test('worker forwards a fenced assignment to the sandbox and settles the result', async () => {

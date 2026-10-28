@@ -1,8 +1,5 @@
 import { createBridgeIdentity } from './identity.js';
-import {
-  BRIDGE_PROTOCOL_VERSION,
-  BridgeProtocolError,
-} from './protocol.js';
+import { BRIDGE_PROTOCOL_VERSION, BridgeProtocolError } from './protocol.js';
 
 import type { BridgeWorkerCredentialResponse } from './protocol.js';
 
@@ -11,6 +8,7 @@ export interface PairBridgeWorkerOptions {
   workerId: string;
   code: string;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 }
 
 export interface PairedBridgeWorkerIdentity
@@ -18,14 +16,16 @@ export interface PairedBridgeWorkerIdentity
   codeApiUrl: string;
   publicKey: string;
   privateKey: string;
+  /** Private setup journal to protect until completion removes its secret copies. */
+  setupAttemptPath?: string;
 }
 
 function normalizedBaseUrl(value: string): string {
   return value.replace(/\/+$/, '');
 }
 
-function errorMessage(value: object): string | undefined {
-  if ('error' in value && typeof value.error === 'string') return value.error;
+function errorMessage(value: Record<string, unknown>): string | undefined {
+  if (typeof value.error === 'string') return value.error;
   return undefined;
 }
 
@@ -38,6 +38,8 @@ export async function pairBridgeWorker(
     `${codeApiUrl}/bridge/pairings/redeem`,
     {
       method: 'POST',
+      redirect: 'error',
+      signal: options.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -47,10 +49,29 @@ export async function pairBridgeWorker(
       }),
     },
   );
-  const payload = (await response.json()) as object;
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new BridgeProtocolError(
+      'Code API returned an invalid pairing response',
+      response.status,
+    );
+  }
+  if (
+    typeof payload !== 'object' ||
+    payload == null ||
+    Array.isArray(payload)
+  ) {
+    throw new BridgeProtocolError(
+      'Code API returned an invalid pairing response',
+      response.status,
+    );
+  }
   if (!response.ok) {
     throw new BridgeProtocolError(
-      errorMessage(payload) ?? `Bridge pairing failed with HTTP ${response.status}`,
+      errorMessage(payload as Record<string, unknown>) ??
+        `Bridge pairing failed with HTTP ${response.status}`,
       response.status,
     );
   }
@@ -62,7 +83,9 @@ export async function pairBridgeWorker(
     credential.credential.length < 32 ||
     !Number.isFinite(Date.parse(credential.expiresAt))
   ) {
-    throw new BridgeProtocolError('Code API returned an invalid worker credential');
+    throw new BridgeProtocolError(
+      'Code API returned an invalid worker credential',
+    );
   }
   return {
     ...credential,

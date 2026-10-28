@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { CodeApiAuthContext, RequestFile } from '../types';
 import type { LCTool } from '../preamble';
 import {
+  bindReplayWorkspaceInstance,
   buildReplayExecutionState,
   resolveReplayStateSandboxBackend,
 } from './programmatic-state';
@@ -84,6 +85,7 @@ describe('buildReplayExecutionState', () => {
       authContext,
       bridgeWorkerId: 'code-user_123',
       workspaceId: 'project-a',
+      workspaceInstanceId: 'a'.repeat(64),
       sandboxBackend: 'remote-bridge',
       executionProfile: 'stateful',
       executionProfileSource: 'explicit',
@@ -104,6 +106,7 @@ describe('buildReplayExecutionState', () => {
       apiKeyId: 'key_legacy',
       bridgeWorkerId: 'code-user_123',
       workspaceId: 'project-a',
+      workspaceInstanceId: 'a'.repeat(64),
       sandboxBackend: 'remote-bridge',
       executionProfile: 'stateful',
       executionProfileSource: 'explicit',
@@ -117,6 +120,19 @@ describe('buildReplayExecutionState', () => {
       startTime: 1778250000000,
       lastActivity: 1778250000000,
     });
+  });
+
+  test('binds a selected conversation checkout into every replay payload', () => {
+    const payload = { language: 'bash', version: '5.2', files: [] };
+    expect(
+      bindReplayWorkspaceInstance(payload, {
+        workspaceInstanceId: 'b'.repeat(64),
+      }),
+    ).toEqual({
+      ...payload,
+      workspace_instance_id: 'b'.repeat(64),
+    });
+    expect(bindReplayWorkspaceInstance(payload, {})).toBe(payload);
   });
 
   test('falls back to JWT identity only when no managed auth context exists', () => {

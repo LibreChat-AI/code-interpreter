@@ -1,6 +1,7 @@
 import { NativeSrtWorkspaceCommandSandbox } from './native-sandbox.js';
 import { NativeWorkspaceProgrammaticExecutor } from './native-programmatic.js';
 import { WorkspaceToolError } from './workspace.js';
+import { commandFailureDiagnostic } from './command-diagnostics.js';
 import type { NativeSrtWorkspaceCommandSandboxOptions } from './native-sandbox.js';
 import type {
   BridgeWorkspaceProgrammaticRequest,
@@ -189,6 +190,14 @@ process.on('message', async (raw: unknown) => {
     reply({
       id: message.id,
       ok: false,
+      diagnostic:
+        error instanceof WorkspaceToolError && error.commandDiagnostic
+          ? error.commandDiagnostic
+          : commandFailureDiagnostic(
+              message.type === 'prepare' ? 'sandbox_startup' : message.type === 'close' ? 'cleanup' : 'dispatch',
+              message.type === 'prepare' ? 'startup_failed' : message.type === 'close' ? 'cleanup_failed' : 'executor_rejected',
+              error,
+            ),
       code:
         error instanceof WorkspaceToolError
           ? error.code

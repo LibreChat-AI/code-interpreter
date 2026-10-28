@@ -94,7 +94,7 @@ export type SessionOwnershipResult =
  * simply gone.
  */
 export async function authorizeSessionOwnership(
-  store: SessionOwnershipStore,
+  store: Pick<SessionOwnershipStore, 'get'>,
   args: {
     session_id: string;
     expectedSessionKey: string;

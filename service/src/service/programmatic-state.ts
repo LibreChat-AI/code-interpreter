@@ -39,6 +39,8 @@ export interface BuildReplayExecutionStateParams {
   language: 'python' | 'bash';
   bridgeWorkerId?: string;
   workspaceId?: string;
+  workspaceInstanceId?: string;
+  workspaceWorktree?: string;
   sandboxBackend?: SandboxBackendName;
   executionProfile: ExecutionProfile;
   executionProfileSource: ExecutionProfileSource;
@@ -68,6 +70,8 @@ export function buildReplayExecutionState(
     apiKeyId: params.apiKeyId,
     bridgeWorkerId: params.bridgeWorkerId,
     workspaceId: params.workspaceId,
+    workspaceInstanceId: params.workspaceInstanceId,
+    workspaceWorktree: params.workspaceWorktree,
     sandboxBackend: params.sandboxBackend,
     executionProfile: params.executionProfile,
     executionProfileSource: params.executionProfileSource,
@@ -81,5 +85,24 @@ export function buildReplayExecutionState(
     timeout: params.timeout,
     callCount: 0,
     language: params.language,
+  };
+}
+
+/** Bind the authenticated conversation checkout and linked-worktree lane to every replay iteration. */
+export function bindReplayWorkspaceInstance(
+  payload: t.PayloadBody,
+  state: Pick<ExecutionState, 'workspaceInstanceId' | 'workspaceWorktree'>,
+): t.PayloadBody {
+  if (state.workspaceInstanceId == null && state.workspaceWorktree == null) {
+    return payload;
+  }
+  return {
+    ...payload,
+    ...(state.workspaceInstanceId == null
+      ? {}
+      : { workspace_instance_id: state.workspaceInstanceId }),
+    ...(state.workspaceWorktree == null
+      ? {}
+      : { workspace_worktree: state.workspaceWorktree }),
   };
 }

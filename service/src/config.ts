@@ -7,13 +7,14 @@ import {
   resolveExecutionProfile,
   resolveExecutionProfileSource,
 } from './execution-profile';
+import { BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES } from '../../packages/code/src/protocol';
 
 export const languageConfig: Record<Languages | string, t.LanguageConfig | undefined> = {
   [Languages.bash]: { language: 'bash', version: '5.2.0', fileName: 'script.sh' },
-  [Languages.js]: { language: 'bun-js', version: '1.3.14', fileName: 'index.js' },
-  [Languages.node]: { language: 'node', version: '24.15.0', fileName: 'index.js' },
+  [Languages.js]: { language: 'bun-js', version: '1.4.4', fileName: 'index.js' },
+  [Languages.node]: { language: 'node', version: '24.22.1', fileName: 'index.js' },
   [Languages.py]: { language: 'python', version: '3.14.4', fileName: 'main.py' },
-  [Languages.ts]: { language: 'bun-ts', version: '1.3.14', fileName: 'main.ts' },
+  [Languages.ts]: { language: 'bun-ts', version: '1.4.4', fileName: 'main.ts' },
 };
 
 const languageAliases: Record<string, Languages> = {
@@ -420,12 +421,41 @@ export const env = {
   BRIDGE_MAX_WORKSPACE_LEASE_SLOTS: Number(
     process.env.CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS ?? 1,
   ),
+  /**
+   * Offer `lane_git` to workers and accept `laneGit` (`{ branch, head }`) on command results.
+   * Off by default: enable only after the LibreChat talking to this service accepts the field.
+   */
+  BRIDGE_LANE_GIT: process.env.CODEAPI_BRIDGE_LANE_GIT === 'true',
+  /**
+   * Largest stored object relayed into a worker by `import_file`. The operation
+   * is offered only when EGRESS_GATEWAY_URL can mint its one-object grant.
+   */
+  BRIDGE_IMPORT_FILE_MAX_BYTES: resolvePositiveIntEnv(
+    process.env.CODEAPI_BRIDGE_IMPORT_FILE_MAX_BYTES,
+    BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES,
+  ),
   /** Outbound worker selected by the remote-bridge backend. */
   BRIDGE_WORKER_ID: process.env.CODEAPI_BRIDGE_WORKER_ID ?? '',
   /** Static compatibility auth or short-lived proof-of-possession credentials. */
   BRIDGE_AUTH_MODE: bridgeAuthMode,
   /** Enrollment and lease credential shared only with the configured worker. */
   BRIDGE_TOKEN: process.env.CODEAPI_BRIDGE_TOKEN ?? '',
+  /** Opt-in stable HTTPS origin of this Code API deployment (shared by all replicas). */
+  BRIDGE_RECOVERY_SERVER_ID: process.env.CODEAPI_BRIDGE_RECOVERY_SERVER_ID ?? '',
+  /** Zero preserves machine authorization until explicit revocation. */
+  BRIDGE_ENROLLMENT_TTL_SECONDS: Number(process.env.CODEAPI_BRIDGE_ENROLLMENT_TTL_SECONDS ?? 0),
+  BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS: Number(
+    process.env.CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS ?? 60,
+  ),
+  BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE: Number(
+    process.env.CODEAPI_BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE ?? 12,
+  ),
+  BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE: Number(
+    process.env.CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE ?? 30,
+  ),
+  BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE: Number(
+    process.env.CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE ?? 240,
+  ),
   /**
    * Runtime session affinity for stateful sandbox backends.
    * - `stateless` (default): no runtime sessions; `runtime_session_hint` ignored.

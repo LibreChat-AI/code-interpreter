@@ -1,4 +1,6 @@
 import {
+  createCipheriv,
+  createDecipheriv,
   createHash,
   createPublicKey,
   randomBytes,
@@ -6,13 +8,41 @@ import {
 
 import type Redis from 'ioredis';
 
-import { verifyBridgeRequest } from '../../../packages/code/src/identity';
+import {
+  BROWSER_ENROLLMENT_MAX_TTL_MS,
+  canonicalBrowserEnrollmentRedemption,
+  isBrowserEnrollmentApproval,
+  isBrowserEnrollmentRedemption,
+  isBrowserEnrollmentRedemptionContract,
+  isBrowserEnrollmentStatusRequest,
+  verifyBrowserEnrollmentRedemption,
+} from '../../../packages/code/src/browser-enrollment-protocol';
+import type {
+  BrowserEnrollmentApproval,
+  BrowserEnrollmentRedemption,
+  BrowserEnrollmentRedemptionContract,
+  BrowserEnrollmentStatusRequest,
+} from '../../../packages/code/src/browser-enrollment-protocol';
+import {
+  verifyBridgeRecovery,
+  verifyBridgeRecoveryStart,
+  verifyBridgeRequest,
+} from '../../../packages/code/src/identity';
+import type {
+  BridgeRecoveryProofInput,
+  BridgeRecoveryStartProofInput,
+} from '../../../packages/code/src/identity';
 
 const PREFIX = 'codeapi:bridge:v1';
 const DEFAULT_PAIRING_TTL_SECONDS = 10 * 60;
 const DEFAULT_CREDENTIAL_TTL_SECONDS = 15 * 60;
 const PROOF_NONCE_TTL_SECONDS = 2 * 60;
 const PROOF_CLOCK_SKEW_MS = 60_000;
+const DEFAULT_CHALLENGE_TTL_SECONDS = 60;
+const DEFAULT_CHALLENGES_PER_MINUTE = 12;
+const DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE = 30;
+const DEFAULT_UNTRUSTED_RECOVERY_REQUESTS_PER_MINUTE = 240;
+const RECOVERY_START_NONCE_TTL_SECONDS = 3 * 60;
 const LEGACY_SCAN_CLAIM_TTL_MS = 5_000;
 const LEGACY_SCAN_POLL_INTERVAL_MS = 25;
 const LEGACY_SCAN_PENDING = 'pending';
@@ -41,6 +71,7 @@ elseif (generation or '0') ~= ARGV[2] then
   redis.call('DEL', KEYS[1])
   return 0
 end
+if ARGV[7] ~= '' and (generation or '0') ~= ARGV[9] then return 0 end
 redis.call('DEL', KEYS[1])
 if redis.call('GET', KEYS[5]) == KEYS[1] then
   redis.call('DEL', KEYS[5])
@@ -48,9 +79,86 @@ end
 redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
 redis.call('SET', KEYS[4], ARGV[5], 'EX', ARGV[4])
 redis.call('SET', KEYS[6], ARGV[6], 'EX', ARGV[4])
+if ARGV[7] ~= '' then
+  if tonumber(ARGV[8]) > 0 then
+    redis.call('SET', KEYS[7], ARGV[7], 'EX', ARGV[8])
+  else
+    redis.call('SET', KEYS[7], ARGV[7])
+  end
+  redis.call('SET', KEYS[8], ARGV[10])
+else
+  redis.call('DEL', KEYS[7], KEYS[8])
+end
 return 1
 `;
+const ISSUE_BROWSER_ENROLLMENT_SCRIPT = `
+local now = redis.call('TIME')
+local remaining = tonumber(ARGV[3]) - (tonumber(now[1]) * 1000.0 + math.floor(tonumber(now[2]) / 1000))
+if remaining <= 0 or remaining > tonumber(ARGV[4]) then return 0 end
+if (redis.call('GET', KEYS[5]) or '0') ~= '0' then return 0 end
+local saved = redis.call('GET', KEYS[1])
+local tombstone = redis.call('GET', KEYS[13])
+if tombstone and (not saved or tombstone ~= ARGV[5]) then return 0 end
+if saved then
+  if saved ~= ARGV[1] or redis.call('GET', KEYS[4]) ~= KEYS[3] or redis.call('GET', KEYS[3]) ~= 'browser-enrollment' then return 0 end
+  local enrollment = redis.call('GET', KEYS[8])
+  if enrollment then
+    if enrollment ~= redis.call('GET', KEYS[2]) then return 0 end
+  else
+    for i = 6, 12 do
+      if i ~= 8 and redis.call('EXISTS', KEYS[i]) == 1 then return 0 end
+    end
+  end
+  redis.call('SETNX', KEYS[5], '0')
+  return 1
+end
+for i = 4, 12 do
+  if i ~= 5 and redis.call('EXISTS', KEYS[i]) == 1 then return 0 end
+end
+redis.call('SETNX', KEYS[5], '0')
+redis.call('SET', KEYS[13], ARGV[5])
+redis.call('SET', KEYS[1], ARGV[1], 'PX', remaining)
+redis.call('SET', KEYS[2], ARGV[2], 'PX', remaining)
+redis.call('SET', KEYS[3], 'browser-enrollment', 'PX', remaining)
+redis.call('SET', KEYS[4], KEYS[3], 'PX', remaining)
+return 1
+`;
+const REDEEM_BROWSER_ENROLLMENT_SCRIPT = `
+local now = redis.call('TIME')
+local remaining = tonumber(ARGV[3]) - (tonumber(now[1]) * 1000.0 + math.floor(tonumber(now[2]) / 1000))
+if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[2]) ~= ARGV[2] or
+  redis.call('GET', KEYS[3]) ~= 'browser-enrollment' or redis.call('GET', KEYS[4]) ~= KEYS[3] or
+  (redis.call('GET', KEYS[5]) or '0') ~= '0' then return nil end
+local replay = redis.call('GET', KEYS[11])
+if replay then
+  if redis.call('GET', KEYS[9]) ~= ARGV[2] or redis.call('GET', KEYS[10]) ~= ARGV[9] then return nil end
+  return replay
+end
+if remaining <= 0 or ARGV[11] ~= '1' then return nil end
+for i = 7, 14 do
+  if i ~= 11 and redis.call('EXISTS', KEYS[i]) == 1 then return nil end
+end
+redis.call('SET', KEYS[6], ARGV[4], 'EX', ARGV[5])
+redis.call('SET', KEYS[7], ARGV[6], 'EX', ARGV[5])
+redis.call('SET', KEYS[8], ARGV[7], 'EX', ARGV[5])
+if tonumber(ARGV[8]) > 0 then
+  redis.call('SET', KEYS[9], ARGV[2], 'EX', ARGV[8])
+else
+  redis.call('SET', KEYS[9], ARGV[2])
+end
+redis.call('SET', KEYS[10], ARGV[9])
+redis.call('SET', KEYS[11], ARGV[10], 'EX', ARGV[5])
+for i = 1, 4 do redis.call('EXPIRE', KEYS[i], ARGV[5]) end
+return ARGV[10]
+`;
 const ROTATE_CREDENTIAL_SCRIPT = `
+if ARGV[6] ~= '' then
+  if redis.call('GET', KEYS[5]) ~= ARGV[6] or (redis.call('GET', KEYS[6]) or '0') ~= ARGV[7] or redis.call('GET', KEYS[7]) ~= ARGV[8] then
+    return 0
+  end
+elseif redis.call('EXISTS', KEYS[7]) == 1 then
+  return 0
+end
 local activeDigest = redis.call('GET', KEYS[1])
 local previous = redis.call('GET', KEYS[2])
 if not activeDigest or not previous then
@@ -82,10 +190,43 @@ if credential then
   redis.call('DEL', KEYS[3])
   redis.call('DEL', ARGV[1] .. credential)
 end
-redis.call('DEL', KEYS[1], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7])
+redis.call('DEL', KEYS[1], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7], KEYS[8])
 if activeIncarnation then
   redis.call('SET', ARGV[2] .. activeIncarnation .. ':fenced', '1')
 end
+return 1
+`;
+const CREATE_RECOVERY_CHALLENGE_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] or (redis.call('GET', KEYS[4]) or '0') ~= ARGV[4] or redis.call('GET', KEYS[5]) ~= ARGV[6] then
+  return 0
+end
+if redis.call('EXISTS', KEYS[6]) == 1 then return -2 end
+local count = redis.call('INCR', KEYS[2])
+if count == 1 then redis.call('EXPIRE', KEYS[2], 60) end
+if count > tonumber(ARGV[2]) then return -1 end
+if not redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[5], 'NX') then return 0 end
+redis.call('SET', KEYS[6], '1', 'EX', ARGV[7])
+return 1
+`;
+const LIMIT_RECOVERY_ATTEMPTS_SCRIPT = `
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then redis.call('EXPIRE', KEYS[1], 60) end
+if count > tonumber(ARGV[1]) then return 0 end
+return 1
+`;
+const COMPLETE_RECOVERY_CHALLENGE_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[2]) ~= ARGV[2] or (redis.call('GET', KEYS[6]) or '0') ~= ARGV[3] or redis.call('GET', KEYS[7]) ~= ARGV[8] then
+  return 0
+end
+local stableIdentity = redis.call('GET', KEYS[5])
+if stableIdentity and stableIdentity ~= ARGV[4] then return 0 end
+local count = redis.call('INCR', KEYS[8])
+if count == 1 then redis.call('EXPIRE', KEYS[8], 60) end
+if count > tonumber(ARGV[9]) then return -1 end
+redis.call('DEL', KEYS[2])
+redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[6])
+redis.call('SET', KEYS[4], ARGV[7], 'EX', ARGV[6])
+redis.call('SET', KEYS[5], ARGV[4], 'EX', ARGV[6])
 return 1
 `;
 const RELEASE_LEGACY_SCAN_CLAIM_SCRIPT = `
@@ -147,7 +288,34 @@ interface StoredCredential {
   publicKey: string;
   expiresAt: string;
   binding?: BridgeWorkerBinding;
+  /** Present only for credentials backed by durable machine enrollment. */
+  enrollmentGeneration?: string;
 }
+
+interface StoredEnrollment {
+  workerId: string;
+  serverId: string;
+  identityId: string;
+  generation: string;
+  pairingGeneration: number;
+  publicKey: string;
+  binding?: BridgeWorkerBinding;
+  browserEnrollment?: BrowserEnrollmentRedemptionContract;
+}
+
+export interface BridgeRecoveryOptions {
+  /** Stable HTTPS origin of this Code API deployment, identical on every replica. */
+  serverId: string;
+  /** Zero (the default) keeps enrollment until explicit revocation. */
+  enrollmentTtlSeconds?: number;
+  challengeTtlSeconds?: number;
+  maxChallengesPerMinute?: number;
+  maxAttemptsPerMinute?: number;
+  /** Shared per-connection-peer cap, separate from machine-signed budgets. */
+  maxUntrustedRequestsPerMinute?: number;
+}
+
+export type BridgeRecoveryChallenge = BridgeRecoveryProofInput;
 
 export interface BridgePairing {
   workerId: string;
@@ -168,7 +336,10 @@ export class BridgePairingError extends Error {
       | 'PUBLIC_KEY_INVALID'
       | 'CREDENTIAL_INVALID'
       | 'PROOF_INVALID'
-      | 'PROOF_REPLAYED',
+      | 'PROOF_REPLAYED'
+      | 'ENROLLMENT_INVALID'
+      | 'CHALLENGE_INVALID'
+      | 'RECOVERY_RATE_LIMITED',
     message: string,
   ) {
     super(message);
@@ -184,6 +355,54 @@ function pairingKey(code: string): string {
   return `${PREFIX}:pairing:${digest(code)}`;
 }
 
+function browserEnrollmentKey(instance: string, attemptId: string): string {
+  return `${PREFIX}:browser-enrollment:${digest(JSON.stringify([instance, attemptId]))}`;
+}
+
+function canonicalApproval(approval: BrowserEnrollmentApproval): string {
+  return JSON.stringify({
+    protocolVersion: 1,
+    operation: approval.operation,
+    serverId: approval.serverId,
+    instance: approval.instance,
+    attemptId: approval.attemptId,
+    requestHash: approval.requestHash,
+    workerId: approval.workerId,
+    expiresAt: approval.expiresAt,
+    publicKey: approval.publicKey,
+    binding: {
+      tenantId: approval.binding.tenantId,
+      principal: { type: approval.binding.principal.type, id: approval.binding.principal.id },
+    },
+  });
+}
+
+function enrollmentReplayKey(adminToken: string, serverId: string): Buffer {
+  if (!adminToken) throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment requires an administrator token');
+  return createHash('sha256').update('librechat-code:browser-enrollment-replay:v1\0')
+    .update(serverId).update('\0').update(adminToken).digest();
+}
+
+function encryptEnrollmentReplay(credential: BridgeWorkerCredential, approval: string, key: Buffer): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from(approval));
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(credential), 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url');
+}
+
+function decryptEnrollmentReplay(ciphertext: string, approval: string, key: Buffer): BridgeWorkerCredential {
+  try {
+    const bytes = Buffer.from(ciphertext, 'base64url');
+    const decipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(0, 12));
+    decipher.setAAD(Buffer.from(approval));
+    decipher.setAuthTag(bytes.subarray(12, 28));
+    return JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8')) as BridgeWorkerCredential;
+  } catch {
+    throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment replay is unavailable');
+  }
+}
+
 function credentialDigestKey(credentialDigest: string): string {
   return `${PREFIX}:credential:${credentialDigest}`;
 }
@@ -194,6 +413,39 @@ function workerIdentityKey(workerId: string): string {
 
 function workerStableIdentityKey(workerId: string): string {
   return `${PREFIX}:stable-identity:${workerId}`;
+}
+
+function workerEnrollmentKey(workerId: string): string {
+  return `${PREFIX}:enrollment:${workerId}`;
+}
+
+function workerEnrollmentRequiredKey(workerId: string): string {
+  return `${PREFIX}:enrollment-required:${workerId}`;
+}
+
+function recoveryChallengeKey(challenge: string): string {
+  return `${PREFIX}:recovery:challenge:${digest(challenge)}`;
+}
+
+function recoveryStartNonceKey(workerId: string, nonce: string): string {
+  return `${PREFIX}:recovery:nonce:${workerId}:${digest(nonce)}`;
+}
+
+function recoveryChallengeAttemptKey(challenge: string): string {
+  return `${PREFIX}:recovery:attempt:${digest(challenge)}`;
+}
+
+function untrustedRecoveryRateKey(peer: string, operation: 'challenge' | 'recover'): string {
+  // Never partition by a caller-supplied worker ID or an untrusted forwarded IP.
+  return `${PREFIX}:recovery:untrusted:${operation}:${digest(peer)}`;
+}
+
+function recoveryRateKey(
+  workerId: string,
+  enrollmentGeneration: string,
+  operation: 'start' | 'complete',
+): string {
+  return `${PREFIX}:recovery:rate:${operation}:${workerId}:${enrollmentGeneration}`;
 }
 
 function workerPairingGenerationKey(workerId: string): string {
@@ -236,8 +488,329 @@ export class RedisBridgePairingStore {
     private readonly credentialTtlSeconds = DEFAULT_CREDENTIAL_TTL_SECONDS,
     private readonly legacyScanClaimTtlMs = LEGACY_SCAN_CLAIM_TTL_MS,
     private readonly rollbackEpoch =
-      process.env.CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH?.trim() ?? '',
-  ) {}
+    process.env.CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH?.trim() ?? '',
+    private readonly recovery?: BridgeRecoveryOptions,
+  ) {
+    if (recovery == null) return;
+    let server: URL;
+    try {
+      server = new URL(recovery.serverId);
+    } catch {
+      throw new Error('Bridge recovery requires a stable HTTPS server origin');
+    }
+    if (
+      server.protocol !== 'https:' ||
+      server.username !== '' ||
+      server.password !== '' ||
+      server.pathname !== '/' ||
+      server.search !== '' ||
+      server.hash !== '' ||
+      server.origin !== recovery.serverId
+    ) {
+      throw new Error('Bridge recovery requires a stable HTTPS server origin');
+    }
+    for (const [value, max] of [
+      [recovery.enrollmentTtlSeconds ?? 0, 10 * 365 * 24 * 3600],
+      [recovery.challengeTtlSeconds ?? DEFAULT_CHALLENGE_TTL_SECONDS, 300],
+      [recovery.maxChallengesPerMinute ?? DEFAULT_CHALLENGES_PER_MINUTE, 120],
+      [recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE, 120],
+      [recovery.maxUntrustedRequestsPerMinute ?? DEFAULT_UNTRUSTED_RECOVERY_REQUESTS_PER_MINUTE, 1200],
+    ]) {
+      if (!Number.isSafeInteger(value) || value < 0 || value > max) {
+        throw new RangeError('Invalid bridge recovery lifetime or rate limit');
+      }
+    }
+    if (
+      (recovery.challengeTtlSeconds ?? DEFAULT_CHALLENGE_TTL_SECONDS) === 0 ||
+      (recovery.maxChallengesPerMinute ?? DEFAULT_CHALLENGES_PER_MINUTE) === 0 ||
+      (recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE) === 0 ||
+      (recovery.maxUntrustedRequestsPerMinute ?? DEFAULT_UNTRUSTED_RECOVERY_REQUESTS_PER_MINUTE) === 0
+    ) {
+      throw new RangeError('Bridge recovery challenge lifetime and rate limits must be positive');
+    }
+  }
+
+  get recoveryEnabled(): boolean {
+    return this.recovery != null;
+  }
+
+  get recoveryServerId(): string | undefined {
+    return this.recovery?.serverId;
+  }
+
+  async limitBrowserEnrollmentPeer(peer: string): Promise<void> {
+    if (this.recovery == null) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment is disabled');
+    }
+    const allowed = await this.redis.eval(
+      LIMIT_RECOVERY_ATTEMPTS_SCRIPT,
+      1,
+      `${PREFIX}:browser-enrollment:peer:${digest(peer)}`,
+      String(this.recovery.maxUntrustedRequestsPerMinute ?? DEFAULT_UNTRUSTED_RECOVERY_REQUESTS_PER_MINUTE),
+    );
+    if (allowed !== 1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many browser enrollment requests from this peer');
+    }
+  }
+
+  async issueBrowserEnrollment(approval: BrowserEnrollmentApproval): Promise<BrowserEnrollmentApproval> {
+    if (!isBrowserEnrollmentApproval(approval) || this.recovery == null || approval.serverId !== this.recovery.serverId ||
+      Date.parse(approval.expiresAt) <= Date.now() || Date.parse(approval.expiresAt) - Date.now() > BROWSER_ENROLLMENT_MAX_TTL_MS) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Invalid browser enrollment approval');
+    }
+    await this.removeLegacyPairings(approval.workerId);
+    const approvalRaw = canonicalApproval(approval);
+    const normalized = JSON.parse(approvalRaw) as BrowserEnrollmentApproval;
+    const enrollment: StoredEnrollment = {
+      workerId: approval.workerId,
+      serverId: approval.serverId,
+      identityId: randomBytes(18).toString('base64url'),
+      generation: randomBytes(18).toString('base64url'),
+      pairingGeneration: 0,
+      browserEnrollment: {
+        operation: approval.operation,
+        serverId: approval.serverId,
+        instance: approval.instance,
+        attemptId: approval.attemptId,
+        requestHash: approval.requestHash,
+        workerId: approval.workerId,
+        expiresAt: approval.expiresAt,
+      },
+      publicKey: approval.publicKey,
+      binding: normalized.binding,
+    };
+    const key = browserEnrollmentKey(approval.instance, approval.attemptId);
+    const workerPrefix = `${PREFIX}:worker:${encodeURIComponent(approval.workerId)}`;
+    // The manual-pairing index points at a separate fence, never the immutable
+    // approval. Manual issue/revoke consumes that fence without erasing the tombstone.
+    const accepted = await this.redis.eval(
+      ISSUE_BROWSER_ENROLLMENT_SCRIPT,
+      13,
+      key,
+      `${key}:enrollment`,
+      `${key}:fence`,
+      workerPairingIndexKey(approval.workerId),
+      workerPairingGenerationKey(approval.workerId),
+      workerIdentityKey(approval.workerId),
+      workerStableIdentityKey(approval.workerId),
+      workerEnrollmentKey(approval.workerId),
+      workerEnrollmentRequiredKey(approval.workerId),
+      workerPrefix,
+      `${workerPrefix}:incarnation`,
+      `${workerPrefix}:registration-generation`,
+      `${key}:tombstone`,
+      approvalRaw,
+      JSON.stringify(enrollment),
+      String(Date.parse(approval.expiresAt)),
+      String(BROWSER_ENROLLMENT_MAX_TTL_MS),
+      `${digest(approvalRaw)}:${digest(canonicalBrowserEnrollmentRedemption(approval))}`,
+    );
+    if (accepted !== 1) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment is expired, revoked, superseded, or conflicts with an existing worker');
+    }
+    return normalized;
+  }
+
+  async browserEnrollmentStatus(proof: BrowserEnrollmentStatusRequest): Promise<{
+    protocolVersion: 1;
+    status: 'pending' | 'completed' | 'revoked';
+    workerId: string;
+  }> {
+    if (!isBrowserEnrollmentStatusRequest(proof) || this.recovery == null || proof.serverId !== this.recovery.serverId) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Invalid browser enrollment status request');
+    }
+    const key = browserEnrollmentKey(proof.instance, proof.attemptId);
+    const [raw, generation, requiredGeneration, approvalRaw, tombstone, fence, indexed, planned] = await this.redis.mget(
+      workerEnrollmentKey(proof.workerId),
+      workerPairingGenerationKey(proof.workerId),
+      workerEnrollmentRequiredKey(proof.workerId),
+      key,
+      `${key}:tombstone`,
+      `${key}:fence`,
+      workerPairingIndexKey(proof.workerId),
+      `${key}:enrollment`,
+    );
+    const contract = canonicalBrowserEnrollmentRedemption(proof);
+    try {
+      const enrollment = this.checkedEnrollment(proof.workerId, raw, generation, requiredGeneration);
+      if (isBrowserEnrollmentRedemptionContract(enrollment.browserEnrollment) &&
+        canonicalBrowserEnrollmentRedemption(enrollment.browserEnrollment) === contract) {
+        return { protocolVersion: 1, status: 'completed', workerId: proof.workerId };
+      }
+    } catch (error) {
+      if (!(error instanceof BridgePairingError)) throw error;
+    }
+    if (tombstone?.split(':')[1] !== digest(contract)) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment does not match a known contract');
+    }
+    let pending = false;
+    try {
+      const approval = JSON.parse(approvalRaw ?? 'null') as unknown;
+      pending = (generation ?? '0') === '0' && raw == null && requiredGeneration == null && planned != null &&
+        isBrowserEnrollmentApproval(approval) && canonicalBrowserEnrollmentRedemption(approval) === contract &&
+        Date.parse(approval.expiresAt) > Date.now() && fence === 'browser-enrollment' && indexed === `${key}:fence`;
+    } catch {
+      pending = false;
+    }
+    return { protocolVersion: 1, status: pending ? 'pending' : 'revoked', workerId: proof.workerId };
+  }
+
+  async redeemBrowserEnrollment(
+    proof: BrowserEnrollmentRedemption,
+    adminToken: string,
+  ): Promise<BridgeWorkerCredential> {
+    if (!isBrowserEnrollmentRedemption(proof) || this.recovery == null || proof.serverId !== this.recovery.serverId) {
+      throw new BridgePairingError('PROOF_INVALID', 'Invalid browser enrollment proof');
+    }
+    const replayKey = enrollmentReplayKey(adminToken, proof.serverId);
+    const key = browserEnrollmentKey(proof.instance, proof.attemptId);
+    const attempts = await this.redis.eval(
+      LIMIT_RECOVERY_ATTEMPTS_SCRIPT,
+      1,
+      `${key}:attempts`,
+      String(this.recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE),
+    );
+    if (attempts !== 1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many browser enrollment attempts');
+    }
+    const [raw, enrollmentRaw] = await this.redis.mget(key, `${key}:enrollment`);
+    let approval: BrowserEnrollmentApproval;
+    let enrollment: StoredEnrollment;
+    try {
+      approval = JSON.parse(raw ?? 'null') as BrowserEnrollmentApproval;
+      enrollment = JSON.parse(enrollmentRaw ?? 'null') as StoredEnrollment;
+      if (!isBrowserEnrollmentApproval(approval) || canonicalBrowserEnrollmentRedemption(approval) !== canonicalBrowserEnrollmentRedemption(proof) ||
+        enrollment?.workerId !== approval.workerId || enrollment.serverId !== approval.serverId ||
+        enrollment.publicKey !== approval.publicKey || enrollment.pairingGeneration !== 0 ||
+        enrollment.browserEnrollment == null || canonicalBrowserEnrollmentRedemption(enrollment.browserEnrollment) !== canonicalBrowserEnrollmentRedemption(proof) ||
+        JSON.stringify(enrollment.binding) !== JSON.stringify(approval.binding) ||
+        !/^[A-Za-z0-9_-]{24}$/.test(enrollment.identityId) || !/^[A-Za-z0-9_-]{24}$/.test(enrollment.generation)) {
+        throw new Error('Invalid approval');
+      }
+    } catch {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment is unavailable or does not match its approval');
+    }
+    if (!verifyBrowserEnrollmentRedemption(approval.publicKey, proof, proof.signature)) {
+      throw new BridgePairingError('PROOF_INVALID', 'Browser enrollment requires the approved machine key');
+    }
+    const credential: BridgeWorkerCredential = {
+      workerId: approval.workerId,
+      credential: randomBytes(32).toString('base64url'),
+      expiresAt: new Date(Date.now() + this.credentialTtlSeconds * 1000).toISOString(),
+    };
+    const credentialDigest = digest(credential.credential);
+    const stored: StoredCredential = {
+      workerId: approval.workerId,
+      identityId: enrollment.identityId,
+      publicKey: approval.publicKey,
+      expiresAt: credential.expiresAt,
+      binding: approval.binding,
+      enrollmentGeneration: enrollment.generation,
+    };
+    const workerPrefix = `${PREFIX}:worker:${encodeURIComponent(approval.workerId)}`;
+    const encrypted = await this.redis.eval(
+      REDEEM_BROWSER_ENROLLMENT_SCRIPT,
+      14,
+      key,
+      `${key}:enrollment`,
+      `${key}:fence`,
+      workerPairingIndexKey(approval.workerId),
+      workerPairingGenerationKey(approval.workerId),
+      credentialDigestKey(credentialDigest),
+      workerIdentityKey(approval.workerId),
+      workerStableIdentityKey(approval.workerId),
+      workerEnrollmentKey(approval.workerId),
+      workerEnrollmentRequiredKey(approval.workerId),
+      `${key}:result`,
+      workerPrefix,
+      `${workerPrefix}:incarnation`,
+      `${workerPrefix}:registration-generation`,
+      raw!,
+      enrollmentRaw!,
+      String(Date.parse(approval.expiresAt)),
+      JSON.stringify(stored),
+      String(this.credentialTtlSeconds),
+      credentialDigest,
+      enrollment.identityId,
+      String(this.recovery.enrollmentTtlSeconds ?? 0),
+      enrollment.generation,
+      encryptEnrollmentReplay(credential, raw!, replayKey),
+      Date.parse(proof.expiresAt) > Date.now() ? '1' : '0',
+    );
+    if (typeof encrypted !== 'string') {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Browser enrollment is expired, revoked, or superseded');
+    }
+    return decryptEnrollmentReplay(encrypted, raw!, replayKey);
+  }
+
+  async limitUntrustedRecovery(
+    peer: string,
+    operation: 'challenge' | 'recover',
+  ): Promise<void> {
+    if (this.recovery == null) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Machine recovery is disabled');
+    }
+    const allowed = await this.redis.eval(
+      LIMIT_RECOVERY_ATTEMPTS_SCRIPT,
+      1,
+      untrustedRecoveryRateKey(peer, operation),
+      String(this.recovery.maxUntrustedRequestsPerMinute ?? DEFAULT_UNTRUSTED_RECOVERY_REQUESTS_PER_MINUTE),
+    );
+    if (allowed !== 1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many recovery requests from this peer');
+    }
+  }
+
+  private checkedEnrollment(
+    workerId: string,
+    raw: string | null,
+    pairingGeneration: string | null,
+    requiredGeneration: string | null,
+  ): StoredEnrollment {
+    let parsed: unknown;
+    try {
+      parsed = raw == null ? undefined : JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+    const enrollment = (
+      typeof parsed === 'object' && parsed != null && !Array.isArray(parsed)
+        ? parsed
+        : {}
+    ) as Partial<StoredEnrollment>;
+    if (
+      this.recovery == null ||
+      enrollment.workerId !== workerId ||
+      enrollment.serverId !== this.recovery.serverId ||
+      typeof enrollment.identityId !== 'string' ||
+      !/^[A-Za-z0-9_-]{24}$/.test(enrollment.identityId) ||
+      typeof enrollment.generation !== 'string' ||
+      !/^[A-Za-z0-9_-]{24}$/.test(enrollment.generation) ||
+      enrollment.generation !== requiredGeneration ||
+      typeof enrollment.publicKey !== 'string' ||
+      !validEd25519PublicKey(enrollment.publicKey) ||
+      !Number.isSafeInteger(enrollment.pairingGeneration) ||
+      String(enrollment.pairingGeneration) !== (pairingGeneration ?? '0')
+    ) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Machine enrollment is unavailable or revoked');
+    }
+    return enrollment as StoredEnrollment;
+  }
+
+  private checkEnrolledCredential(
+    credential: StoredCredential,
+    enrollment: StoredEnrollment,
+  ): void {
+    if (
+      credential.workerId !== enrollment.workerId ||
+      credential.identityId !== enrollment.identityId ||
+      credential.publicKey !== enrollment.publicKey ||
+      credential.enrollmentGeneration !== enrollment.generation ||
+      JSON.stringify(credential.binding ?? null) !== JSON.stringify(enrollment.binding ?? null)
+    ) {
+      throw new BridgePairingError('CREDENTIAL_INVALID', 'Worker credential does not match its machine enrollment');
+    }
+  }
 
   async issue(
     workerId: string,
@@ -314,28 +887,49 @@ export class RedisBridgePairingStore {
       Date.now() + this.credentialTtlSeconds * 1000,
     ).toISOString();
     const identityId = randomBytes(18).toString('base64url');
+    const pairingGeneration = pairing.generation ?? Number(
+      (await this.redis.get(workerPairingGenerationKey(args.workerId))) ?? '0',
+    );
+    const enrollment: StoredEnrollment | undefined = this.recovery == null
+      ? undefined
+      : {
+        workerId: args.workerId,
+        serverId: this.recovery.serverId,
+        identityId,
+        generation: randomBytes(18).toString('base64url'),
+        pairingGeneration,
+        publicKey: args.publicKey,
+        binding: pairing.binding,
+      };
     const stored: StoredCredential = {
       workerId: args.workerId,
       identityId,
       publicKey: args.publicKey,
       expiresAt,
       binding: pairing.binding,
+      ...(enrollment == null ? {} : { enrollmentGeneration: enrollment.generation }),
     };
     const accepted = await this.redis.eval(
       REDEEM_PAIRING_SCRIPT,
-      6,
+      8,
       codeKey,
       workerPairingGenerationKey(pairing.workerId),
       credentialDigestKey(credentialDigest),
       workerIdentityKey(args.workerId),
       workerPairingIndexKey(args.workerId),
       workerStableIdentityKey(args.workerId),
+      workerEnrollmentKey(args.workerId),
+      workerEnrollmentRequiredKey(args.workerId),
       raw,
       pairing.generation == null ? '' : String(pairing.generation),
       JSON.stringify(stored),
       String(this.credentialTtlSeconds),
       credentialDigest,
       identityId,
+      enrollment == null ? '' : JSON.stringify(enrollment),
+      String(this.recovery?.enrollmentTtlSeconds ?? 0),
+      String(pairingGeneration),
+      enrollment?.generation ?? '',
     );
     if (accepted !== 1) {
       throw new BridgePairingError(
@@ -374,10 +968,12 @@ export class RedisBridgePairingStore {
       );
     }
     const credentialDigest = digest(args.credential);
-    const [raw, activeDigest, pairingGeneration] = await this.redis.mget(
+    const [raw, activeDigest, pairingGeneration, enrollmentRaw, requiredGeneration] = await this.redis.mget(
       credentialDigestKey(credentialDigest),
       workerIdentityKey(args.workerId),
       workerPairingGenerationKey(args.workerId),
+      workerEnrollmentKey(args.workerId),
+      workerEnrollmentRequiredKey(args.workerId),
     );
     if (raw == null || activeDigest == null) {
       throw new BridgePairingError(
@@ -386,6 +982,12 @@ export class RedisBridgePairingStore {
       );
     }
     const stored = JSON.parse(raw) as StoredCredential;
+    if (stored.enrollmentGeneration != null || requiredGeneration != null || enrollmentRaw != null) {
+      this.checkEnrolledCredential(
+        stored,
+        this.checkedEnrollment(args.workerId, enrollmentRaw, pairingGeneration, requiredGeneration),
+      );
+    }
     if (activeDigest !== credentialDigest) {
       const activeRaw = await this.redis.get(
         credentialDigestKey(activeDigest),
@@ -439,6 +1041,177 @@ export class RedisBridgePairingStore {
     };
   }
 
+  async createRecoveryChallenge(
+    workerId: string,
+    request: BridgeRecoveryStartProofInput,
+    signature: string,
+  ): Promise<BridgeRecoveryChallenge> {
+    if (this.recovery == null) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Machine recovery is disabled');
+    }
+    const [raw, pairingGeneration, requiredGeneration] = await this.redis.mget(
+      workerEnrollmentKey(workerId),
+      workerPairingGenerationKey(workerId),
+      workerEnrollmentRequiredKey(workerId),
+    );
+    const enrollment = this.checkedEnrollment(workerId, raw, pairingGeneration, requiredGeneration);
+    const proofTime = Date.parse(request.timestamp);
+    if (
+      String(request.operation) !== 'credential.challenge' ||
+      request.serverId !== enrollment.serverId ||
+      request.workerId !== workerId ||
+      !/^[A-Za-z0-9_-]{43}$/.test(request.nonce) ||
+      !Number.isFinite(proofTime) ||
+      Math.abs(Date.now() - proofTime) > PROOF_CLOCK_SKEW_MS ||
+      !verifyBridgeRecoveryStart(enrollment.publicKey, request, signature)
+    ) {
+      throw new BridgePairingError('PROOF_INVALID', 'Machine recovery challenge proof is invalid');
+    }
+    const challenge: BridgeRecoveryChallenge = {
+      operation: 'credential.recover',
+      serverId: enrollment.serverId,
+      workerId,
+      enrollmentGeneration: enrollment.generation,
+      challenge: randomBytes(32).toString('base64url'),
+      expiresAt: new Date(
+        Date.now() + (this.recovery.challengeTtlSeconds ?? DEFAULT_CHALLENGE_TTL_SECONDS) * 1000,
+      ).toISOString(),
+    };
+    const created = await this.redis.eval(
+      CREATE_RECOVERY_CHALLENGE_SCRIPT,
+      6,
+      workerEnrollmentKey(workerId),
+      recoveryRateKey(workerId, enrollment.generation, 'start'),
+      recoveryChallengeKey(challenge.challenge),
+      workerPairingGenerationKey(workerId),
+      workerEnrollmentRequiredKey(workerId),
+      recoveryStartNonceKey(workerId, request.nonce),
+      raw!,
+      String(this.recovery.maxChallengesPerMinute ?? DEFAULT_CHALLENGES_PER_MINUTE),
+      JSON.stringify(challenge),
+      String(enrollment.pairingGeneration),
+      String(this.recovery.challengeTtlSeconds ?? DEFAULT_CHALLENGE_TTL_SECONDS),
+      enrollment.generation,
+      String(RECOVERY_START_NONCE_TTL_SECONDS),
+    );
+    if (created === -2) {
+      throw new BridgePairingError('PROOF_REPLAYED', 'Machine recovery challenge proof was already used');
+    }
+    if (created === -1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many machine recovery challenges');
+    }
+    if (created !== 1) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Machine enrollment is unavailable or revoked');
+    }
+    return challenge;
+  }
+
+  async recoverCredential(
+    workerId: string,
+    proof: BridgeRecoveryChallenge,
+    signature: string,
+  ): Promise<BridgeWorkerCredential> {
+    if (this.recovery == null) {
+      throw new BridgePairingError('ENROLLMENT_INVALID', 'Machine recovery is disabled');
+    }
+    const challengeKey = recoveryChallengeKey(proof.challenge);
+    const [enrollmentRaw, challengeRaw, pairingGeneration, requiredGeneration] = await this.redis.mget(
+      workerEnrollmentKey(workerId),
+      challengeKey,
+      workerPairingGenerationKey(workerId),
+      workerEnrollmentRequiredKey(workerId),
+    );
+    const enrollment = this.checkedEnrollment(
+      workerId, enrollmentRaw, pairingGeneration, requiredGeneration,
+    );
+    let parsed: unknown;
+    try {
+      parsed = challengeRaw == null ? undefined : JSON.parse(challengeRaw);
+    } catch {
+      parsed = undefined;
+    }
+    const saved = (
+      typeof parsed === 'object' && parsed != null && !Array.isArray(parsed)
+        ? parsed
+        : {}
+    ) as Partial<BridgeRecoveryChallenge>;
+    if (
+      saved.operation !== 'credential.recover' ||
+      saved.serverId !== enrollment.serverId ||
+      saved.workerId !== workerId ||
+      saved.enrollmentGeneration !== enrollment.generation ||
+      saved.challenge !== proof.challenge ||
+      saved.expiresAt !== proof.expiresAt ||
+      String(proof.operation) !== saved.operation ||
+      saved.serverId !== proof.serverId ||
+      saved.workerId !== proof.workerId ||
+      saved.enrollmentGeneration !== proof.enrollmentGeneration ||
+      typeof saved.expiresAt !== 'string' ||
+      !Number.isFinite(Date.parse(saved.expiresAt)) ||
+      Date.parse(saved.expiresAt) <= Date.now()
+    ) {
+      throw new BridgePairingError('CHALLENGE_INVALID', 'Machine recovery challenge is invalid or expired');
+    }
+    // Invalid signatures can only exhaust the high-entropy challenge they know,
+    // never the enrolled worker's shared quota. The worker-wide counter is
+    // charged inside completion, after the key proof and replay checks.
+    const attempts = await this.redis.eval(
+      LIMIT_RECOVERY_ATTEMPTS_SCRIPT,
+      1,
+      recoveryChallengeAttemptKey(proof.challenge),
+      String(this.recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE),
+    );
+    if (attempts !== 1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many machine recovery attempts');
+    }
+    if (!verifyBridgeRecovery(enrollment.publicKey, saved as BridgeRecoveryChallenge, signature)) {
+      throw new BridgePairingError('PROOF_INVALID', 'Machine recovery signature is invalid');
+    }
+
+    const credential = randomBytes(32).toString('base64url');
+    const credentialDigest = digest(credential);
+    const expiresAt = new Date(Date.now() + this.credentialTtlSeconds * 1000).toISOString();
+    const stored: StoredCredential = {
+      workerId,
+      identityId: enrollment.identityId,
+      publicKey: enrollment.publicKey,
+      expiresAt,
+      binding: enrollment.binding,
+      enrollmentGeneration: enrollment.generation,
+    };
+    // The same Redis decision consumes the proof and issues the credential.
+    // A revoke or replacement on another replica wins by invalidating the
+    // enrollment/generation comparison, with no window to recreate trust.
+    const issued = await this.redis.eval(
+      COMPLETE_RECOVERY_CHALLENGE_SCRIPT,
+      8,
+      workerEnrollmentKey(workerId),
+      challengeKey,
+      credentialDigestKey(credentialDigest),
+      workerIdentityKey(workerId),
+      workerStableIdentityKey(workerId),
+      workerPairingGenerationKey(workerId),
+      workerEnrollmentRequiredKey(workerId),
+      recoveryRateKey(workerId, enrollment.generation, 'complete'),
+      enrollmentRaw!,
+      challengeRaw!,
+      String(enrollment.pairingGeneration),
+      enrollment.identityId,
+      JSON.stringify(stored),
+      String(this.credentialTtlSeconds),
+      credentialDigest,
+      enrollment.generation,
+      String(this.recovery.maxAttemptsPerMinute ?? DEFAULT_RECOVERY_ATTEMPTS_PER_MINUTE),
+    );
+    if (issued === -1) {
+      throw new BridgePairingError('RECOVERY_RATE_LIMITED', 'Too many machine recoveries');
+    }
+    if (issued !== 1) {
+      throw new BridgePairingError('CHALLENGE_INVALID', 'Machine recovery challenge is invalid or expired');
+    }
+    return { workerId, credential, expiresAt };
+  }
+
   async revoke(workerId: string): Promise<void> {
     await this.removeLegacyPairings(workerId);
     // Fence redemption and consume the currently indexed code atomically. An
@@ -446,7 +1219,7 @@ export class RedisBridgePairingStore {
     // that linearizes afterward installs a distinct generation and code.
     await this.redis.eval(
       REVOKE_PAIRING_SCRIPT,
-      7,
+      8,
       workerPairingIndexKey(workerId),
       workerPairingGenerationKey(workerId),
       workerIdentityKey(workerId),
@@ -454,6 +1227,7 @@ export class RedisBridgePairingStore {
       `${PREFIX}:worker:${encodeURIComponent(workerId)}`,
       `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation`,
       `${PREFIX}:worker:${encodeURIComponent(workerId)}:ready`,
+      workerEnrollmentKey(workerId),
       `${PREFIX}:credential:`,
       `${PREFIX}:worker:${encodeURIComponent(workerId)}:incarnation:`,
     );
@@ -652,12 +1426,26 @@ export class RedisBridgePairingStore {
       );
     }
     const previous = JSON.parse(previousRaw) as StoredCredential;
+    let enrollment: StoredEnrollment | undefined;
+    let enrollmentRaw: string | null = null;
+    const [raw, generation, requiredGeneration] = await this.redis.mget(
+      workerEnrollmentKey(workerId),
+      workerPairingGenerationKey(workerId),
+      workerEnrollmentRequiredKey(workerId),
+    );
+    if (previous.enrollmentGeneration != null || requiredGeneration != null || raw != null) {
+      enrollment = this.checkedEnrollment(workerId, raw, generation, requiredGeneration);
+      this.checkEnrolledCredential(previous, enrollment);
+      enrollmentRaw = raw;
+    }
     return await this.issueCredential(
       workerId,
       previous.publicKey,
       previousDigest,
       previous.binding,
       previous.identityId ?? null,
+      enrollment,
+      enrollmentRaw,
     );
   }
 
@@ -667,6 +1455,8 @@ export class RedisBridgePairingStore {
     previousDigest?: string,
     binding?: BridgeWorkerBinding,
     identityId?: string | null,
+    enrollment?: StoredEnrollment,
+    enrollmentRaw?: string | null,
   ): Promise<BridgeWorkerCredential> {
     const credential = randomBytes(32).toString('base64url');
     const credentialDigest = digest(credential);
@@ -683,20 +1473,27 @@ export class RedisBridgePairingStore {
       publicKey,
       expiresAt,
       binding,
+      ...(enrollment == null ? {} : { enrollmentGeneration: enrollment.generation }),
     };
     if (previousDigest !== undefined) {
       const rotated = await this.redis.eval(
         ROTATE_CREDENTIAL_SCRIPT,
-        4,
+        7,
         workerIdentityKey(workerId),
         credentialDigestKey(previousDigest),
         credentialDigestKey(credentialDigest),
         workerStableIdentityKey(workerId),
+        workerEnrollmentKey(workerId),
+        workerPairingGenerationKey(workerId),
+        workerEnrollmentRequiredKey(workerId),
         previousDigest,
         credentialDigest,
         JSON.stringify(stored),
         String(this.credentialTtlSeconds),
         stableIdentityId ?? '',
+        enrollmentRaw ?? '',
+        String(enrollment?.pairingGeneration ?? ''),
+        enrollment?.generation ?? '',
       );
       if (rotated !== 1) {
         throw new BridgePairingError(

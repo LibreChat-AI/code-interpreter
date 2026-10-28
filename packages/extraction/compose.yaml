@@ -1,0 +1,47 @@
+services:
+    extraction-init:
+        image: ${EXTRACTION_IMAGE:-librechat-extraction:local}
+        build:
+            context: ../..
+            dockerfile: packages/extraction/Dockerfile
+            target: runtime
+        command: [node, dist/provision.js]
+        user: '10001:10001'
+        read_only: true
+        cap_drop: [ALL]
+        security_opt: [no-new-privileges:true]
+        network_mode: none
+        mem_limit: 128m
+        cpus: 1
+        pids_limit: 16
+        healthcheck:
+            disable: true
+        volumes:
+            - extraction-token:/run/extraction
+    extraction:
+        image: ${EXTRACTION_IMAGE:-librechat-extraction:local}
+        build:
+            context: ../..
+            dockerfile: packages/extraction/Dockerfile
+            target: runtime
+        depends_on:
+            extraction-init:
+                condition: service_completed_successfully
+        init: true
+        user: '10001:10001'
+        read_only: true
+        cap_drop: [ALL]
+        security_opt: [no-new-privileges:true]
+        networks: [extraction]
+        mem_limit: 768m
+        cpus: 2
+        pids_limit: 32
+        tmpfs:
+            - /jobs:rw,noexec,nosuid,nodev,size=96m,nr_inodes=1024,uid=10001,gid=10001,mode=0700
+        volumes:
+            - extraction-token:/run/extraction:ro
+networks:
+    extraction:
+        internal: true
+volumes:
+    extraction-token:

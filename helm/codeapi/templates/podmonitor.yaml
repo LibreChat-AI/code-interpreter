@@ -43,6 +43,28 @@ spec:
     matchLabels:
       {{- include "codeapi.serviceWorker.selectorLabels" . | nindent 6 }}
 {{- end }}
+{{- if .Values.workerSandbox.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "codeapi.fullname" . }}-sandbox-runner
+  labels:
+    {{- include "codeapi.sandboxRunner.labels" . | nindent 4 }}
+spec:
+  podMetricsEndpoints:
+    - path: /metrics
+      port: sandbox
+      {{- with .Values.metrics.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with .Values.metrics.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+  selector:
+    matchLabels:
+      {{- include "codeapi.sandboxRunner.selectorLabels" . | nindent 6 }}
+{{- end }}
 {{- if .Values.egressGateway.enabled }}
 ---
 apiVersion: monitoring.coreos.com/v1

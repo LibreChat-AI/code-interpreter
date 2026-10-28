@@ -2,10 +2,79 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BridgeProtocolError } from './protocol.js';
+import type { WorkspaceToolRequest } from './protocol.js';
 import { BridgeWorker, BridgeWorkspaceQuarantinedError } from './worker.js';
 import { SandboxWorkspaceTools, WorkspaceToolError } from './workspace.js';
 
 const incarnationId = 'incarnation-00000001';
+
+test('worker logs command failures locally without changing bridge settlements', async () => {
+  for (const sink of ['sync', 'async', 'pending'] as const) {
+  for (const operation of ['execute_command', 'list_files'] as const) {
+    const events: unknown[] = [];
+    let settlement: Record<string, unknown> | undefined;
+    const capabilities = {
+      protocolVersion: 1 as const,
+      operations: ['execute_command' as const, 'list_files' as const],
+      workspaces: [{ id: 'primary' }],
+    };
+    const worker = new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1', token: 'worker-secret', workerId: 'vm-1', incarnationId,
+      sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: { statefulWorkspace: false, sandboxProfile: 'anthropic-srt', runtimes: [], workspaceTools: capabilities },
+      workspaceTools: {
+        capabilities, mutationFailuresAreAtomic: true,
+        async execute() {
+          throw new WorkspaceToolError('private error', 'COMMAND_UNAVAILABLE', false, false,
+            { stage: 'credential_resolution', reason: 'credential_failed' });
+        },
+      },
+      workspaceQuarantines: new Map([['primary', mutationQuarantine()]]),
+      onCommandFailure(event) {
+        events.push(event);
+        if (sink === 'sync') throw new Error('private log sink error');
+        if (sink === 'async') return Promise.reject(new Error('private log sink error'));
+        return new Promise<void>(() => {});
+      },
+      fetchImpl: async (_input, init) => {
+        settlement = JSON.parse(String(init?.body));
+        return Response.json({ protocolVersion: 1, accepted: true });
+      },
+    });
+    await worker.executeAndSettle({
+      protocolVersion: 1, assignmentId: 'assignment-1', workerId: 'vm-1', incarnationId, generation: 4,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing', expiresAt: new Date(Date.now() + 5000).toISOString(),
+      executionKind: 'workspace_tool',
+      request: operation === 'execute_command'
+        ? { protocolVersion: 1, operation, workspaceId: 'primary', command: 'echo secret' }
+        : { protocolVersion: 1, operation, workspaceId: 'primary', path: '.' },
+    });
+    assert.equal(events.length, operation === 'execute_command' ? 1 : 0);
+    if (events.length) assert.deepEqual(events[0], {
+      event: 'workspace_command_unavailable', stage: 'credential_resolution', reason: 'credential_failed',
+      assignmentId: 'assignment-1', workerId: 'vm-1', incarnationId, workspaceId: 'primary',
+      operation: 'execute_command', mutationMayHaveCommitted: false, requiresQuarantine: false,
+    });
+    assert.equal(settlement?.status, 'rejected');
+    assert.equal(settlement?.errorCode, 'COMMAND_UNAVAILABLE');
+    assert.equal('diagnostic' in settlement!, false);
+    assert.equal(JSON.stringify(events).includes('secret'), false);
+  }
+  }
+});
+
+test('instance advertisement requires a guard resolver even for reads and with base guards', () => {
+  for (const operation of ['read_file', 'write_file'] as const) {
+    const workspaceTools = { protocolVersion: 1 as const, operations: [operation], workspaces: [{ id: 'primary', workspaceInstances: ['git_worktree'] as ['git_worktree'] }] };
+    assert.throws(() => new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1', token: 'worker-secret', workerId: 'vm-1', incarnationId,
+      sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: { statefulWorkspace: false, sandboxProfile: 'anthropic-srt', runtimes: [], workspaceTools },
+      workspaceQuarantines: new Map([['primary', mutationQuarantine()]]),
+      workspaceTools: { capabilities: workspaceTools, async execute() { throw new Error('must not execute'); } },
+    }), /instance capabilities require a durable quarantine resolver/);
+  }
+});
 
 test('worker clears named actions when command execution is not negotiated', async () => {
   const workspaceTools = {
@@ -221,6 +290,112 @@ test('worker omits pagination fields until Code API negotiates them', async () =
     paths: ['first.txt'],
     truncated: true,
   });
+});
+
+async function settleMissingFile(
+  registeredCodes: string[] | undefined,
+  rejectSettlement: (body: Record<string, unknown>) => boolean = () => false,
+): Promise<{ settlements: Array<Record<string, unknown>>; failure?: unknown }> {
+  const settlements: Array<Record<string, unknown>> = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'nsjail',
+      runtimes: [],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() {
+        throw new WorkspaceToolError('Workspace path does not exist', 'NOT_FOUND');
+      },
+    },
+    fetchImpl: async (input, init) => {
+      if (!String(input).endsWith('/settle')) {
+        return Response.json({
+          protocolVersion: 1,
+          workerId: 'vm-1',
+          incarnationId,
+          registeredAt: new Date().toISOString(),
+          leaseTtlMs: 60_000,
+          supportedWorkspaceToolOperations: ['read_file'],
+          ...(registeredCodes ? { supportedWorkspaceToolErrorCodes: registeredCodes } : {}),
+        });
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      settlements.push(body);
+      if (rejectSettlement(body)) {
+        return Response.json({ error: 'Invalid bridge settlement' }, { status: 400 });
+      }
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+
+  await worker.register();
+  const failure = await worker.executeAndSettle({
+    protocolVersion: 1,
+    assignmentId: 'assignment-missing-file',
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 1,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: {
+      protocolVersion: 1,
+      operation: 'read_file',
+      workspaceId: 'primary',
+      path: 'logs/pending.log',
+    },
+  }).then(() => undefined, (error: unknown) => error);
+  return { settlements, failure };
+}
+
+test('worker reports NOT_FOUND only to a Code API that advertised it', async () => {
+  const { settlements: supported } = await settleMissingFile(['NOT_FOUND']);
+  assert.deepEqual(
+    supported.map(({ status, errorCode, error }) => ({ status, errorCode, error })),
+    [{ status: 'rejected', errorCode: 'NOT_FOUND', error: 'Workspace path does not exist' }],
+  );
+
+  for (const registeredCodes of [undefined, [], ['SOMETHING_ELSE']]) {
+    const { settlements: legacy } = await settleMissingFile(registeredCodes);
+    assert.deepEqual(
+      legacy.map(({ status, errorCode, error }) => ({ status, errorCode, error })),
+      [{ status: 'rejected', errorCode: 'INVALID_PATH', error: 'Workspace path does not exist' }],
+    );
+  }
+});
+
+test('worker resends a refused NOT_FOUND settlement with its legacy code', async () => {
+  const { settlements, failure } = await settleMissingFile(
+    ['NOT_FOUND'],
+    (body) => body.errorCode === 'NOT_FOUND',
+  );
+
+  assert.equal(failure, undefined);
+  assert.deepEqual(
+    settlements.map(({ errorCode }) => errorCode),
+    ['NOT_FOUND', 'INVALID_PATH'],
+  );
+});
+
+test('worker does not resend a refused legacy settlement', async () => {
+  const { settlements, failure } = await settleMissingFile(undefined, () => true);
+
+  assert.deepEqual(settlements.map(({ errorCode }) => errorCode), ['INVALID_PATH']);
+  assert.ok(failure instanceof BridgeProtocolError);
+  assert.equal(failure.status, 400);
 });
 
 test('worker omits restricted workspaces that legacy registration would widen', async () => {
@@ -646,6 +821,49 @@ test('worker advertises only edit modes and features negotiated by Code API', as
   ]);
 });
 
+test('worker negotiates preview-only tolerant features and drops edit-only hashes', async () => {
+  const registrations: Array<Record<string, unknown>> = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['read_file' as const, 'preview_edit' as const, 'edit_file' as const],
+    workspaces: [{ id: 'primary' }],
+    editFileModes: ['single' as const, 'batch' as const],
+    editFileFeatures: ['expected_base_sha256' as const, 'tolerant_match' as const, 'replace_all' as const],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: true,
+      sandboxProfile: 'native-srt',
+      runtimes: ['bash'],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      async execute() { throw new Error('must not execute'); },
+    },
+    workspaceMutationQuarantine: mutationQuarantine(),
+    fetchImpl: async (_input, init) => {
+      const capabilities = JSON.parse(String(init?.body)).capabilities.workspaceTools;
+      registrations.push(capabilities);
+      return Response.json({
+        protocolVersion: 1, workerId: 'vm-1', incarnationId,
+        registeredAt: new Date().toISOString(), leaseTtlMs: 60_000,
+        supportedWorkspaceToolOperations: ['read_file', 'preview_edit'],
+        supportedWorkspaceEditFileModes: ['single', 'batch'],
+        supportedWorkspaceEditFileFeatures: ['tolerant_match', 'replace_all', 'expected_base_sha256'],
+      });
+    },
+  });
+  await worker.register();
+  assert.deepEqual(registrations.at(-1)?.operations, ['read_file', 'preview_edit']);
+  assert.deepEqual(registrations.at(-1)?.editFileFeatures, ['tolerant_match', 'replace_all']);
+});
+
 test('worker drops file operations when no request mode is compatible', async () => {
   const registrations: Array<Record<string, unknown>> = [];
   const workspaceCapabilities = {
@@ -974,6 +1192,93 @@ test('worker executes a workspace tool assignment locally without acquiring a sa
   });
 });
 
+test('worker isolates dynamic worktree guards from collision-shaped root IDs', async () => {
+  const instanceId = 'a'.repeat(64);
+  const collisionRoot = `foo:git-worktree:${instanceId}`;
+  const lifecycle: string[] = [];
+  const workspaceCapabilities = {
+    protocolVersion: 1 as const,
+    operations: ['write_file' as const],
+    workspaces: [
+      { id: 'foo', workspaceInstances: ['git_worktree'] as ['git_worktree'] },
+      { id: collisionRoot },
+    ],
+  };
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1',
+    token: 'worker-secret',
+    workerId: 'vm-1',
+    incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'anthropic-srt',
+      runtimes: [],
+      workspaceTools: workspaceCapabilities,
+    },
+    workspaceTools: {
+      capabilities: workspaceCapabilities,
+      mutationFailuresAreAtomic: true,
+      async execute(request) {
+        return {
+          protocolVersion: 1,
+          operation: 'write_file',
+          workspaceId: request.workspaceId,
+          path: 'result.txt',
+          created: true,
+          bytesWritten: 2,
+        };
+      },
+    },
+    workspaceQuarantines: new Map([
+      [
+        collisionRoot,
+        mutationQuarantine(
+          undefined,
+          () => lifecycle.push('root:arm'),
+          () => lifecycle.push('root:clear'),
+        ),
+      ],
+    ]),
+    workspaceQuarantineResolver: async () =>
+      mutationQuarantine(
+        undefined,
+        () => lifecycle.push('instance:arm'),
+        () => lifecycle.push('instance:clear'),
+      ),
+    fetchImpl: async () =>
+      Response.json({ protocolVersion: 1, accepted: true }),
+  });
+  const assignment = (workspaceId: string, suffix: string) => ({
+    protocolVersion: 1 as const,
+    assignmentId: `assignment-${suffix}`,
+    workerId: 'vm-1',
+    incarnationId,
+    generation: 4,
+    leaseToken: `lease-token-that-is-long-enough-${suffix}`,
+    expiresAt: new Date(Date.now() + 5_000).toISOString(),
+    executionKind: 'workspace_tool' as const,
+    request: {
+      protocolVersion: 1 as const,
+      operation: 'write_file' as const,
+      workspaceId,
+      path: 'result.txt',
+      content: 'ok',
+      ...(workspaceId === 'foo' ? { workspaceInstanceId: instanceId } : {}),
+    },
+  });
+
+  await worker.executeAndSettle(assignment('foo', 'instance'));
+  await worker.executeAndSettle(assignment(collisionRoot, 'root'));
+
+  assert.deepEqual(lifecycle, [
+    'instance:arm',
+    'instance:clear',
+    'root:arm',
+    'root:clear',
+  ]);
+});
+
 test('worker executes programmatic Bash in the selected workspace and preserves its fence', async () => {
   const programmaticRequests: object[] = [];
   const quarantineEvents: string[] = [];
@@ -1058,6 +1363,7 @@ test('worker executes programmatic Bash in the selected workspace and preserves 
 
 test('worker keeps a selected workspace usable after an atomic programmatic setup failure', async () => {
   const lifecycle: string[] = [];
+  const diagnostics: unknown[] = [];
   let settlement: Record<string, unknown> | undefined;
   const workspaceCapabilities = {
     protocolVersion: 1 as const,
@@ -1092,6 +1398,10 @@ test('worker keeps a selected workspace usable after an atomic programmatic setu
           'COMMAND_UNAVAILABLE',
         );
       },
+    },
+    onCommandFailure(event) {
+      diagnostics.push(event);
+      throw new Error('logging sink failed');
     },
     workspaceQuarantines: new Map([
       [
@@ -1133,6 +1443,14 @@ test('worker keeps a selected workspace usable after an atomic programmatic setu
   assert.deepEqual(lifecycle, ['arm', 'clear']);
   assert.equal(settlement?.status, 'rejected');
   assert.equal(settlement?.errorCode, 'COMMAND_UNAVAILABLE');
+  assert.deepEqual(diagnostics, [{
+    event: 'workspace_command_unavailable', stage: 'dispatch', reason: 'executor_rejected',
+    assignmentId: 'assignment-programmatic-setup-failure', workerId: 'vm-1', incarnationId,
+    workspaceId: 'primary', operation: 'workspace_programmatic',
+    mutationMayHaveCommitted: false, requiresQuarantine: false,
+  }]);
+  assert.equal('commandDiagnostic' in settlement!, false);
+  assert.equal('diagnostic' in settlement!, false);
 });
 
 test('worker keeps a selected workspace usable after confirmed programmatic cancellation cleanup', async () => {
@@ -3064,6 +3382,98 @@ test('worker rejects workspace operations outside its advertised capability', as
   assert.equal(settlement?.status, 'rejected');
   assert.match(String(settlement?.error), /operation is not advertised/i);
 });
+
+for (const [operation, extras] of [
+  ['preview_edit', { matching: 'tolerant', oldText: 'a', newText: 'b' }],
+  ['preview_edit', { matching: 'exact', oldText: 'a', newText: 'b' }],
+  ['preview_edit', { edits: [{ oldText: 'a', newText: 'b', replaceAll: false }] }],
+  ['edit_file', { edits: [{ oldText: 'a', newText: 'b', replaceAll: true }] }],
+] as const) {
+  test(`worker refuses unnegotiated ${operation} feature before dispatch`, async () => {
+    let executions = 0;
+    let armed = 0;
+    let settlement: Record<string, unknown> | undefined;
+    const workspaceCapabilities = {
+      protocolVersion: 1 as const,
+      operations: ['preview_edit' as const, 'edit_file' as const],
+      editFileModes: ['single' as const, 'batch' as const],
+      workspaces: [{ id: 'primary' }],
+    };
+    const worker = new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1', token: 'worker-secret', workerId: 'vm-1',
+      incarnationId, sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: { statefulWorkspace: true, sandboxProfile: 'native-srt', runtimes: ['bash'],
+        workspaceTools: workspaceCapabilities },
+      workspaceTools: { capabilities: workspaceCapabilities, async execute() {
+        executions++;
+        throw new Error('must not execute');
+      } },
+      workspaceMutationQuarantine: mutationQuarantine(undefined, () => armed++),
+      fetchImpl: async (_input, init) => {
+        settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ protocolVersion: 1, accepted: true });
+      },
+    });
+    await worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: `assignment-${operation}-${String('matching' in extras ? extras.matching : 'replace')}`,
+      workerId: 'vm-1', incarnationId, generation: 4,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 5_000).toISOString(),
+      executionKind: 'workspace_tool',
+      request: { protocolVersion: 1, operation, workspaceId: 'primary', path: 'notes.txt', ...extras } as WorkspaceToolRequest,
+    });
+    assert.equal(executions, 0);
+    assert.equal(armed, 0);
+    assert.equal(settlement?.status, 'rejected');
+    assert.match(String(settlement?.error), /edit feature is not advertised/i);
+  });
+}
+
+for (const [label, operations, allowed, mayRead] of [
+  ['edit-only worker', ['edit_file'], ['edit_file'], false],
+  ['read denied by workspace', ['read_file', 'edit_file'], ['edit_file'], false],
+  ['read permitted by workspace', ['read_file', 'edit_file'], ['read_file', 'edit_file'], true],
+  ['preview permits full file reads', ['preview_edit', 'edit_file'], ['preview_edit', 'edit_file'], true],
+] as const) {
+  test(`edit diagnostics respect ${label} authorization`, async () => {
+    const source = 'confidential-source-line';
+    let settlement: Record<string, unknown> | undefined;
+    const capabilities = {
+      protocolVersion: 1 as const,
+      operations: [...operations],
+      editFileModes: ['single' as const],
+      workspaces: [{ id: 'primary', operations: [...allowed] }],
+    };
+    const worker = new BridgeWorker({
+      codeApiUrl: 'https://code.example/v1', token: 'worker-secret', workerId: 'vm-1',
+      incarnationId, sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+      capabilities: { statefulWorkspace: true, sandboxProfile: 'nsjail', runtimes: ['bash'],
+        workspaceTools: capabilities },
+      workspaceTools: { capabilities, mutationFailuresAreAtomic: true, async execute() {
+        throw new WorkspaceToolError(`old_text was not found; closest line: "${source}"`, 'EDIT_CONFLICT');
+      } },
+      workspaceMutationQuarantine: mutationQuarantine(),
+      fetchImpl: async (_url, init) => {
+        settlement = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ protocolVersion: 1, accepted: true });
+      },
+    });
+    await worker.executeAndSettle({
+      protocolVersion: 1,
+      assignmentId: 'edit-source-authorization',
+      workerId: 'vm-1', incarnationId, generation: 4,
+      leaseToken: 'lease-token-that-is-long-enough-for-testing',
+      expiresAt: new Date(Date.now() + 5_000).toISOString(),
+      executionKind: 'workspace_tool',
+      request: { protocolVersion: 1, operation: 'edit_file', workspaceId: 'primary',
+        path: 'notes.txt', oldText: 'missing', newText: 'replacement' },
+    });
+    assert.equal(settlement?.status, 'rejected');
+    assert.equal(settlement?.errorCode, 'EDIT_CONFLICT');
+    assert.equal(String(settlement?.error).includes(source), mayRead);
+  });
+}
 
 test('worker rejects legacy replacement writes outside its advertised mode', async () => {
   let executions = 0;

@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import * as fsp from 'node:fs/promises';
 import { timingSafeEqual } from 'node:crypto';
 
-import { aggregateBashExtras } from './job';
+import { aggregateBashExtras, ensureNodeModulesSymlink } from './job';
 import { execute, type NsJailResult } from './nsjail';
 import { getLatestRuntimeMatchingLanguageVersion } from './runtime';
 import type { Runtime } from './runtime';
@@ -169,7 +169,9 @@ export async function executeWorkspaceCommand(
     HOME: '/mnt/data',
     SANDBOX_LANGUAGE: 'bash',
   };
-  const extraPkgdirs = aggregateBashExtras(runtime.pkgdir, envVars);
+  const linkTarget: { nodeModulesPath?: string } = {};
+  const extraPkgdirs = aggregateBashExtras(runtime.pkgdir, envVars, undefined, linkTarget);
+  ensureNodeModulesSymlink(workspaceRoot, linkTarget.nodeModulesPath);
   const relativeCwd = path.relative(workspaceRoot, cwd).split(path.sep).join('/');
   const result = await (options.executeNsJail ?? execute)({
     command: [

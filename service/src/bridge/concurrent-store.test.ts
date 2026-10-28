@@ -2,7 +2,10 @@ import { afterEach, expect, test } from 'bun:test';
 import RedisMock from 'ioredis-mock';
 import type Redis from 'ioredis';
 import { RedisBridgeStore } from './store';
-import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  workspaceIsolationKey,
+} from '../../../packages/code/src/protocol';
 import type { CodeBridgeAssignment } from './store';
 
 const redis = new RedisMock() as unknown as Redis;
@@ -26,13 +29,20 @@ async function register(workspaceLeaseSlots = 2) {
       workspaceTools: {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         operations: ['read_file'],
-        workspaces: [{ id: 'a' }, { id: 'b' }],
+        workspaces: [
+          { id: 'a', workspaceInstances: ['git_worktree'] },
+          { id: 'b' },
+        ],
       },
     },
   });
   await store.confirmReady(workerId, incarnationId, generation);
 }
-function dispatch(workspaceId: string, signal = new AbortController().signal) {
+function dispatch(
+  workspaceId: string,
+  signal = new AbortController().signal,
+  workspaceInstanceId?: string,
+) {
   const promise = store.dispatchWorkspaceTool({
     workerId,
     signal,
@@ -41,6 +51,7 @@ function dispatch(workspaceId: string, signal = new AbortController().signal) {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       operation: 'read_file',
       workspaceId,
+      ...(workspaceInstanceId == null ? {} : { workspaceInstanceId }),
       path: 'file.txt',
     },
   });
@@ -346,6 +357,97 @@ test('same-root work waits while another root progresses', async () => {
   await Promise.all([nextA, b]);
 });
 
+test('a long same-root queue allowance does not extend slot or assignment TTLs', async () => {
+  await register();
+  const active = dispatch('a');
+  const activeAssignment = await store.lease(
+    workerId, incarnationId, 1000, undefined, undefined, 0,
+  );
+  const controller = new AbortController();
+  const queued = store.dispatchWorkspaceTool({
+    workerId,
+    signal: controller.signal,
+    deadlineAtMs: Date.now() + 300_000,
+    executionTimeoutMs: 305_000,
+    request: { protocolVersion: 1, operation: 'read_file', workspaceId: 'a', path: 'second.txt' },
+  });
+  void queued.catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await settle(activeAssignment!);
+  await active;
+
+  const assignment = await store.lease(
+    workerId, incarnationId, 1000, undefined, undefined, 0,
+  );
+  if (assignment == null) {
+    controller.abort();
+    await queued.catch(() => undefined);
+    throw new Error('Queued request was not leased');
+  }
+  expect(assignment.request).toMatchObject({ path: 'second.txt' });
+  try {
+    const expiresAtMs = Date.parse(assignment.expiresAt);
+    const slotExpiresAtMs = Number(await redis.hget(
+      `codeapi:bridge:v1:worker:${workerId}:workspace-slots`, 'e:0',
+    ));
+    expect(slotExpiresAtMs).toBeGreaterThan(expiresAtMs + 28_000);
+    expect(slotExpiresAtMs).toBeLessThan(expiresAtMs + 32_000);
+    const assignmentTtlMs = await redis.pttl(`codeapi:bridge:v1:assignment:${assignment.assignmentId}`);
+    const remainingMs = expiresAtMs - Date.now();
+    expect(assignmentTtlMs).toBeGreaterThan(remainingMs + 28_000);
+    expect(assignmentTtlMs).toBeLessThan(remainingMs + 32_000);
+  } finally {
+    await settle(assignment);
+    await queued;
+  }
+});
+
+test('conversation worktrees on one source use independent capacity lanes', async () => {
+  await register();
+  const firstId = 'a'.repeat(64);
+  const secondId = 'b'.repeat(64);
+  const firstPending = dispatch('a', undefined, firstId);
+  const first = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  const samePending = dispatch('a', undefined, firstId);
+  const secondPending = dispatch('a', undefined, secondId);
+  const second = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    1,
+  ))!;
+  expect(second.request).toMatchObject({
+    workspaceId: 'a',
+    workspaceInstanceId: secondId,
+  });
+  await settle(first);
+  await firstPending;
+  const same = (await store.lease(
+    workerId,
+    incarnationId,
+    1000,
+    undefined,
+    undefined,
+    0,
+  ))!;
+  expect(same.request).toMatchObject({
+    workspaceId: 'a',
+    workspaceInstanceId: firstId,
+  });
+  await settle(second);
+  await settle(same);
+  await Promise.all([samePending, secondPending]);
+});
+
 test('queued cancellation never leases and does not block another root', async () => {
   await register();
   const a = dispatch('a');
@@ -548,7 +650,11 @@ test('post-settlement fences are authenticated, idempotent, and invalidated by r
   await expect(dispatch('a')).rejects.toMatchObject({
     code: 'WORKSPACE_QUARANTINED',
   });
-  await store.resetWorkspace(workerId, incarnationId, 'native-workspace:a');
+  await store.resetWorkspace(
+    workerId,
+    incarnationId,
+    `native-workspace:${workspaceIsolationKey('a')}`,
+  );
   await expect(
     store.settle(
       workerId,

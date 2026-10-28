@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'fs';
+import * as path from 'path';
 import {
   jobCompletionWaitTimeoutMs,
   jobDeadlineAtMs,
@@ -22,9 +24,20 @@ describe('node language configuration', () => {
   it('maps Node.js requests to the node sandbox runtime', () => {
     expect(languageConfig[Languages.node]).toEqual({
       language: 'node',
-      version: '24.15.0',
+      version: '24.22.1',
       fileName: 'index.js',
     });
+  });
+
+  it('aligns package installers and Helm with the selected Node runtime', () => {
+    const root = path.resolve(__dirname, '../..');
+    const version = languageConfig[Languages.node]!.version;
+    for (const file of ['build-packages.sh', 'docker/package-init.sh']) {
+      expect(readFileSync(path.join(root, file), 'utf8'))
+        .toContain(`NODE_VERSION="\${NODE_VERSION:-${version}}"`);
+    }
+    expect(readFileSync(path.join(root, 'helm/codeapi/values.yaml'), 'utf8'))
+      .toContain(`nodeVersion: "${version}"`);
   });
 
   it('creates a valid Node.js execution payload', () => {
@@ -45,7 +58,7 @@ describe('node language configuration', () => {
 
     expect(payload).toMatchObject({
       language: 'node',
-      version: '24.15.0',
+      version: '24.22.1',
       session_id: 'session-node',
       args: ['--trace-warnings'],
       files: [
@@ -67,15 +80,15 @@ describe('runtime version configuration', () => {
     });
   });
 
-  it('maps Bun JavaScript and TypeScript requests to Bun 1.3.14', () => {
+  it('maps Bun JavaScript and TypeScript requests to Bun 1.4.4', () => {
     expect(languageConfig[Languages.js]).toMatchObject({
       language: 'bun-js',
-      version: '1.3.14',
+      version: '1.4.4',
       fileName: 'index.js',
     });
     expect(languageConfig[Languages.ts]).toMatchObject({
       language: 'bun-ts',
-      version: '1.3.14',
+      version: '1.4.4',
       fileName: 'main.ts',
     });
   });

@@ -1,0 +1,518 @@
+import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash, randomBytes } from 'crypto';
+import RedisMock from 'ioredis-mock';
+
+import type Redis from 'ioredis';
+import type {
+  BridgeRecoveryProofInput,
+  BridgeRecoveryStartProofInput,
+} from '../../../packages/code/src/identity';
+import type {
+  BridgeRecoveryChallenge,
+  BridgeRecoveryOptions,
+  BridgeWorkerBinding,
+  BridgeWorkerCredential,
+} from './pairing';
+
+import {
+  createBridgeIdentity,
+  signBridgeRecovery,
+  signBridgeRecoveryStart,
+  signBridgeRequest,
+} from '../../../packages/code/src/identity';
+import { RedisBridgePairingStore } from './pairing';
+import { RedisBridgeStore } from './store';
+
+const redis = new RedisMock() as unknown as Redis;
+const serverId = 'https://code.example.test';
+const workerId = 'durable-worker';
+const binding: BridgeWorkerBinding = {
+  tenantId: 'tenant-one',
+  principal: { type: 'user', id: 'owner-one' },
+};
+
+function recoverableStore(options: Partial<BridgeRecoveryOptions> = {}): RedisBridgePairingStore {
+  return new RedisBridgePairingStore(redis, 600, 300, 5_000, '', {
+    serverId,
+    ...options,
+  });
+}
+
+function authorizedRequest(
+  privateKey: string,
+  credential: string,
+  nonce: string,
+): Parameters<RedisBridgePairingStore['authorize']>[0] {
+  const proof = {
+    credential,
+    method: 'POST',
+    path: '/v1/bridge/workers/register',
+    timestamp: new Date().toISOString(),
+    nonce,
+    body: JSON.stringify({ protocolVersion: 1, workerId }),
+  };
+  return {
+    ...proof,
+    workerId,
+    signature: signBridgeRequest(privateKey, proof),
+  };
+}
+
+async function enroll(
+  store: RedisBridgePairingStore,
+  publicKey: string,
+): Promise<BridgeWorkerCredential> {
+  const pairing = await store.issue(workerId, binding);
+  return store.redeem({ workerId, code: pairing.code, publicKey });
+}
+
+function recoveryStart(
+  privateKey: string,
+  nonce = randomBytes(32).toString('base64url'),
+  overrides: Partial<BridgeRecoveryStartProofInput> = {},
+): { proof: BridgeRecoveryStartProofInput; signature: string } {
+  const proof: BridgeRecoveryStartProofInput = {
+    operation: 'credential.challenge',
+    serverId,
+    workerId,
+    timestamp: new Date().toISOString(),
+    nonce,
+    ...overrides,
+  };
+  return { proof, signature: signBridgeRecoveryStart(privateKey, proof) };
+}
+
+async function challengeFor(
+  store: RedisBridgePairingStore,
+  privateKey: string,
+): Promise<BridgeRecoveryChallenge> {
+  const { proof, signature } = recoveryStart(privateKey);
+  return store.createRecoveryChallenge(workerId, proof, signature);
+}
+
+async function recover(
+  store: RedisBridgePairingStore,
+  privateKey: string,
+): Promise<{ challenge: BridgeRecoveryChallenge; credential: BridgeWorkerCredential }> {
+  const challenge = await challengeFor(store, privateKey);
+  const credential = await store.recoverCredential(
+    workerId,
+    challenge,
+    signBridgeRecovery(privateKey, challenge),
+  );
+  return { challenge, credential };
+}
+
+afterEach(async () => {
+  await redis.flushall();
+});
+
+describe('durable bridge enrollment', () => {
+  test('keeps legacy pairing and refresh compatible until recovery is enabled', async () => {
+    const legacy = new RedisBridgePairingStore(redis);
+    const identity = createBridgeIdentity();
+    const issued = await enroll(legacy, identity.publicKey);
+    expect(await redis.get(`codeapi:bridge:v1:enrollment:${workerId}`)).toBeNull();
+
+    const replica = recoverableStore();
+    const { proof, signature } = recoveryStart(identity.privateKey);
+    await expect(replica.createRecoveryChallenge(workerId, proof, signature))
+      .rejects.toMatchObject({ code: 'ENROLLMENT_INVALID' });
+    const rotated = await replica.rotate(workerId);
+    await expect(
+      replica.authorize(authorizedRequest(identity.privateKey, rotated.credential, 'legacy-proof')),
+    ).resolves.toMatchObject({ workerId, binding });
+    expect(issued.credential).not.toBe(rotated.credential);
+  });
+
+  test('recovers after access expiry and restart with the same identity and binding', async () => {
+    const identity = createBridgeIdentity();
+    const firstReplica = recoverableStore();
+    const issued = await enroll(firstReplica, identity.publicKey);
+    const original = await firstReplica.authorize(
+      authorizedRequest(identity.privateKey, issued.credential, 'before-outage'),
+    );
+    const digest = createHash('sha256').update(issued.credential).digest('hex');
+    await redis.del(
+      `codeapi:bridge:v1:credential:${digest}`,
+      `codeapi:bridge:v1:identity:${workerId}`,
+      `codeapi:bridge:v1:stable-identity:${workerId}`,
+    );
+    await expect(firstReplica.rotate(workerId)).rejects.toMatchObject({
+      code: 'CREDENTIAL_INVALID',
+    });
+
+    const restartedReplica = recoverableStore();
+    const { challenge, credential } = await recover(restartedReplica, identity.privateKey);
+    expect(challenge).toMatchObject({
+      operation: 'credential.recover',
+      serverId,
+      workerId,
+    });
+    const restored = await firstReplica.authorize(
+      authorizedRequest(identity.privateKey, credential.credential, 'after-outage'),
+    );
+    expect(restored).toMatchObject({ identityId: original.identityId, binding });
+    expect(credential.expiresAt).toBeString();
+    const rotated = await restartedReplica.rotate(workerId, restored.credentialId);
+    await expect(firstReplica.authorize(
+      authorizedRequest(identity.privateKey, rotated.credential, 'after-rotation'),
+    )).resolves.toMatchObject({ identityId: original.identityId, binding });
+  });
+
+  test('requires the enrolled key and binds proofs to server, worker, generation, operation, and expiry', async () => {
+    const enrolled = createBridgeIdentity();
+    const outsider = createBridgeIdentity();
+    const store = recoverableStore();
+    await enroll(store, enrolled.publicKey);
+    const challenge = await challengeFor(store, enrolled.privateKey);
+
+    await expect(store.recoverCredential(
+      workerId, challenge, signBridgeRecovery(outsider.privateKey, challenge),
+    )).rejects.toMatchObject({ code: 'PROOF_INVALID' });
+    for (const modified of [
+      { ...challenge, serverId: 'https://other.example.test' },
+      { ...challenge, workerId: 'another-worker' },
+      { ...challenge, enrollmentGeneration: '0'.repeat(24) },
+      { ...challenge, operation: 'credential.recover-other' as 'credential.recover' },
+      { ...challenge, expiresAt: new Date(Date.now() + 120_000).toISOString() },
+    ]) {
+      await expect(store.recoverCredential(
+        workerId,
+        modified,
+        signBridgeRecovery(enrolled.privateKey, modified as BridgeRecoveryProofInput),
+      )).rejects.toMatchObject({ code: 'CHALLENGE_INVALID' });
+    }
+    const signature = signBridgeRecovery(enrolled.privateKey, challenge);
+    await store.recoverCredential(workerId, challenge, signature);
+    await expect(store.recoverCredential(workerId, challenge, signature))
+      .rejects.toMatchObject({ code: 'CHALLENGE_INVALID' });
+  });
+
+  test('rejects a signed challenge after its short-lived Redis window expires', async () => {
+    const identity = createBridgeIdentity();
+    const store = recoverableStore({ challengeTtlSeconds: 1 });
+    await enroll(store, identity.publicKey);
+    const challenge = await challengeFor(store, identity.privateKey);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await expect(store.recoverCredential(
+      workerId, challenge, signBridgeRecovery(identity.privateKey, challenge),
+    )).rejects.toMatchObject({ code: 'CHALLENGE_INVALID' });
+  });
+
+  test('retries a lost recovery response without changing the enrolled identity', async () => {
+    const identity = createBridgeIdentity();
+    const first = recoverableStore();
+    const originalCredential = await enroll(first, identity.publicKey);
+    const original = await first.authorize(
+      authorizedRequest(identity.privateKey, originalCredential.credential, 'before-lost-response'),
+    );
+    await recover(first, identity.privateKey); // The caller lost this credential response.
+    const second = recoverableStore();
+    const retried = await recover(second, identity.privateKey);
+    const auth = await second.authorize(
+      authorizedRequest(identity.privateKey, retried.credential.credential, 'after-lost-response'),
+    );
+    expect(auth.identityId).toBe(original.identityId);
+    expect(auth.binding).toEqual(binding);
+    const enrolled = JSON.parse((await redis.get(`codeapi:bridge:v1:enrollment:${workerId}`))!) as {
+      generation: string;
+    };
+    expect(await redis.get(`codeapi:bridge:v1:enrollment-required:${workerId}`))
+      .toBe(enrolled.generation);
+  });
+
+  test('rejects expired and missing enrollment even when an access credential remains live', async () => {
+    const identity = createBridgeIdentity();
+    const store = recoverableStore({ enrollmentTtlSeconds: 1 });
+    const issued = await enroll(store, identity.publicKey);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await expect(challengeFor(store, identity.privateKey))
+      .rejects.toMatchObject({ code: 'ENROLLMENT_INVALID' });
+    await expect(store.rotate(workerId))
+      .rejects.toMatchObject({ code: 'ENROLLMENT_INVALID' });
+    await expect(store.authorize(
+      authorizedRequest(identity.privateKey, issued.credential, 'expired-enrollment'),
+    )).rejects.toMatchObject({ code: 'ENROLLMENT_INVALID' });
+  });
+
+  test('never treats an unmarked access token as legacy after authorization state is lost', async () => {
+    const identity = createBridgeIdentity();
+    const store = recoverableStore();
+    const issued = await enroll(store, identity.publicKey);
+    const credentialKey = `codeapi:bridge:v1:credential:${createHash('sha256').update(issued.credential).digest('hex')}`;
+    const raw = JSON.parse((await redis.get(credentialKey))!) as { enrollmentGeneration?: string };
+    delete raw.enrollmentGeneration; // Simulate a refresh by a pre-recovery replica.
+    await redis.set(credentialKey, JSON.stringify(raw), 'EX', 300);
+    await redis.del(`codeapi:bridge:v1:enrollment:${workerId}`);
+
+    expect(await redis.get(`codeapi:bridge:v1:enrollment-required:${workerId}`)).not.toBeNull();
+    await expect(store.authorize(
+      authorizedRequest(identity.privateKey, issued.credential, 'lost-authorization'),
+    )).rejects.toMatchObject({ code: 'ENROLLMENT_INVALID' });
+    await expect(store.rotate(workerId)).rejects.toMatchObject({ code: 'ENROLLMENT_INVALID' });
+    await expect(challengeFor(store, identity.privateKey))
+      .rejects.toMatchObject({ code: 'ENROLLMENT_INVALID' });
+    await redis.set(`codeapi:bridge:v1:enrollment:${workerId}`, 'null');
+    await expect(challengeFor(store, identity.privateKey))
+      .rejects.toMatchObject({ code: 'ENROLLMENT_INVALID' });
+  });
+
+  test('re-pairing explicitly supersedes a previous key and binds to the new principal', async () => {
+    const first = createBridgeIdentity();
+    const second = createBridgeIdentity();
+    const store = recoverableStore();
+    const initial = await enroll(store, first.publicKey);
+    const pending = await challengeFor(store, first.privateKey);
+    const replacement = await store.issue(workerId, {
+      tenantId: 'tenant-two', principal: { type: 'user', id: 'owner-two' },
+    });
+    await store.redeem({ workerId, code: replacement.code, publicKey: second.publicKey });
+
+    await expect(store.recoverCredential(
+      workerId, pending, signBridgeRecovery(first.privateKey, pending),
+    )).rejects.toMatchObject({ code: 'CHALLENGE_INVALID' });
+    await expect(store.authorize(
+      authorizedRequest(first.privateKey, initial.credential, 'superseded-key'),
+    )).rejects.toMatchObject({ code: 'CREDENTIAL_INVALID' });
+    const { credential } = await recover(store, second.privateKey);
+    await expect(store.authorize(
+      authorizedRequest(second.privateKey, credential.credential, 'new-owner'),
+    )).resolves.toMatchObject({
+      binding: { tenantId: 'tenant-two', principal: { type: 'user', id: 'owner-two' } },
+    });
+  });
+
+  test('concurrent replicas consume a recovery challenge and count it only once', async () => {
+    const identity = createBridgeIdentity();
+    const first = recoverableStore({ maxAttemptsPerMinute: 2 });
+    const second = recoverableStore({ maxAttemptsPerMinute: 2 });
+    await enroll(first, identity.publicKey);
+    const challenge = await challengeFor(first, identity.privateKey);
+    const signature = signBridgeRecovery(identity.privateKey, challenge);
+    const attempts = await Promise.allSettled([
+      first.recoverCredential(workerId, challenge, signature),
+      second.recoverCredential(workerId, challenge, signature),
+    ]);
+    const issued = attempts.filter(
+      (result): result is PromiseFulfilledResult<BridgeWorkerCredential> =>
+        result.status === 'fulfilled',
+    );
+    const rejected = attempts.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    expect(issued).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({ reason: { code: 'CHALLENGE_INVALID' } });
+    const digest = createHash('sha256').update(issued[0].value.credential).digest('hex');
+    expect(await redis.get(`codeapi:bridge:v1:identity:${workerId}`)).toBe(digest);
+    expect(await redis.get(`codeapi:bridge:v1:recovery:rate:complete:${workerId}:${challenge.enrollmentGeneration}`))
+      .toBe('1');
+  });
+
+  test('revocation beats a signed recovery pending on a different replica', async () => {
+    const identity = createBridgeIdentity();
+    const first = recoverableStore();
+    const second = recoverableStore();
+    await enroll(first, identity.publicKey);
+    const challenge = await challengeFor(first, identity.privateKey);
+    const originalEval = redis.eval.bind(redis);
+    let release!: () => void;
+    let enter!: () => void;
+    const paused = new Promise<void>((resolve) => { enter = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    redis.eval = (async (script: string, ...args: unknown[]) => {
+      if (script.includes('local stableIdentity = redis.call')) {
+        enter();
+        await resume;
+      }
+      return (originalEval as (...evalArgs: unknown[]) => Promise<unknown>)(script, ...args);
+    }) as Redis['eval'];
+    try {
+      const pending = first.recoverCredential(
+        workerId, challenge, signBridgeRecovery(identity.privateKey, challenge),
+      );
+      await paused;
+      await second.revoke(workerId);
+      release();
+      await expect(pending).rejects.toMatchObject({ code: 'CHALLENGE_INVALID' });
+      expect(await redis.get(`codeapi:bridge:v1:identity:${workerId}`)).toBeNull();
+      expect(await redis.get(`codeapi:bridge:v1:enrollment:${workerId}`)).toBeNull();
+    } finally {
+      redis.eval = originalEval as Redis['eval'];
+      release();
+    }
+  });
+
+  test('isolates untrusted recovery limits by socket peer and endpoint from signed machine quotas', async () => {
+    const identity = createBridgeIdentity();
+    const first = recoverableStore({
+      maxUntrustedRequestsPerMinute: 1, maxChallengesPerMinute: 1, maxAttemptsPerMinute: 1,
+    });
+    const second = recoverableStore({
+      maxUntrustedRequestsPerMinute: 1, maxChallengesPerMinute: 1, maxAttemptsPerMinute: 1,
+    });
+    await enroll(first, identity.publicKey);
+    await first.limitUntrustedRecovery('192.0.2.1', 'challenge');
+    await expect(second.limitUntrustedRecovery('192.0.2.1', 'challenge'))
+      .rejects.toMatchObject({ code: 'RECOVERY_RATE_LIMITED' });
+    await expect(second.limitUntrustedRecovery('192.0.2.2', 'challenge'))
+      .resolves.toBeUndefined();
+    await expect(second.limitUntrustedRecovery('192.0.2.1', 'recover'))
+      .resolves.toBeUndefined();
+    expect((await redis.keys('codeapi:bridge:v1:recovery:rate:start:*')).length).toBe(0);
+    const { credential } = await recover(second, identity.privateKey);
+    expect(credential.workerId).toBe(workerId);
+  });
+
+  test('only a signed, fresh, unused start request consumes the worker challenge budget', async () => {
+    const identity = createBridgeIdentity();
+    const outsider = createBridgeIdentity();
+    const first = recoverableStore({ maxChallengesPerMinute: 2 });
+    const second = recoverableStore({ maxChallengesPerMinute: 2 });
+    await enroll(first, identity.publicKey);
+
+    for (let index = 0; index < 20; index += 1) {
+      const forged = recoveryStart(outsider.privateKey);
+      await expect(first.createRecoveryChallenge(workerId, forged.proof, forged.signature))
+        .rejects.toMatchObject({ code: 'PROOF_INVALID' });
+    }
+    const otherServer = recoveryStart(identity.privateKey, undefined, {
+      serverId: 'https://unrelated.example.test',
+    });
+    await expect(first.createRecoveryChallenge(workerId, otherServer.proof, otherServer.signature))
+      .rejects.toMatchObject({ code: 'PROOF_INVALID' });
+    const stale = recoveryStart(identity.privateKey, undefined, {
+      timestamp: new Date(Date.now() - 5 * 60_000).toISOString(),
+    });
+    await expect(first.createRecoveryChallenge(workerId, stale.proof, stale.signature))
+      .rejects.toMatchObject({ code: 'PROOF_INVALID' });
+
+    const valid = recoveryStart(identity.privateKey);
+    await first.createRecoveryChallenge(workerId, valid.proof, valid.signature);
+    await expect(second.createRecoveryChallenge(workerId, valid.proof, valid.signature))
+      .rejects.toMatchObject({ code: 'PROOF_REPLAYED' });
+    await challengeFor(second, identity.privateKey);
+    await expect(challengeFor(first, identity.privateKey))
+      .rejects.toMatchObject({ code: 'RECOVERY_RATE_LIMITED' });
+  });
+
+  test('fabricated completions never spend the worker budget or block a fresh signed recovery', async () => {
+    const identity = createBridgeIdentity();
+    const first = recoverableStore({ maxAttemptsPerMinute: 1 });
+    const second = recoverableStore({ maxAttemptsPerMinute: 1 });
+    await enroll(first, identity.publicKey);
+    const real = await challengeFor(first, identity.privateKey);
+
+    for (let index = 0; index < 35; index += 1) {
+      const fake = { ...real, challenge: randomBytes(32).toString('base64url') };
+      await expect(first.recoverCredential(workerId, fake, 'forged'))
+        .rejects.toMatchObject({ code: 'CHALLENGE_INVALID' });
+    }
+    await first.recoverCredential(workerId, real, signBridgeRecovery(identity.privateKey, real));
+    const next = await challengeFor(second, identity.privateKey);
+    await expect(second.recoverCredential(
+      workerId, next, signBridgeRecovery(identity.privateKey, next),
+    )).rejects.toMatchObject({ code: 'RECOVERY_RATE_LIMITED' });
+  });
+
+  test('invalid signatures exhaust only their own challenge, not the enrolled worker', async () => {
+    const identity = createBridgeIdentity();
+    const first = recoverableStore({ maxAttemptsPerMinute: 1 });
+    const second = recoverableStore({ maxAttemptsPerMinute: 1 });
+    await enroll(first, identity.publicKey);
+    const attacked = await challengeFor(first, identity.privateKey);
+    await expect(first.recoverCredential(workerId, attacked, 'forged'))
+      .rejects.toMatchObject({ code: 'PROOF_INVALID' });
+    await expect(second.recoverCredential(
+      workerId, attacked, signBridgeRecovery(identity.privateKey, attacked),
+    )).rejects.toMatchObject({ code: 'RECOVERY_RATE_LIMITED' });
+    const fresh = await challengeFor(second, identity.privateKey);
+    await expect(first.recoverCredential(
+      workerId, fresh, signBridgeRecovery(identity.privateKey, fresh),
+    )).resolves.toMatchObject({ workerId });
+  });
+
+  test('key replacement starts new signed challenge and recovery budgets', async () => {
+    const oldKey = createBridgeIdentity();
+    const newKey = createBridgeIdentity();
+    const store = recoverableStore({ maxChallengesPerMinute: 1, maxAttemptsPerMinute: 1 });
+    await enroll(store, oldKey.publicKey);
+    const oldChallenge = await challengeFor(store, oldKey.privateKey);
+    await store.recoverCredential(
+      workerId, oldChallenge, signBridgeRecovery(oldKey.privateKey, oldChallenge),
+    );
+    const replacement = await store.issue(workerId, binding);
+    await store.redeem({ workerId, code: replacement.code, publicKey: newKey.publicKey });
+
+    await expect(challengeFor(store, oldKey.privateKey))
+      .rejects.toMatchObject({ code: 'PROOF_INVALID' });
+    const newChallenge = await challengeFor(store, newKey.privateKey);
+    await expect(store.recoverCredential(
+      workerId, newChallenge, signBridgeRecovery(newKey.privateKey, newChallenge),
+    )).resolves.toMatchObject({ workerId });
+  });
+
+  test('revocation fences a previously verified start proof before a challenge is written', async () => {
+    const identity = createBridgeIdentity();
+    const first = recoverableStore();
+    const second = recoverableStore();
+    await enroll(first, identity.publicKey);
+    const { proof, signature } = recoveryStart(identity.privateKey);
+    const originalEval = redis.eval.bind(redis);
+    let release!: () => void;
+    let enter!: () => void;
+    const paused = new Promise<void>((resolve) => { enter = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    redis.eval = (async (script: string, ...args: unknown[]) => {
+      if (script.includes('KEYS[6]) == 1 then return -2')) {
+        enter();
+        await resume;
+      }
+      return (originalEval as (...evalArgs: unknown[]) => Promise<unknown>)(script, ...args);
+    }) as Redis['eval'];
+    try {
+      const pending = first.createRecoveryChallenge(workerId, proof, signature);
+      await paused;
+      await second.revoke(workerId);
+      release();
+      await expect(pending).rejects.toMatchObject({ code: 'ENROLLMENT_INVALID' });
+      expect(await redis.keys('codeapi:bridge:v1:recovery:challenge:*')).toEqual([]);
+    } finally {
+      redis.eval = originalEval as Redis['eval'];
+      release();
+    }
+  });
+
+  test('recovering credentials never clears worker or workspace quarantine', async () => {
+    const identity = createBridgeIdentity();
+    const store = recoverableStore();
+    await enroll(store, identity.publicKey);
+    const workerQuarantine = `codeapi:bridge:v1:worker:${workerId}:incarnation:incarnation-00000001:quarantined`;
+    const workspaceQuarantine = `codeapi:bridge:v1:worker:${workerId}:workspace:${createHash('sha256').update('session-one').digest('hex')}:quarantined`;
+    await redis.set(workerQuarantine, '1');
+    await redis.set(workspaceQuarantine, '1');
+    const { credential } = await recover(store, identity.privateKey);
+    expect(await redis.get(workerQuarantine)).toBe('1');
+    expect(await redis.get(workspaceQuarantine)).toBe('1');
+    const auth = await store.authorize(
+      authorizedRequest(identity.privateKey, credential.credential, 'quarantined-machine'),
+    );
+    await expect(new RedisBridgeStore(redis).register({
+      protocolVersion: 1,
+      workerId,
+      incarnationId: 'incarnation-00000001',
+      capabilities: { statefulWorkspace: true, sandboxProfile: 'nsjail', runtimes: ['bash'] },
+    }, auth)).rejects.toMatchObject({ code: 'WORKER_QUARANTINED' });
+  });
+
+  test('refuses non-HTTPS or non-origin deployment identity and unbounded recovery policy', () => {
+    for (const invalid of ['http://code.example.test', 'https://code.example.test/path', 'https://user@code.example.test']) {
+      expect(() => recoverableStore({ serverId: invalid })).toThrow();
+    }
+    expect(() => recoverableStore({ maxAttemptsPerMinute: 0 })).toThrow();
+    expect(() => recoverableStore({ maxUntrustedRequestsPerMinute: 0 })).toThrow();
+    expect(() => recoverableStore({ maxUntrustedRequestsPerMinute: 1201 })).toThrow();
+    expect(() => recoverableStore({ challengeTtlSeconds: 301 })).toThrow();
+  });
+});

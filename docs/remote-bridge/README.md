@@ -3,6 +3,10 @@
 Remote Code Bridge makes an operator-owned VM a stateful Code API execution
 environment without exposing that VM to inbound internet traffic.
 
+For an end-to-end host setup, including pairing, named environments, systemd,
+launchd, GitHub App credentials, upgrades, verification, and recovery, see the
+[self-hosted worker runbook](./worker-runbook.md).
+
 ```text
 LibreChat -> Code API -> Redis assignment
                          ^             |
@@ -26,6 +30,42 @@ CODEAPI_BRIDGE_WORKER_ID=my-vm
 CODEAPI_BRIDGE_TOKEN=<strong-administrator-bootstrap-secret>
 CODEAPI_BRIDGE_AUTH_MODE=paired
 ```
+
+To opt in to durable machine authorization on every Code API replica, set a
+single stable public **Code API** origin (not the LibreChat URL):
+
+```dotenv
+CODEAPI_BRIDGE_RECOVERY_SERVER_ID=https://code.example.com
+# 0 (default): enrolled machine keys remain authorized until revoked.
+# CODEAPI_BRIDGE_ENROLLMENT_TTL_SECONDS=0
+# CODEAPI_BRIDGE_RECOVERY_CHALLENGE_TTL_SECONDS=60
+# CODEAPI_BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE=12
+# CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE=30
+# CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE=240
+```
+
+Omitting the server ID retains the existing pairing and refresh behavior and
+hides the recovery routes. Deploy the compatible Code API version to **all**
+replicas before setting this value and enrolling workers again. Older Code API
+replicas can still pair or refresh a worker but do not write durable enrollment;
+they must not serve device login or recovery requests. Only a pairing redeemed
+after this option is enabled has a recoverable key. Updating Code API alone
+does not make old workers reconnect automatically: the CLI must also implement
+this recovery protocol in the later worker release.
+
+Store Redis state durably across restarts. The primary `docker-compose.yaml`
+now uses Redis AOF and a named `/data` volume; preserve that volume when
+recreating the stack. If upgrading a running stack with an in-memory Redis,
+migrate its state before recreating the container: mounting an empty volume
+does **not** preserve active assignments, fences, or earlier revocations. Other
+deployments must provide equivalent durable Redis (for example, a managed
+persistent Redis service and backups). Revocation and
+machine enrollment share that state across replicas; do not configure eviction
+of authorization keys. If enrollment state is missing, credentials minted under
+that enrollment fail closed, and the worker must be explicitly enrolled again.
+Restoring a backup from *before* a revocation can revive trust; reconcile
+revocations after recovery from backup. Use a distinct server ID for each Code
+API deployment and keep it stable when the endpoint changes behind a proxy.
 
 Use `strict` instead of `affinity` if every request must include a runtime
 session hint. In hardened mode, startup requires the bridge token to be at least
@@ -125,10 +165,18 @@ backslashes, symlink escapes, unexpected fields, and host roots are rejected.
 Workspace mutation remains disabled unless the operator starts the worker with
 `--allow-workspace-writes` (or
 `LIBRECHAT_CODE_ALLOW_WORKSPACE_WRITES=true`). That adds bounded `write_file`
-and exact-match `edit_file` operations. Writes are limited to 1 MiB of UTF-8
+and `edit_file` operations. `edit_file` matches exactly by default; the
+negotiated `tolerant_match` and `replace_all` edit features add
+whitespace-tolerant matching and multi-location replacement (see
+`packages/code/README.md`). Writes are limited to 1 MiB of UTF-8
 text, require an existing in-workspace parent directory, reject symlinks, and
 commit atomically. The worker capability is an enforcement boundary; LibreChat
 should still route every mutation through its configurable tool-approval hooks.
+Writable workers with a file relay upstream also offer `import_file` by
+default (opt out with `LIBRECHAT_CODE_ALLOW_WORKSPACE_IMPORTS=false`), which
+copies a chat upload the caller owns into the workspace through a one-object
+egress grant (ADR 0014). It is a file write: a worker without writes enabled
+never advertises it and refuses it with `WRITE_DISABLED`.
 
 The workspace root can be an existing project, a Git repository, or an empty
 directory; Git is not required. This boundary keeps that directory local to the
@@ -200,6 +248,7 @@ Expose the Code API deployment as an environment under the Agents endpoint:
 endpoints:
     agents:
         statefulCodeSessions:
+            allowedEnvironments: [user, agent-user, conversation]
             environments:
                 - id: my-vm
                   name: My VM
@@ -221,7 +270,40 @@ execution.
   atomically on their first redemption attempt.
 - Worker credentials expire after fifteen minutes and are bound to an Ed25519
   public key. Exact-request signatures include the HTTP method, path, body
-  digest, timestamp, nonce, and credential.
+  digest, timestamp, nonce, and credential. With recovery enabled, redeeming a
+  pairing also persists a separate machine authorization and its public key in
+  Redis without a TTL by default; an operator can instead set a bounded
+  enrollment lifetime.
+- `POST /v1/bridge/workers/:workerId/credentials/challenge` does not require
+  an administrator token or an existing access credential, but **does** require
+  the enrolled key. Its JSON body contains `protocolVersion: 1`,
+  `operation: "credential.challenge"`, the configured `serverId`, the matching
+  `workerId`, a fresh UTC ISO `timestamp`, a random 32-byte base64url `nonce`,
+  and `signature` computed with `signBridgeRecoveryStart(privateKey, fields)`
+  from `@librechat/code/identity`. Code API verifies the signed fields and
+  consumes the nonce once before charging the machine's shared challenge
+  budget; a fabricated request cannot exhaust another worker's budget.
+- The response is a short-lived, single-use challenge with the server ID,
+  worker ID, enrollment generation, operation and expiry. Sign those fields
+  with `signBridgeRecovery(privateKey, challenge)` and send the fields plus
+  `signature` to `POST .../credentials/recover` to obtain a new short-lived
+  credential. Invalid proofs are limited per high-entropy challenge; only
+  successfully verified, unused proofs consume the machine's shared recovery
+  budget. Separately, both recovery endpoints limit all incoming requests per
+  connection peer *before* key verification, including well-formed JSON with
+  malformed or forged proofs; forged headers and worker IDs cannot bypass
+  that limit or consume the signed machine budget. All limits live in shared
+  Redis; HTTP 429 means back off. When a reverse proxy connects to Code API,
+  its clients share that peer's limit. Restrict direct backend access and apply
+  client-IP and global
+  abuse limits at the trusted ingress to keep one proxy peer from becoming a
+  shared bottleneck; do not trust an arbitrary `X-Forwarded-For` on Code API.
+- Recovery and revocation are atomic Redis transitions across API replicas.
+  A missing, revoked, expired or superseded enrollment never creates new
+  credentials. Recovery only restores transport authentication. It does not
+  clear assignment fences, worker or workspace quarantine, or uncertain
+  execution state. The worker private key is a durable, revocable credential;
+  expiry of an access credential alone does **not** protect against key theft.
 - Accepted proof nonces cannot be replayed, credentials rotate before expiry,
   and an administrator can revoke the active worker identity immediately.
 - Assignment leases bind to a stable paired identity rather than an individual
@@ -230,7 +312,21 @@ execution.
 - Remote bridge deployments use backend-specific BullMQ queues and serialize
   the expected backend on every new job, preventing Lambda or HTTP consumers
   from accepting attached-worker executions.
-- Code API permits one active assignment per worker.
+- Code API negotiates a bounded number of active workspace assignments per
+  worker. The lower API or worker slot ceiling wins, and assignments sharing
+  the same workspace isolation key remain serialized while independent
+  conversation worktrees may run concurrently. A linked-worktree lane
+  (`worktree: <name>`) nests beneath its checkout's key: sibling lanes run
+  concurrently, while a lane and its checkout exclude each other, and a lane
+  cannot start while its checkout is quarantined.
+- Workspace tool admission waits for capacity up to 30 seconds without a
+  `X-LibreChat-Workspace-Queue-Wait-Ms` header. A caller can advertise a longer
+  per-request allowance, bounded by five minutes and any server queue ceiling.
+  Disconnects cancel waiting, and admitted work receives a separate execution
+  budget capped by `JOB_TIMEOUT`. A shorter client or proxy timeout can end the
+  wait sooner; Code API does not receive an absolute caller deadline. See
+  [BYOM worker admission](../byom-worker-admission.md) for the total-request
+  and proxy timeout requirements.
 - Dynamic workers are fenced to their server-issued tenant before assignment.
 - Each assignment has an absolute deadline, generation, and random lease token.
 - Settlements with the wrong worker, generation, token, or expired deadline are
@@ -293,3 +389,58 @@ capabilities.
 LibreChat's owner-scoped environment registry can issue these principal-bound
 pairings without changing the worker execution protocol or moving code tools
 into the Agents SDK.
+
+### Durable workspace requests
+
+New clients can probe authenticated `GET /v1/workspace-tools/capabilities` for
+`durableWorkspaceRequests: 1`. Older servers return 404 or advertise 0. Keep the
+legacy synchronous `/workspace-tools/execute` path for those servers. Do not
+fall back to synchronous execution after submitting durable work.
+
+Submit the same workspace-tool body to `POST /v1/workspace-tools/requests`, with
+`X-LibreChat-Workspace-Request-Id` set to a unique 16–128 character identifier
+(letters, digits, `_`, `-`). The queue-wait header and command timeout retain their
+existing limits. HTTP 202 acknowledges durable acceptance, not execution.
+Disconnecting does not cancel accepted work.
+
+- Repeat an identical submission with the same ID to recover a lost response.
+  An ID reused for different work returns 409 `REQUEST_CONFLICT`.
+- Poll `GET /v1/workspace-tools/requests/:requestId`. States are `queued`,
+  `admitted`, `completed`, `failed`, and `cancelled`. Lookup is tenant/user scoped;
+  unknown or another principal's IDs return 404. Results are non-consuming reads.
+- Cancel with `DELETE /v1/workspace-tools/requests/:requestId`. Cancellation is a
+  request, not proof of termination. All operations notify the worker. A committed
+  result can win the race. Without a confirmed settlement, read-only calls retain
+  `cancelled`; mutations retain an unknown-outcome failure and their safety fence.
+  `ASSIGNMENT_EXPIRED` means execution may have occurred. Never replay it.
+- Status includes worker/workspace/lane metadata, queue position when available,
+  measured queue wait, and the execution deadline after admission. Queue position
+  is advisory: negotiated independent roots may run concurrently.
+
+Requests and results are retained for 24 hours from acceptance. Idempotency is
+bounded by that retention window. A client must not resubmit an expired ID after
+404; its outcome is unknown. Automatic result claims and wake-ups remain the
+client's responsibility.
+
+Bridge-enabled API replicas reconcile accepted work from Redis within a shared
+bridge-policy scope. Disabled bridges and different scheduling policies never
+claim that work. Keep backend/profile, bridge auth mode, worker selection, slot
+ceiling and command-timeout policy identical on replicas behind one endpoint.
+Drain durable requests before changing those settings. FIFO admission position
+survives API restarts and temporary worker registration/readiness loss until the
+queue deadline. Capacity acquisition and assignment enqueue atomically check the coordinator
+claim, queued state, cancellation and admission deadline. Delayed callbacks
+cannot reserve capacity after their claim ends. Assignment enqueue also checks
+capacity ownership and atomically commits the durable `admitted` transition.
+Recovery resumes only queued work and observes admitted assignments without
+creating another command. Worker identity/incarnation changes fail pending work
+rather than transferring it to another machine. Execution gets its full budget
+after admission. Existing lease fencing, cancellation and workspace quarantine
+continue to apply.
+
+This capability covers workspace tools, including `execute_command`, not
+programmatic `/execute` jobs. It requires Redis state to survive the API restart;
+Redis data loss is not recoverable. All API replicas behind an endpoint must
+support the capability before a client enables it. Roll back clients to the legacy
+path only for new work; drain durable requests before rolling back servers.
+Worker protocol, worker concurrency and deployed rate limits are unchanged.

@@ -20,6 +20,7 @@ export class HttpSandboxBackend implements SandboxBackend {
       `${env.SANDBOX_ENDPOINT}/${Jobs.execute}`,
       req.body,
       {
+        maxRedirects: 0,
         headers: injectTraceHeaders(req.headers),
         signal: ctx.signal,
       }

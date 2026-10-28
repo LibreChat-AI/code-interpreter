@@ -1,0 +1,22 @@
+{
+    "name": "@librechat/extraction-service",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "engines": {
+        "node": ">=24 <25"
+    },
+    "scripts": {
+        "build": "tsc",
+        "typecheck": "tsc --noEmit",
+        "test": "npm run build && node --test dist/*.test.js",
+        "start": "node dist/main.js",
+        "test:container": "bash tests/container.sh",
+        "format:check": "prettier --check src tests/*.mjs *.json compose.yaml ../../.github/workflows/extraction.yml"
+    },
+    "devDependencies": {
+        "@types/node": "24.10.1",
+        "prettier": "2.4.1",
+        "typescript": "5.9.3"
+    }
+}

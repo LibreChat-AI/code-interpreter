@@ -34,8 +34,10 @@
 #  endif
 #endif
 
+static int first_untrusted_fd = 3;
+
 static void close_fd_loop(long start, long end) {
-    if (start < 3) start = 3;
+    if (start < first_untrusted_fd) start = first_untrusted_fd;
     if (end > INT_MAX) end = INT_MAX;
     if (start > end) return;
     for (long fd = start; fd <= end; fd++) {
@@ -54,7 +56,7 @@ static bool close_proc_fds(void) {
         char *end = NULL;
         long fd = strtol(entry->d_name, &end, 10);
         if (end == entry->d_name || *end != '\0') continue;
-        if (fd < 3 || fd > (long)INT_MAX) continue;
+        if (fd < first_untrusted_fd || fd > (long)INT_MAX) continue;
         if ((int)fd == dir_fd) continue;  /* don't close our iterator */
         close((int)fd);
     }
@@ -62,7 +64,8 @@ static bool close_proc_fds(void) {
     return true;
 }
 
-/* Close every file descriptor >= 3 (preserve stdin/stdout/stderr) before
+/* Close every unrelated descriptor (preserve stdin/stdout/stderr and,
+ * only with --tool-call-pipes, the validated pipe endpoints 3/4) before
  * the user command runs. The bug this prevents:
  *
  *   (1) sandbox API / proxy / NsJail allocate FDs in the runner;
@@ -86,7 +89,7 @@ static bool close_proc_fds(void) {
  */
 static void close_inherited_fds(void) {
 #if defined(__NR_close_range) && !defined(SPEC_GUARD_TEST_DISABLE_CLOSE_RANGE)
-    long rc = syscall(__NR_close_range, (unsigned int)3, ~0U, 0u);
+    long rc = syscall(__NR_close_range, (unsigned int)first_untrusted_fd, ~0U, 0u);
     if (rc == 0) return;
     /* ENOSYS on pre-5.9 kernels, EINVAL on some odd builds. Fall through. */
 #endif
@@ -123,9 +126,24 @@ int main(int argc, char *argv[]) {
 
     umask(0077);
 
+    int command = 1;
+    if (strcmp(argv[1], "--tool-call-pipes") == 0) {
+        struct stat writer, reader;
+        int write_flags = fcntl(3, F_GETFL), read_flags = fcntl(4, F_GETFL);
+        if (argc < 3 || fstat(3, &writer) != 0 || fstat(4, &reader) != 0
+            || !S_ISFIFO(writer.st_mode) || !S_ISFIFO(reader.st_mode)
+            || write_flags < 0 || read_flags < 0
+            || (write_flags & O_ACCMODE) != O_WRONLY
+            || (read_flags & O_ACCMODE) != O_RDONLY) {
+            fprintf(stderr, "invalid tool-call pipes\n");
+            return 1;
+        }
+        first_untrusted_fd = 5;
+        command = 2;
+    }
     close_inherited_fds();
 
-    execvp(argv[1], &argv[1]);
+    execvp(argv[command], &argv[command]);
     perror("exec");
     return 1;
 }

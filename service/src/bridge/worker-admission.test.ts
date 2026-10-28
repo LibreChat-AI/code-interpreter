@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import RedisMock from 'ioredis-mock';
 import type Redis from 'ioredis';
 import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
@@ -114,7 +114,7 @@ test('an expired queued call never reaches the worker and does not strand later 
   const assignment = await store.lease(workerId, incarnationId, 1000);
   await expect(
     dispatch('expired', new AbortController(), 25, 1000),
-  ).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+  ).rejects.toMatchObject({ code: 'WORKSPACE_QUEUE_TIMEOUT' });
   const third = dispatch('third');
   await settle(assignment);
   await first;
@@ -122,6 +122,32 @@ test('an expired queued call never reaches the worker and does not strand later 
   expect(next?.request).toMatchObject({ path: 'third' });
   await settle(next);
   await third;
+});
+
+test('an already-expired workspace deadline is a definite queue timeout before registration', async () => {
+  await register();
+  await expect(dispatch('expired-before-read', new AbortController(), -1)).rejects.toMatchObject({
+    code: 'WORKSPACE_QUEUE_TIMEOUT',
+  });
+  expect(await redis.zcard(`codeapi:bridge:v1:worker:${workerId}:admission`)).toBe(0);
+  expect(await store.lease(workerId, incarnationId, 20)).toBeUndefined();
+});
+
+test('expiry during the registration read never becomes an ambiguous assignment error', async () => {
+  await register();
+  const registrationRead = spyOn(redis, 'mget').mockImplementation(async () => {
+    await new Promise(resolve => setTimeout(resolve, 25));
+    throw new Error('registration read outlived its queue budget');
+  });
+  try {
+    await expect(dispatch('expired-during-read', new AbortController(), 1)).rejects.toMatchObject({
+      code: 'WORKSPACE_QUEUE_TIMEOUT',
+    });
+  } finally {
+    registrationRead.mockRestore();
+  }
+  expect(await redis.zcard(`codeapi:bridge:v1:worker:${workerId}:admission`)).toBe(0);
+  expect(await store.lease(workerId, incarnationId, 20)).toBeUndefined();
 });
 
 test('a queued request is rejected if the worker withdraws its capability', async () => {
@@ -161,6 +187,72 @@ test('execution receives a fresh budget after waiting and the lock covers long c
   await second;
 });
 
+test('a long queue allowance does not extend serial lock or assignment TTLs after admission', async () => {
+  await register();
+  const active = dispatch('first');
+  const activeAssignment = await store.lease(workerId, incarnationId, 1000);
+  const controller = new AbortController();
+  const queued = dispatch('second', controller, 300_000, 305_000);
+  void queued.catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await settle(activeAssignment);
+  await active;
+
+  const assignment = await store.lease(workerId, incarnationId, 1000);
+  if (assignment == null) {
+    controller.abort();
+    await queued.catch(() => undefined);
+    throw new Error('Queued request was not leased');
+  }
+  expect(assignment.request).toMatchObject({ path: 'second' });
+  try {
+    const expiresAtMs = Date.parse(assignment.expiresAt);
+    for (const key of [
+      `codeapi:bridge:v1:worker:${workerId}:lock`,
+      `codeapi:bridge:v1:worker:${workerId}:lock:incarnation`,
+      `codeapi:bridge:v1:assignment:${assignment.assignmentId}`,
+    ]) {
+      const ttlMs = await redis.pttl(key);
+      const remainingMs = expiresAtMs - Date.now();
+      expect(ttlMs).toBeGreaterThan(remainingMs + 28_000);
+      expect(ttlMs).toBeLessThan(remainingMs + 32_000);
+    }
+  } finally {
+    await settle(assignment);
+    await queued;
+  }
+});
+
+test('absolute-deadline callers keep only their remaining deadline in the serial lock TTL', async () => {
+  await register();
+  const active = dispatch('first');
+  const activeAssignment = await store.lease(workerId, incarnationId, 1000);
+  const controller = new AbortController();
+  const queued = dispatch('absolute', controller, 2_500);
+  void queued.catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 1450));
+  await settle(activeAssignment);
+  await active;
+
+  const assignment = await store.lease(workerId, incarnationId, 1000);
+  if (assignment == null) {
+    controller.abort();
+    await queued.catch(() => undefined);
+    throw new Error('Queued request was not leased');
+  }
+  expect(assignment.request).toMatchObject({ path: 'absolute' });
+  try {
+    const remainingMs = Date.parse(assignment.expiresAt) - Date.now();
+    expect(remainingMs).toBeGreaterThan(0);
+    const ttlMs = await redis.pttl(`codeapi:bridge:v1:worker:${workerId}:lock`);
+    expect(ttlMs).toBeGreaterThan(remainingMs + 28_000);
+    expect(ttlMs).toBeLessThan(remainingMs + 31_000);
+  } finally {
+    await settle(assignment);
+    await queued;
+  }
+});
+
 test('execution expires independently of an unused queue allowance', async () => {
   await register();
   const completion = dispatch('short', new AbortController(), 5000, 150);
@@ -169,4 +261,24 @@ test('execution expires independently of an unused queue allowance', async () =>
   expect(assignment).toBeDefined();
   expect(Date.parse(assignment!.expiresAt) - Date.now()).toBeLessThanOrEqual(150);
   await expect(completion).rejects.toMatchObject({ code: 'ASSIGNMENT_EXPIRED' });
+});
+
+test('expiry after generation allocation but before enqueue is definitely not started', async () => {
+  await register();
+  const now = Date.now;
+  const incr = redis.incr.bind(redis);
+  let expired = false;
+  const clock = spyOn(Date, 'now').mockImplementation(() => now() + (expired ? 10_000 : 0));
+  const generation = spyOn(redis, 'incr').mockImplementation(async (key) => {
+    const value = await incr(key);
+    expired = true;
+    return value;
+  });
+  try {
+    await expect(dispatch('not-enqueued')).rejects.toMatchObject({ code: 'WORKSPACE_QUEUE_TIMEOUT' });
+  } finally {
+    clock.mockRestore();
+    generation.mockRestore();
+  }
+  expect(await store.lease(workerId, incarnationId, 20)).toBeUndefined();
 });

@@ -151,19 +151,25 @@ export async function restoreScratchTraversal(
     if (directoryFd === undefined) continue;
     try {
       const directory = await opendir(descriptorPath(directoryFd));
-      for await (const entry of directory) {
-        entriesInspected += 1;
-        if (entriesInspected > MAX_SCRATCH_ENTRIES) {
-          throw new Error('Native sandbox scratch cleanup exceeded its entry limit');
+      try {
+        while (true) {
+          const entry = await directory.read();
+          if (entry === null) break;
+          entriesInspected += 1;
+          if (entriesInspected > MAX_SCRATCH_ENTRIES) {
+            throw new Error('Native sandbox scratch cleanup exceeded its entry limit');
+          }
+          if (!entry.isDirectory()) continue;
+          if (components.length >= MAX_SCRATCH_DEPTH) {
+            throw new Error('Native sandbox scratch cleanup exceeded its depth limit');
+          }
+          if (pending.length >= MAX_SCRATCH_DIRECTORIES) {
+            throw new Error('Native sandbox scratch cleanup exceeded its directory limit');
+          }
+          pending.push([...components, entry.name]);
         }
-        if (!entry.isDirectory()) continue;
-        if (components.length >= MAX_SCRATCH_DEPTH) {
-          throw new Error('Native sandbox scratch cleanup exceeded its depth limit');
-        }
-        if (pending.length >= MAX_SCRATCH_DIRECTORIES) {
-          throw new Error('Native sandbox scratch cleanup exceeded its directory limit');
-        }
-        pending.push([...components, entry.name]);
+      } finally {
+        await directory.close();
       }
     } finally {
       if (directoryFd !== root.fd) closeDirectory(directoryFd);

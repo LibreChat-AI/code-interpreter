@@ -286,14 +286,27 @@ expect_socket_blocked("AF_RXRPC", getattr(socket, "AF_RXRPC", 33), socket.SOCK_D
 expect_socket_blocked("AF_ALG", getattr(socket, "AF_ALG", 38), socket.SOCK_SEQPACKET, 0)
 
 syscalls = {
-    "x86_64": {"clone": 56, "clone3": 435, "vmsplice": 278},
-    "amd64": {"clone": 56, "clone3": 435, "vmsplice": 278},
-    "aarch64": {"clone": 220, "clone3": 435, "vmsplice": 75},
-    "arm64": {"clone": 220, "clone3": 435, "vmsplice": 75},
+    "x86_64": {"clone": 56, "clone3": 435, "vmsplice": 278, "futex": 202},
+    "amd64": {"clone": 56, "clone3": 435, "vmsplice": 278, "futex": 202},
+    "aarch64": {"clone": 220, "clone3": 435, "vmsplice": 75, "futex": 98},
+    "arm64": {"clone": 220, "clone3": 435, "vmsplice": 75, "futex": 98},
 }
 arch = platform.machine().lower()
 if arch not in syscalls:
     raise SystemExit(f"unsupported arch for syscall smoke test: {arch}")
+
+# PI operations must be denied before the kernel sees even invalid addresses.
+for command in (6, 7, 8, 11, 12, 13):
+    for flags in (0, 128, 256, 384):
+        ctypes.set_errno(0)
+        rc = libc.syscall(syscalls[arch]["futex"], 0, command | flags, 0, 0, 0, 0)
+        if rc != -1 or ctypes.get_errno() != errno.EPERM:
+            raise SystemExit(f"PI futex operation was not denied: {command | flags}")
+word = ctypes.c_int(0)
+rc = libc.syscall(syscalls[arch]["futex"], ctypes.byref(word), 1 | 128, 1, 0, 0, 0)
+if rc != 0:
+    raise SystemExit("ordinary FUTEX_WAKE_PRIVATE was blocked")
+print("futex_pi=blocked:ordinary_wake=ok")
 
 CLONE_NEWUSER = 0x10000000
 CLONE_NEWNET = 0x40000000
@@ -359,7 +372,8 @@ PY
         && [[ "$stdout" == *"AF_ALG=errno:1"* ]] \
         && [[ "$stdout" == *"clone_namespace=rc:-1:errno:1"* ]] \
         && [[ "$stdout" == *"clone3=rc:-1:errno:38"* ]] \
-        && [[ "$stdout" == *"vmsplice=rc:-1:errno:1"* ]]; then
+        && [[ "$stdout" == *"vmsplice=rc:-1:errno:1"* ]] \
+        && [[ "$stdout" == *"futex_pi=blocked:ordinary_wake=ok"* ]]; then
         log_success "Kernel attack-surface syscalls blocked"
         return 0
     else

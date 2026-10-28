@@ -1,4 +1,5 @@
 import type Redis from 'ioredis';
+import { durableAdmissionFence } from './admission';
 
 /** Hard bound keeps every atomic scheduling scan constant-sized. */
 export const MAX_WORKSPACE_LEASE_SLOTS = 8;
@@ -6,6 +7,12 @@ export const MAX_WORKSPACE_LEASE_SLOTS = 8;
 /** Reservations share the legacy admission queue and aggregate worker lock.
  * Thus a serial dispatcher or replacement incarnation cannot race active slots.
  * Workspace mutation uncertainty is fenced separately by the assignment store.
+ *
+ * Keys are hierarchical: a linked-worktree lane (`\0linked-worktree\0<parent>\0<name>`)
+ * conflicts with itself and with its parent checkout, and a checkout conflicts
+ * with every lane beneath it. Sibling lanes run concurrently. A waiting checkout
+ * request also holds back newer lanes beneath it, so root operations such as
+ * `git worktree add` cannot be starved by a steady stream of lane work.
  */
 export class BridgeWorkspaceSlots {
   constructor(private readonly redis: Redis) {}
@@ -31,6 +38,8 @@ export class BridgeWorkspaceSlots {
     workspaceId: string;
     capacity: number;
     expiresAtMs: number;
+    refreshOwned?: boolean;
+    guard?: { key: string; claimKey: string; token: string };
   }): Promise<number | undefined> {
     if (
       !Number.isSafeInteger(args.capacity) ||
@@ -42,15 +51,34 @@ export class BridgeWorkspaceSlots {
     ) {
       throw new Error('Invalid workspace slot reservation');
     }
+    const keys = this.keys(args.workerId);
+    if (args.guard != null) keys.push(args.guard.key, args.guard.claimKey);
     const result = Number(
       await this.redis.eval(
         [
+          ...(args.guard == null ? [] : durableAdmissionFence('KEYS[9]', 'KEYS[10]', 'ARGV[8]', -3)),
           "if redis.call('GET', KEYS[4]) ~= ARGV[1] then return -2 end",
           "if (redis.call('GET', KEYS[8]) or '1') ~= ARGV[4] then return -2 end",
+          // Parent of a linked-worktree lane key; nil for a checkout key.
+          'local lanePrefix = "\\0linked-worktree\\0"',
+          'local function parentOf(key)',
+          '  if string.sub(key, 1, #lanePrefix) ~= lanePrefix then return nil end',
+          '  local last = nil',
+          '  local cursor = #lanePrefix + 1',
+          '  while true do',
+          '    local found = string.find(key, "\\0", cursor, true)',
+          '    if not found then break end',
+          '    last = found',
+          '    cursor = found + 1',
+          '  end',
+          '  if last == nil or last <= #lanePrefix + 1 then return nil end',
+          '  return string.sub(key, #lanePrefix + 1, last - 1)',
+          'end',
           "local lock = redis.call('GET', KEYS[2])",
           "local owner = 'workspace-slots:' .. ARGV[1]",
           'if lock and lock ~= owner then return -1 end',
           'local busy = {}',
+          'local busyChildren = {}',
           'local free = nil',
           'local latest = tonumber(ARGV[5])',
           `for slot = 0, ${MAX_WORKSPACE_LEASE_SLOTS - 1} do`,
@@ -61,14 +89,30 @@ export class BridgeWorkspaceSlots {
           "      redis.call('HDEL', KEYS[1], 'a:' .. slot, 'i:' .. slot, 'w:' .. slot, 'e:' .. slot)",
           '      occupied = false',
           '    else',
-          '      if entry[1] == ARGV[2] then return slot end',
+          '      if entry[1] == ARGV[2] then',
+          '        if ARGV[7] == \'1\' then',
+          '          redis.call(\'HSET\', KEYS[1], \'e:\' .. slot, ARGV[5])',
+          '          for _, key in ipairs({KEYS[1], KEYS[2], KEYS[3]}) do',
+          '            if redis.call(\'PTTL\', key) < tonumber(ARGV[5]) - tonumber(ARGV[6]) then redis.call(\'PEXPIREAT\', key, ARGV[5]) end',
+          '          end',
+          '        end',
+          '        return slot',
+          '      end',
           '      busy[entry[3]] = true',
+          '      local busyParent = parentOf(entry[3])',
+          '      if busyParent then busyChildren[busyParent] = true end',
           '      latest = math.max(latest, tonumber(entry[4]))',
           '    end',
           '  end',
           '  if not occupied and free == nil and slot < tonumber(ARGV[4]) then free = slot end',
           'end',
-          'if free == nil or busy[ARGV[3]] then return -1 end',
+          'local function conflicts(key)',
+          '  if busy[key] then return true end',
+          '  local parent = parentOf(key)',
+          '  if parent then return busy[parent] == true end',
+          '  return busyChildren[key] == true',
+          'end',
+          'if free == nil or conflicts(ARGV[3]) then return -1 end',
           // Expiry removes queue metadata, never a workspace uncertainty fence.
           "local expired = redis.call('ZRANGEBYSCORE', KEYS[6], '-inf', ARGV[6])",
           'for _, id in ipairs(expired) do',
@@ -78,11 +122,15 @@ export class BridgeWorkspaceSlots {
           'end',
           "local pending = redis.call('ZRANGE', KEYS[5], 0, 31)",
           'local selected = nil',
+          'local waitingCheckouts = {}',
           'for _, id in ipairs(pending) do',
           "  local workspace = redis.call('HGET', KEYS[7], id)",
           // An older serial request remains a barrier until its dispatcher finishes.
           '  if not workspace then return -1 end',
-          '  if not busy[workspace] then selected = id; break end',
+          '  local parent = parentOf(workspace)',
+          '  local held = conflicts(workspace) or (parent ~= nil and waitingCheckouts[parent] == true)',
+          '  if not held then selected = id; break end',
+          '  if parent == nil then waitingCheckouts[workspace] = true end',
           'end',
           'if selected ~= ARGV[2] then return -1 end',
           "redis.call('HSET', KEYS[1], 'a:' .. free, ARGV[2], 'i:' .. free, ARGV[1], 'w:' .. free, ARGV[3], 'e:' .. free, ARGV[5])",
@@ -91,14 +139,16 @@ export class BridgeWorkspaceSlots {
           "redis.call('SET', KEYS[3], ARGV[1], 'PXAT', latest)",
           'return free',
         ].join('\n'),
-        8,
-        ...this.keys(args.workerId),
+        keys.length,
+        ...keys,
         args.incarnationId,
         args.assignmentId,
         args.workspaceId,
         args.capacity,
         args.expiresAtMs,
         Date.now(),
+        args.refreshOwned === true ? '1' : '0',
+        args.guard?.token ?? '',
       ),
     );
     if (result === -2)

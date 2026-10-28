@@ -14,7 +14,7 @@ type CapturedRequest = {
 
 let server: ReturnType<typeof Bun.serve>;
 let captured: CapturedRequest[] = [];
-let nextResponse: { status: number; body: unknown; delayMs?: number } = { status: 200, body: {} };
+let nextResponse: { status: number; body: unknown; delayMs?: number; location?: string } = { status: 200, body: {} };
 
 const savedEndpoint = env.SANDBOX_ENDPOINT;
 
@@ -33,7 +33,7 @@ beforeAll(() => {
       }
       return new Response(JSON.stringify(nextResponse.body), {
         status: nextResponse.status,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(nextResponse.location ? { Location: nextResponse.location } : {}) },
       });
     },
   });
@@ -102,6 +102,26 @@ describe('HttpSandboxBackend', () => {
     expect(captured[0].rawBody).toBe(JSON.stringify(req.body));
     expect(captured[0].headers['content-type']).toBe('application/json');
     expect(result).toEqual(responseBody);
+  });
+
+  test('rejects redirects without sending the signed execution to another endpoint', async () => {
+    let redirected = 0;
+    const target = Bun.serve({
+      port: 0,
+      fetch() {
+        redirected++;
+        return Response.json({ session_id: 'unexpected' });
+      },
+    });
+    try {
+      for (const status of [302, 307, 308]) {
+        nextResponse = { status, body: {}, location: `http://127.0.0.1:${target.port}/stolen` };
+        await expect(new HttpSandboxBackend().execute(request(), context())).rejects.toThrow();
+      }
+      expect(redirected).toBe(0);
+    } finally {
+      target.stop(true);
+    }
   });
 
   test('does not mutate the signed request body', async () => {

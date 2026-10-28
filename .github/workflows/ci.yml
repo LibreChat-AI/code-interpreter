@@ -31,11 +31,17 @@ jobs:
       - name: Block-root package delivery
         run: tests/block_root_package_delivery.sh
 
+      - name: Python runtime package-init rollout
+        run: tests/package_init_runtime_rollout.sh
+
       - name: KVM guest resolver handoff
         run: tests/kvm_guest_dns.sh
 
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
+
+      - name: Sandbox-runner metrics discovery and network policy
+        run: tests/sandbox_runner_metrics.sh
 
       - name: Bridge pairing rollout safety
         run: tests/bridge_pairing_rollout.sh
@@ -43,10 +49,20 @@ jobs:
       - name: Compose bridge configuration
         run: node tests/compose-bridge-config.cjs
 
+      - name: OpenShell evaluation probe (no gateway)
+        run: node --test scripts/openshell/probe.test.mjs
+
+      - name: Release versioning
+        run: tests/release-versioning.sh
+
+      - name: Release version resolution
+        run: tests/release-version-resolution.sh
+
       - name: Validate sandbox Dockerfiles
         run: |
           docker buildx build --check -f api/Dockerfile .
           docker buildx build --check -f docker/Dockerfile.worker-sandbox .
+          docker buildx build --check -f launcher/Dockerfile .
 
   launcher-unit-tests:
     name: Launcher Unit Tests
@@ -77,18 +93,28 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.14
+          bun-version: 1.4.4
 
       - name: Cache Bun packages
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-codeapi-api-bun-1.3.14-${{ hashFiles('api/bun.lock') }}
+          key: ${{ runner.os }}-codeapi-api-bun-1.4.4-${{ hashFiles('api/bun.lock') }}
           restore-keys: |
-            ${{ runner.os }}-codeapi-api-bun-1.3.14-
+            ${{ runner.os }}-codeapi-api-bun-1.4.4-
 
       - name: Install dependencies
         run: bun ci
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22.23.4
+
+      - name: Compile anonymous-pipe addon
+        run: |
+          mkdir -p .build
+          NODE_HEADERS="$(dirname "$(dirname "$(command -v node)")")/include/node"
+          gcc -shared -fPIC -O2 -Wall -Wextra -Werror -I"$NODE_HEADERS" -o .build/anonymous-pipes.node src/anonymous-pipes.c
 
       - name: Build API
         run: bun run build
@@ -115,6 +141,125 @@ jobs:
       - name: Bun tests
         run: bun run test
 
+      - name: File-heavy workspace cleanup on tmpfs
+        run: |
+          docker run --rm --user 0 \
+            --tmpfs /tmp:rw,size=1g \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+            --workdir /work/api \
+            --env SANDBOX_CLEANUP_TMPFS_TEST=1 \
+            --env SANDBOX_LOG_LEVEL=error \
+            oven/bun:1.4.4-debian \
+            bun test src/cleanup.integration.test.ts
+
+  nsjail-ipc-tests:
+    name: NsJail IPC Filter (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - name: Render native sandbox policy
+        working-directory: api
+        run: |
+          bun ci
+          bun scripts/dump-seccomp-policy.ts > "$RUNNER_TEMP/nsjail.policy"
+      - name: Build pipe broker and generate Python client
+        run: |
+          bun run --cwd api build
+          bun ci --cwd service
+          bun service/scripts/dump-pipe-preamble.ts > "$RUNNER_TEMP/pipe-client.py"
+      - name: Build pinned NsJail and Kafel
+        run: docker build --target nsjail-ipc-test -t nsjail-ipc-test -f api/Dockerfile .
+      - name: Verify standalone launcher guest pipe runtime
+        run: |
+          docker build --target sandbox-build -t launcher-guest-test -f launcher/Dockerfile .
+          docker run --rm --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            --entrypoint /usr/local/bin/node \
+            launcher-guest-test /tests/pipe_runtime_image.cjs
+      - name: Execute through the packaged guest API without build-stage ENV
+        run: |
+          for addon_path in unset empty override; do
+            docker run --rm --privileged --network none \
+              --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+              --entrypoint bun launcher-guest-test \
+              /work/tests/sandbox_pipe_addon_image.ts "$addon_path"
+          done
+      - name: Load legacy netfilter modules for hosted-app isolation
+        run: sudo modprobe -a ip_tables ip6_tables iptable_filter ip6table_filter xt_conntrack xt_owner ipt_REJECT ip6t_REJECT
+      - name: Verify supervisor filter and anonymous stdio
+        run: |
+          docker run --rm --init --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            nsjail-ipc-test python3 /tests/supervisor_policy.py
+          docker run --rm --init --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            nsjail-ipc-test python3 /tests/pipe_relay_backpressure.py
+          docker run --rm --init --dns 127.0.0.1 --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            nsjail-ipc-test python3 /tests/supervisor_dns.py
+          docker run --rm --init --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+            --entrypoint /usr/local/bin/sandbox-supervisor-policy \
+            nsjail-ipc-test bun test /work/api/src/pipe-process.test.ts
+          docker run --rm --init --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            --entrypoint /usr/local/bin/sandbox-supervisor-policy \
+            launcher-guest-test node /tests/pipe_runtime_image.cjs
+          docker run --rm --init --cap-add NET_ADMIN --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+            --entrypoint /usr/local/bin/sandbox-supervisor-policy \
+            launcher-guest-test bun /work/tests/supervisor_hosted_network.ts
+
+      - name: Verify descriptor denial and runtime IPC with the installed filter
+        run: |
+          docker run --rm --init --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$RUNNER_TEMP/nsjail.policy,target=/policy,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            nsjail-ipc-test \
+            bash -c 'python3 /tests/nsjail_unix_gc.py /policy /nsjail/kafel/libkafel.so && python3 /tests/specguard_tool_call_pipes.py && gcc -O2 -static -Wall -Wextra -Werror -DSPEC_GUARD_TEST_DISABLE_CLOSE_RANGE -o /tmp/guard-fallback /tmp/spec-guard.c && SPEC_GUARD_BINARY=/tmp/guard-fallback python3 /tests/specguard_tool_call_pipes.py'
+          docker run --rm --init --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$RUNNER_TEMP/nsjail.policy,target=/policy,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/pipe-client.py,target=/client.py,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/api/.build/tool-call-pipe-broker.cjs,target=/broker.cjs,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/tests,readonly" \
+            nsjail-ipc-test \
+            python3 /tests/tool_call_pipes.py /policy /broker.cjs /client.py
+
+  guest-api-image-tests:
+    name: Guest API Execution (${{ matrix.dockerfile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dockerfile: api/Dockerfile
+            target: sandbox-build
+          - dockerfile: docker/Dockerfile.worker-sandbox
+            target: sandbox-rootfs
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Build the production guest rootfs
+        run: docker build --target "${{ matrix.target }}" -t guest-api-test -f "${{ matrix.dockerfile }}" .
+      - name: Execute through the packaged guest API without build-stage ENV
+        # Test the roots copied into the direct/KVM runners, removing the
+        # Docker ENV metadata that does not survive that COPY/VM boundary.
+        run: |
+          for addon_path in unset empty override; do
+            docker run --rm --privileged --network none \
+              --mount "type=bind,source=$GITHUB_WORKSPACE,target=/work,readonly" \
+              --entrypoint bun guest-api-test \
+              /work/tests/sandbox_pipe_addon_image.ts "$addon_path"
+          done
+
   service-unit-tests:
     name: Service Unit Tests
     runs-on: ubuntu-latest
@@ -126,21 +271,28 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.14
+          bun-version: 1.4.4
 
       - name: Cache Bun packages
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-codeapi-service-bun-1.3.14-${{ hashFiles('service/bun.lock') }}
+          key: ${{ runner.os }}-codeapi-service-bun-1.4.4-${{ hashFiles('service/bun.lock') }}
           restore-keys: |
-            ${{ runner.os }}-codeapi-service-bun-1.3.14-
+            ${{ runner.os }}-codeapi-service-bun-1.4.4-
 
       - name: Install dependencies
         run: bun ci
 
       - name: Install Redis for ledger integration tests
         run: sudo apt-get update && sudo apt-get install -y redis-server
+
+      - name: Verify fleet admission with isolated Redis
+        run: |
+          redis_socket="$RUNNER_TEMP/byom-admission.sock"
+          redis-server --port 0 --unixsocket "$redis_socket" --save '' --appendonly no --daemonize yes
+          trap 'redis-cli -s "$redis_socket" shutdown nosave' EXIT
+          BRIDGE_TEST_REDIS_URL="$redis_socket" bun test src/bridge/fleet.test.ts src/workspace-tools/requests.test.ts
 
       - name: Build service
         run: bun run build
@@ -154,7 +306,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['20.11.0', '22.21.0', '24.16.0']
+        node-version: ['22.23.4', '24.22.1']
     defaults:
       run:
         working-directory: packages/code
@@ -191,9 +343,14 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: 24.16.0
+          node-version: 24.22.1
       - run: npm ci
       - run: npm run build
+      - name: Selected project root containment tests
+        run: |
+          command -v rg || brew install ripgrep
+          node --test dist/root-access.test.js
+          node --test --test-name-pattern='selected command|selected replay copy|programmatic probes reject' dist/native-sandbox.test.js
       - name: Native environment containment tests
         run: node --test dist/environment.test.js
       - name: Native ACL and credential lifecycle tests
@@ -203,6 +360,33 @@ jobs:
           LIBRECHAT_CODE_LIVE_SRT_TESTS: '1'
         run: node --test dist/environment-live.test.js
 
+  linux-native-sandbox-tests:
+    name: Linux Native Sandbox Tests
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: packages/code
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.22.1
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap socat ripgrep
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor; bwrap needs them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: npm ci
+      - run: npm run build
+      - name: Linked worktree lane and root Git metadata containment
+        env:
+          LIBRECHAT_CODE_LIVE_SRT_TESTS: '1'
+        run: >-
+          node --test
+          dist/linked-worktrees-live.test.js
+          dist/root-git-denies-live.test.js
+
   lambda-microvm-provisioning:
     name: Lambda MicroVM Provisioning
     runs-on: ubuntu-latest
@@ -211,7 +395,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.14
+          bun-version: 1.4.4
 
       - name: Install service dependencies
         working-directory: service
@@ -283,7 +467,7 @@ jobs:
           docker buildx inspect --bootstrap
 
       - name: Build Lambda MicroVM runner image
-        # The target pins Bun 1.3.14 and installs api/bun.lock frozen. Building
+        # The target pins Bun 1.4.4 and installs api/bun.lock frozen. Building
         # natively catches architecture-specific package and Docker layer
         # failures without retaining a second multi-gigabyte image copy.
         run: |

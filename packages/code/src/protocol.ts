@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const BRIDGE_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const BRIDGE_SANDBOX_PROFILE_MAX_LENGTH = 128;
@@ -33,6 +35,12 @@ export function programmaticTransferReserveMs(jobTimeoutMs: number): number {
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES = 10 * 1024 * 1024;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_HISTORY_BYTES = 40_000_000;
 export const BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
+/** Default per-file `import_file` ceiling; Code API and each worker may configure their own. */
+export const BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
+/** Longest execution budget Code API grants one `import_file` transfer. */
+export const BRIDGE_WORKSPACE_IMPORT_FILE_TIMEOUT_MS = 5 * 60_000;
+const BRIDGE_WORKSPACE_IMPORT_FILE_HANDLE_MAX_LENGTH = 32_768;
+const BRIDGE_WORKSPACE_IMPORT_FILE_GRANT_MAX_LENGTH = 256 * 1024;
 /** How long Code API drains a clean rejection after Stop cancels a workspace mutation. */
 export const BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS = 5_000;
 
@@ -257,6 +265,53 @@ export function bridgeArtifactMediaType(name: string): string {
 
 export type BridgeProtocolVersion = typeof BRIDGE_PROTOCOL_VERSION;
 
+/** One path segment naming a linked worktree at `<root>/.worktrees/<name>`. */
+export const BRIDGE_LINKED_WORKTREE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+export function isValidLinkedWorktreeName(value: unknown): value is string {
+    return (
+        typeof value === 'string' &&
+        BRIDGE_LINKED_WORKTREE_NAME_PATTERN.test(value) &&
+        !value.endsWith('.lock')
+    );
+}
+
+const LINKED_WORKTREE_KEY_PREFIX = '\0linked-worktree\0';
+
+/** Collision-free identity shared by scheduling and worker quarantine state.
+ * A linked worktree lane nests beneath the key of the checkout that owns it. */
+export function workspaceIsolationKey(
+    workspaceId: string,
+    instanceId?: string,
+    worktree?: string,
+): string {
+    const base = instanceId === undefined
+        ? workspaceId
+        : `\0git-worktree\0${workspaceId}\0${instanceId}`;
+    return worktree === undefined
+        ? base
+        : `${LINKED_WORKTREE_KEY_PREFIX}${base}\0${worktree}`;
+}
+
+/** The checkout key a linked-worktree lane nests beneath, or undefined for a root key.
+ * Scheduling treats a lane and its parent as conflicting; sibling lanes do not. */
+export function workspaceIsolationParent(key: string): string | undefined {
+    if (!key.startsWith(LINKED_WORKTREE_KEY_PREFIX)) return undefined;
+    const separator = key.lastIndexOf('\0');
+    return separator <= LINKED_WORKTREE_KEY_PREFIX.length
+        ? undefined
+        : key.slice(LINKED_WORKTREE_KEY_PREFIX.length, separator);
+}
+
+/** Two isolation keys may not execute concurrently when either nests the other. */
+export function workspaceIsolationKeysConflict(left: string, right: string): boolean {
+    return (
+        left === right ||
+        workspaceIsolationParent(left) === right ||
+        workspaceIsolationParent(right) === left
+    );
+}
+
 export type BridgeWorkspaceToolOperation =
   | 'read_file'
   | 'search_text'
@@ -264,19 +319,103 @@ export type BridgeWorkspaceToolOperation =
   | 'write_file'
   | 'preview_edit'
   | 'edit_file'
-  | 'execute_command';
+  | 'execute_command'
+  | 'import_file';
+
+/** Operations that may change workspace contents and therefore arm the durable mutation guard. */
+export function isWorkspaceMutationOperation(
+  operation: BridgeWorkspaceToolOperation,
+): boolean {
+  return (
+    operation === 'write_file' ||
+    operation === 'edit_file' ||
+    operation === 'execute_command' ||
+    operation === 'import_file'
+  );
+}
 
 export type WorkspaceWriteFileMode = 'replace' | 'create';
 export type WorkspaceEditFileMode = 'single' | 'batch';
-export type WorkspaceEditFileFeature = 'expected_base_sha256';
+export type WorkspaceEditFileFeature =
+  | 'expected_base_sha256'
+  | 'tolerant_match'
+  | 'replace_all';
+/** Every edit feature this protocol version defines, for capability validation. */
+export const WORKSPACE_EDIT_FILE_FEATURES: readonly WorkspaceEditFileFeature[] = [
+  'expected_base_sha256',
+  'tolerant_match',
+  'replace_all',
+];
+/** `tolerant` falls back from exact matching to whitespace-tolerant strategies. */
+export type WorkspaceEditMatching = 'exact' | 'tolerant';
+export type WorkspaceEditMatchStrategy =
+  | 'exact'
+  | 'line-trimmed'
+  | 'whitespace-normalized'
+  | 'indentation-flexible';
+const WORKSPACE_EDIT_MATCH_STRATEGIES = new Set<WorkspaceEditMatchStrategy>([
+  'exact',
+  'line-trimmed',
+  'whitespace-normalized',
+  'indentation-flexible',
+]);
+
+/** A branch name reportable to LibreChat: 1 to 256 chars, no control characters. */
+export function boundedBranch(value: unknown): string | null {
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    // Git forbids only ASCII controls in ref names; the header must also never show Unicode
+    // controls, format characters (bidi overrides, zero-width) or line and paragraph separators.
+    !/[\x00-\x1f\x7f\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
+    ? value
+    : null;
+}
+
+/** A commit id reportable to LibreChat: 40 (SHA-1) or 64 (SHA-256) lowercase hex chars. */
+export function boundedHead(value: unknown): string | null {
+  return typeof value === 'string' && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(value)
+    ? value
+    : null;
+}
+
 export type WorkspaceListFileFeature = 'after_path';
+/** `lane_git`: `execute_command` results may carry `laneGit`. Sent only when Code API echoes it. */
+export type WorkspaceCommandResultFeature = 'lane_git';
+
+/** Git state of the lane a command ran in. Never carries paths, remotes or repository content. */
+export interface WorkspaceLaneGit {
+  /** Checked-out branch, or null when HEAD is detached or the name is not reportable. */
+  branch: string | null;
+  /** HEAD commit (40 or 64 lowercase hex), or null before the first commit or when unreportable. */
+  head: string | null;
+}
+
+export function isWorkspaceLaneGit(value: unknown): value is WorkspaceLaneGit {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  const keys = Object.keys(state);
+  return (
+    keys.length === 2 &&
+    keys.includes('branch') &&
+    keys.includes('head') &&
+    (state.branch === null || (state.branch !== undefined && boundedBranch(state.branch) === state.branch)) &&
+    (state.head === null || (state.head !== undefined && boundedHead(state.head) === state.head))
+  );
+}
 export type WorkspaceProgrammaticLanguage = 'bash';
 
 export interface BridgeWorkspaceDescriptor {
   id: string;
   name?: string;
+  instructions?: RepositoryInstructionDescriptor[];
   /** Optional per-workspace restriction. Omitted by protocol-v1 readers. */
   operations?: BridgeWorkspaceToolOperation[];
+  /** Worker-owned isolation schemes available beneath this selected root. */
+  workspaceInstances?: ['git_worktree'];
+  /** Scheduling scopes available beneath this root. `git_linked_worktree` gives each
+   * verified `.worktrees/<name>` linked worktree its own lane. */
+  workspaceScopes?: ['git_linked_worktree'];
     environment?: {
         fingerprint: string;
         repo?: string;
@@ -297,6 +436,8 @@ export interface BridgeWorkspaceToolCapabilities {
   editFileFeatures?: WorkspaceEditFileFeature[];
   /** Omitted by workers that cannot continue a bounded file listing. */
   listFileFeatures?: WorkspaceListFileFeature[];
+  /** Omitted by workers that do not report lane Git state on command results. */
+  commandResultFeatures?: WorkspaceCommandResultFeature[];
   /** Languages that can execute PTC replay inside a selected workspace. */
   programmaticLanguages?: WorkspaceProgrammaticLanguage[];
 }
@@ -305,9 +446,33 @@ export interface WorkspaceReadFileRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'read_file';
   workspaceId: string;
+  workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   path: string;
   startLine?: number;
   maxLines?: number;
+  /** Requests an exact bounded instruction snapshot, not a line-oriented file read. */
+  instructionSha256?: string;
+}
+
+export const REPOSITORY_INSTRUCTION_MAX_BYTES = 32 * 1024;
+export interface RepositoryInstructionDescriptor {
+  path: 'AGENTS.md' | 'CLAUDE.md';
+  /** Bytes in the bounded UTF-8 snapshot, whose digest is sha256. */
+  bytes: number;
+  sha256: string;
+  truncated: boolean;
+}
+
+export function isRepositoryInstructionDescriptor(value: unknown): value is RepositoryInstructionDescriptor {
+  if (value == null || typeof value !== 'object') return false;
+  const descriptor = value as Record<string, unknown>;
+  return Object.keys(descriptor).every(key => ['path', 'bytes', 'sha256', 'truncated'].includes(key)) &&
+    (descriptor.path === 'AGENTS.md' || descriptor.path === 'CLAUDE.md') &&
+    Number.isSafeInteger(descriptor.bytes) && Number(descriptor.bytes) >= 0 && Number(descriptor.bytes) <= REPOSITORY_INSTRUCTION_MAX_BYTES &&
+    typeof descriptor.sha256 === 'string' && /^[a-f0-9]{64}$/.test(descriptor.sha256) &&
+    typeof descriptor.truncated === 'boolean';
 }
 
 export interface WorkspaceReadFileResult {
@@ -326,6 +491,9 @@ export interface WorkspaceSearchTextRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'search_text';
   workspaceId: string;
+  workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   query: string;
   path?: string;
   maxResults?: number;
@@ -350,6 +518,9 @@ export interface WorkspaceListFilesRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'list_files';
   workspaceId: string;
+  workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   path?: string;
   maxResults?: number;
   /** Continue strictly after this canonical path from a previous page. */
@@ -370,6 +541,9 @@ export interface WorkspaceWriteFileRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'write_file';
   workspaceId: string;
+  workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   path: string;
   content: string;
   /** False requires an atomic create and refuses to replace an existing file. */
@@ -389,9 +563,14 @@ interface WorkspaceEditFileRequestBase {
   protocolVersion: BridgeProtocolVersion;
   operation: 'edit_file';
   workspaceId: string;
+  workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   path: string;
   /** Refuses the mutation unless current file bytes match this preview revision. */
   expectedBaseSha256?: string;
+  /** Requires the `tolerant_match` edit feature. Omitted means `exact`. */
+  matching?: WorkspaceEditMatching;
 }
 
 export interface WorkspaceSingleEditFileRequest
@@ -418,6 +597,15 @@ export type WorkspaceEditFileRequest =
 export interface WorkspaceTextEdit {
   oldText: string;
   newText: string;
+  /** Replaces every match instead of requiring exactly one. Requires `replace_all`. */
+  replaceAll?: boolean;
+}
+
+/** How one edit matched. Present only when the request set `matching` or `replaceAll`. */
+export interface WorkspaceEditMatch {
+  strategy: WorkspaceEditMatchStrategy;
+  /** Locations replaced; always 1 unless the edit set `replaceAll`. */
+  occurrences: number;
 }
 
 export interface WorkspaceEditFileResult {
@@ -425,15 +613,22 @@ export interface WorkspaceEditFileResult {
   operation: 'edit_file';
   workspaceId: string;
   path: string;
+  /** Number of edits applied, which is always the number requested. */
   replacements: number;
   bytesWritten: number;
+  matches?: WorkspaceEditMatch[];
 }
 
 interface WorkspacePreviewEditRequestBase {
   protocolVersion: BridgeProtocolVersion;
   operation: 'preview_edit';
   workspaceId: string;
+  workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   path: string;
+  /** Requires the `tolerant_match` edit feature. Omitted means `exact`. */
+  matching?: WorkspaceEditMatching;
 }
 
 export interface WorkspaceSinglePreviewEditRequest
@@ -464,12 +659,16 @@ export interface WorkspacePreviewEditResult {
   baseSha256: string;
   replacements: number;
   bytesWritten: number;
+  matches?: WorkspaceEditMatch[];
 }
 
 export interface WorkspaceExecuteCommandRequest {
   protocolVersion: BridgeProtocolVersion;
   operation: 'execute_command';
   workspaceId: string;
+  workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
   /** Shell source evaluated only inside the selected sandbox runtime. */
   command: string;
   /** Portable path relative to the workspace root; defaults to '.'. */
@@ -490,6 +689,56 @@ export interface WorkspaceExecuteCommandResult {
   stderr: string;
   truncated: boolean;
   timedOut: boolean;
+  /** Present only when `commandResultFeatures` negotiated `lane_git` and Git was readable. */
+  laneGit?: WorkspaceLaneGit;
+}
+
+/** A stored object the caller owns, named exactly as Code API file storage names it. */
+export interface WorkspaceImportFileSource {
+  storage_session_id: string;
+  id: string;
+}
+
+/**
+ * Copies one stored object into the workspace as a binary-safe file. The
+ * worker streams it through its file relay upstream, refuses `.git` paths and
+ * symlinked parents, verifies `bytes` and `sha256`, and installs it atomically
+ * with mode 0644.
+ */
+export interface WorkspaceImportFileRequest {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'import_file';
+  workspaceId: string;
+  workspaceInstanceId?: string;
+  /** Linked worktree lane at `.worktrees/<name>`; paths and cwd are relative to it. */
+  worktree?: string;
+  path: string;
+  source: WorkspaceImportFileSource;
+  /** Exact object size, enforced as a hard cap while streaming. */
+  bytes: number;
+  /** Lowercase hex SHA-256 of the object's bytes. */
+  sha256: string;
+  /** False or omitted refuses to replace a file whose content differs. */
+  overwrite?: boolean;
+  /**
+   * Set only by Code API when it relays the request to a worker: a short-lived
+   * read grant scoped to `source`, whose ids are then opaque grant handles.
+   * Callers never send it.
+   */
+  egressGrant?: string;
+}
+
+export interface WorkspaceImportFileResult {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'import_file';
+  workspaceId: string;
+  path: string;
+  created: boolean;
+  /** True when the target already held these exact bytes; nothing was written. */
+  unchanged?: boolean;
+  /** Bytes installed, or 0 when `unchanged`. */
+  bytesWritten: number;
+  sha256: string;
 }
 
 export type WorkspaceToolRequest =
@@ -499,7 +748,8 @@ export type WorkspaceToolRequest =
   | WorkspaceWriteFileRequest
   | WorkspacePreviewEditRequest
   | WorkspaceEditFileRequest
-  | WorkspaceExecuteCommandRequest;
+  | WorkspaceExecuteCommandRequest
+  | WorkspaceImportFileRequest;
 export type WorkspaceToolResult =
   | WorkspaceReadFileResult
   | WorkspaceSearchTextResult
@@ -507,12 +757,16 @@ export type WorkspaceToolResult =
   | WorkspaceWriteFileResult
   | WorkspacePreviewEditResult
   | WorkspaceEditFileResult
-  | WorkspaceExecuteCommandResult;
+  | WorkspaceExecuteCommandResult
+  | WorkspaceImportFileResult;
 
 const WORKSPACE_READ_REQUEST_KEYS = new Set([
+  'instructionSha256',
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
+  'worktree',
   'path',
   'startLine',
   'maxLines',
@@ -521,6 +775,8 @@ const WORKSPACE_SEARCH_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
+  'worktree',
   'query',
   'path',
   'maxResults',
@@ -529,6 +785,8 @@ const WORKSPACE_LIST_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
+  'worktree',
   'path',
   'maxResults',
   'afterPath',
@@ -537,6 +795,8 @@ const WORKSPACE_WRITE_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
+  'worktree',
   'path',
   'content',
   'overwrite',
@@ -545,31 +805,64 @@ const WORKSPACE_EDIT_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
+  'worktree',
   'path',
   'oldText',
   'newText',
   'edits',
   'expectedBaseSha256',
+  'matching',
 ]);
 const WORKSPACE_PREVIEW_EDIT_REQUEST_KEYS = new Set([
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
+  'worktree',
   'path',
   'oldText',
   'newText',
   'edits',
+  'matching',
 ]);
-const WORKSPACE_TEXT_EDIT_KEYS = new Set(['oldText', 'newText']);
+const WORKSPACE_TEXT_EDIT_KEYS = new Set(['oldText', 'newText', 'replaceAll']);
+const WORKSPACE_EDIT_MATCH_KEYS = new Set(['strategy', 'occurrences']);
 const WORKSPACE_COMMAND_REQUEST_KEYS = new Set([
     'environmentAction',
   'protocolVersion',
   'operation',
   'workspaceId',
+  'workspaceInstanceId',
+  'worktree',
   'command',
   'cwd',
   'timeoutMs',
   'maxOutputBytes',
+]);
+const WORKSPACE_IMPORT_REQUEST_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'workspaceInstanceId',
+  'worktree',
+  'path',
+  'source',
+  'bytes',
+  'sha256',
+  'overwrite',
+  'egressGrant',
+]);
+const WORKSPACE_IMPORT_SOURCE_KEYS = new Set(['storage_session_id', 'id']);
+const WORKSPACE_IMPORT_RESULT_KEYS = new Set([
+  'protocolVersion',
+  'operation',
+  'workspaceId',
+  'path',
+  'created',
+  'unchanged',
+  'bytesWritten',
+  'sha256',
 ]);
 const WORKSPACE_READ_RESULT_KEYS = new Set([
   'protocolVersion',
@@ -612,6 +905,7 @@ const WORKSPACE_EDIT_RESULT_KEYS = new Set([
   'path',
   'replacements',
   'bytesWritten',
+  'matches',
 ]);
 const WORKSPACE_PREVIEW_EDIT_RESULT_KEYS = new Set([
   'protocolVersion',
@@ -623,6 +917,7 @@ const WORKSPACE_PREVIEW_EDIT_RESULT_KEYS = new Set([
   'baseSha256',
   'replacements',
   'bytesWritten',
+  'matches',
 ]);
 const WORKSPACE_COMMAND_RESULT_KEYS = new Set([
   'protocolVersion',
@@ -634,6 +929,7 @@ const WORKSPACE_COMMAND_RESULT_KEYS = new Set([
   'stderr',
   'truncated',
   'timedOut',
+  'laneGit',
 ]);
 const WORKSPACE_SEARCH_MATCH_KEYS = new Set(['path', 'line', 'column', 'text']);
 
@@ -677,6 +973,14 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceListFileFeatures?: WorkspaceListFileFeature[];
   /** PTC languages this Code API can safely route into a selected workspace. */
   supportedWorkspaceProgrammaticLanguages?: WorkspaceProgrammaticLanguage[];
+  /** Workspace isolation schemes this Code API understands and can route. */
+  supportedWorkspaceInstanceTypes?: ['git_worktree'];
+  /** Scheduling scopes this Code API can admit as independent lanes. */
+  supportedWorkspaceScopes?: ['git_linked_worktree'];
+  /** Command result fields this Code API accepts in settlements. */
+  supportedWorkspaceCommandResultFeatures?: WorkspaceCommandResultFeature[];
+  /** Added workspace tool error codes this Code API accepts in settlements. */
+  supportedWorkspaceToolErrorCodes?: WorkspaceToolErrorCode[];
 }
 
 /** Administrator-visible liveness for a configured worker. Credentials,
@@ -687,6 +991,8 @@ export interface BridgeWorkerStatusResponse {
   online: boolean;
   ready: boolean;
   leaseExpiresInMs?: number;
+  /** Server-owned execution ceiling for workspace commands. Omitted by legacy servers. */
+  maxCommandTimeoutMs?: number;
   capabilities?: BridgeWorkerCapabilities;
 }
 
@@ -702,6 +1008,32 @@ export interface BridgeWorkerCredentialResponse {
   workerId: string;
   credential: string;
   expiresAt: string;
+}
+
+/** The enrolled machine signs this request before Code API issues a challenge. */
+export interface BridgeRecoveryChallengeRequest {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'credential.challenge';
+  serverId: string;
+  workerId: string;
+  timestamp: string;
+  nonce: string;
+  signature: string;
+}
+
+/** A short-lived, single-use challenge for an already enrolled machine key. */
+export interface BridgeRecoveryChallengeResponse {
+  protocolVersion: BridgeProtocolVersion;
+  operation: 'credential.recover';
+  serverId: string;
+  workerId: string;
+  enrollmentGeneration: string;
+  challenge: string;
+  expiresAt: string;
+}
+
+export interface BridgeRecoveryRequest extends BridgeRecoveryChallengeResponse {
+  signature: string;
 }
 
 export interface BridgeSandboxRequest<TBody = object> {
@@ -721,6 +1053,9 @@ export type BridgeProgrammaticPayloadFile =
 export interface BridgeWorkspaceProgrammaticBody {
   language: 'bash';
   version: string;
+  workspace_instance_id?: string;
+  /** Linked worktree lane at `.worktrees/<name>` beneath the selected checkout. */
+  workspace_worktree?: string;
     /** Stable identity shared by every replay iteration of one execution. */
     execution_id?: string;
     /** Declared replay tools; zero allows the worker to skip the probe pass. */
@@ -786,6 +1121,7 @@ export interface BridgeRejectedSettlement {
 
 export type WorkspaceToolErrorCode =
   | 'INVALID_PATH'
+  | 'NOT_FOUND'
   | 'INVALID_REQUEST'
   | 'READ_LIMIT_EXCEEDED'
   | 'WRITE_LIMIT_EXCEEDED'
@@ -804,6 +1140,7 @@ export type WorkspaceToolErrorCode =
 
 const WORKSPACE_TOOL_ERROR_CODES = new Set<WorkspaceToolErrorCode>([
   'INVALID_PATH',
+  'NOT_FOUND',
   'INVALID_REQUEST',
   'READ_LIMIT_EXCEEDED',
   'WRITE_LIMIT_EXCEEDED',
@@ -820,6 +1157,15 @@ const WORKSPACE_TOOL_ERROR_CODES = new Set<WorkspaceToolErrorCode>([
   'COMMAND_UNAVAILABLE',
   'COMMAND_DISABLED',
 ]);
+
+/**
+ * Codes added after the original settlement contract, each with the legacy code
+ * an older Code API accepts in its place. A worker reports an added code only
+ * after registration advertises it, and falls back if a settlement is refused.
+ */
+export const WORKSPACE_TOOL_ERROR_CODE_FALLBACKS: Readonly<
+  Partial<Record<WorkspaceToolErrorCode, WorkspaceToolErrorCode>>
+> = { NOT_FOUND: 'INVALID_PATH' };
 
 export function isWorkspaceToolErrorCode(
   value: unknown,
@@ -885,6 +1231,11 @@ export function isBridgeWorkspaceProgrammaticRequest(
     typeof body.version !== 'string' ||
     body.version.length === 0 ||
     body.version.length > BRIDGE_RUNTIME_MAX_LENGTH ||
+    (body.workspace_instance_id !== undefined &&
+      (typeof body.workspace_instance_id !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(body.workspace_instance_id))) ||
+    (body.workspace_worktree !== undefined &&
+      !isValidLinkedWorktreeName(body.workspace_worktree)) ||
         (body.execution_id !== undefined &&
             (typeof body.execution_id !== 'string' ||
                 !/^[A-Za-z0-9_-]{1,128}$/.test(body.execution_id))) ||
@@ -1017,6 +1368,94 @@ export function isSafePortableRelativePath(value: unknown): value is string {
     return value.split('/').every(segment => segment !== '..');
 }
 
+/**
+ * Whether a path segment names Git metadata on any host filesystem: case
+ * folding (macOS, Windows), ignorable code points (HFS+), trailing dots and
+ * spaces (Windows), NTFS stream syntax such as `.git::$INDEX_ALLOCATION`, and
+ * the NTFS short name all alias `.git`.
+ */
+function isDotGitPathSegment(segment: string): boolean {
+  const folded = segment
+    .split(':', 1)[0]!
+    .toLowerCase()
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '')
+    .replace(/[. ]+$/, '');
+  return folded === '.git' || folded === 'git~1';
+}
+
+/** `write_file` path rules, plus no `.git` segment and a file-like final segment. */
+export function isWorkspaceImportFilePath(value: unknown): value is string {
+  if (!isSafePortableRelativePath(value)) return false;
+  const segments = value.split('/');
+  const last = segments[segments.length - 1];
+  return (
+    last !== undefined &&
+    last !== '' &&
+    last !== '.' &&
+    !segments.some(isDotGitPathSegment)
+  );
+}
+
+function isWorkspaceImportFileHandle(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= BRIDGE_WORKSPACE_IMPORT_FILE_HANDLE_MAX_LENGTH &&
+    !/[\0\r\n]/.test(value)
+  );
+}
+
+function isWorkspaceImportFileRequestShape(
+  request: Record<string, unknown>,
+): boolean {
+  const source = request.source;
+  return (
+    hasOnlyKeys(request, WORKSPACE_IMPORT_REQUEST_KEYS) &&
+    isWorkspaceImportFilePath(request.path) &&
+    typeof source === 'object' &&
+    source !== null &&
+    !Array.isArray(source) &&
+    hasOnlyKeys(source as Record<string, unknown>, WORKSPACE_IMPORT_SOURCE_KEYS) &&
+    isWorkspaceImportFileHandle((source as Record<string, unknown>).storage_session_id) &&
+    isWorkspaceImportFileHandle((source as Record<string, unknown>).id) &&
+    Number.isSafeInteger(request.bytes) &&
+    Number(request.bytes) >= 0 &&
+    typeof request.sha256 === 'string' &&
+    /^[a-f0-9]{64}$/.test(request.sha256) &&
+    (request.overwrite === undefined || typeof request.overwrite === 'boolean') &&
+    (request.egressGrant === undefined ||
+      (typeof request.egressGrant === 'string' &&
+        request.egressGrant.length > 0 &&
+        request.egressGrant.length <= BRIDGE_WORKSPACE_IMPORT_FILE_GRANT_MAX_LENGTH &&
+        !/[\0\r\n]/.test(request.egressGrant)))
+  );
+}
+
+/**
+ * The caller-facing `import_file` request LibreChat sends to Code API. A
+ * caller may never supply `egressGrant`; Code API mints it when relaying.
+ */
+export function isBridgeWorkspaceImportFileRequest(
+  value: unknown,
+): value is WorkspaceImportFileRequest & { egressGrant?: never } {
+  return (
+    isWorkspaceToolRequest(value) &&
+    value.operation === 'import_file' &&
+    value.egressGrant === undefined
+  );
+}
+
+/** The relayed `import_file` request a worker executes: it must carry Code API's grant. */
+export function isRelayedWorkspaceImportFileRequest(
+  value: unknown,
+): value is WorkspaceImportFileRequest & { egressGrant: string } {
+  return (
+    isWorkspaceToolRequest(value) &&
+    value.operation === 'import_file' &&
+    value.egressGrant !== undefined
+  );
+}
+
 function normalizePortableRelativePath(value: string): string {
   return (
     value
@@ -1060,6 +1499,44 @@ function isWithinRequestedPath(candidate: string, requested?: string): boolean {
   );
 }
 
+/** Whether a request asked for per-edit match reporting (and so must receive it). */
+export function workspaceEditRequestReportsMatches(
+  request: WorkspaceEditFileRequest | WorkspacePreviewEditRequest,
+): boolean {
+  return (
+    request.matching !== undefined ||
+    (request.edits?.some((edit) => edit.replaceAll !== undefined) ?? false)
+  );
+}
+
+function isValidWorkspaceEditMatches(
+  request: WorkspaceEditFileRequest | WorkspacePreviewEditRequest,
+  matches: unknown,
+): boolean {
+  if (!workspaceEditRequestReportsMatches(request)) return matches === undefined;
+  const edits: WorkspaceTextEdit[] = request.edits ?? [
+    { oldText: request.oldText ?? '', newText: request.newText ?? '' },
+  ];
+  return (
+    Array.isArray(matches) &&
+    matches.length === edits.length &&
+    matches.every((match: unknown, index) => {
+      if (typeof match !== 'object' || match === null) return false;
+      const candidate = match as Record<string, unknown>;
+      return (
+        hasOnlyKeys(candidate, WORKSPACE_EDIT_MATCH_KEYS) &&
+        WORKSPACE_EDIT_MATCH_STRATEGIES.has(
+          candidate.strategy as WorkspaceEditMatchStrategy,
+        ) &&
+        (request.matching === 'tolerant' || candidate.strategy === 'exact') &&
+        Number.isSafeInteger(candidate.occurrences) &&
+        Number(candidate.occurrences) >= 1 &&
+        (edits[index]?.replaceAll === true || candidate.occurrences === 1)
+      );
+    })
+  );
+}
+
 function isValidWorkspaceEditRequest(
     request: Record<string, unknown>,
 ): boolean {
@@ -1068,6 +1545,13 @@ function isValidWorkspaceEditRequest(
         hasBatch &&
         (request.oldText !== undefined || request.newText !== undefined)
     ) {
+    return false;
+  }
+  if (
+    request.matching !== undefined &&
+    request.matching !== 'exact' &&
+    request.matching !== 'tolerant'
+  ) {
     return false;
   }
   const edits = hasBatch
@@ -1100,7 +1584,9 @@ function isValidWorkspaceEditRequest(
                 candidate.oldText ||
       typeof candidate.newText !== 'string' ||
             Buffer.from(candidate.newText).toString('utf8') !==
-                candidate.newText
+                candidate.newText ||
+      (candidate.replaceAll !== undefined &&
+        typeof candidate.replaceAll !== 'boolean')
     ) {
       return false;
     }
@@ -1134,11 +1620,21 @@ export function isWorkspaceToolRequest(
   if (
     request.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
     typeof request.workspaceId !== 'string' ||
-    !isValidBridgeWorkerId(request.workspaceId)
+    !isValidBridgeWorkerId(request.workspaceId) ||
+    (request.workspaceInstanceId !== undefined &&
+      (typeof request.workspaceInstanceId !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(request.workspaceInstanceId))) ||
+    (request.worktree !== undefined && !isValidLinkedWorktreeName(request.worktree))
   ) {
     return false;
   }
   if (request.operation === 'read_file') {
+    if (request.instructionSha256 !== undefined) {
+      return hasOnlyKeys(request, WORKSPACE_READ_REQUEST_KEYS) &&
+        typeof request.instructionSha256 === 'string' && /^[a-f0-9]{64}$/.test(request.instructionSha256) &&
+        (request.path === 'AGENTS.md' || request.path === 'CLAUDE.md') &&
+        request.startLine === undefined && request.maxLines === undefined;
+    }
     return (
       hasOnlyKeys(request, WORKSPACE_READ_REQUEST_KEYS) &&
       isSafePortableRelativePath(request.path) &&
@@ -1258,6 +1754,9 @@ export function isWorkspaceToolRequest(
             BRIDGE_WORKSPACE_COMMAND_MAX_OUTPUT_BYTES))
     );
   }
+  if (request.operation === 'import_file') {
+    return isWorkspaceImportFileRequestShape(request);
+  }
   return false;
 }
 
@@ -1282,6 +1781,13 @@ export function isWorkspaceToolResult(
   }
 
   if (request.operation === 'read_file') {
+    if (request.instructionSha256 !== undefined) {
+      return hasOnlyKeys(result, WORKSPACE_READ_RESULT_KEYS) && result.path === request.path &&
+        typeof result.content === 'string' && new TextEncoder().encode(result.content).byteLength <= REPOSITORY_INSTRUCTION_MAX_BYTES &&
+        createHash('sha256').update(result.content).digest('hex') === request.instructionSha256 &&
+        result.startLine === 1 && result.endLine === result.content.split('\n').length &&
+        result.nextStartLine === undefined;
+    }
     const startLine = request.startLine ?? 1;
     const maxLines = request.maxLines ?? 200;
         const content =
@@ -1384,6 +1890,26 @@ export function isWorkspaceToolResult(
     );
   }
 
+  if (request.operation === 'import_file') {
+    if (
+      !hasOnlyKeys(result, WORKSPACE_IMPORT_RESULT_KEYS) ||
+      result.path !== request.path ||
+      result.sha256 !== request.sha256 ||
+      typeof result.created !== 'boolean' ||
+      (result.unchanged !== undefined && typeof result.unchanged !== 'boolean') ||
+      !Number.isSafeInteger(result.bytesWritten)
+    ) {
+      return false;
+    }
+    if (result.unchanged === true) {
+      return result.created === false && result.bytesWritten === 0;
+    }
+    return (
+      result.bytesWritten === request.bytes &&
+      (request.overwrite === true || result.created === true)
+    );
+  }
+
   if (request.operation === 'edit_file') {
     const replacements = request.edits?.length ?? 1;
     return (
@@ -1392,7 +1918,8 @@ export function isWorkspaceToolResult(
       result.replacements === replacements &&
       Number.isSafeInteger(result.bytesWritten) &&
       Number(result.bytesWritten) >= 0 &&
-      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES &&
+      isValidWorkspaceEditMatches(request, result.matches)
     );
   }
 
@@ -1413,7 +1940,8 @@ export function isWorkspaceToolResult(
       Number(result.bytesWritten) ===
         new TextEncoder().encode(content).byteLength +
           (result.hasUtf8Bom ? 3 : 0) &&
-      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES
+      Number(result.bytesWritten) <= BRIDGE_WORKSPACE_WRITE_MAX_BYTES &&
+      isValidWorkspaceEditMatches(request, result.matches)
     );
   }
 
@@ -1443,6 +1971,7 @@ export function isWorkspaceToolResult(
           /^SIG[A-Z0-9]+$/.test(result.signal))) &&
       typeof result.truncated === 'boolean' &&
       typeof result.timedOut === 'boolean' &&
+      (result.laneGit === undefined || isWorkspaceLaneGit(result.laneGit)) &&
       (result.exitCode === null
         ? result.timedOut === true || result.signal !== undefined
         : result.timedOut === false && result.signal === undefined)
@@ -1483,7 +2012,7 @@ export function isValidBridgeWorkspaceToolCapabilities(
     capabilities.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
     !Array.isArray(capabilities.operations) ||
     capabilities.operations.length < 1 ||
-    capabilities.operations.length > 7 ||
+    capabilities.operations.length > 8 ||
     !capabilities.operations.every(
             operation =>
         operation === 'read_file' ||
@@ -1492,7 +2021,8 @@ export function isValidBridgeWorkspaceToolCapabilities(
         operation === 'write_file' ||
         operation === 'preview_edit' ||
         operation === 'edit_file' ||
-        operation === 'execute_command',
+        operation === 'execute_command' ||
+        operation === 'import_file',
     ) ||
         new Set(capabilities.operations).size !==
             capabilities.operations.length ||
@@ -1537,9 +2067,20 @@ export function isValidBridgeWorkspaceToolCapabilities(
   if (
     capabilities.editFileFeatures !== undefined &&
     (!Array.isArray(capabilities.editFileFeatures) ||
-      capabilities.editFileFeatures.length !== 1 ||
-      !capabilities.operations.includes('edit_file') ||
-      capabilities.editFileFeatures[0] !== 'expected_base_sha256')
+      capabilities.editFileFeatures.length < 1 ||
+      capabilities.editFileFeatures.length >
+        WORKSPACE_EDIT_FILE_FEATURES.length ||
+      (!capabilities.operations.includes('edit_file') &&
+        !capabilities.operations.includes('preview_edit')) ||
+      !capabilities.editFileFeatures.every((feature: unknown) =>
+        WORKSPACE_EDIT_FILE_FEATURES.includes(
+          feature as WorkspaceEditFileFeature,
+        ) &&
+        (feature !== 'expected_base_sha256' ||
+          (capabilities.operations as string[]).includes('edit_file')),
+      ) ||
+      new Set(capabilities.editFileFeatures).size !==
+        capabilities.editFileFeatures.length)
   ) {
     return false;
   }
@@ -1550,6 +2091,16 @@ export function isValidBridgeWorkspaceToolCapabilities(
       capabilities.listFileFeatures.length !== 1 ||
       !capabilities.operations.includes('list_files') ||
       capabilities.listFileFeatures[0] !== 'after_path')
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.commandResultFeatures !== undefined &&
+    (!Array.isArray(capabilities.commandResultFeatures) ||
+      capabilities.commandResultFeatures.length !== 1 ||
+      !capabilities.operations.includes('execute_command') ||
+      capabilities.commandResultFeatures[0] !== 'lane_git')
   ) {
     return false;
   }
@@ -1574,11 +2125,23 @@ export function isValidBridgeWorkspaceToolCapabilities(
                     key !== 'id' &&
                     key !== 'name' &&
                     key !== 'operations' &&
+                    key !== 'workspaceInstances' &&
+                    key !== 'workspaceScopes' &&
+                    key !== 'instructions' &&
                     key !== 'environment',
       ) ||
       typeof descriptor.id !== 'string' ||
       !isValidBridgeWorkerId(descriptor.id) ||
       workspaceIds.has(descriptor.id) ||
+      (descriptor.workspaceInstances !== undefined &&
+        (!Array.isArray(descriptor.workspaceInstances) ||
+          descriptor.workspaceInstances.length !== 1 ||
+          descriptor.workspaceInstances[0] !== 'git_worktree')) ||
+      (descriptor.workspaceScopes !== undefined &&
+        (!Array.isArray(descriptor.workspaceScopes) ||
+          descriptor.workspaceScopes.length !== 1 ||
+          descriptor.workspaceScopes[0] !== 'git_linked_worktree')) ||
+      (descriptor.instructions !== undefined && (!Array.isArray(descriptor.instructions) || descriptor.instructions.length > 1 || !descriptor.instructions.every(isRepositoryInstructionDescriptor))) ||
             (descriptor.environment !== undefined &&
                 !isValidCodeEnvironmentDescriptor(descriptor.environment)) ||
       (descriptor.name !== undefined &&

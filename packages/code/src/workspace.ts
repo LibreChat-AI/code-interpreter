@@ -1,10 +1,12 @@
-import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, open, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { deferWorkspaceRootCleanup, holdsWorkspaceRoot, link, lstat, mkdir, open, realpath, rename, rmdir, stat, unlink, spawn, withWorkspaceRoot, WorkspaceRootAccessError } from './root-access.js';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { FileHandle } from 'node:fs/promises';
+import type { CommandFailureDiagnostic } from './command-diagnostics.js';
+import { captureWorkspaceRootIdentity, matchesWorkspaceRoot } from './root-identity.js';
+import type { WorkspaceRootIdentity } from './root-identity.js';
 
 import {
   BRIDGE_PROTOCOL_VERSION,
@@ -16,13 +18,23 @@ import {
   BRIDGE_WORKSPACE_SEARCH_TEXT_MAX_LENGTH,
   comparePortableRelativePaths,
   isSafePortableRelativePath,
+  isWorkspaceImportFilePath,
   isValidBridgeWorkspaceToolCapabilities,
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
+  WORKSPACE_EDIT_FILE_FEATURES,
+  workspaceEditRequestReportsMatches,
 } from './protocol.js';
+import {
+  applyTextEdits,
+  WorkspaceEditMatchError,
+  WorkspaceEditOutputLimitError,
+} from './edits.js';
+import type { AppliedEdits } from './edits.js';
 
 import type {
   BridgeWorkspaceDescriptor,
+  WorkspaceEditMatch,
   BridgeWorkspaceToolCapabilities,
   WorkspaceReadFileRequest,
   WorkspaceReadFileResult,
@@ -32,6 +44,8 @@ import type {
   WorkspacePreviewEditResult,
   WorkspaceExecuteCommandRequest,
   WorkspaceExecuteCommandResult,
+  WorkspaceImportFileRequest,
+  WorkspaceImportFileResult,
   WorkspaceListFilesRequest,
   WorkspaceListFilesResult,
   WorkspaceSearchMatch,
@@ -45,6 +59,7 @@ import type {
 } from './protocol.js';
 
 export { isWorkspaceToolRequest, isWorkspaceToolResult };
+import { readRepositoryInstructions } from './instructions.js';
 export type {
   WorkspaceReadFileRequest,
   WorkspaceReadFileResult,
@@ -54,6 +69,8 @@ export type {
   WorkspacePreviewEditResult,
   WorkspaceExecuteCommandRequest,
   WorkspaceExecuteCommandResult,
+  WorkspaceImportFileRequest,
+  WorkspaceImportFileResult,
   WorkspaceListFilesRequest,
   WorkspaceListFilesResult,
   WorkspaceSearchMatch,
@@ -66,6 +83,7 @@ export type {
 };
 
 export interface LocalWorkspaceConfig {
+  identity?: WorkspaceRootIdentity;
   id: string;
   name?: string;
   root: string;
@@ -73,8 +91,27 @@ export interface LocalWorkspaceConfig {
   writable?: boolean;
 }
 
+/**
+ * Fetches a stored object for `import_file`. Only a worker with a configured
+ * file relay upstream has one, and `import_file` is advertised only then.
+ */
+export interface WorkspaceFileImporter {
+  /** Largest file this worker imports; larger requests fail before any transfer. */
+  readonly maxBytes: number;
+  /** Streams the granted object. Failures are WorkspaceToolErrors. */
+  open(
+    request: WorkspaceImportFileRequest & { egressGrant: string },
+    signal?: AbortSignal,
+  ): Promise<AsyncIterable<Uint8Array>>;
+  /** Bytes a new file in `directory` may still use on its filesystem. */
+  availableBytes(directory: string): Promise<number>;
+}
+
 export interface LocalWorkspaceToolsOptions {
   workspaces: LocalWorkspaceConfig[];
+  repositoryInstructions?: boolean;
+  /** Enables `import_file` on writable workspaces. */
+  importer?: WorkspaceFileImporter;
 }
 
 export interface WorkspaceToolExecutor {
@@ -87,6 +124,8 @@ export interface WorkspaceToolExecutor {
   execute(
     request: WorkspaceToolRequest,
     signal?: AbortSignal,
+    /** Local epoch ms after which the worker aborts this execution. Advisory work must finish well before it. */
+    context?: { deadlineAtMs?: number },
   ): Promise<WorkspaceToolResult>;
 }
 
@@ -120,6 +159,8 @@ const MAX_SEARCH_CANDIDATE_BYTES = 1024 * 1024;
 const MAX_SEARCH_CANDIDATES = 20_000;
 const SEARCH_TIMEOUT_MS = 10_000;
 const LIST_TIMEOUT_MS = 10_000;
+const READ_TIMEOUT_MS = 10_000;
+const READ_CHUNK_BYTES = 64 * 1024;
 
 const READ_OPERATIONS = [
   'read_file',
@@ -127,6 +168,12 @@ const READ_OPERATIONS = [
   'list_files',
 ] as const;
 const WRITE_OPERATIONS = ['write_file', 'preview_edit', 'edit_file'] as const;
+const IMPORT_OPERATIONS = ['import_file'] as const;
+const IMPORT_DIRECTORY_MODE = 0o755;
+const IMPORT_FILE_MODE = 0o644;
+const IMPORT_HASH_CHUNK_BYTES = 1024 * 1024;
+/** Headroom left on the target filesystem after an import lands. */
+export const WORKSPACE_IMPORT_FREE_SPACE_RESERVE_BYTES = 64 * 1024 * 1024;
 
 function isUtf8ScalarString(value: string): boolean {
   return Buffer.from(value).toString('utf8') === value;
@@ -180,6 +227,8 @@ export class WorkspaceToolError extends Error {
     public readonly mutationMayHaveCommitted = false,
     /** Retain the durable mutation guard when process or write settlement is uncertain. */
     public readonly requiresQuarantine = mutationMayHaveCommitted,
+    /** Worker-local diagnostic metadata; never serialized into bridge settlements. */
+    public readonly commandDiagnostic?: CommandFailureDiagnostic,
   ) {
     super(message);
     this.name = 'WorkspaceToolError';
@@ -260,10 +309,18 @@ function resolveWorkspacePath(root: string, requestedPath: string): string {
   return candidate;
 }
 
-async function readConfinedFileBuffer(
+interface WorkspaceReadControl {
+  signal?: AbortSignal;
+  deadline: number;
+  interrupted: boolean;
+}
+
+async function withConfinedFile<T>(
   root: string,
   requestedPath: string,
-): Promise<Buffer> {
+  read: (handle: FileHandle, size: number) => Promise<T>,
+  control?: WorkspaceReadControl,
+): Promise<T> {
   const candidate = resolveWorkspacePath(root, requestedPath);
   let handle: FileHandle | undefined;
   try {
@@ -284,7 +341,31 @@ async function readConfinedFileBuffer(
     ) {
       throw new Error('Invalid workspace path');
     }
-    if (openedFile.size > BRIDGE_WORKSPACE_READ_MAX_BYTES) {
+    return await read(handle, openedFile.size);
+  } catch (error) {
+    if (error instanceof WorkspaceToolError) throw error;
+    if (isMissingEntry(error)) {
+      throw await classifyMissingWorkspacePath(root, candidate);
+    }
+    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  } finally {
+    if (handle) {
+      const closing = handle.close();
+      if (control?.interrupted) {
+        // Node retains the descriptor and buffer until outstanding I/O drains.
+        deferWorkspaceRootCleanup();
+        void closing.catch(() => {});
+      } else await closing;
+    }
+  }
+}
+
+async function readConfinedFileBuffer(
+  root: string,
+  requestedPath: string,
+): Promise<Buffer> {
+  return withConfinedFile(root, requestedPath, async (handle, size) => {
+    if (size > BRIDGE_WORKSPACE_READ_MAX_BYTES) {
       throw new WorkspaceToolError(
         'Workspace file exceeds read limit',
         'READ_LIMIT_EXCEEDED',
@@ -309,33 +390,230 @@ async function readConfinedFileBuffer(
       );
     }
     return buffer.subarray(0, bytesRead);
-  } catch (error) {
-    if (error instanceof WorkspaceToolError) throw error;
-    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  });
+}
+
+function interruptRead(
+  control: WorkspaceReadControl,
+  message: string,
+  code: 'EXECUTION_ABORTED' | 'READ_LIMIT_EXCEEDED',
+): WorkspaceToolError {
+  control.interrupted = true;
+  return new WorkspaceToolError(message, code);
+}
+
+function checkReadDeadline(control: WorkspaceReadControl): void {
+  if (control.signal?.aborted) {
+    throw interruptRead(
+      control,
+      'Workspace tool execution aborted',
+      'EXECUTION_ABORTED',
+    );
+  }
+  if (performance.now() >= control.deadline) {
+    throw interruptRead(
+      control,
+      'Workspace read exceeded its scan time limit; request an earlier startLine or use search_text to locate content',
+      'READ_LIMIT_EXCEEDED',
+    );
+  }
+}
+
+async function readWorkspaceChunk(
+  handle: FileHandle,
+  buffer: Buffer,
+  length: number,
+  position: number,
+  control: WorkspaceReadControl,
+): Promise<number> {
+  checkReadDeadline(control);
+  const { signal, deadline } = control;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      handle
+        .read(buffer, 0, length, position)
+        .then((result) => result.bytesRead),
+      new Promise<never>((_, reject) => {
+        abort = () =>
+          reject(
+            interruptRead(
+              control,
+              'Workspace tool execution aborted',
+              'EXECUTION_ABORTED',
+            ),
+          );
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) abort();
+        timer = setTimeout(
+          () =>
+            reject(
+              interruptRead(
+                control,
+                'Workspace read exceeded its scan time limit; retry with an earlier startLine',
+                'READ_LIMIT_EXCEEDED',
+              ),
+            ),
+          Math.max(0, deadline - performance.now()),
+        );
+      }),
+    ]);
   } finally {
-    await handle?.close();
+    if (timer !== undefined) clearTimeout(timer);
+    if (abort) signal?.removeEventListener('abort', abort);
   }
 }
 
 async function readConfinedFile(
   root: string,
-  requestedPath: string,
-): Promise<string> {
-  const decoded = decodeWorkspaceText(
-    await readConfinedFileBuffer(root, requestedPath),
-  );
-  if (Buffer.byteLength(decoded, 'utf8') > BRIDGE_WORKSPACE_READ_MAX_BYTES) {
-    throw new WorkspaceToolError(
-      'Workspace file exceeds read limit',
-      'READ_LIMIT_EXCEEDED',
+  request: WorkspaceReadFileRequest,
+  signal?: AbortSignal,
+): Promise<WorkspaceReadFileResult> {
+  const startLine = request.startLine ?? 1;
+  const maxLines = request.maxLines ?? 200;
+  const control: WorkspaceReadControl = {
+    signal,
+    deadline: performance.now() + READ_TIMEOUT_MS,
+    interrupted: false,
+  };
+  const read = async (
+    handle: FileHandle,
+    size: number,
+  ): Promise<WorkspaceReadFileResult> => {
+    const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+    // Fix the read extent at admission so an appending writer cannot extend the scan.
+    let position = 0;
+    const header = Buffer.alloc(3);
+    let headerBytes = 0;
+    while (headerBytes < header.length && position < size) {
+      const bytes = await readWorkspaceChunk(
+        handle,
+        buffer,
+        Math.min(header.length - headerBytes, size - position),
+        position,
+        control,
+      );
+      checkReadDeadline(control);
+      if (bytes === 0) break;
+      buffer.copy(header, headerBytes, 0, bytes);
+      headerBytes += bytes;
+      position += bytes;
+    }
+    const utf16le =
+      headerBytes >= 2 && header[0] === 0xff && header[1] === 0xfe;
+    const utf16be =
+      headerBytes >= 2 && header[0] === 0xfe && header[1] === 0xff;
+    const bomBytes =
+      utf16le || utf16be
+        ? 2
+        : headerBytes === 3 &&
+          header[0] === 0xef &&
+          header[1] === 0xbb &&
+          header[2] === 0xbf
+        ? 3
+        : 0;
+    // Preserve ordinary reads' replacement decoding and BOM-marked UTF-16 support.
+    const decoder = new TextDecoder(
+      utf16le ? 'utf-16le' : utf16be ? 'utf-16be' : 'utf-8',
+      { ignoreBOM: true },
     );
-  }
-  return decoded;
+    const lines: string[] = [];
+    let fragments: string[] = [];
+    let line = 1;
+    let lineBytes = 0;
+    let returnedBytes = 0;
+    let hasText = false;
+    let truncated = false;
+    const consume = (text: string): void => {
+      let offset = 0;
+      while (offset < text.length) {
+        checkReadDeadline(control);
+        const newline = text.indexOf('\n', offset);
+        const end = newline < 0 ? text.length : newline;
+        if (line >= startLine) {
+          if (lines.length === maxLines) {
+            truncated = true;
+            return;
+          }
+          const fragment = text.slice(offset, end);
+          const bytes = Buffer.byteLength(fragment, 'utf8');
+          if (
+            returnedBytes + (lines.length > 0 ? 1 : 0) + lineBytes + bytes >
+            BRIDGE_WORKSPACE_READ_MAX_BYTES
+          ) {
+            if (lines.length === 0) {
+              throw new WorkspaceToolError(
+                `Workspace file exceeds read limit: line ${line} cannot fit within ${BRIDGE_WORKSPACE_READ_MAX_BYTES} UTF-8 bytes; request a later startLine or use search_text`,
+                'READ_LIMIT_EXCEEDED',
+              );
+            }
+            truncated = true;
+            return;
+          }
+          if (fragment.length > 0) fragments.push(fragment);
+          lineBytes += bytes;
+        }
+        hasText ||= end > offset;
+        if (newline < 0) return;
+        if (line >= startLine) {
+          lines.push(fragments.join(''));
+          returnedBytes += (lines.length > 1 ? 1 : 0) + lineBytes;
+          fragments = [];
+          lineBytes = 0;
+        }
+        line += 1;
+        hasText = false;
+        offset = newline + 1;
+      }
+    };
+    consume(
+      decoder.decode(header.subarray(bomBytes, headerBytes), {
+        stream: true,
+      }),
+    );
+    while (!truncated && position < size) {
+      const bytes = await readWorkspaceChunk(
+        handle,
+        buffer,
+        Math.min(buffer.length, size - position),
+        position,
+        control,
+      );
+      checkReadDeadline(control);
+      if (bytes === 0) break;
+      position += bytes;
+      consume(decoder.decode(buffer.subarray(0, bytes), { stream: true }));
+    }
+    if (!truncated) {
+      consume(decoder.decode());
+      if (!truncated && line >= startLine && (hasText || line === 1)) {
+        lines.push(fragments.join(''));
+      }
+    }
+    checkReadDeadline(control);
+    const endLine = startLine + lines.length - 1;
+    return {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'read_file',
+      workspaceId: request.workspaceId,
+      path: request.path,
+      content: lines.join('\n'),
+      startLine,
+      endLine,
+      truncated,
+      ...(truncated ? { nextStartLine: endLine + 1 } : {}),
+    };
+  };
+  return withConfinedFile(root, request.path, read, control);
 }
 
 interface WorkspaceRoot {
+  identity?: WorkspaceRootIdentity;
   root: string;
   writable: boolean;
+  /** Writable, an importer is configured, and this host can create the parents an import needs. */
+  imports: boolean;
 }
 
 async function verifyDirectoryPathHasNoSymlinks(
@@ -353,6 +631,226 @@ async function verifyDirectoryPathHasNoSymlinks(
     }
   }
   return currentIdentity;
+}
+
+function isMissingEntry(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
+
+interface DirectoryIdentity {
+  path: string;
+  dev: bigint | number;
+  ino: bigint | number;
+}
+
+/** Whether each ancestor observed before a miss is still the same real directory. */
+async function ancestorsUnchanged(ancestors: readonly DirectoryIdentity[]): Promise<boolean> {
+  for (const ancestor of ancestors) {
+    try {
+      const current = await lstat(ancestor.path);
+      if (
+        current.isSymbolicLink() ||
+        !current.isDirectory() ||
+        current.dev !== ancestor.dev ||
+        current.ino !== ancestor.ino
+      ) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Reports an absent target as `NOT_FOUND` only when the walk from the root
+ * reaches the missing entry through real directories, the root included, that
+ * are unchanged after the miss. A symlink, a file used as a directory, or an ancestor replaced
+ * during the walk stays a path-safety rejection, so the distinction never
+ * describes a path beyond the root.
+ */
+async function classifyMissingWorkspacePath(
+  root: string,
+  candidate: string,
+): Promise<WorkspaceToolError> {
+  const invalid = new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  const segments = relative(root, candidate).split(sep).filter(Boolean);
+  const ancestors: DirectoryIdentity[] = [];
+  try {
+    const rootEntry = await lstat(root);
+    if (rootEntry.isSymbolicLink() || !rootEntry.isDirectory()) return invalid;
+    ancestors.push({ path: root, dev: rootEntry.dev, ino: rootEntry.ino });
+  } catch {
+    return invalid;
+  }
+  let current = root;
+  for (const [index, segment] of segments.entries()) {
+    current = resolve(current, segment);
+    let entry: Awaited<ReturnType<typeof lstat>>;
+    try {
+      entry = await lstat(current);
+    } catch (error) {
+      return isMissingEntry(error) && (await ancestorsUnchanged(ancestors))
+        ? new WorkspaceToolError('Workspace path does not exist', 'NOT_FOUND')
+        : invalid;
+    }
+    if (index === segments.length - 1) return invalid;
+    if (entry.isSymbolicLink() || !entry.isDirectory()) return invalid;
+    ancestors.push({ path: current, dev: entry.dev, ino: entry.ino });
+  }
+  return invalid;
+}
+
+/**
+ * Creates each missing ancestor of a write target as a real directory beneath
+ * the root, one verified level at a time, and syncs each new entry into its
+ * parent. Creation needs a held root descriptor, so `mkdirat` is anchored to
+ * the root; a pathname-only root borrows one through
+ * {@link withAnchoredParentCreation}, and where none can be held creates
+ * nothing and its write reports the missing parent. An existing symlink or
+ * file stops the walk.
+ *
+ * Created directories are a committed side effect, never rolled back: once one
+ * exists, a later failure of this write is reported as a possible mutation, so
+ * the worker quarantines rather than claiming an atomic rejection.
+ */
+async function createMissingParentDirectories(
+  root: string,
+  candidate: string,
+  mode = 0o777,
+): Promise<string[]> {
+  const created: string[] = [];
+  if (!holdsWorkspaceRoot()) return created;
+  const segments = relative(root, dirname(candidate)).split(sep).filter(Boolean);
+  let current = root;
+  try {
+    for (const segment of segments) {
+      current = resolve(current, segment);
+      let entry: Awaited<ReturnType<typeof lstat>> | undefined;
+      try {
+        entry = await lstat(current);
+      } catch (error) {
+        if (!isMissingEntry(error)) throw error;
+      }
+      let createdHere = false;
+      if (entry == null) {
+        try {
+          await mkdir(current, mode);
+          created.push(current);
+          createdHere = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        }
+        entry = await lstat(current);
+        /** Also after a raced `EEXIST`: the write relies on that entry too. */
+        await syncWorkspaceDirectory(dirname(current));
+      }
+      if (
+        entry.isSymbolicLink() ||
+        !entry.isDirectory() ||
+        (createdHere && !isWithinRoot(root, await realpath(current)))
+      ) {
+        throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+      }
+    }
+    return created;
+  } catch (error) {
+    throw afterCreatedDirectories(created, classifyWritePathValidationError(error));
+  }
+}
+
+/** The identity to hold `root` by, while it is still a real directory at that exact path. */
+async function anchorableRootIdentity(root: string): Promise<WorkspaceRootIdentity | undefined> {
+  try {
+    const identity = await captureWorkspaceRootIdentity(root);
+    return identity.path === root ? identity : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether this host can hold `root` by descriptor, which creating a missing
+ * parent needs. Exercises the native `openat` path, not only the open.
+ */
+async function canAnchorWorkspaceRoot(
+  root: string,
+  identity?: WorkspaceRootIdentity,
+): Promise<boolean> {
+  const held = identity ?? (await anchorableRootIdentity(root));
+  if (held == null) return false;
+  try {
+    return (await withWorkspaceRoot(root, held, () => realpath(root))) === root;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `path` names a file whose parent directory is missing beneath `root`. */
+async function hasMissingParent(root: string, path: string): Promise<boolean> {
+  let parent: string;
+  try {
+    parent = dirname(resolveWorkspacePath(root, path));
+  } catch {
+    return false;
+  }
+  if (parent === root) return false;
+  try {
+    await lstat(parent);
+    return false;
+  } catch (error) {
+    return isMissingEntry(error);
+  }
+}
+
+/**
+ * Runs a write or import on a pathname-only root (`--worker-dir`, `--workspace`
+ * or `--environment`) under a descriptor held for just this request when its
+ * parent is missing, so the mutation, parent creation included, takes the same
+ * anchored path a selected project root does and a swapped symlink cannot
+ * redirect it outside the root. A held root or an existing parent runs the
+ * mutation as before; a root that is no longer a real directory at its path
+ * runs it unanchored and is refused there, creating nothing. A root that
+ * changes between its capture and its open is refused as `INVALID_PATH`.
+ */
+async function withAnchoredParentCreation<T>(
+  root: string,
+  path: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  if (holdsWorkspaceRoot() || !(await hasMissingParent(root, path))) return action();
+  const identity = await anchorableRootIdentity(root);
+  if (identity == null) return action();
+  try {
+    return await withWorkspaceRoot(root, identity, action);
+  } catch (error) {
+    /**
+     * Raised only while opening the root, before `action` ran: the root changed after its
+     * identity was captured. Never retry unanchored against whatever replaced it.
+     */
+    if (error instanceof WorkspaceRootAccessError) {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    }
+    throw error;
+  }
+}
+
+function afterCreatedDirectories(
+  created: readonly string[],
+  error: WorkspaceToolError,
+): WorkspaceToolError {
+  if (created.length === 0 || error.mutationMayHaveCommitted) return error;
+  return new WorkspaceToolError(error.message, error.code, true);
+}
+
+function assertWithinWriteLimit(content: Buffer): void {
+  if (content.byteLength > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
+    throw new WorkspaceToolError(
+      'Workspace file exceeds write limit',
+      'WRITE_LIMIT_EXCEEDED',
+    );
+  }
 }
 
 function classifyWritePathValidationError(error: unknown): WorkspaceToolError {
@@ -467,12 +965,7 @@ async function atomicWriteConfinedFile(
   allowOverwrite = true,
 ): Promise<{ created: boolean }> {
   throwIfAborted(signal);
-  if (content.byteLength > BRIDGE_WORKSPACE_WRITE_MAX_BYTES) {
-    throw new WorkspaceToolError(
-      'Workspace file exceeds write limit',
-      'WRITE_LIMIT_EXCEEDED',
-    );
-  }
+  assertWithinWriteLimit(content);
   const candidate = resolveWorkspacePath(root, requestedPath);
   const parent = dirname(candidate);
   let canonicalParent: string;
@@ -484,6 +977,9 @@ async function atomicWriteConfinedFile(
       throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
     }
   } catch (error) {
+    if (isMissingEntry(error)) {
+      throw await classifyMissingWorkspacePath(root, parent);
+    }
     throw classifyWritePathValidationError(error);
   }
 
@@ -657,14 +1153,26 @@ async function writeWorkspaceFile(
   signal?: AbortSignal,
 ): Promise<WorkspaceWriteFileResult> {
   const content = Buffer.from(request.content, 'utf8');
-  const { created } = await atomicWriteConfinedFile(
+  throwIfAborted(signal);
+  assertWithinWriteLimit(content);
+  const directories = await createMissingParentDirectories(
     root,
-    request.path,
-    content,
-    signal,
-    undefined,
-    request.overwrite !== false,
+    resolveWorkspacePath(root, request.path),
   );
+  let created: boolean;
+  try {
+    /** Once parents exist, finish the write rather than abandon them to a cancellation. */
+    ({ created } = await atomicWriteConfinedFile(
+      root,
+      request.path,
+      content,
+      directories.length === 0 ? signal : undefined,
+      undefined,
+      request.overwrite !== false,
+    ));
+  } catch (error) {
+    throw afterCreatedDirectories(directories, classifyWritePathValidationError(error));
+  }
   return {
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
     operation: 'write_file',
@@ -673,6 +1181,373 @@ async function writeWorkspaceFile(
     created,
     bytesWritten: content.byteLength,
   };
+}
+
+interface ImportTargetIdentity {
+  dev: bigint | number;
+  ino: bigint | number;
+}
+
+type ImportTarget =
+  | { state: 'missing' }
+  | { state: 'unchanged' }
+  | ({ state: 'different' } & ImportTargetIdentity);
+
+function importIntegrityError(message: string): WorkspaceToolError {
+  return new WorkspaceToolError(message, 'INVALID_REQUEST');
+}
+
+/** Size and SHA-256 of everything an open file holds now, read through its descriptor. */
+async function hashOpenFile(
+  handle: FileHandle,
+  signal?: AbortSignal,
+): Promise<{ bytes: number; sha256: string }> {
+  const hash = createHash('sha256');
+  const chunk = Buffer.allocUnsafe(IMPORT_HASH_CHUNK_BYTES);
+  let position = 0;
+  for (;;) {
+    throwIfAborted(signal);
+    const { bytesRead } = await handle.read(chunk, 0, chunk.byteLength, position);
+    if (bytesRead === 0) break;
+    hash.update(chunk.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+  return { bytes: position, sha256: hash.digest('hex') };
+}
+
+/** Hash an existing target only when its size already matches the import. */
+async function inspectImportTarget(
+  root: string,
+  request: WorkspaceImportFileRequest,
+  signal?: AbortSignal,
+): Promise<ImportTarget> {
+  try {
+    return await withConfinedFile(root, request.path, async (handle, size) => {
+      const { dev, ino } = await handle.stat();
+      if (size !== request.bytes) return { state: 'different', dev, ino };
+      const existing = await hashOpenFile(handle, signal);
+      return existing.bytes === request.bytes && existing.sha256 === request.sha256
+        ? { state: 'unchanged' }
+        : { state: 'different', dev, ino };
+    });
+  } catch (error) {
+    if (error instanceof WorkspaceToolError && error.code === 'NOT_FOUND') {
+      return { state: 'missing' };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Undo parent directories this import created; true when every one is gone
+ * again. A directory is removed only while it is still the inode this import
+ * created, so a replacement made by another local process is never deleted.
+ */
+async function removeCreatedDirectories(
+  created: readonly string[],
+  identities: readonly ImportTargetIdentity[],
+): Promise<boolean> {
+  if (identities.length !== created.length) return false;
+  for (let index = created.length - 1; index >= 0; index -= 1) {
+    const directory = created[index]!;
+    try {
+      const current = await lstat(directory);
+      if (
+        current.isSymbolicLink() ||
+        !current.isDirectory() ||
+        current.dev !== identities[index]!.dev ||
+        current.ino !== identities[index]!.ino
+      ) {
+        return false;
+      }
+      await rmdir(directory);
+      await syncWorkspaceDirectory(dirname(directory));
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Record each directory this import created, then give it the documented mode
+ * regardless of the worker's umask. `identities` fills as each is opened.
+ */
+async function setImportDirectoryModes(
+  created: readonly string[],
+  identities: ImportTargetIdentity[],
+): Promise<void> {
+  for (const directory of created) {
+    const handle = await open(
+      directory,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    try {
+      const { dev, ino } = await handle.stat();
+      identities.push({ dev, ino });
+      await handle.chmod(IMPORT_DIRECTORY_MODE);
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+async function writeImportChunk(handle: FileHandle, chunk: Uint8Array, position: number): Promise<void> {
+  let offset = 0;
+  while (offset < chunk.byteLength) {
+    const { bytesWritten } = await handle.write(chunk, offset, chunk.byteLength - offset, position + offset);
+    if (bytesWritten < 1) throw new Error('short workspace write');
+    offset += bytesWritten;
+  }
+}
+
+/** Confirm the installed entry is the staged inode, inside the root, after syncing its directory. */
+async function confirmInstalledImport(
+  root: string,
+  installTarget: string,
+  staged: ImportTargetIdentity,
+): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    await syncWorkspaceDirectory(dirname(installTarget));
+    handle = await open(
+      installTarget,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const [installed, canonicalPath] = await Promise.all([handle.stat(), realpath(installTarget)]);
+    if (
+      !installed.isFile() ||
+      !isWithinRoot(root, canonicalPath) ||
+      installed.dev !== staged.dev ||
+      installed.ino !== staged.ino
+    ) {
+      throw new Error('installed workspace import changed');
+    }
+  } catch {
+    throw new WorkspaceToolError(
+      'Workspace import durability could not be confirmed',
+      'WRITE_UNAVAILABLE',
+      true,
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Stream one object into a same-directory temporary file, verify the synced
+ * file's size and SHA-256 through its own descriptor, then install it
+ * atomically. A create links exclusively so a racing file is never replaced.
+ * An overwrite rechecks the inspected inode immediately before its rename, the
+ * same check-then-rename `write_file` uses; bridge mutations of one root are
+ * serialized, so only an out-of-band local writer can race that last step.
+ */
+async function installImportedFile(
+  root: string,
+  candidate: string,
+  request: WorkspaceImportFileRequest & { egressGrant: string },
+  importer: WorkspaceFileImporter,
+  target: Exclude<ImportTarget, { state: 'unchanged' }>,
+  signal?: AbortSignal,
+): Promise<{ created: boolean }> {
+  const parent = dirname(candidate);
+  let canonicalParent: string;
+  let parentIdentity: Awaited<ReturnType<typeof lstat>>;
+  try {
+    canonicalParent = await realpath(parent);
+    parentIdentity = await verifyDirectoryPathHasNoSymlinks(root, parent);
+    if (!isWithinRoot(root, canonicalParent) || !parentIdentity.isDirectory()) {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    }
+  } catch (error) {
+    if (isMissingEntry(error)) throw await classifyMissingWorkspacePath(root, parent);
+    throw classifyWritePathValidationError(error);
+  }
+  let available: number;
+  try {
+    available = await importer.availableBytes(canonicalParent);
+  } catch {
+    throw new WorkspaceToolError('Workspace free space could not be determined', 'WRITE_UNAVAILABLE');
+  }
+  if (available < request.bytes + WORKSPACE_IMPORT_FREE_SPACE_RESERVE_BYTES) {
+    throw new WorkspaceToolError(
+      'Workspace filesystem does not have enough free space for this file',
+      'WRITE_LIMIT_EXCEEDED',
+    );
+  }
+
+  const temporary = resolve(canonicalParent, `.librechat-code-${randomBytes(18).toString('hex')}.tmp`);
+  const installTarget = resolve(canonicalParent, basename(candidate));
+  let handle: FileHandle | undefined;
+  let temporaryNeedsCleanup = false;
+  try {
+    handle = await open(
+      temporary,
+      constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    temporaryNeedsCleanup = true;
+    let written = 0;
+    for await (const chunk of await importer.open(request, signal)) {
+      throwIfAborted(signal);
+      if (written + chunk.byteLength > request.bytes) {
+        throw importIntegrityError('Imported file is larger than its declared size');
+      }
+      await writeImportChunk(handle, chunk, written);
+      written += chunk.byteLength;
+    }
+    throwIfAborted(signal);
+    if (written !== request.bytes) {
+      throw importIntegrityError('Imported file is smaller than its declared size');
+    }
+    await handle.chmod(IMPORT_FILE_MODE);
+    await handle.sync();
+    // Verify what will be installed, not what arrived: the staged file is a workspace entry.
+    const staged = await hashOpenFile(handle, signal);
+    if (staged.bytes !== request.bytes) {
+      throw importIntegrityError('Imported file does not match its declared size');
+    }
+    if (staged.sha256 !== request.sha256) {
+      throw importIntegrityError('Imported file does not match its declared SHA-256');
+    }
+    const stagedStat = await handle.stat();
+    const stagedIdentity = { dev: stagedStat.dev, ino: stagedStat.ino };
+    if (process.platform === 'win32') {
+      await handle.close();
+      handle = undefined;
+    }
+
+    const [currentParent, currentParentIdentity] = await Promise.all([
+      realpath(parent),
+      verifyDirectoryPathHasNoSymlinks(root, parent),
+    ]);
+    if (
+      currentParent !== canonicalParent ||
+      currentParentIdentity.dev !== parentIdentity.dev ||
+      currentParentIdentity.ino !== parentIdentity.ino
+    ) {
+      throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+    }
+    let current: Awaited<ReturnType<typeof lstat>> | undefined;
+    try {
+      current = await lstat(candidate);
+    } catch (error) {
+      if (!isMissingEntry(error)) throw error;
+    }
+    if (
+      target.state === 'missing'
+        ? current != null
+        : current == null || current.isSymbolicLink() || current.dev !== target.dev || current.ino !== target.ino
+    ) {
+      throw new WorkspaceToolError(
+        'Workspace file changed before import could be committed',
+        'EDIT_CONFLICT',
+      );
+    }
+    throwIfAborted(signal);
+    if (target.state === 'different') {
+      await rename(temporary, installTarget);
+      temporaryNeedsCleanup = false;
+    } else {
+      try {
+        await link(temporary, installTarget);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new WorkspaceToolError('Workspace file already exists', 'EDIT_CONFLICT');
+        }
+        throw error;
+      }
+      try {
+        await unlink(temporary);
+        temporaryNeedsCleanup = false;
+      } catch {
+        throw new WorkspaceToolError(
+          'Workspace import cleanup could not be confirmed',
+          'WRITE_UNAVAILABLE',
+          true,
+        );
+      }
+    }
+    await confirmInstalledImport(root, installTarget, stagedIdentity);
+    return { created: target.state === 'missing' };
+  } catch (error) {
+    if (error instanceof WorkspaceToolError) throw error;
+    throw new WorkspaceToolError('Workspace storage is unavailable', 'WRITE_UNAVAILABLE');
+  } finally {
+    await handle?.close().catch(() => undefined);
+    if (temporaryNeedsCleanup) await removeImportStaging(temporary);
+  }
+}
+
+/** A staging file that cannot be removed is upload bytes left in the workspace: never a clean failure. */
+async function removeImportStaging(temporary: string): Promise<void> {
+  try {
+    await unlink(temporary);
+  } catch (error) {
+    if (isMissingEntry(error)) return;
+    throw new WorkspaceToolError(
+      'Workspace import staging file could not be removed',
+      'WRITE_UNAVAILABLE',
+      true,
+    );
+  }
+}
+
+async function importWorkspaceFile(
+  root: string,
+  request: WorkspaceImportFileRequest,
+  importer: WorkspaceFileImporter,
+  signal?: AbortSignal,
+): Promise<WorkspaceImportFileResult> {
+  throwIfAborted(signal);
+  if (!isWorkspaceImportFilePath(request.path)) {
+    throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
+  }
+  const { egressGrant } = request;
+  if (egressGrant === undefined) {
+    throw new WorkspaceToolError('Import source grant is unavailable', 'INVALID_REQUEST');
+  }
+  if (request.bytes > importer.maxBytes) {
+    throw new WorkspaceToolError('Imported file exceeds the worker file limit', 'WRITE_LIMIT_EXCEEDED');
+  }
+  const result = (created: boolean, bytesWritten: number, unchanged = false): WorkspaceImportFileResult => ({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    operation: 'import_file',
+    workspaceId: request.workspaceId,
+    path: request.path,
+    created,
+    ...(unchanged ? { unchanged: true } : {}),
+    bytesWritten,
+    sha256: request.sha256,
+  });
+  const candidate = resolveWorkspacePath(root, request.path);
+  const target = await inspectImportTarget(root, request, signal);
+  if (target.state === 'unchanged') return result(false, 0, true);
+  if (target.state === 'different' && request.overwrite !== true) {
+    throw new WorkspaceToolError(
+      'Workspace file already exists with different content',
+      'EDIT_CONFLICT',
+    );
+  }
+  const directories = await createMissingParentDirectories(root, candidate, IMPORT_DIRECTORY_MODE);
+  const identities: ImportTargetIdentity[] = [];
+  try {
+    await setImportDirectoryModes(directories, identities);
+    const { created } = await installImportedFile(
+      root,
+      candidate,
+      { ...request, egressGrant },
+      importer,
+      target,
+      signal,
+    );
+    return result(created, request.bytes);
+  } catch (error) {
+    const failure = classifyWritePathValidationError(error);
+    if (directories.length === 0 || failure.mutationMayHaveCommitted) throw failure;
+    if (await removeCreatedDirectories(directories, identities)) throw failure;
+    throw afterCreatedDirectories(directories, failure);
+  }
 }
 
 async function editWorkspaceFile(
@@ -717,7 +1592,10 @@ async function editWorkspaceFile(
         'EDIT_CONFLICT',
       );
     }
-    const { updated, replacements } = applyWorkspaceEdits(original, request);
+    const { updated, replacements, matches } = applyWorkspaceEdits(
+      original,
+      request,
+    );
     await atomicWriteConfinedFile(
       root,
       request.path,
@@ -736,9 +1614,13 @@ async function editWorkspaceFile(
       path: request.path,
       replacements,
       bytesWritten: updated.byteLength,
+      ...(matches ? { matches } : {}),
     };
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
+    if (isMissingEntry(error)) {
+      throw await classifyMissingWorkspacePath(root, candidate);
+    }
     throw classifyWritePathValidationError(error);
   } finally {
     await opened?.close().catch(() => undefined);
@@ -748,7 +1630,7 @@ async function editWorkspaceFile(
 function applyWorkspaceEdits(
   original: Buffer,
   request: WorkspaceEditFileRequest | WorkspacePreviewEditRequest,
-): { updated: Buffer; replacements: number } {
+): { updated: Buffer; replacements: number; matches?: WorkspaceEditMatch[] } {
   const hasBom =
     original[0] === 0xef && original[1] === 0xbb && original[2] === 0xbf;
   const body = hasBom ? original.subarray(3) : original;
@@ -762,20 +1644,19 @@ function applyWorkspaceEdits(
   const edits = request.edits ?? [
     { oldText: request.oldText ?? '', newText: request.newText ?? '' },
   ];
-  let updatedText = text;
-  for (const edit of edits) {
-    const first = updatedText.indexOf(edit.oldText);
-    if (first < 0 || updatedText.indexOf(edit.oldText, first + 1) >= 0) {
-      throw new WorkspaceToolError(
-        'Workspace edit must match exactly once',
-        'EDIT_CONFLICT',
-      );
+  let applied: AppliedEdits;
+  try {
+    applied = applyTextEdits(text, edits, request.matching ?? 'exact');
+  } catch (error) {
+    if (error instanceof WorkspaceEditMatchError) {
+      throw new WorkspaceToolError(error.message, 'EDIT_CONFLICT');
     }
-    updatedText =
-      updatedText.slice(0, first) +
-      edit.newText +
-      updatedText.slice(first + edit.oldText.length);
+    if (error instanceof WorkspaceEditOutputLimitError) {
+      throw new WorkspaceToolError(error.message, 'WRITE_LIMIT_EXCEEDED');
+    }
+    throw error;
   }
+  const updatedText = applied.text;
   const updatedBody = Buffer.from(updatedText, 'utf8');
   const updated = hasBom
     ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), updatedBody])
@@ -786,7 +1667,13 @@ function applyWorkspaceEdits(
       'WRITE_LIMIT_EXCEEDED',
     );
   }
-  return { updated, replacements: edits.length };
+  return {
+    updated,
+    replacements: edits.length,
+    ...(workspaceEditRequestReportsMatches(request)
+      ? { matches: applied.matches }
+      : {}),
+  };
 }
 
 async function previewWorkspaceEdit(
@@ -801,7 +1688,10 @@ async function previewWorkspaceEdit(
       'EXECUTION_ABORTED',
     );
   }
-  const { updated, replacements } = applyWorkspaceEdits(original, request);
+  const { updated, replacements, matches } = applyWorkspaceEdits(
+    original,
+    request,
+  );
   if (signal?.aborted) {
     throw new WorkspaceToolError(
       'Workspace tool execution aborted',
@@ -820,6 +1710,7 @@ async function previewWorkspaceEdit(
     baseSha256: createHash('sha256').update(original).digest('hex'),
     replacements,
     bytesWritten: updated.byteLength,
+    ...(matches ? { matches } : {}),
   };
 }
 
@@ -982,7 +1873,10 @@ async function searchWorkspace(
   let canonicalTarget: string;
   try {
     canonicalTarget = await realpath(target);
-  } catch {
+  } catch (error) {
+    if (isMissingEntry(error)) {
+      throw await classifyMissingWorkspacePath(root, target);
+    }
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   }
   if (!isWithinRoot(root, canonicalTarget))
@@ -1033,7 +1927,9 @@ async function searchWorkspace(
     } catch (error) {
       if (
         error instanceof WorkspaceToolError &&
-        (error.code === 'INVALID_PATH' || error.code === 'READ_LIMIT_EXCEEDED')
+        (error.code === 'INVALID_PATH' ||
+          error.code === 'NOT_FOUND' ||
+          error.code === 'READ_LIMIT_EXCEEDED')
       ) {
         continue;
       }
@@ -1140,6 +2036,13 @@ async function listWorkspaceFiles(
     );
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
+    if (isMissingEntry(error)) {
+      throw await withinListDeadline(
+        classifyMissingWorkspacePath(root, target),
+        signal,
+        deadline,
+      );
+    }
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   }
   if (!isWithinRoot(root, canonicalTarget)) {
@@ -1154,6 +2057,13 @@ async function listWorkspaceFiles(
     ).isDirectory();
   } catch (error) {
     if (error instanceof WorkspaceToolError) throw error;
+    if (isMissingEntry(error)) {
+      throw await withinListDeadline(
+        classifyMissingWorkspacePath(root, target),
+        signal,
+        deadline,
+      );
+    }
     throw new WorkspaceToolError('Invalid workspace path', 'INVALID_PATH');
   }
   const normalizedRequestedResultPath = request.path
@@ -1429,6 +2339,16 @@ async function withinListDeadline<T>(
 export class LocalWorkspaceTools implements WorkspaceToolExecutor {
   readonly capabilities: BridgeWorkspaceToolCapabilities;
   readonly mutationFailuresAreAtomic = true as const;
+  private repositoryInstructions = false;
+
+  async instructionDescriptors() {
+    if (!this.repositoryInstructions) return undefined;
+    const entries = await Promise.all([...this.roots].map(async ([id, { root, identity }]) => {
+      const snapshot = await withWorkspaceRoot(root, identity, () => readRepositoryInstructions(root));
+      return [id, snapshot ? [snapshot.descriptor] : []] as const;
+    }));
+    return new Map(entries);
+  }
 
   private constructor(
     private readonly roots: ReadonlyMap<string, WorkspaceRoot>,
@@ -1438,6 +2358,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     editFileModes?: BridgeWorkspaceToolCapabilities['editFileModes'],
     editFileFeatures?: BridgeWorkspaceToolCapabilities['editFileFeatures'],
     listFileFeatures?: BridgeWorkspaceToolCapabilities['listFileFeatures'],
+    private readonly importer?: WorkspaceFileImporter,
   ) {
     this.capabilities = {
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -1454,12 +2375,43 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     options: LocalWorkspaceToolsOptions,
   ): Promise<LocalWorkspaceTools> {
     const roots = new Map<string, WorkspaceRoot>();
+    for (const workspace of options.workspaces) {
+      let canonicalRoot: string;
+      try {
+        canonicalRoot = await realpath(workspace.root);
+        if (workspace.identity && !await matchesWorkspaceRoot(canonicalRoot, workspace.identity)) throw new Error();
+        await withWorkspaceRoot(canonicalRoot, workspace.identity, async () => undefined);
+        if (!(await stat(canonicalRoot)).isDirectory()) throw new Error();
+      } catch {
+        throw new WorkspaceToolError(
+          'Invalid workspace registration',
+          'REGISTRATION_INVALID',
+        );
+      }
+      const writable = workspace.writable === true;
+      roots.set(workspace.id, {
+        identity: workspace.identity,
+        root: canonicalRoot,
+        writable,
+        /** Imports land in folders that may not exist yet, so only where parents can be created. */
+        imports:
+          writable &&
+          options.importer != null &&
+          (await canAnchorWorkspaceRoot(canonicalRoot, workspace.identity)),
+      });
+    }
     const anyWritable = options.workspaces.some(
       (workspace) => workspace.writable === true,
     );
+    const anyImports = [...roots.values()].some((root) => root.imports);
+    const mutationsFor = (root: WorkspaceRoot | undefined) => [
+      ...(root?.writable ? WRITE_OPERATIONS : []),
+      ...(root?.imports ? IMPORT_OPERATIONS : []),
+    ];
     const operations: BridgeWorkspaceToolCapabilities['operations'] = [
       ...READ_OPERATIONS,
       ...(anyWritable ? WRITE_OPERATIONS : []),
+      ...(anyImports ? IMPORT_OPERATIONS : []),
     ];
     const workspaces: BridgeWorkspaceDescriptor[] = options.workspaces.map(
       (workspace) => ({
@@ -1469,7 +2421,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
           ? {
               operations: [
                 ...READ_OPERATIONS,
-                ...(workspace.writable === true ? WRITE_OPERATIONS : []),
+                ...mutationsFor(roots.get(workspace.id)),
               ],
             }
           : {}),
@@ -1482,7 +2434,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       ...(anyWritable ? { writeFileModes: ['replace', 'create'] } : {}),
       ...(anyWritable ? { editFileModes: ['single', 'batch'] } : {}),
       ...(anyWritable
-        ? { editFileFeatures: ['expected_base_sha256'] }
+        ? { editFileFeatures: [...WORKSPACE_EDIT_FILE_FEATURES] }
         : {}),
       listFileFeatures: ['after_path'],
     };
@@ -1492,23 +2444,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
         'REGISTRATION_INVALID',
       );
     }
-    for (const workspace of options.workspaces) {
-      let canonicalRoot: string;
-      try {
-        canonicalRoot = await realpath(workspace.root);
-        if (!(await stat(canonicalRoot)).isDirectory()) throw new Error();
-      } catch {
-        throw new WorkspaceToolError(
-          'Invalid workspace registration',
-          'REGISTRATION_INVALID',
-        );
-      }
-      roots.set(workspace.id, {
-        root: canonicalRoot,
-        writable: workspace.writable === true,
-      });
-    }
-    return new LocalWorkspaceTools(
+    const tools = new LocalWorkspaceTools(
       roots,
       operations,
       workspaces,
@@ -1516,10 +2452,27 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       capabilities.editFileModes,
       capabilities.editFileFeatures,
       capabilities.listFileFeatures,
+      anyImports ? options.importer : undefined,
     );
+    tools.repositoryInstructions = options.repositoryInstructions === true;
+    return tools;
   }
 
   async execute(
+    request: WorkspaceToolRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceToolResult> {
+    const workspace = this.roots.get(request?.workspaceId);
+    if (!workspace?.identity) return this.executeBound(request, signal);
+    try {
+      return await withWorkspaceRoot(workspace.root, workspace.identity, () => this.executeBound(request, signal));
+    } catch (error) {
+      if (error instanceof WorkspaceRootAccessError) throw new WorkspaceToolError(error.message, 'REGISTRATION_INVALID');
+      throw error;
+    }
+  }
+
+  private async executeBound(
     request: WorkspaceToolRequest,
     signal?: AbortSignal,
   ): Promise<WorkspaceToolResult> {
@@ -1541,6 +2494,25 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     }
     const { root } = workspace;
 
+    if (request.operation === 'import_file') {
+      if (!workspace.writable) {
+        throw new WorkspaceToolError(
+          'Workspace mutations are disabled by the worker',
+          'WRITE_DISABLED',
+        );
+      }
+      const { importer } = this;
+      if (importer == null || !workspace.imports) {
+        throw new WorkspaceToolError(
+          'Workspace file import is not configured on this worker',
+          'WRITE_UNAVAILABLE',
+        );
+      }
+      return withAnchoredParentCreation(root, request.path, () =>
+        importWorkspaceFile(root, request, importer, signal),
+      );
+    }
+
     if (
       request.operation === 'write_file' ||
       request.operation === 'preview_edit' ||
@@ -1559,7 +2531,9 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
         );
       }
       if (request.operation === 'write_file') {
-        return writeWorkspaceFile(root, request, signal);
+        return withAnchoredParentCreation(root, request.path, () =>
+          writeWorkspaceFile(root, request, signal),
+        );
       }
       return request.operation === 'preview_edit'
         ? previewWorkspaceEdit(root, request, signal)
@@ -1579,6 +2553,15 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
       );
     }
 
+    if (request.instructionSha256 !== undefined) {
+      const snapshot = this.repositoryInstructions ? await readRepositoryInstructions(root) : undefined;
+      if (!snapshot || snapshot.descriptor.path !== request.path || snapshot.descriptor.sha256 !== request.instructionSha256) {
+        throw new WorkspaceToolError('Repository instructions changed or are unavailable', 'INVALID_PATH');
+      }
+      return { protocolVersion: BRIDGE_PROTOCOL_VERSION, operation: 'read_file', workspaceId: request.workspaceId,
+        path: request.path, content: snapshot.content, startLine: 1, endLine: snapshot.content.split('\n').length,
+        truncated: snapshot.descriptor.truncated };
+    }
     const startLine = request.startLine ?? 1;
     const maxLines = request.maxLines ?? 200;
     if (
@@ -1590,31 +2573,7 @@ export class LocalWorkspaceTools implements WorkspaceToolExecutor {
     ) {
       throw new WorkspaceToolError('Invalid workspace read', 'INVALID_REQUEST');
     }
-    const content = await readConfinedFile(root, request.path);
-    if (signal?.aborted) {
-      throw new WorkspaceToolError(
-        'Workspace tool execution aborted',
-        'EXECUTION_ABORTED',
-      );
-    }
-    const lines = content.endsWith('\n')
-      ? content.slice(0, -1).split('\n')
-      : content.split('\n');
-    const selected = lines.slice(startLine - 1, startLine - 1 + maxLines);
-    const endLine = startLine + selected.length - 1;
-    const truncated = endLine < lines.length;
-
-    return {
-      protocolVersion: BRIDGE_PROTOCOL_VERSION,
-      operation: 'read_file',
-      workspaceId: request.workspaceId,
-      path: request.path,
-      content: selected.join('\n'),
-      startLine,
-      endLine,
-      truncated,
-      ...(truncated ? { nextStartLine: endLine + 1 } : {}),
-    };
+    return readConfinedFile(root, request, signal);
   }
 }
 
@@ -1719,7 +2678,7 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
         ) {
           throw error;
         }
-        throw new WorkspaceToolError(error.message, error.code, true);
+        throw new WorkspaceToolError(error.message, error.code, true, true, error.commandDiagnostic);
       }
       throw new WorkspaceToolError(
         'Sandboxed command execution unavailable',

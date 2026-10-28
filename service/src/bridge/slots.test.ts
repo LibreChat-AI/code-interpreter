@@ -3,6 +3,7 @@ import RedisMock from 'ioredis-mock';
 import type Redis from 'ioredis';
 import { BridgeAdmissionQueue } from './admission';
 import { BridgeWorkspaceSlots } from './slots';
+import { workspaceIsolationKey } from '../../../packages/code/src/protocol';
 
 const redis = new RedisMock() as unknown as Redis;
 const admission = new BridgeAdmissionQueue(redis);
@@ -13,19 +14,26 @@ const prefix = `codeapi:bridge:v1:worker:${workerId}`;
 afterEach(async () => {
   await redis.flushall();
 });
-async function enqueue(assignmentId: string, workspaceId: string) {
+async function enqueue(assignmentId: string, workspaceId: string, capacity = 2) {
   await redis.set(`${prefix}:incarnation`, incarnationId);
-  await redis.set(`${prefix}:workspace-slot-capacity`, '2');
+  await redis.set(`${prefix}:workspace-slot-capacity`, String(capacity));
   await admission.enter(workerId, assignmentId, Date.now() + 5000, workspaceId);
   return {
     workerId,
     incarnationId,
     assignmentId,
     workspaceId,
-    capacity: 2,
+    capacity,
     expiresAtMs: Date.now() + 10000,
   };
 }
+
+async function finish(assignmentId: string) {
+  await slots.release(workerId, incarnationId, assignmentId);
+  await admission.leave(workerId, assignmentId);
+}
+
+const lane = (name: string, parent = 'repo') => workspaceIsolationKey(parent, undefined, name);
 
 test('slots admit independent workspaces, skip a busy root, and bound capacity', async () => {
   const a = await enqueue('a', 'root-a');
@@ -90,4 +98,52 @@ test('releasing a long slot shortens the aggregate expiry to remaining work', as
   expect(await redis.pttl(`${prefix}:lock`)).toBeGreaterThan(8000);
   await slots.release(workerId, incarnationId, 'a');
   expect(await redis.pttl(`${prefix}:lock`)).toBeLessThanOrEqual(3000);
+});
+
+test('sibling linked-worktree lanes share their checkout, which waits for both', async () => {
+  const a = await enqueue('a', lane('task-a'), 3);
+  const b = await enqueue('b', lane('task-b'), 3);
+  const root = await enqueue('root', 'repo', 3);
+  expect(await slots.reserve(a)).toBe(0);
+  expect(await slots.reserve(b)).toBe(1);
+  expect(await slots.reserve(root)).toBeUndefined();
+  await finish('a');
+  expect(await slots.reserve(root)).toBeUndefined();
+  await finish('b');
+  expect(await slots.reserve(root)).toBe(0);
+});
+
+test('a busy checkout holds every lane beneath it but not other checkouts', async () => {
+  const root = await enqueue('root', 'repo', 3);
+  const a = await enqueue('a', lane('task-a'), 3);
+  const other = await enqueue('other', lane('task-a', 'other-repo'), 3);
+  expect(await slots.reserve(root)).toBe(0);
+  expect(await slots.reserve(a)).toBeUndefined();
+  expect(await slots.reserve(other)).toBe(1);
+  await finish('root');
+  expect(await slots.reserve(a)).toBe(0);
+});
+
+test('a waiting checkout holds back newer lanes so root work cannot starve', async () => {
+  const a = await enqueue('a', lane('task-a'), 3);
+  expect(await slots.reserve(a)).toBe(0);
+  const root = await enqueue('root', 'repo', 3);
+  const b = await enqueue('b', lane('task-b'), 3);
+  const other = await enqueue('other', 'other-repo', 3);
+  expect(await slots.reserve(root)).toBeUndefined();
+  expect(await slots.reserve(b)).toBeUndefined();
+  expect(await slots.reserve(other)).toBe(1);
+  await finish('a');
+  expect(await slots.reserve(b)).toBeUndefined();
+  expect(await slots.reserve(root)).toBe(0);
+});
+
+test('lanes nest beneath a conversation checkout, not the source root', async () => {
+  const instance = workspaceIsolationKey('repo', 'c'.repeat(64));
+  const conversation = await enqueue('conversation', instance, 3);
+  const nested = await enqueue('nested', workspaceIsolationKey('repo', 'c'.repeat(64), 'task-a'), 3);
+  const source = await enqueue('source', lane('task-a'), 3);
+  expect(await slots.reserve(conversation)).toBe(0);
+  expect(await slots.reserve(nested)).toBeUndefined();
+  expect(await slots.reserve(source)).toBe(1);
 });

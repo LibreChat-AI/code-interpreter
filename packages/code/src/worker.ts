@@ -6,13 +6,23 @@ import {
   BridgeProtocolError,
   bridgeWorkerPath,
   isBridgeWorkspaceProgrammaticRequest,
+  isValidLinkedWorktreeName,
+  isWorkspaceMutationOperation,
   isWorkspaceToolResult,
+  workspaceIsolationKey,
+  workspaceIsolationKeysConflict,
+  workspaceIsolationParent,
+  WORKSPACE_TOOL_ERROR_CODE_FALLBACKS,
 } from './protocol.js';
 import { EndpointRuntimeSupervisor } from './runtime.js';
 import { signBridgeRequest } from './identity.js';
+import { recoverWorkerCredential } from './credential-recovery.js';
 import { isWorkspaceToolRequest, WorkspaceToolError } from './workspace.js';
+import { commandFailureEvent } from './command-diagnostics.js';
+import type { CommandFailureEvent } from './command-diagnostics.js';
 
 import type {
+  WorkspaceCommandResultFeature,
   BridgeAssignment,
   BridgeLeaseResponse,
   BridgeSandboxRequest,
@@ -23,6 +33,8 @@ import type {
   BridgeWorkerRegistrationResponse,
   BridgeWorkspaceToolOperation,
   BridgeWorkspaceProgrammaticRequest,
+  RepositoryInstructionDescriptor,
+  WorkspaceToolErrorCode,
 } from './protocol.js';
 import type { RuntimeLease, RuntimeSupervisor } from './runtime.js';
 import type { WorkspaceToolExecutor } from './workspace.js';
@@ -37,6 +49,7 @@ export interface BridgeWorkerOptions {
   runtimeSupervisor?: RuntimeSupervisor;
   capabilities: BridgeWorkerCapabilities;
   workspaceTools?: WorkspaceToolExecutor;
+  instructionDescriptors?: () => Promise<ReadonlyMap<string, readonly RepositoryInstructionDescriptor[]> | undefined>;
   workspaceProgrammatic?: {
     /**
      * True when a WorkspaceToolError without mutation uncertainty proves the
@@ -52,6 +65,22 @@ export interface BridgeWorkerOptions {
   workspaceMutationQuarantine?: WorkspaceMutationQuarantine;
   /** Required per-root durable guards when opting into concurrent workspace leases. */
   workspaceQuarantines?: ReadonlyMap<string, WorkspaceMutationQuarantine>;
+  /** Resolve a durable guard for a worker-owned dynamic workspace instance. */
+  workspaceQuarantineResolver?: (
+    workspaceId: string,
+    workspaceInstanceId: string,
+  ) =>
+    | WorkspaceMutationQuarantine
+    | Promise<WorkspaceMutationQuarantine>;
+  /** Resolve a durable guard for a linked-worktree lane beneath a registered root. */
+  linkedWorktreeQuarantineResolver?: (
+    workspaceId: string,
+    worktree: string,
+  ) =>
+    | WorkspaceMutationQuarantine
+    | Promise<WorkspaceMutationQuarantine>;
+  /** Names of the linked worktrees currently beneath a registered root. */
+  linkedWorktreeNames?: (workspaceId: string) => Promise<readonly string[]>;
   leaseWaitMs?: number;
   leaseTransportGraceMs?: number;
   registrationTransportTimeoutMs?: number;
@@ -68,10 +97,14 @@ export interface BridgeWorkerOptions {
   credentialRefreshTransportTimeoutMs?: number;
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
+  /** Local-only, allowlisted command failure metadata; never contains request data. */
+  onCommandFailure?: (event: CommandFailureEvent) => void | Promise<void>;
   onIdentityChange?: (identity: BridgeWorkerIdentity) => void | Promise<void>;
   onRegistered?: (
     registration: BridgeWorkerRegistrationResponse,
   ) => void | Promise<void>;
+  /** Called only after registration and required readiness confirmation succeed. */
+  onReady?: () => void | Promise<void>;
   incarnationId?: string;
 }
 
@@ -151,6 +184,19 @@ function errorCode(value: object): string | undefined {
   return undefined;
 }
 
+/** Edit conflicts can include source excerpts, so disclosure needs read or full-preview access. */
+function workspaceCanReadSource(
+  capabilities: BridgeWorkerCapabilities['workspaceTools'],
+  workspaceId: string,
+): boolean {
+  const workspace = capabilities?.workspaces.find((entry) => entry.id === workspaceId);
+  if (!workspace || !capabilities) return false;
+  return (['read_file', 'preview_edit'] as const).some(
+    (operation) => capabilities.operations.includes(operation) &&
+      (workspace.operations == null || workspace.operations.includes(operation)),
+  );
+}
+
 function workspaceCapabilitiesMatch(
   advertised: NonNullable<BridgeWorkerCapabilities['workspaceTools']>,
   executor: NonNullable<BridgeWorkerCapabilities['workspaceTools']>,
@@ -181,6 +227,11 @@ function workspaceCapabilitiesMatch(
       (feature, index) => feature === executor.listFileFeatures?.[index],
     ) ??
       executor.listFileFeatures == null) &&
+    advertised.commandResultFeatures?.length === executor.commandResultFeatures?.length &&
+    (advertised.commandResultFeatures?.every(
+      (feature, index) => feature === executor.commandResultFeatures?.[index],
+    ) ??
+      executor.commandResultFeatures == null) &&
     advertised.programmaticLanguages?.length ===
       executor.programmaticLanguages?.length &&
     (advertised.programmaticLanguages?.every(
@@ -206,7 +257,20 @@ function workspaceCapabilitiesMatch(
             operation ===
             executor.workspaces[index]?.operations?.[operationIndex],
         ) ??
-          executor.workspaces[index]?.operations == null),
+          executor.workspaces[index]?.operations == null) &&
+        workspace.workspaceInstances?.length ===
+          executor.workspaces[index]?.workspaceInstances?.length &&
+        (workspace.workspaceInstances?.every(
+          (instanceType, instanceIndex) =>
+            instanceType ===
+            executor.workspaces[index]?.workspaceInstances?.[instanceIndex],
+        ) ?? executor.workspaces[index]?.workspaceInstances == null) &&
+        workspace.workspaceScopes?.length ===
+          executor.workspaces[index]?.workspaceScopes?.length &&
+        (workspace.workspaceScopes?.every(
+          (scope, scopeIndex) =>
+            scope === executor.workspaces[index]?.workspaceScopes?.[scopeIndex],
+        ) ?? executor.workspaces[index]?.workspaceScopes == null),
     )
   );
 }
@@ -221,7 +285,10 @@ function registrationCompatibleCapabilities(
       (operation) => operation === 'read_file' || operation === 'search_text',
     ) &&
       workspaceTools.workspaces.every(
-        (workspace) => workspace.operations == null,
+        (workspace) =>
+          workspace.operations == null &&
+          workspace.workspaceInstances == null &&
+          workspace.workspaceScopes == null,
       ))
   ) {
     return capabilities;
@@ -242,7 +309,12 @@ function registrationCompatibleCapabilities(
     ) {
       return [];
     }
-    const { operations: _operations, ...compatibleWorkspace } = workspace;
+    const {
+      operations: _operations,
+      workspaceInstances: _workspaceInstances,
+      workspaceScopes: _workspaceScopes,
+      ...compatibleWorkspace
+    } = workspace;
     return [{ ...compatibleWorkspace, ...(workspace.environment ? {
       environment: { ...workspace.environment, actions: [] },
     } : {}) }];
@@ -256,6 +328,7 @@ function registrationCompatibleCapabilities(
     editFileModes: _editFileModes,
     editFileFeatures: _editFileFeatures,
     listFileFeatures: _listFileFeatures,
+    commandResultFeatures: _commandResultFeatures,
     programmaticLanguages: _programmaticLanguages,
     ...compatibleWorkspaceTools
   } = workspaceTools;
@@ -327,6 +400,16 @@ function supportedWorkspaceCapabilities(
     return workspaceOperations.length === 0
       ? []
       : [{ ...workspace,
+          ...(workspace.workspaceInstances != null &&
+          registration.supportedWorkspaceInstanceTypes?.includes(
+            'git_worktree',
+          )
+            ? { workspaceInstances: workspace.workspaceInstances }
+            : { workspaceInstances: undefined }),
+          ...(workspace.workspaceScopes != null &&
+          registration.supportedWorkspaceScopes?.includes('git_linked_worktree')
+            ? { workspaceScopes: workspace.workspaceScopes }
+            : { workspaceScopes: undefined }),
           ...(workspace.operations ? { operations: workspaceOperations } : {}),
           ...(workspace.environment && !workspaceOperations.includes('execute_command') ? {
             environment: { ...workspace.environment, actions: [] },
@@ -335,10 +418,14 @@ function supportedWorkspaceCapabilities(
   });
   if (workspaces.length === 0) return undefined;
   const editFileFeatures = desired.editFileFeatures?.filter((feature) =>
-    registration.supportedWorkspaceEditFileFeatures?.includes(feature),
+    registration.supportedWorkspaceEditFileFeatures?.includes(feature) &&
+    (feature !== 'expected_base_sha256' || operations.includes('edit_file')),
   );
   const listFileFeatures = desired.listFileFeatures?.filter((feature) =>
     registration.supportedWorkspaceListFileFeatures?.includes(feature),
+  );
+  const commandResultFeatures = desired.commandResultFeatures?.filter((feature) =>
+    registration.supportedWorkspaceCommandResultFeatures?.includes(feature),
   );
   const programmaticLanguages = desired.programmaticLanguages?.filter(
     (language) =>
@@ -349,6 +436,7 @@ function supportedWorkspaceCapabilities(
     editFileModes: _editFileModes,
     editFileFeatures: _editFileFeatures,
     listFileFeatures: _listFileFeatures,
+    commandResultFeatures: _commandResultFeatures,
     programmaticLanguages: _programmaticLanguages,
     ...compatibleDesired
   } = desired;
@@ -364,11 +452,14 @@ function supportedWorkspaceCapabilities(
       ...(supportsEditRequests && editFileModes?.length
         ? { editFileModes }
         : {}),
-      ...(operations.includes('edit_file') && editFileFeatures?.length
+      ...(supportsEditRequests && editFileFeatures?.length
         ? { editFileFeatures }
         : {}),
       ...(operations.includes('list_files') && listFileFeatures?.length
         ? { listFileFeatures }
+        : {}),
+      ...(operations.includes('execute_command') && commandResultFeatures?.length
+        ? { commandResultFeatures }
         : {}),
       ...(operations.includes('execute_command') &&
       programmaticLanguages?.length
@@ -396,6 +487,14 @@ export class BridgeWorker {
   private readonly compatibleCapabilities: BridgeWorkerCapabilities;
   private registrationCapabilities: BridgeWorkerCapabilities;
   private activeCapabilities: BridgeWorkerCapabilities;
+  private instructionMetadataSupported = true;
+  /** Added error codes the current Code API registration accepts in settlements. */
+  private settlementErrorCodes: ReadonlySet<WorkspaceToolErrorCode> = new Set();
+  /** Whether the registration that is actually active advertised this command result feature. */
+  commandResultFeatureActive(feature: WorkspaceCommandResultFeature): boolean {
+    return this.activeCapabilities.workspaceTools?.commandResultFeatures?.includes(feature) === true;
+  }
+
   private registrationTtlMs = DEFAULT_REGISTRATION_TTL_MS;
   private lastRegisteredAtMs = 0;
   private maintenanceOnly = false;
@@ -470,16 +569,36 @@ export class BridgeWorker {
     }
     if (
       options.capabilities.workspaceTools?.operations.some(
-        (operation) =>
-          operation === 'write_file' ||
-          operation === 'edit_file' ||
-          operation === 'execute_command',
+        isWorkspaceMutationOperation,
       ) === true &&
       options.workspaceMutationQuarantine == null &&
-      options.workspaceQuarantines == null
+      options.workspaceQuarantines == null &&
+      options.workspaceQuarantineResolver == null &&
+      options.linkedWorktreeQuarantineResolver == null
     ) {
       throw new BridgeProtocolError(
         'Workspace mutation capabilities require durable quarantine storage',
+      );
+    }
+    if (
+      options.capabilities.workspaceTools?.workspaces.some(
+        (root) => (root.workspaceInstances?.length ?? 0) > 0,
+      ) &&
+      options.workspaceQuarantineResolver == null
+    ) {
+      throw new BridgeProtocolError(
+        'Workspace instance capabilities require a durable quarantine resolver',
+      );
+    }
+    if (
+      options.capabilities.workspaceTools?.workspaces.some(
+        (root) => (root.workspaceScopes?.length ?? 0) > 0,
+      ) &&
+      (options.linkedWorktreeQuarantineResolver == null ||
+        (options.capabilities.workspaceLeaseSlots ?? 1) < 2)
+    ) {
+      throw new BridgeProtocolError(
+        'Linked worktree lanes require a durable quarantine resolver and at least two lease slots',
       );
     }
     if ((options.capabilities.workspaceLeaseSlots ?? 1) > 1) {
@@ -597,6 +716,8 @@ export class BridgeWorker {
     const registrationStartedAtMs = Date.now();
     let registration: BridgeWorkerRegistrationResponse;
     try {
+      const instructions = this.instructionMetadataSupported ? await this.options.instructionDescriptors?.() : undefined;
+      let includeInstructions = this.instructionMetadataSupported;
       const register = (capabilities: BridgeWorkerCapabilities) =>
         this.request<BridgeWorkerRegistrationResponse>(
           `${this.codeApiUrl}/bridge/workers/register`,
@@ -609,12 +730,29 @@ export class BridgeWorker {
                   ...capabilities,
                   requiresReadyConfirmation: true,
                 }
-              : capabilities,
+              : includeInstructions && instructions && capabilities.workspaceTools ? {
+                  ...capabilities,
+                  workspaceTools: { ...capabilities.workspaceTools,
+                    workspaces: capabilities.workspaceTools.workspaces.map(workspace => ({ ...workspace,
+                      ...((workspace.operations ?? capabilities.workspaceTools!.operations).includes('read_file')
+                        ? { instructions: [...(instructions.get(workspace.id) ?? [])] } : {}),
+                    })),
+                  },
+                } : capabilities,
           },
           registrationController.signal,
         );
       try {
-        registration = await register(this.registrationCapabilities);
+        try {
+          registration = await register(this.registrationCapabilities);
+        } catch (error) {
+          if (!(instructions && error instanceof BridgeProtocolError && error.status === 400)) {
+            throw error;
+          }
+          includeInstructions = false;
+          this.instructionMetadataSupported = false;
+          registration = await register(this.registrationCapabilities);
+        }
       } catch (error) {
         if (
           !(error instanceof BridgeProtocolError) ||
@@ -693,6 +831,11 @@ export class BridgeWorker {
     }
     this.registrationTtlMs = registration.leaseTtlMs;
     this.activeCapabilities = this.registrationCapabilities;
+    this.settlementErrorCodes = new Set(
+      Array.isArray(registration.supportedWorkspaceToolErrorCodes)
+        ? registration.supportedWorkspaceToolErrorCodes
+        : [],
+    );
     await this.options.onRegistered?.(registration);
     if (
       !this.maintenanceOnly &&
@@ -701,6 +844,7 @@ export class BridgeWorker {
       await this.confirmReady(registration, signal);
     }
     this.lastRegisteredAtMs = registrationStartedAtMs;
+    if (!this.maintenanceOnly) await this.options.onReady?.();
     return registration;
   }
 
@@ -717,7 +861,7 @@ export class BridgeWorker {
         'Code API does not support explicit worker readiness confirmation',
       );
     }
-    await this.timedRequest(
+    const ready = await this.timedRequest<{ ready?: boolean }>(
       `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/ready`,
       {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -731,6 +875,9 @@ export class BridgeWorker {
       ),
       signal,
     );
+    if (ready.ready !== true) {
+      throw new BridgeProtocolError('Code API did not confirm worker readiness');
+    }
   }
 
   async resetWorkspace(
@@ -763,14 +910,40 @@ export class BridgeWorker {
   async resetNativeWorkspace(
     workspaceId: string,
     signal?: AbortSignal,
+    workspaceInstanceId?: string,
+    worktree?: string,
   ): Promise<void> {
-    const guard = this.options.workspaceQuarantines?.get(workspaceId);
+    const workspace = this.options.capabilities.workspaceTools?.workspaces.find(
+      (root) => root.id === workspaceId,
+    );
+    if (
+      worktree != null &&
+      (workspaceInstanceId != null ||
+        !isValidLinkedWorktreeName(worktree) ||
+        workspace?.workspaceScopes?.includes('git_linked_worktree') !== true)
+    ) {
+      throw new BridgeProtocolError(
+        'Linked worktree reset requires a registered checkout with worktree lanes',
+      );
+    }
+    const key = workspaceIsolationKey(workspaceId, workspaceInstanceId, worktree);
+    let guard: WorkspaceMutationQuarantine | undefined;
+    if (worktree != null) {
+      guard = await this.options.linkedWorktreeQuarantineResolver?.(workspaceId, worktree);
+    } else if (workspaceInstanceId != null) {
+      guard = await this.options.workspaceQuarantineResolver?.(
+        workspaceId,
+        workspaceInstanceId,
+      );
+    } else {
+      guard = this.options.workspaceQuarantines?.get(workspaceId);
+    }
     if (
       !guard ||
       this.activeWorkspaceAssignments.size > 0 ||
-      !this.options.capabilities.workspaceTools?.workspaces.some(
-        (root) => root.id === workspaceId,
-      )
+      workspace == null ||
+      (workspaceInstanceId != null &&
+        workspace.workspaceInstances?.includes('git_worktree') !== true)
     ) {
       throw new BridgeProtocolError(
         'Native workspace reset requires an idle registered root',
@@ -786,14 +959,14 @@ export class BridgeWorker {
       {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         incarnationId: this.incarnationId,
-        runtimeSessionId: `native-workspace:${workspaceId}`,
+        runtimeSessionId: `native-workspace:${key}`,
         confirmDiscarded: true,
       },
       this.options.resetTransportTimeoutMs ??
         DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
       signal,
     );
-    this.quarantinedWorkspaces.delete(workspaceId);
+    this.quarantinedWorkspaces.delete(key);
   }
 
   async lease(
@@ -1153,20 +1326,49 @@ export class BridgeWorker {
     if (Date.parse(identity.expiresAt) > validThroughMs) {
       return;
     }
-    const credential = await this.timedRequest<BridgeWorkerCredentialResponse>(
-      `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}` +
-        '/credentials/refresh',
-      { protocolVersion: BRIDGE_PROTOCOL_VERSION },
-      Math.max(
-        1,
-        Math.min(
-          transportTimeoutMs,
-          this.options.credentialRefreshTransportTimeoutMs ??
-            DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
-        ),
+    const timeoutMs = Math.max(
+      1,
+      Math.min(
+        transportTimeoutMs,
+        this.options.credentialRefreshTransportTimeoutMs ??
+          DEFAULT_CONTROL_TRANSPORT_TIMEOUT_MS,
       ),
-      signal,
     );
+    const deadline = performance.now() + timeoutMs;
+    let credential: BridgeWorkerCredentialResponse;
+    try {
+      credential = await this.timedRequest<BridgeWorkerCredentialResponse>(
+        `${this.codeApiUrl}${bridgeWorkerPath(this.options.workerId)}/credentials/refresh`,
+        { protocolVersion: BRIDGE_PROTOCOL_VERSION },
+        timeoutMs,
+        signal,
+      );
+    } catch (error) {
+      // Only bootstrap recovery. Auth failures during active work retain existing fencing/settlement rules.
+      if (
+        this.lastRegisteredAtMs !== 0 ||
+        !(error instanceof BridgeProtocolError) ||
+        error.status !== 401 ||
+        error.code !== 'CREDENTIAL_INVALID'
+      ) throw error;
+      signal?.throwIfAborted();
+      const remainingMs = Math.floor(deadline - performance.now());
+      if (remainingMs <= 0) {
+        throw new DOMException('Credential recovery timed out', 'TimeoutError');
+      }
+      const recoverySignal = AbortSignal.timeout(remainingMs);
+      credential = await recoverWorkerCredential({
+        codeApiUrl: this.codeApiUrl,
+        workerId: this.options.workerId,
+        privateKey: identity.privateKey,
+        validThroughMs,
+        fetchImpl: this.fetchImpl,
+        signal: signal == null
+          ? recoverySignal
+          : AbortSignal.any([signal, recoverySignal]),
+      });
+    }
+    signal?.throwIfAborted();
     if (
       credential.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
       credential.workerId !== this.options.workerId ||
@@ -1243,8 +1445,11 @@ export class BridgeWorker {
   ): Promise<void> {
     const root = this.assignmentWorkspaceId(assignment);
     const waitingAt = Date.now();
-    while (root != null && this.activeWorkspaceAssignments.has(root)) {
-      const active = this.activeWorkspaceAssignments.get(root)!;
+    for (
+      let active = root == null ? undefined : this.conflictingActiveAssignment(root);
+      root != null && active != null;
+      active = this.conflictingActiveAssignment(root)
+    ) {
       if (active.id === assignment.assignmentId)
         throw new BridgeProtocolError(
           'Code API replayed an active workspace assignment',
@@ -1316,10 +1521,68 @@ export class BridgeWorker {
     }
   }
 
+  /** An active assignment on the same key, the key's parent checkout, or a lane beneath it. */
+  private conflictingActiveAssignment(
+    key: string,
+  ): { id: string; done: Promise<void> } | undefined {
+    for (const [activeKey, active] of this.activeWorkspaceAssignments) {
+      if (workspaceIsolationKeysConflict(activeKey, key)) return active;
+    }
+    return undefined;
+  }
+
+  /** A lane may not run while the checkout it belongs to is quarantined. */
+  /**
+   * A lane may not start while its checkout is quarantined, and a checkout may
+   * not start while any linked worktree beneath it is: root commands can reach
+   * `.worktrees/*`, including `git worktree remove`.
+   */
+  private async assertLaneFamilyAvailable(
+    workspaceKey: string,
+    assignment: BridgeAssignment,
+  ): Promise<void> {
+    const workspaceId = this.assignmentBaseWorkspaceId(assignment);
+    const parent = workspaceIsolationParent(workspaceKey);
+    if (parent != null) {
+      if (this.quarantinedWorkspaces.has(parent)) {
+        throw new Error('Parent workspace requires an explicit quarantine reset');
+      }
+      if (workspaceId != null && parent === workspaceId) {
+        await this.options.workspaceQuarantines?.get(workspaceId)?.assertAvailable();
+      }
+      return;
+    }
+    const resolveLaneGuard = this.options.linkedWorktreeQuarantineResolver;
+    if (workspaceId == null || workspaceKey !== workspaceId || resolveLaneGuard == null) return;
+    for (const key of this.quarantinedWorkspaces) {
+      if (workspaceIsolationParent(key) === workspaceKey) {
+        throw new Error('A linked worktree in this workspace requires an explicit quarantine reset');
+      }
+    }
+    const names = (await this.options.linkedWorktreeNames?.(workspaceId)) ?? [];
+    await Promise.all(
+      names.map(async (name) => (await resolveLaneGuard(workspaceId, name)).assertAvailable()),
+    );
+  }
+
   private workspaceGuard(
     assignment: BridgeAssignment,
-  ): WorkspaceMutationQuarantine | undefined {
-    const workspaceId = this.assignmentWorkspaceId(assignment);
+  ):
+    | WorkspaceMutationQuarantine
+    | Promise<WorkspaceMutationQuarantine>
+    | undefined {
+    const workspaceId = this.assignmentBaseWorkspaceId(assignment);
+    const instanceId = this.assignmentWorkspaceInstanceId(assignment);
+    const worktree = this.assignmentWorktree(assignment);
+    if (workspaceId != null && worktree != null) {
+      return this.options.linkedWorktreeQuarantineResolver?.(workspaceId, worktree);
+    }
+    if (workspaceId != null && instanceId != null) {
+      return this.options.workspaceQuarantineResolver?.(
+        workspaceId,
+        instanceId,
+      );
+    }
     return workspaceId != null
       ? (this.options.workspaceQuarantines?.get(workspaceId) ??
           this.options.workspaceMutationQuarantine)
@@ -1327,6 +1590,35 @@ export class BridgeWorker {
   }
 
   private assignmentWorkspaceId(
+    assignment: BridgeAssignment,
+  ): string | undefined {
+    const workspaceId = this.assignmentBaseWorkspaceId(assignment);
+    if (workspaceId == null) return undefined;
+    const instanceId = this.assignmentWorkspaceInstanceId(assignment);
+    return workspaceIsolationKey(
+      workspaceId,
+      instanceId,
+      this.assignmentWorktree(assignment),
+    );
+  }
+
+  private assignmentWorktree(assignment: BridgeAssignment): string | undefined {
+    if (
+      assignment.executionKind === 'workspace_tool' &&
+      isWorkspaceToolRequest(assignment.request)
+    ) {
+      return assignment.request.worktree;
+    }
+    if (
+      assignment.executionKind === 'workspace_programmatic' &&
+      isBridgeWorkspaceProgrammaticRequest(assignment.request)
+    ) {
+      return assignment.request.body.workspace_worktree;
+    }
+    return undefined;
+  }
+
+  private assignmentBaseWorkspaceId(
     assignment: BridgeAssignment,
   ): string | undefined {
     if (
@@ -1344,11 +1636,33 @@ export class BridgeWorker {
     return undefined;
   }
 
+  private assignmentWorkspaceInstanceId(
+    assignment: BridgeAssignment,
+  ): string | undefined {
+    if (
+      assignment.executionKind === 'workspace_tool' &&
+      isWorkspaceToolRequest(assignment.request)
+    ) {
+      return assignment.request.workspaceInstanceId;
+    }
+    if (
+      assignment.executionKind === 'workspace_programmatic' &&
+      isBridgeWorkspaceProgrammaticRequest(assignment.request)
+    ) {
+      return assignment.request.body.workspace_instance_id;
+    }
+    return undefined;
+  }
+
   private async executeOwned(
     assignment: BridgeAssignment,
     signal?: AbortSignal,
   ): Promise<void> {
-    const guard = this.workspaceGuard(assignment);
+    const unresolvedGuard = this.workspaceGuard(assignment);
+    const guard =
+      unresolvedGuard instanceof Promise
+        ? await unresolvedGuard
+        : unresolvedGuard;
     if (signal?.aborted === true) {
       throw signal.reason instanceof Error
         ? signal.reason
@@ -1462,12 +1776,19 @@ export class BridgeWorker {
           throw new BridgeProtocolError('Invalid workspace tool request');
         }
         const workspaceRequest = assignment.request;
+        const workspaceKey = this.assignmentWorkspaceId(assignment)!;
         try {
-          if (this.quarantinedWorkspaces.has(workspaceRequest.workspaceId)) {
+          if (this.quarantinedWorkspaces.has(workspaceKey)) {
             throw new Error('Workspace requires an explicit quarantine reset');
           }
-          if (this.options.workspaceQuarantines != null)
+          if (
+            this.options.workspaceQuarantines != null ||
+            this.options.workspaceQuarantineResolver != null ||
+            this.options.linkedWorktreeQuarantineResolver != null
+          ) {
             await guard?.assertAvailable();
+            await this.assertLaneFamilyAvailable(workspaceKey, assignment);
+          }
         } catch (error) {
           throw new BridgeWorkspaceQuarantinedError(
             'Workspace is quarantined',
@@ -1490,6 +1811,22 @@ export class BridgeWorker {
         );
         if (workspace == null) {
           throw new BridgeProtocolError('Workspace is not advertised');
+        }
+        if (
+          workspaceRequest.workspaceInstanceId != null &&
+          workspace.workspaceInstances?.includes('git_worktree') !== true
+        ) {
+          throw new BridgeProtocolError(
+            'Workspace instance type is not advertised',
+          );
+        }
+        if (
+          workspaceRequest.worktree != null &&
+          workspace.workspaceScopes?.includes('git_linked_worktree') !== true
+        ) {
+          throw new BridgeProtocolError(
+            'Linked worktree lanes are not advertised for workspace',
+          );
         }
         if (
           workspace.operations != null &&
@@ -1528,9 +1865,13 @@ export class BridgeWorker {
             );
           }
           if (
-            workspaceRequest.operation === 'edit_file' &&
-            workspaceRequest.expectedBaseSha256 !== undefined &&
-            !advertised.editFileFeatures?.includes('expected_base_sha256')
+            (workspaceRequest.operation === 'edit_file' &&
+              workspaceRequest.expectedBaseSha256 !== undefined &&
+              !advertised.editFileFeatures?.includes('expected_base_sha256')) ||
+            (workspaceRequest.matching !== undefined &&
+              !advertised.editFileFeatures?.includes('tolerant_match')) ||
+            (workspaceRequest.edits?.some((edit) => edit.replaceAll !== undefined) === true &&
+              !advertised.editFileFeatures?.includes('replace_all'))
           ) {
             throw new BridgeProtocolError(
               'Workspace edit feature is not advertised',
@@ -1546,14 +1887,13 @@ export class BridgeWorker {
             'Workspace listing feature is not advertised',
           );
         }
-        const isMutation =
-          workspaceRequest.operation === 'write_file' ||
-          workspaceRequest.operation === 'edit_file' ||
-          workspaceRequest.operation === 'execute_command';
+        const isMutation = isWorkspaceMutationOperation(
+          workspaceRequest.operation,
+        );
         if (isMutation) {
           this.mutationGuardArmed = true;
           try {
-            this.armedWorkspaces.add(workspaceRequest.workspaceId);
+            this.armedWorkspaces.add(workspaceKey);
             await guard!.arm(
               `Workspace mutation ${workspaceRequest.operation} is pending settlement`,
               assignment.assignmentId,
@@ -1570,6 +1910,7 @@ export class BridgeWorker {
         payload = await this.options.workspaceTools.execute(
           workspaceRequest,
           executionController.signal,
+          { deadlineAtMs: localDeadlineAtMs },
         );
         if (
           workspaceRequest.operation === 'list_files' &&
@@ -1578,6 +1919,14 @@ export class BridgeWorker {
         ) {
           const { nextAfterPath: _nextAfterPath, ...compatiblePayload } =
             payload;
+          payload = compatiblePayload;
+        }
+        if (
+          workspaceRequest.operation === 'execute_command' &&
+          !advertised.commandResultFeatures?.includes('lane_git') &&
+          'laneGit' in payload
+        ) {
+          const { laneGit: _laneGit, ...compatiblePayload } = payload;
           payload = compatiblePayload;
         }
         workspaceMutationApplied = isMutation;
@@ -1608,12 +1957,19 @@ export class BridgeWorker {
             'Worker does not provide valid selected-workspace programmatic execution',
           );
         }
+        const workspaceKey = this.assignmentWorkspaceId(assignment)!;
         try {
-          if (this.quarantinedWorkspaces.has(workspaceId)) {
+          if (this.quarantinedWorkspaces.has(workspaceKey)) {
             throw new Error('Workspace requires an explicit quarantine reset');
           }
-          if (this.options.workspaceQuarantines != null)
+          if (
+            this.options.workspaceQuarantines != null ||
+            this.options.workspaceQuarantineResolver != null ||
+            this.options.linkedWorktreeQuarantineResolver != null
+          ) {
             await guard?.assertAvailable();
+            await this.assertLaneFamilyAvailable(workspaceKey, assignment);
+          }
         } catch (error) {
           throw new BridgeWorkspaceQuarantinedError(
             'Workspace is quarantined',
@@ -1635,9 +1991,25 @@ export class BridgeWorker {
             'Selected-workspace programmatic execution is not advertised',
           );
         }
+        if (
+          assignment.request.body.workspace_instance_id != null &&
+          workspace.workspaceInstances?.includes('git_worktree') !== true
+        ) {
+          throw new BridgeProtocolError(
+            'Workspace instance type is not advertised',
+          );
+        }
+        if (
+          assignment.request.body.workspace_worktree != null &&
+          workspace.workspaceScopes?.includes('git_linked_worktree') !== true
+        ) {
+          throw new BridgeProtocolError(
+            'Linked worktree lanes are not advertised for workspace',
+          );
+        }
         this.mutationGuardArmed = true;
         try {
-          this.armedWorkspaces.add(workspaceId);
+          this.armedWorkspaces.add(workspaceKey);
           await guard!.arm(
             'Workspace programmatic execution is pending settlement',
             assignment.assignmentId,
@@ -1747,6 +2119,35 @@ export class BridgeWorker {
       };
     } catch (error) {
       if (
+        error instanceof WorkspaceToolError &&
+        error.code === 'COMMAND_UNAVAILABLE' &&
+        (assignment.executionKind === 'workspace_programmatic' ||
+          (assignment.executionKind === 'workspace_tool' &&
+            isWorkspaceToolRequest(assignment.request) &&
+            assignment.request.operation === 'execute_command'))
+      ) {
+        try {
+          const event = commandFailureEvent(error.commandDiagnostic, {
+            assignmentId: assignment.assignmentId,
+            workerId: this.options.workerId,
+            incarnationId: this.incarnationId,
+            workspaceId: assignment.executionKind === 'workspace_programmatic'
+              ? assignment.workspaceId
+              : (isWorkspaceToolRequest(assignment.request) ? assignment.request.workspaceId : undefined),
+            operation: assignment.executionKind === 'workspace_programmatic'
+              ? 'workspace_programmatic'
+              : 'execute_command',
+            mutationMayHaveCommitted: error.mutationMayHaveCommitted,
+            requiresQuarantine: error.requiresQuarantine,
+          });
+          void Promise.resolve(this.options.onCommandFailure?.(event)).catch(() => {
+            // A rejected asynchronous log sink must not interrupt settlement.
+          });
+        } catch {
+          // Observability must never change settlement or quarantine decisions.
+        }
+      }
+      if (
         error instanceof BridgeWorkspaceQuarantinedError &&
         !workspaceMutationArmed
       ) {
@@ -1787,11 +2188,16 @@ export class BridgeWorker {
         ...((assignment.executionKind === 'workspace_tool' ||
           assignment.executionKind === 'workspace_programmatic') &&
         error instanceof WorkspaceToolError
-          ? { errorCode: error.code }
+          ? { errorCode: this.settlementErrorCode(error.code) }
           : {}),
-        error: (error instanceof Error
-          ? error.message
-          : 'Sandbox execution failed'
+        error: (assignment.executionKind === 'workspace_tool' &&
+          isWorkspaceToolRequest(assignment.request) &&
+          assignment.request.operation === 'edit_file' &&
+          !workspaceCanReadSource(this.activeCapabilities.workspaceTools, assignment.request.workspaceId)
+          ? 'Workspace edit failed; source diagnostics require read access'
+          : error instanceof Error
+            ? error.message
+            : 'Sandbox execution failed'
         ).slice(0, MAX_SETTLEMENT_ERROR_LENGTH),
       };
     }
@@ -2057,11 +2463,15 @@ export class BridgeWorker {
   ): Promise<BridgeWorkspaceQuarantinedError> {
     if (runtimeSessionId == null) {
       try {
-        await (
+        const unresolvedGuard =
           assignment == null
             ? this.options.workspaceMutationQuarantine
-            : this.workspaceGuard(assignment)
-        )?.quarantine(message, cause, assignment?.assignmentId);
+            : this.workspaceGuard(assignment);
+        const guard =
+          unresolvedGuard instanceof Promise
+            ? await unresolvedGuard
+            : unresolvedGuard;
+        await guard?.quarantine(message, cause, assignment?.assignmentId);
         return new BridgeWorkspaceQuarantinedError(message, cause);
       } catch (error) {
         return new BridgeWorkspaceQuarantinedError(
@@ -2167,6 +2577,12 @@ export class BridgeWorker {
     );
   }
 
+  /** An older Code API refuses a settlement carrying a code it does not know. */
+  private settlementErrorCode(code: WorkspaceToolErrorCode): WorkspaceToolErrorCode {
+    if (this.settlementErrorCodes.has(code)) return code;
+    return WORKSPACE_TOOL_ERROR_CODE_FALLBACKS[code] ?? code;
+  }
+
   private async settleWithRetry(
     assignment: BridgeAssignment,
     settlement: BridgeSettlement,
@@ -2180,9 +2596,7 @@ export class BridgeWorker {
       (assignment.executionKind === 'workspace_programmatic' ||
         (assignment.executionKind === 'workspace_tool' &&
           isWorkspaceToolRequest(assignment.request) &&
-          (assignment.request.operation === 'write_file' ||
-            assignment.request.operation === 'edit_file' ||
-            assignment.request.operation === 'execute_command')));
+          isWorkspaceMutationOperation(assignment.request.operation)));
     if (signal?.aborted === true) {
       if (assignment.runtimeSessionId != null || fulfilledWorkspaceMutation) {
         throw await this.quarantineWorkspace(
@@ -2218,6 +2632,20 @@ export class BridgeWorker {
         } catch (error) {
           lastError = error;
           if (signal?.aborted) break;
+          const legacyErrorCode =
+            settlement.status === 'rejected' && settlement.errorCode != null
+              ? WORKSPACE_TOOL_ERROR_CODE_FALLBACKS[settlement.errorCode]
+              : undefined;
+          if (
+            settlement.status === 'rejected' &&
+            legacyErrorCode != null &&
+            error instanceof BridgeProtocolError &&
+            error.status === 400
+          ) {
+            /** A replica that predates the added code can still serve this settlement. */
+            settlement = { ...settlement, errorCode: legacyErrorCode };
+            continue;
+          }
           if (
             error instanceof BridgeProtocolError &&
             error.status != null &&

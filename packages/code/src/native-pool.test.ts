@@ -5,13 +5,74 @@ import { WorkspaceToolError } from './workspace.js';
 import type { WorkspaceExecuteCommandRequest } from './protocol.js';
 
 const roots = new Map(
-  ['a', 'b', 'c'].map((id) => [id, { workspaceRoot: `/fixture/${id}` }]),
+  ['a', 'b', 'c'].map((id) => [id, { workspaceRoot: `/fixture/${id}` }])
 );
 const request = (workspaceId: string): WorkspaceExecuteCommandRequest => ({
   protocolVersion: 1,
   operation: 'execute_command',
   workspaceId,
   command: 'fixture',
+});
+
+test('pool distinguishes same-root contention from exhausted machine capacity', async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const running = new Promise<void>(resolve => { entered = resolve; });
+  const finish = new Promise<void>(resolve => { release = resolve; });
+  const pool = new NativeWorkspaceCommandPool(roots, 1, () => ({
+    async prepare() {}, async close() {},
+    async execute(req) {
+      entered();
+      await finish;
+      return { ...req, stdout: '', stderr: '', exitCode: 0, timedOut: false, truncated: false };
+    },
+  }));
+  const first = pool.execute(request('a'));
+  await running;
+  try {
+    for (const [root, reason] of [['a', 'workspace_busy'], ['b', 'capacity_exhausted']]) {
+      await assert.rejects(pool.execute(request(root!)), error => {
+        assert.ok(error instanceof WorkspaceToolError);
+        assert.deepEqual(error.commandDiagnostic, { stage: 'allocation', reason });
+        assert.equal(error.mutationMayHaveCommitted, false);
+        return true;
+      });
+    }
+  } finally {
+    release();
+    await first;
+    await pool.close();
+  }
+});
+
+test('failed provisioning roots are removed only after confirmed executor cleanup', async () => {
+  let failClose = true;
+  const pool = new NativeWorkspaceCommandPool(roots, 2, () => ({
+    async prepare() {},
+    async execute() {
+      throw new Error('not used');
+    },
+    async close() {
+      if (failClose) throw new Error('cleanup unconfirmed');
+    },
+  }));
+  await pool.registerRoot('instance', { workspaceRoot: '/fixture/instance' });
+  // Allocate this executor without dispatching a command.
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    pool.execute(request('instance'), controller.signal),
+    /cancelled/
+  );
+  await assert.rejects(pool.unregisterRoot('instance'), /cleanup unconfirmed/);
+  failClose = false;
+  await pool.unregisterRoot('instance');
+  await assert.rejects(pool.execute(request('instance')), /unavailable/);
+  await pool.close();
+  await assert.rejects(
+    pool.registerRoot('new', { workspaceRoot: '/fixture/new' }),
+    /unavailable/
+  );
 });
 
 test('native pool preflights every registered root with bounded concurrency', async () => {
@@ -22,7 +83,7 @@ test('native pool preflights every registered root with bounded concurrency', as
     async prepare() {
       active += 1;
       peak = Math.max(peak, active);
-      await new Promise(resolve => setTimeout(resolve, 5));
+      await new Promise((resolve) => setTimeout(resolve, 5));
       prepared.push(options.workspaceRoot);
       active -= 1;
     },
@@ -35,6 +96,90 @@ test('native pool preflights every registered root with bounded concurrency', as
   await pool.prepare();
   assert.deepEqual(prepared.sort(), ['/fixture/a', '/fixture/b', '/fixture/c']);
   assert.equal(peak, 2);
+  await pool.close();
+});
+
+test('native pool admits worker-owned roots after startup', async () => {
+  const created: string[] = [];
+  const pool = new NativeWorkspaceCommandPool(
+    new Map([['primary', { workspaceRoot: '/fixture/primary' }]]),
+    2,
+    (options) => ({
+      async prepare() {},
+      async close() {},
+      async execute(req) {
+        created.push(options.workspaceRoot);
+        return {
+          protocolVersion: 1,
+          operation: 'execute_command',
+          workspaceId: req.workspaceId,
+          stdout: '',
+          stderr: '',
+          exitCode: 0,
+          truncated: false,
+          timedOut: false,
+        };
+      },
+    })
+  );
+  await pool.registerRoot('conversation', {
+    workspaceRoot: '/fixture/conversation',
+  });
+  await pool.execute(request('conversation'));
+  assert.deepEqual(created, ['/fixture/conversation']);
+  await assert.rejects(
+    async () =>
+      pool.registerRoot('conversation', {
+        workspaceRoot: '/fixture/replaced',
+      }),
+    { code: 'REGISTRATION_INVALID' }
+  );
+  await pool.close();
+});
+
+test('native pool retires a cached executor when a root inode changes', async () => {
+  let created = 0;
+  let closed = 0;
+  const pool = new NativeWorkspaceCommandPool(
+    new Map([['primary', { workspaceRoot: '/fixture/primary' }]]),
+    2,
+    () => {
+      created++;
+      return {
+        async prepare() {},
+        async close() {
+          closed++;
+        },
+        async execute(req) {
+          return {
+            protocolVersion: 1,
+            operation: 'execute_command',
+            workspaceId: req.workspaceId,
+            stdout: '',
+            stderr: '',
+            exitCode: 0,
+            truncated: false,
+            timedOut: false,
+          };
+        },
+      };
+    }
+  );
+  const options = (ino: string) => ({
+    workspaceRoot: '/fixture/conversation',
+    workspaceIdentity: {
+      path: '/fixture/conversation',
+      dev: '1',
+      ino,
+    },
+  });
+  await pool.registerRoot('conversation', options('1'));
+  await pool.execute(request('conversation'));
+  await pool.registerRoot('conversation', options('2'));
+  await pool.execute(request('conversation'));
+
+  assert.equal(created, 2);
+  assert.equal(closed, 1);
   await pool.close();
 });
 
@@ -55,7 +200,7 @@ test('a known-clean executor failure is retired without replaying the command', 
           throw new WorkspaceToolError(
             'prepare failed',
             'COMMAND_UNAVAILABLE',
-            false,
+            false
           );
         return {
           protocolVersion: 1,

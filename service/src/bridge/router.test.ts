@@ -10,7 +10,10 @@ import {
   createBridgeIdentity,
   signBridgeRequest,
 } from '../../../packages/code/src/identity';
-import { BRIDGE_PROTOCOL_VERSION } from '../../../packages/code/src/protocol';
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
+} from '../../../packages/code/src/protocol';
 import { RedisBridgePairingStore } from './pairing';
 import { createBridgeRouter } from './router';
 import { RedisBridgeStore } from './store';
@@ -114,6 +117,151 @@ describe('paired bridge HTTP API', () => {
     const unauthorized = await fetch(`${baseUrl}/workers/user-vm/status`);
     expect(unauthorized.status).toBe(401);
   });
+
+  test('advertises the effective server command timeout for command-capable workers', async () => {
+    const store = new RedisBridgeStore(redis);
+    const app = express();
+    app.use(json());
+    app.use(
+      '/v1/bridge',
+      createBridgeRouter({
+        store,
+        pairings: new RedisBridgePairingStore(redis),
+        authMode: 'static',
+        adminToken: 'strong-administrator-bootstrap-token',
+        configuredWorkerId: 'command-worker',
+        maxCommandTimeoutMs: 900_000,
+      }),
+    );
+    server = createServer(app);
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address == null || typeof address === 'string') {
+      throw new Error('Expected TCP listener');
+    }
+    await store.register({
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      workerId: 'command-worker',
+      incarnationId: 'incarnation-00000001',
+      capabilities: {
+        statefulWorkspace: false,
+        sandboxProfile: 'native-srt',
+        runtimes: [],
+        workspaceTools: {
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          operations: ['execute_command'],
+          workspaces: [{ id: 'primary' }],
+        },
+      },
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/v1/bridge/workers/command-worker/status`,
+      { headers: { Authorization: 'Bearer strong-administrator-bootstrap-token' } },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      workerId: 'command-worker',
+      maxCommandTimeoutMs: BRIDGE_WORKSPACE_COMMAND_MAX_TIMEOUT_MS,
+    });
+  });
+
+  for (const laneGit of [false, true]) {
+    test(`registration ${laneGit ? 'offers' : 'omits'} lane_git when the setting is ${laneGit ? 'on' : 'off'}`, async () => {
+      const app = express();
+      app.use(json());
+      app.use(
+        '/v1/bridge',
+        createBridgeRouter({
+          store: new RedisBridgeStore(redis, undefined, undefined, 1, laneGit),
+          pairings: new RedisBridgePairingStore(redis),
+          authMode: 'static',
+          adminToken: 'strong-administrator-bootstrap-token',
+          configuredWorkerId: 'vm-1',
+        }),
+      );
+      server = createServer(app);
+      await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/bridge/workers/register`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer strong-administrator-bootstrap-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          workerId: 'vm-1',
+          incarnationId: 'incarnation-00000001',
+          capabilities: {
+            statefulWorkspace: false,
+            sandboxProfile: 'nsjail',
+            runtimes: [],
+            workspaceTools: {
+              protocolVersion: BRIDGE_PROTOCOL_VERSION,
+              operations: ['read_file', 'execute_command'],
+              workspaces: [{ id: 'primary' }],
+              ...(laneGit ? { commandResultFeatures: ['lane_git'] } : {}),
+            },
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body.supportedWorkspaceListFileFeatures).toEqual(['after_path']);
+      if (laneGit) expect(body.supportedWorkspaceCommandResultFeatures).toEqual(['lane_git']);
+      else expect('supportedWorkspaceCommandResultFeatures' in body).toBe(false);
+    });
+  }
+
+  for (const workspaceImportFile of [false, true]) {
+    test(`registration ${workspaceImportFile ? 'offers' : 'omits'} import_file when grants ${workspaceImportFile ? 'can' : 'cannot'} be minted`, async () => {
+      const app = express();
+      app.use(json());
+      app.use(
+        '/v1/bridge',
+        createBridgeRouter({
+          store: new RedisBridgeStore(redis),
+          pairings: new RedisBridgePairingStore(redis),
+          authMode: 'static',
+          adminToken: 'strong-administrator-bootstrap-token',
+          configuredWorkerId: 'vm-1',
+          workspaceImportFile,
+        }),
+      );
+      server = createServer(app);
+      await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/bridge/workers/register`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer strong-administrator-bootstrap-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          workerId: 'vm-1',
+          incarnationId: 'incarnation-00000001',
+          capabilities: {
+            statefulWorkspace: false,
+            sandboxProfile: 'anthropic-srt',
+            runtimes: [],
+            workspaceTools: {
+              protocolVersion: BRIDGE_PROTOCOL_VERSION,
+              operations: ['read_file', 'write_file', 'import_file'],
+              workspaces: [{ id: 'primary' }],
+            },
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { supportedWorkspaceToolOperations: string[] };
+      expect(body.supportedWorkspaceToolOperations.includes('import_file')).toBe(workspaceImportFile);
+    });
+  }
 
   test('rejects a malformed optional binding for a configured worker', async () => {
     const app = express();
@@ -380,8 +528,13 @@ describe('paired bridge HTTP API', () => {
       ],
       supportedWorkspaceWriteFileModes: ['replace', 'create'],
       supportedWorkspaceEditFileModes: ['single', 'batch'],
-      supportedWorkspaceEditFileFeatures: ['expected_base_sha256'],
+      supportedWorkspaceEditFileFeatures: [
+        'expected_base_sha256',
+        'tolerant_match',
+        'replace_all',
+      ],
       supportedWorkspaceListFileFeatures: ['after_path'],
+      supportedWorkspaceToolErrorCodes: ['NOT_FOUND'],
     });
 
     const crossDeploymentRevoke = await fetch(

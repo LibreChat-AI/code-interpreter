@@ -91,7 +91,7 @@ describe('NsJail args', () => {
     expect(valueAfter(args, '--config')).toBe('/tmp/nsjail-job-xyz.cfg');
   });
 
-  test('does not export TOOL_CALL_SOCKET into the jail (preamble references the literal path)', () => {
+  test('does not export a legacy tool-call socket path into the jail', () => {
     const args = buildArgs({
       logPath: '/tmp/nsjail-test.log',
       pkgdir: '/pkgs/python/3.14.4',
@@ -109,7 +109,7 @@ describe('NsJail args', () => {
     }
   });
 
-  test('binds the tool-call socket only for jobs that explicitly request it', () => {
+  test('passes tool-call pipes only for jobs that explicitly request the capability', () => {
     const originalAllowedPort = config.allowed_local_network_port;
     config.allowed_local_network_port = 3190;
     try {
@@ -126,8 +126,12 @@ describe('NsJail args', () => {
       const withoutSocket = buildArgs(baseOpts);
       expect(hasArgPair(withoutSocket, '-B', '/tmp/tcs.sock:/tmp/tcs.sock')).toBe(false);
 
-      const withSocket = buildArgs({ ...baseOpts, enableToolCallSocket: true });
-      expect(hasArgPair(withSocket, '-B', '/tmp/tcs.sock:/tmp/tcs.sock')).toBe(true);
+      const withSocket = buildArgs({ ...baseOpts, enableToolCallPipes: true });
+      expect(hasArgPair(withSocket, '-B', '/tmp/tcs.sock:/tmp/tcs.sock')).toBe(false);
+      expect(hasArgPair(withSocket, '--pass_fd', '3')).toBe(true);
+      expect(hasArgPair(withSocket, '--pass_fd', '4')).toBe(true);
+      expect(withSocket).toContain('--tool-call-pipes');
+      expect(withoutSocket).not.toContain('--pass_fd');
     } finally {
       config.allowed_local_network_port = originalAllowedPort;
     }
@@ -371,7 +375,37 @@ describe('NsJail seccomp policy', () => {
 
     const errnoSocketRule = errnoBlock.split('\n').find(line => line.includes('socket(domain)'));
     expect(errnoSocketRule).toBeDefined();
-    expect(errnoSocketRule).not.toContain('AF_VSOCK');
+    expect(errnoSocketRule).toContain('domain != AF_VSOCK');
+  });
+
+  test('blocks priority-inheritance futex operations without denying ordinary wait/wake', () => {
+    const policy = seccompPolicy();
+    expect(policy).toContain('#define FUTEX_CMD_MASK 0x7f');
+    const rule = policy.split('ERRNO(1)')[1]?.split('\n')
+      .find(line => line.includes('futex(uaddr, op)'));
+    expect(rule).toBeDefined();
+    for (const [operation, command] of [
+      ['LOCK_PI', 6], ['UNLOCK_PI', 7], ['TRYLOCK_PI', 8],
+      ['WAIT_REQUEUE_PI', 11], ['CMP_REQUEUE_PI', 12], ['LOCK_PI2', 13],
+    ] as const) {
+      expect(policy).toContain(`#define FUTEX_${operation} ${command}`);
+      expect(rule).toContain(`(op & FUTEX_CMD_MASK) == FUTEX_${operation}`);
+    }
+    expect(rule).not.toMatch(/== FUTEX_(WAIT|WAKE)(?:\s|$)/);
+  });
+
+  test('blocks descriptor-passing sends and all socketpair creation', () => {
+    const policy = seccompPolicy();
+    const errnoBlock = policy.split('ERRNO(1) {')[1]?.split('  }')[0] ?? '';
+    for (const name of ['sendmsg', 'sendmmsg', 'io_uring_setup', 'io_uring_enter', 'io_uring_register']) {
+      expect(errnoBlock).toMatch(new RegExp(`\\b${name}\\b[,\\s]`));
+    }
+    // The patched runtime and tool calls use anonymous pipes.
+    expect(policy).toContain('    socketpair');
+    for (const name of ['read', 'write', 'sendto', 'recvfrom']) {
+      expect(policy).not.toMatch(new RegExp(`\\b${name}\\b`));
+    }
+    expect(policy).toContain('USE sandbox DEFAULT ALLOW');
   });
 
   test('rejects Copy Fail and Dirty Frag socket entry points in the sandbox', () => {
@@ -379,10 +413,7 @@ describe('NsJail seccomp policy', () => {
     const errnoBlock = policy.split('ERRNO(1)')[1] ?? '';
     const socketRule = errnoBlock.split('\n').find(line => line.includes('socket(domain)'));
     expect(socketRule).toBeDefined();
-    for (const family of ['AF_ALG', 'AF_RXRPC', 'AF_INET', 'AF_INET6']) {
-      expect(socketRule).toContain(family);
-    }
-    expect(socketRule).not.toContain('AF_VSOCK');
+    expect(socketRule).toContain('domain != AF_VSOCK');
   });
 
   test('KILLs the defense-in-depth batch from the audit', () => {

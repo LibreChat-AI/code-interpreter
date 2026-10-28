@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { constants } from 'node:fs';
 import {
   chmod,
   lstat,
@@ -10,7 +11,7 @@ import {
 } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { BRIDGE_PROTOCOL_VERSION, BridgeProtocolError } from './protocol.js';
 import { assertPrivateStorageAcl, removePrivateStorageAcl, assertPrivateStorageAncestors, assertPrivateStorageSupported } from './private-storage.js';
@@ -33,7 +34,10 @@ function isPairedIdentity(value: unknown): value is PairedBridgeWorkerIdentity {
     typeof value.expiresAt === 'string' &&
     Number.isFinite(Date.parse(value.expiresAt)) &&
     typeof value.publicKey === 'string' &&
-    typeof value.privateKey === 'string'
+    typeof value.privateKey === 'string' &&
+    (value.setupAttemptPath === undefined ||
+      (typeof value.setupAttemptPath === 'string' && isAbsolute(value.setupAttemptPath) &&
+        Buffer.byteLength(value.setupAttemptPath) <= 4096 && !/[\x00-\x1f\x7f]/.test(value.setupAttemptPath)))
   );
 }
 
@@ -201,11 +205,15 @@ async function assertOwnedByWorker(path: string): Promise<void> {
 async function readGuardedFile(
   path: string,
   exposed: (mode: string) => string,
+  maxBytes = Infinity,
 ): Promise<string> {
   await assertReadPathPrivate(path);
   const handle = await open(path, 'r');
   try {
     const stats = await handle.stat();
+    if (!stats.isFile() || stats.size > maxBytes) {
+      throw new BridgeProtocolError('Invalid private storage file size or type');
+    }
     const self = process.getuid?.();
     if (self !== undefined && !isTrustedOwner(stats.uid, self)) {
       throw new BridgeProtocolError(
@@ -218,7 +226,18 @@ async function readGuardedFile(
       if ((mode & 0o077) !== 0) throw new BridgeProtocolError(exposed(mode.toString(8)));
     }
     await assertPrivateStorageAcl(handle, path);
-    return await handle.readFile('utf8');
+    if (!Number.isFinite(maxBytes)) return await handle.readFile('utf8');
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > maxBytes) {
+      throw new BridgeProtocolError('Invalid private storage file size or type');
+    }
+    return buffer.toString('utf8', 0, length);
   } finally {
     await handle.close();
   }
@@ -355,6 +374,7 @@ async function assertSiblingPublishable(path: string): Promise<void> {
 
 export async function assertIdentityPathIsPrivate(
   path: string,
+  createOnly = false,
 ): Promise<IdentityPathReservation> {
   assertPrivateStorageSupported();
   await assertWriteContainerPrivate(path);
@@ -384,6 +404,11 @@ export async function assertIdentityPathIsPrivate(
       throw error;
     }
     if (!isRecord(error) || error.code !== 'EEXIST') throw error;
+    if (createOnly) {
+      throw new BridgeProtocolError(
+        `${path} already exists; choose a different identity/profile path.`,
+      );
+    }
     /* Already present: judge what is there instead of the placeholder, and
      * prove the publish itself is possible - an unwritable parent would
      * otherwise surface as EACCES only after the code was spent. */
@@ -423,6 +448,62 @@ export async function saveBridgeIdentity(
   path: string,
   identity: PairedBridgeWorkerIdentity,
 ): Promise<void> {
+  return savePrivateJson(path, identity);
+}
+
+/** Preparation receipts are worker state, never a workspace-authored success marker. */
+export async function prepareEnvironmentPreparationDirectory(path: string): Promise<string[]> {
+  await assertPrivateStorageAncestors(path, true);
+  await ensureDurableDirectory(path);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isDirectory() || (metadata.mode & 0o077) !== 0)
+      throw new BridgeProtocolError('Environment preparation directory must be owner-only');
+    await assertPrivateStorageAcl(handle, path, true);
+  } finally { await handle.close(); }
+  return assertPrivateStorageAncestors(path);
+}
+
+export async function loadEnvironmentPreparationKey(path: string): Promise<string | undefined> {
+  let content: string;
+  try {
+    content = await readGuardedFile(path, () => 'Environment preparation receipt must be owner-only', 256);
+  } catch (error) {
+    if (isMissingPathError(error)) return undefined;
+    throw error;
+  }
+  try {
+    const value: unknown = JSON.parse(content);
+    if (isRecord(value) && value.version === 1 && typeof value.key === 'string' && /^[a-f0-9]{64}$/.test(value.key)) return value.key;
+  } catch { /* Invalid receipts are cache misses, not readiness evidence. */ }
+  return undefined;
+}
+
+export async function saveEnvironmentPreparationKey(path: string, key: string): Promise<void> {
+  if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Invalid environment preparation key');
+  await savePrivateJson(path, { version: 1, key });
+}
+
+export async function readPrivateJson(path: string, maxBytes: number): Promise<unknown> {
+  assertPrivateStorageSupported();
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new BridgeProtocolError('Private JSON file limit must be a positive integer');
+  }
+  const content = await readGuardedFile(
+    path,
+    (mode) => `Private JSON file ${path} must be owner-only (mode ${mode})`,
+    maxBytes,
+  );
+  await assertReadPathPrivate(path);
+  try {
+    return JSON.parse(content) as unknown;
+  } catch {
+    throw new BridgeProtocolError(`Invalid private JSON file: ${path}`);
+  }
+}
+
+export async function savePrivateJson(path: string, value: unknown): Promise<void> {
   assertPrivateStorageSupported();
   await assertWriteContainerPrivate(path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -435,13 +516,14 @@ export async function saveBridgeIdentity(
       await removePrivateStorageAcl(file, path);
       await file.chmod(0o600);
       await assertOwnerOnlyFile(file, path);
-      await file.writeFile(`${JSON.stringify(identity, null, 2)}\n`, 'utf8');
+      await file.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
       await file.sync();
     } finally {
       await file.close();
     }
     await rename(temporaryPath, path);
     await chmod(path, 0o600);
+    await syncParentDirectory(path);
   } catch (error) {
     await rm(temporaryPath, { force: true });
     throw error;

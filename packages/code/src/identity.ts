@@ -19,6 +19,25 @@ export interface BridgeRequestProofInput {
   body: string;
 }
 
+/** Signed without an access credential before requesting a server recovery challenge. */
+export interface BridgeRecoveryStartProofInput {
+  operation: 'credential.challenge';
+  serverId: string;
+  workerId: string;
+  timestamp: string;
+  nonce: string;
+}
+
+/** Signed separately from access-credential requests, so neither proof can be reused for the other. */
+export interface BridgeRecoveryProofInput {
+  operation: 'credential.recover';
+  serverId: string;
+  workerId: string;
+  enrollmentGeneration: string;
+  challenge: string;
+  expiresAt: string;
+}
+
 export function createBridgeIdentity(): BridgeIdentity {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519', {
     publicKeyEncoding: { type: 'spki', format: 'pem' },
@@ -57,6 +76,81 @@ export function verifyBridgeRequest(
     return verify(
       null,
       Buffer.from(canonicalBridgeRequest(input)),
+      publicKey,
+      Buffer.from(signature, 'base64url'),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function canonicalBridgeRecoveryStart(input: BridgeRecoveryStartProofInput): string {
+  return [
+    'librechat-code:bridge-recovery-start:v1',
+    input.operation,
+    input.serverId,
+    input.workerId,
+    input.timestamp,
+    input.nonce,
+  ].join('\n');
+}
+
+export function signBridgeRecoveryStart(
+  privateKey: string,
+  input: BridgeRecoveryStartProofInput,
+): string {
+  return sign(null, Buffer.from(canonicalBridgeRecoveryStart(input)), privateKey).toString(
+    'base64url',
+  );
+}
+
+export function verifyBridgeRecoveryStart(
+  publicKey: string,
+  input: BridgeRecoveryStartProofInput,
+  signature: string,
+): boolean {
+  try {
+    return verify(
+      null,
+      Buffer.from(canonicalBridgeRecoveryStart(input)),
+      publicKey,
+      Buffer.from(signature, 'base64url'),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function canonicalBridgeRecovery(input: BridgeRecoveryProofInput): string {
+  return [
+    'librechat-code:bridge-recovery:v1',
+    input.operation,
+    input.serverId,
+    input.workerId,
+    input.enrollmentGeneration,
+    input.challenge,
+    input.expiresAt,
+  ].join('\n');
+}
+
+export function signBridgeRecovery(
+  privateKey: string,
+  input: BridgeRecoveryProofInput,
+): string {
+  return sign(null, Buffer.from(canonicalBridgeRecovery(input)), privateKey).toString(
+    'base64url',
+  );
+}
+
+export function verifyBridgeRecovery(
+  publicKey: string,
+  input: BridgeRecoveryProofInput,
+  signature: string,
+): boolean {
+  try {
+    return verify(
+      null,
+      Buffer.from(canonicalBridgeRecovery(input)),
       publicKey,
       Buffer.from(signature, 'base64url'),
     );
