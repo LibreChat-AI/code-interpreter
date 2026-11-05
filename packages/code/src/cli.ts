@@ -1639,7 +1639,7 @@ async function run(
                 );
                 if (record != null) {
                   throw new BridgeProtocolError(
-                    `Workspace mutations are quarantined since ${record.quarantinedAt}: ${record.reason}. Inspect or restore the workspace, then run librechat-code clear-workspace-quarantine`,
+                    `Workspace mutations are quarantined since ${record.quarantinedAt}: ${record.reason}. Inspect or restore the workspace, then run lc-code clear-workspace-quarantine`,
                     undefined,
                     'WORKER_QUARANTINED',
                   );
@@ -1822,7 +1822,7 @@ async function clearMutationQuarantine(args: string[]): Promise<void> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length === 1 && (args[0] === '--help' || args[0] === 'help')) {
-    process.stdout.write(`Usage: librechat-code <command>
+    process.stdout.write(`Usage: lc-code <command>
 
   setup --instance <url>  Browser-approved enrollment and private profile setup
   run [--profile <file>]  Start a saved profile or existing worker configuration
@@ -1831,7 +1831,8 @@ async function main(): Promise<void> {
   reset-workspace <id>              Existing runtime maintenance
   clear-workspace-quarantine       Existing workspace maintenance
 
-Run librechat-code setup --help for setup options.
+Run lc-code setup --help for setup options.
+librechat-code remains available as a compatibility alias.
 Legacy LIBRECHAT_CODE_* configuration takes precedence over the default profile.
 Explicit profiles cannot be mixed with legacy settings or run options.
 `);
@@ -1846,7 +1847,7 @@ Explicit profiles cannot be mixed with legacy settings or run options.
     for (let i = 1; i < args.length; i++) {
       if (args[i] === '--apply') continue;
       if (args[i] !== '--environment' || !args[i + 1] || args[i + 1].startsWith('--'))
-        throw new Error('Usage: librechat-code prune-environment-storage --environment <file> [--environment <file> ...] [--apply]');
+        throw new Error('Usage: lc-code prune-environment-storage --environment <file> [--environment <file> ...] [--apply]');
       paths.push(args[++i]);
     }
     if (!paths.length || paths.length > 32) throw new Error('Supply between one and 32 environment definitions');
@@ -1867,7 +1868,7 @@ Explicit profiles cannot be mixed with legacy settings or run options.
     const root = option(args, '--root');
     if (!root || args.slice(1).some((arg, index, rest) =>
         arg !== '--root' && rest[index - 1] !== '--root' && !arg.startsWith('--root='))) {
-      throw new Error('Usage: librechat-code projects --root <directory>');
+      throw new Error('Usage: lc-code projects --root <directory>');
     }
     const inventory = await discoverProjects({ root });
     process.stdout.write(`${JSON.stringify(inventory, null, 2)}\n`);
@@ -1885,7 +1886,7 @@ Explicit profiles cannot be mixed with legacy settings or run options.
     const runtimeSessionId = args[1]?.trim();
     if (!runtimeSessionId) {
       throw new Error(
-        'Usage: librechat-code reset-workspace <runtime-session-id>',
+        'Usage: lc-code reset-workspace <runtime-session-id>',
       );
     }
     await run(runtimeSessionId);

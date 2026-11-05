@@ -21,3 +21,7 @@ data/
 
 # Editor config
 .vscode/
+
+# Staged by the worker package prepack hook from the repository legal files.
+/packages/code/LICENSE
+/packages/code/NOTICE

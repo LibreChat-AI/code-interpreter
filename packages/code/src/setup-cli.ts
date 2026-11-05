@@ -11,10 +11,10 @@ import { defaultWorkerProfilePath } from './worker-profile.js';
 import { isValidBridgeWorkerId } from './protocol.js';
 import { runBrowserSetupCommand } from './browser-setup-cli.js';
 
-export const SETUP_HELP = `Usage: librechat-code setup [options]
+export const SETUP_HELP = `Usage: lc-code setup [options]
 
 Enroll with browser approval:
-  librechat-code setup --instance https://chat.example.com
+  lc-code setup --instance https://chat.example.com
 
 The browser uses LibreChat's normal login, including configured OAuth/OIDC.
 SSH/headless machines display a URL and matching verification code. No inbound
@@ -44,6 +44,7 @@ sign in to LibreChat or bypass its enrollment policy.
   --code-stdin             Read the pairing code from stdin, never an argument
   --help                   Show this help
 
+librechat-code remains available as a compatibility alias.
 Existing profiles and identities are never replaced. Choose another profile
 and identity for a second machine. Setup does not install OS dependencies,
 start a background service, or change the restricted command policy.
@@ -80,7 +81,7 @@ export function parseSetupArguments(
       options.has(flag)
     ) {
       throw new Error(
-        'Unknown or repeated setup option; use librechat-code setup --help',
+        'Unknown or repeated setup option; use lc-code setup --help',
       );
     }
     if (BOOLEAN_FLAGS.has(flag)) {
@@ -275,7 +276,7 @@ export async function runSetupCommand(args: string[]): Promise<void> {
     const defaultProfile = profilePath === resolve(defaultWorkerProfilePath());
     const quotedProfile = `'${profilePath.replace(/'/g, "'\\''")}'`;
     process.stdout.write(
-      `\nSetup saved. Start the worker with:\n  librechat-code run${defaultProfile ? '' : ` --profile ${quotedProfile}`}\n\nPairing is complete. The worker still needs to start, prepare its sandbox,\nand register before LibreChat can report it ready.\n`,
+      `\nSetup saved. Start the worker with:\n  lc-code run${defaultProfile ? '' : ` --profile ${quotedProfile}`}\n\nPairing is complete. The worker still needs to start, prepare its sandbox,\nand register before LibreChat can report it ready.\n`,
     );
   } finally {
     process.off('SIGINT', abort);

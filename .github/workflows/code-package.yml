@@ -1,0 +1,160 @@
+name: Code Package
+
+on:
+    pull_request:
+        paths:
+            - '.github/workflows/code-package.yml'
+            - 'packages/code/**'
+            - 'scripts/code-package-release*'
+            - 'scripts/smoke-code-package.mjs'
+            - 'LICENSE'
+            - 'NOTICE'
+    push:
+        tags: ['code-v*']
+    workflow_dispatch:
+        inputs:
+            version:
+                description: 'Committed worker version, e.g. 0.1.0-rc.1. Dispatch from main.'
+                required: true
+                type: string
+            publish:
+                description: 'Publish the verified artifact to npm (requires the npm environment).'
+                type: boolean
+                default: false
+
+permissions:
+    contents: read
+
+concurrency:
+    group: code-package-${{ github.event_name == 'pull_request' && github.ref || 'release' }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+    pack:
+        name: Pack Worker
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        permissions:
+            contents: read
+            actions: read
+        outputs:
+            sha: ${{ steps.plan.outputs.sha }}
+            filename: ${{ steps.pack.outputs.filename }}
+        steps:
+            - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+            - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+              with:
+                  node-version: 24.22.1
+                  cache: npm
+                  cache-dependency-path: packages/code/package-lock.json
+            - name: Validate release source and channel
+              id: plan
+              env:
+                  EXPECTED_VERSION: ${{ inputs.version }}
+              run: node scripts/code-package-release.mjs plan
+            - name: Require successful main CI for releases
+              if: github.event_name != 'pull_request'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  SOURCE_SHA: ${{ steps.plan.outputs.sha }}
+              run: |
+                  set -euo pipefail
+                  count="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SOURCE_SHA&event=push&status=success" \
+                    --jq '[.workflow_runs[] | select(.head_branch == "main")] | length')"
+                  test "$count" -gt 0 || { echo 'Successful main CI is required for this exact commit'; exit 1; }
+            - name: Install worker build dependencies
+              working-directory: packages/code
+              run: npm ci
+            - name: Test release guards and typecheck
+              run: |
+                  node --test scripts/code-package-release.test.mjs
+                  npm exec --prefix packages/code -- tsc --noEmit -p packages/code/tsconfig.json
+            - name: Build the candidate once
+              id: pack
+              run: node scripts/code-package-release.mjs pack "$RUNNER_TEMP/code-package"
+            - name: Focused protocol and enrollment regressions
+              working-directory: packages/code
+              run: >-
+                  node --test dist/identity.test.js dist/pairing.test.js
+                  dist/protocol.test.js dist/credential-recovery.test.js
+                  dist/browser-setup.test.js dist/browser-protection.test.js
+            - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: code-package
+                  path: ${{ runner.temp }}/code-package/
+                  if-no-files-found: error
+                  retention-days: 7
+
+    verify:
+        name: Packed Worker (${{ matrix.runner }}, Node ${{ matrix.node }})
+        needs: pack
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - runner: ubuntu-latest
+                      node: 22.23.4
+                    - runner: ubuntu-latest
+                      node: 24.22.1
+                    - runner: ubuntu-24.04-arm
+                      node: 24.22.1
+                    - runner: macos-14
+                      node: 24.22.1
+                    - runner: macos-15-intel
+                      node: 24.22.1
+        runs-on: ${{ matrix.runner }}
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              with:
+                  persist-credentials: false
+            - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+              with:
+                  node-version: ${{ matrix.node }}
+            - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+              with:
+                  name: code-package
+                  path: ${{ runner.temp }}/code-package
+            - name: Verify the exact candidate bytes
+              run: node scripts/code-package-release.mjs verify "$RUNNER_TEMP/code-package"
+            - name: Install and smoke-test outside the source checkout
+              env:
+                  PACKAGE_FILENAME: ${{ needs.pack.outputs.filename }}
+              run: node scripts/smoke-code-package.mjs "$RUNNER_TEMP/code-package/$PACKAGE_FILENAME"
+
+    publish:
+        name: Publish Verified Worker
+        needs: [pack, verify]
+        if: >-
+            github.repository == 'LibreChat-AI/code-interpreter' &&
+            (github.event_name == 'push' ||
+             (github.event_name == 'workflow_dispatch' && inputs.publish == true))
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        environment: npm
+        permissions:
+            contents: read
+            id-token: write
+        steps:
+            - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              with:
+                  ref: ${{ needs.pack.outputs.sha }}
+                  fetch-depth: 0
+                  persist-credentials: false
+            - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+              with:
+                  node-version: 24.22.1
+            - name: Install the trusted-publishing npm CLI
+              run: npm install --global npm@11.13.0 --ignore-scripts
+            - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+              with:
+                  name: code-package
+                  path: ${{ runner.temp }}/code-package
+            - name: Publish without rebuilding, or verify an identical prior publication
+              env:
+                  EXPECTED_VERSION: ${{ inputs.version }}
+                  CODE_PACKAGE_PUBLISH: 'true'
+              run: node scripts/code-package-release.mjs publish "$RUNNER_TEMP/code-package"
