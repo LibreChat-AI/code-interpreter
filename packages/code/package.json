@@ -53,6 +53,7 @@
     }
   },
   "bin": {
+    "lc-code": "./dist/cli.js",
     "librechat-code": "./dist/cli.js"
   },
   "files": [

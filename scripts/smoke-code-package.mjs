@@ -139,21 +139,38 @@ async function checkConsumer(expected) {
   assert.equal(enrollment.verifyBrowserEnrollmentRedemption(key.publicKey, { ...redemption, workerId: 'changed' }, redemptionSignature), false);
   console.log('ok: identity request and browser setup/redemption signatures; tampering rejected');
 
-  const binTarget = resolve(packageRoot, manifest.bin?.['librechat-code'] ?? '');
-  assert.ok(binTarget !== packageRoot && within(packageRoot, binTarget), 'Missing or invalid librechat-code bin');
-  assert.match(await readFile(binTarget, 'utf8'), /^#!\/usr\/bin\/env node\r?\n/);
-  const executable = join(modules, '.bin', 'librechat-code');
-  assert.equal(await realpath(executable), await realpath(binTarget));
-  if (process.platform !== 'win32') {
-    assert.ok((await stat(binTarget)).mode & 0o111, 'Installed bin must be executable');
-    await access(executable, constants.X_OK);
+  assert.deepEqual(manifest.bin, {
+    'lc-code': './dist/cli.js',
+    'librechat-code': './dist/cli.js',
+  });
+  let primaryHelp;
+  let primarySetupHelp;
+  for (const name of ['lc-code', 'librechat-code']) {
+    const binTarget = resolve(packageRoot, manifest.bin[name]);
+    assert.ok(binTarget !== packageRoot && within(packageRoot, binTarget), `Missing or invalid ${name} bin`);
+    assert.match(await readFile(binTarget, 'utf8'), /^#!\/usr\/bin\/env node\r?\n/);
+    const executable = join(modules, '.bin', name);
+    assert.equal(await realpath(executable), await realpath(binTarget));
+    if (process.platform !== 'win32') {
+      assert.ok((await stat(binTarget)).mode & 0o111, 'Installed bin must be executable');
+      await access(executable, constants.X_OK);
+    }
+    const help = await run(executable, ['--help'], { cwd: consumer, timeoutMs: 15_000, label: `${name} --help` });
+    assert.match(help, /Usage: lc-code <command>/);
+    assert.match(help, /librechat-code remains available as a compatibility alias/);
+    const setupHelp = await run(executable, ['setup', '--help'], { cwd: consumer, timeoutMs: 15_000, label: `${name} setup --help` });
+    assert.match(setupHelp, /Usage: lc-code setup/);
+    assert.match(setupHelp, /--instance/);
+    if (primaryHelp === undefined) {
+      primaryHelp = help;
+      primarySetupHelp = setupHelp;
+    } else {
+      assert.equal(help, primaryHelp, 'Compatibility alias changed CLI help');
+      assert.equal(setupHelp, primarySetupHelp, 'Compatibility alias changed setup help');
+    }
+    await assert.rejects(run(executable, ['unknown-command'], { cwd: consumer, timeoutMs: 15_000, label: `${name} unknown-command` }), /exit 1.*[\s\S]*Unknown command: unknown-command/);
   }
-  const help = await run(executable, ['--help'], { cwd: consumer, timeoutMs: 15_000, label: 'librechat-code --help' });
-  assert.match(help, /Usage: librechat-code <command>/);
-  const setupHelp = await run(executable, ['setup', '--help'], { cwd: consumer, timeoutMs: 15_000, label: 'librechat-code setup --help' });
-  assert.match(setupHelp, /Usage: librechat-code setup/);
-  assert.match(setupHelp, /--instance/);
-  console.log('ok: installed executable shebang, permissions, --help and setup --help');
+  console.log('ok: lc-code and librechat-code alias share executable, help, setup and error behavior');
 
   const childPath = join(packageRoot, 'dist', 'native-process-child.js');
   assert.ok((await lstat(childPath)).isFile(), 'Missing installed dist/native-process-child.js');

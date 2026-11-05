@@ -110,7 +110,10 @@ export function validateManifest(manifest) {
         access: 'public',
         registry: REGISTRY,
     });
-    assert.equal(manifest.bin?.['librechat-code'], './dist/cli.js');
+    assert.deepEqual(manifest.bin, {
+        'lc-code': './dist/cli.js',
+        'librechat-code': './dist/cli.js',
+    });
     assert.ok(manifest.exports?.['./browser-enrollment']);
 }
 

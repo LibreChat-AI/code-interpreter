@@ -219,6 +219,10 @@ test('manifest declares public provenance metadata and remains lockfile-aligned'
     );
     assert.equal(lock.version, manifest.version);
     assert.equal(lock.packages[''].version, manifest.version);
+    assert.deepEqual(lock.packages[''].bin, {
+        'lc-code': 'dist/cli.js',
+        'librechat-code': 'dist/cli.js',
+    });
     assert.ok(versionParts(manifest.version));
     for (const altered of [
         { ...manifest, name: 'another-package' },
@@ -234,7 +238,13 @@ test('manifest declares public provenance metadata and remains lockfile-aligned'
             ...manifest,
             publishConfig: { access: 'restricted', registry: REGISTRY },
         },
-        { ...manifest, bin: { 'librechat-code': './src/cli.ts' } },
+        { ...manifest, bin: { 'librechat-code': './dist/cli.js' } },
+        { ...manifest, bin: { 'lc-code': './dist/cli.js' } },
+        { ...manifest, bin: { ...manifest.bin, 'lc-code': './src/cli.ts' } },
+        {
+            ...manifest,
+            bin: { ...manifest.bin, 'librechat-code': './src/cli.ts' },
+        },
     ])
         assert.throws(() => validateManifest(altered));
 });
