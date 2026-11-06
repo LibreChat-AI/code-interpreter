@@ -130,6 +130,7 @@ RUN apt-install \
     bsdextrautils \
     locales \
     procps \
+    chrony \
     iptables \
     bc \
     jq \
@@ -170,6 +171,7 @@ COPY --from=sandbox-builder /app/.build ./.build
 COPY api/config ./config
 COPY api/src/entrypoint.sh ./entrypoint.sh
 COPY api/src/guest-dns.sh ./guest-dns.sh
+COPY api/src/guest-clock.sh ./guest-clock.sh
 RUN chmod +x ./entrypoint.sh
 
 RUN mkdir -p /pkgs /tmp/sandbox

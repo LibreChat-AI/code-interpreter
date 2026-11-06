@@ -37,6 +37,9 @@ jobs:
       - name: KVM guest resolver handoff
         run: tests/kvm_guest_dns.sh
 
+      - name: KVM guest clock lifecycle
+        run: bash tests/guest_clock_lifecycle.sh
+
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
 
