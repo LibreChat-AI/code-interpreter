@@ -269,5 +269,22 @@ export async function authorizeRequestedFiles(args: {
     }
   }
 
-  return requestedFiles;
+  // Deduplicate authorized refs by object and destination, preserving aliases.
+  const seenReferences = new Set<string>();
+  const uniqueReferences = requestedFiles.filter(file => {
+    const identity = `${file.storage_session_id}\0${file.id}\0${file.name}`;
+    if (seenReferences.has(identity)) return false;
+    seenReferences.add(identity);
+    return true;
+  });
+
+  // Last distinct user ref wins each path; exact echoes cannot undo replacements.
+  // Shared skill/agent inputs retain the sandbox's destination conflict checks.
+  const selectedUserFiles = new Map<string, t.RequestFile>();
+  for (const file of uniqueReferences) {
+    if (file.kind === 'user') selectedUserFiles.set(file.name, file);
+  }
+  return uniqueReferences.filter(file =>
+    file.kind !== 'user' || selectedUserFiles.get(file.name) === file,
+  );
 }
