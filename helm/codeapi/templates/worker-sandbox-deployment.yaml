@@ -121,6 +121,7 @@ spec:
       labels:
         {{- include "codeapi.serviceWorker.selectorLabels" . | nindent 8 }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.workerSandbox.serviceWorker.terminationGracePeriodSeconds | default (add 100 (div (add (int .Values.workerSandbox.config.jobTimeout) 999) 1000)) }}
       {{- if or .Values.workerSandbox.serviceAccount.create .Values.workerSandbox.serviceAccount.name }}
       serviceAccountName: {{ $serviceWorkerServiceAccount }}
       {{- end }}

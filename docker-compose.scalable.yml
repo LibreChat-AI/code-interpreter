@@ -166,6 +166,7 @@ services:
   # Each pod runs its own microVM — PYTHON_CONCURRENCY is per-sandbox
   # =============================================================================
   worker-sandbox:
+    stop_grace_period: 400s
     build:
       context: .
       dockerfile: docker/Dockerfile.worker-sandbox
@@ -174,6 +175,7 @@ services:
     devices:
       - ${KVM_DEVICE_PATH:-/dev/kvm}:/dev/kvm
     environment:
+      - CODEAPI_SHUTDOWN_TIMEOUT_MS=${CODEAPI_SHUTDOWN_TIMEOUT_MS:-}
       - KVM_ENABLED=${KVM_ENABLED:-true}
       - LOCAL_MODE=${LOCAL_MODE:-true}
       # Worker config

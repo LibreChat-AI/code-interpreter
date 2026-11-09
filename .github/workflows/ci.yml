@@ -37,6 +37,9 @@ jobs:
       - name: KVM guest resolver handoff
         run: tests/kvm_guest_dns.sh
 
+      - name: Worker drains before sandbox shutdown
+        run: tests/worker_sandbox_shutdown.sh
+
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
 

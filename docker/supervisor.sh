@@ -38,11 +38,13 @@ cleanup() {
 
     echo "Received shutdown signal, stopping processes..."
 
-    if [ -n "$SANDBOX_PID" ]; then
-        kill -TERM "$SANDBOX_PID" 2>/dev/null || true
-    fi
     if [ -n "$WORKER_PID" ]; then
         kill -TERM "$WORKER_PID" 2>/dev/null || true
+        # Active jobs still need the sandbox while the worker drains.
+        wait "$WORKER_PID" 2>/dev/null || true
+    fi
+    if [ -n "$SANDBOX_PID" ]; then
+        kill -TERM "$SANDBOX_PID" 2>/dev/null || true
     fi
 
     wait
