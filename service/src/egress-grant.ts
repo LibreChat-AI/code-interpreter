@@ -440,7 +440,7 @@ export function prepareSandboxEgress(args: {
   delete sandboxVisibleClaims.external_user_id;
   // Manifests signed by pre-rename workers carry the legacy field name;
   // keep scrubbing it until the external_user_id rollout completes.
-  delete (sandboxVisibleClaims as Record<string, unknown>)['chc_user_id']; // leak-check:allow
+  delete (sandboxVisibleClaims as ExecutionManifestClaims & { chc_user_id?: string })['chc_user_id']; // leak-check:allow
   delete sandboxVisibleClaims.org_id;
   delete sandboxVisibleClaims.service_id;
   const executionManifestClaims: ExecutionManifestClaims = {

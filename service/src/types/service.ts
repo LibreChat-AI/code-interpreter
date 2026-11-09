@@ -383,6 +383,7 @@ export interface ProgrammaticRequestBody {
   timeout?: number;
   continuation_token?: string;
   tool_results?: Array<{
+        files?: RequestFile[];
     call_id: string;
     result: unknown;
     is_error?: boolean;

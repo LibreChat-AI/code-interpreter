@@ -33,6 +33,7 @@ import { connection } from '../queue';
 import { env } from '../config';
 import { internalServiceHeaders } from '../internal-service-auth';
 import logger from '../logger';
+import { validateRequestedFiles } from './file-authorization';
 import {
   ptcReplayHistorySize,
   ptcReplayHistoryEntries,
@@ -179,6 +180,7 @@ export interface ExecutionState {
 }
 
 export interface HistoryEntry {
+  files?: t.RequestFile[];
   result: unknown;
   is_error?: boolean;
   error_message?: string;
@@ -318,7 +320,7 @@ export function resetRedisForTests(): void {
  *  key; normalize on read. Safe to delete one EXECUTION_STATE_TTL window
  *  after the external_user_id rollout. */
 export function normalizeExecutionState(state: ExecutionState): ExecutionState {
-  const legacy = (state as Record<string, unknown>)['chcUserId']; // leak-check:allow
+  const legacy = (state as ExecutionState & { chcUserId?: string })['chcUserId']; // leak-check:allow
   if (state.externalUserId == null && typeof legacy === 'string') {
     state.externalUserId = legacy;
   }
@@ -526,11 +528,13 @@ function canonicalEntryBody(
   result: unknown,
   isError: boolean | undefined,
   errorMessage: string | undefined,
+  files?: t.RequestFile[],
 ): string {
   return JSON.stringify({
     result,
     is_error: isError ?? false,
     error_message: errorMessage,
+    ...(files?.length ? { files } : {}),
   });
 }
 
@@ -558,6 +562,7 @@ export async function computeToolHistoryDelta(
   results: Array<{
     call_id: string;
     result: unknown;
+    files?: t.RequestFile[];
     is_error?: boolean;
     error_message?: string;
     tool_name?: string;
@@ -595,6 +600,7 @@ export async function computeToolHistoryDelta(
   for (const r of results) {
     const entry: HistoryEntry = {
       result: r.result,
+      ...(r.files?.length ? { files: r.files } : {}),
       is_error: r.is_error ?? false,
       error_message: r.error_message,
       received_at: now,
@@ -611,11 +617,12 @@ export async function computeToolHistoryDelta(
     }
     const existing = oldByCallId.get(r.call_id);
     if (existing) {
-      const incomingBody = canonicalEntryBody(r.result, r.is_error, r.error_message);
+      const incomingBody = canonicalEntryBody(r.result, r.is_error, r.error_message, r.files);
       const storedBody = canonicalEntryBody(
         existing.entry.result,
         existing.entry.is_error,
         existing.entry.error_message,
+        existing.entry.files,
       );
       if (incomingBody !== storedBody) {
         return {
@@ -859,7 +866,7 @@ export async function cleanupExecution(execution_id: string, mode: 'blocking' | 
 export function validateToolResult(
   r: unknown,
 ):
-  | { call_id: string; result: unknown; is_error?: boolean; error_message?: string }
+  | { call_id: string; result: unknown; files?: t.RequestFile[]; is_error?: boolean; error_message?: string }
   | { error: string } {
   if (r == null || typeof r !== 'object' || Array.isArray(r)) {
     return { error: 'tool_results entries must be objects' };
@@ -902,9 +909,17 @@ export function validateToolResult(
       error: `tool_results[${callId}].result is ${resultBytes} bytes, exceeds per-result cap ${MAX_TOOL_RESULT_BYTES}`,
     };
   }
+  let files: t.RequestFile[] | undefined;
+  try {
+    if (obj.files !== undefined) {
+      files = validateRequestedFiles(obj.files);
+      if (files.length > 100 || obj.is_error === true) return { error: 'Invalid continuation files' };
+    }
+  } catch { return { error: 'Invalid continuation files' }; }
   return {
     call_id: callId,
     result: obj.result,
+    ...(files?.length ? { files } : {}),
     is_error: obj.is_error as boolean | undefined,
     error_message: obj.error_message as string | undefined,
   };
@@ -915,6 +930,7 @@ export function validateToolResult(
 // ---------------------------------------------------------------------------
 
 export interface ValidatedContinuationResult {
+  files?: t.RequestFile[];
   call_id: string;
   result: unknown;
   is_error?: boolean;
@@ -957,6 +973,7 @@ export function validateContinuationBatch(tool_results: unknown[]):
     results.push({
       call_id: v.call_id,
       result: v.result,
+      ...(v.files?.length ? { files: v.files } : {}),
       is_error: v.is_error,
       error_message: v.error_message,
     });
