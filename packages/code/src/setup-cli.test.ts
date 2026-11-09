@@ -58,6 +58,9 @@ test('CLI help explains the pairing prerequisite and setup does not silently rea
     encoding: 'utf8',
   });
   assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /^Usage: lc-code setup/);
+  assert.match(help.stdout, /lc-code setup --instance/);
+  assert.match(help.stdout, /librechat-code remains available as a compatibility alias/);
   assert.match(help.stdout, /Settings > Code Environments/);
   assert.match(help.stdout, /does not\nsign in to LibreChat/);
   const guided = await execute(['setup'], env, code);
@@ -138,7 +141,7 @@ test(
       `${code}\n`,
     );
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /librechat-code run\n/);
+    assert.match(result.stdout, /lc-code run\n/);
     assert.match(result.stdout, /still needs to start/);
     assert.ok(!result.stdout.includes(code));
     assert.ok(!result.stderr.includes(code));
