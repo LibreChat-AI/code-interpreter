@@ -54,6 +54,8 @@ function routeLabel(req: Request): string {
   if (req.path === '/metrics') return '/metrics';
   if (req.path === '/api/v2/execute') return '/api/v2/execute';
   if (req.path === '/api/v2/health') return '/api/v2/health';
+  if (req.path === '/api/v2/ready') return '/api/v2/ready';
+  if (req.path === '/api/v2/drain') return '/api/v2/drain';
   if (req.path === '/api/v2/runtimes') return '/api/v2/runtimes';
   return 'unmatched';
 }

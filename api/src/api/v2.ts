@@ -26,6 +26,7 @@ import {
   parseSessionBindingFromHeader,
 } from '../session-workspace';
 import { streamSessionCheckpoint, restoreSessionCheckpoint } from '../session-checkpoint';
+import drainRouter, { withSandboxDrain } from './drain';
 import {
   SESSION_INPUT_CACHE_MAX_OBJECTS,
   hasCachedInput,
@@ -78,6 +79,9 @@ export function deduplicateFilesByDestination(files: TFile[]): TFile[] {
   }
   return [...byDestination.values()];
 }
+// Register lifecycle routes before the content-type guard so the signed
+// preStop request can use a bodyless POST.
+router.use(drainRouter);
 
 function existingDestinationConflictMessage(existing: string, destination: string): string {
   return existing === destination
@@ -475,7 +479,7 @@ router.use('/execute', (_req: Request, res: Response, next: NextFunction) => {
  * `index.ts` for the routing-order rationale). Keep the limit configurable:
  * analyst workflows may send large scripts or replay payloads, while file
  * bytes should still move through the gateway/file path. */
-router.post('/execute', express.json({ limit: config.execute_body_limit }), async (req: Request, res: Response) => {
+router.post('/execute', withSandboxDrain(express.json({ limit: config.execute_body_limit }), async (req: Request, res: Response) => {
   const started = performance.now();
   let job: Job | undefined;
   let cleanedUp = false;
@@ -683,7 +687,7 @@ router.post('/execute', express.json({ limit: config.execute_body_limit }), asyn
       durationSeconds: (performance.now() - started) / 1000,
     });
   }
-});
+}));
 
 router.post('/workspace/execute', express.json({ limit: '256kb' }), async (req: Request, res: Response) => {
   let binding;
