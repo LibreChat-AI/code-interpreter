@@ -64,6 +64,11 @@ export const config = {
   compile_memory_limit: Number(process.env.SANDBOX_COMPILE_MEMORY_LIMIT ?? -1),
   run_memory_limit: Number(process.env.SANDBOX_RUN_MEMORY_LIMIT ?? -1),
   max_concurrent_jobs: safeInt(process.env.SANDBOX_MAX_CONCURRENT_JOBS, 8),
+  drain_timeout_ms: safeInt(process.env.SANDBOX_DRAIN_TIMEOUT_MS, 45_000),
+  graceful_drain_enabled: process.env.SANDBOX_GRACEFUL_DRAIN_ENABLED === 'true',
+  drain_public_key: process.env.SANDBOX_DRAIN_PUBLIC_KEY ?? '',
+  drain_min_delay_ms: safeInt(process.env.SANDBOX_DRAIN_MIN_DELAY_MS, 5_000, 0),
+  drain_retry_after_seconds: safeInt(process.env.SANDBOX_DRAIN_RETRY_AFTER_SECONDS, 1),
   per_job_uids: (process.env.SANDBOX_PER_JOB_UIDS ?? 'true') === 'true',
   /* Image-level enable for persistent session workspaces (stateful sessions).
    * Only the Lambda MicroVM runner target sets this true; the K8s

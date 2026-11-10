@@ -8,6 +8,9 @@ timeout_seconds="${SANDBOX_RUNNER_HEALTHCHECK_TIMEOUT_SECONDS:-5}"
 manifest_clock_tolerance_seconds=30
 port="${PORT:-2000}"
 url="${SANDBOX_RUNNER_HEALTHCHECK_URL:-http://127.0.0.1:${port}/api/v2/health}"
+if [[ "${1:-}" == "--ready" ]]; then
+    url="http://127.0.0.1:${port}/api/v2/ready"
+fi
 
 validate_non_negative_integer() {
     local name="$1"

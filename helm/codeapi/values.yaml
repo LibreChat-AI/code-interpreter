@@ -216,6 +216,12 @@ workerSandbox:
     affinity: {}
 
   sandboxRunner:
+    gracefulDrain:
+      enabled: false
+      minDelaySeconds: 5
+      timeoutSeconds: 45
+      retryAfterSeconds: 1
+      terminationGracePeriodSeconds: 60
     # Defaults to workerSandbox.replicaCount when unset.
     replicaCount: null
     # Restart a sandbox-runner before launcher/VMM host-side fd retention can

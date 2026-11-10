@@ -10,6 +10,8 @@ import { startWarmupCommand } from './warmup';
 import { hostedAppSupervisor, validateHostedAppStartup } from './hosted-app';
 import v2Router from './api/v2';
 import lifecycleRouter, { LIFECYCLE_HOOK_BASE_PATH } from './api/lifecycle';
+import { drainSandbox } from './drain';
+import { validateDrainConfiguration } from './api/drain';
 
 const app = express();
 
@@ -66,6 +68,7 @@ app.use((err: HttpError, _req: express.Request, res: express.Response, _next: ex
 });
 
 async function main(): Promise<void> {
+  validateDrainConfiguration();
   validateHostedAppStartup();
   validateHardenedSandboxStartup();
   await initializeSandboxWorkspaceIsolation();
@@ -110,6 +113,15 @@ async function main(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    if (config.graceful_drain_enabled) {
+      const drainResult = await drainSandbox(config.drain_timeout_ms, config.drain_min_delay_ms);
+      if (!drainResult.drained) {
+        logger.warn(
+          { activeExecutions: drainResult.activeExecutions, timeoutMillis: config.drain_timeout_ms },
+          'Signal-triggered sandbox drain timed out',
+        );
+      }
+    }
     stopWorkspaceReaper();
     await closeHttpServerWithTimeout();
     await hostedAppSupervisor.shutdown().catch((err) => {

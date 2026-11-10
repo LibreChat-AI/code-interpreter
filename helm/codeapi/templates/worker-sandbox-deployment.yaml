@@ -7,6 +7,24 @@ Split runtime deployments:
 {{- fail "workerSandbox.enabled requires egressGateway.enabled=true because sandbox-runner may only egress to the egress gateway" }}
 {{- end }}
 {{- if .Values.workerSandbox.enabled }}
+{{- $gracefulDrain := .Values.workerSandbox.sandboxRunner.gracefulDrain }}
+{{- if $gracefulDrain.enabled }}
+{{- range $key := list "minDelaySeconds" "timeoutSeconds" "retryAfterSeconds" "terminationGracePeriodSeconds" }}
+{{- $value := toString (get $gracefulDrain $key) }}
+{{- if or (not (regexMatch "^(0|[1-9][0-9]{0,5})$" $value)) (and (ne $key "minDelaySeconds") (eq $value "0")) }}
+{{- fail (printf "gracefulDrain.%s must be a bounded integer (%s)" $key $value) }}
+{{- end }}
+{{- end }}
+{{- if gt (int $gracefulDrain.minDelaySeconds) (int $gracefulDrain.timeoutSeconds) }}
+{{- fail "gracefulDrain.minDelaySeconds must not exceed timeoutSeconds" }}
+{{- end }}
+{{- if or (gt (int $gracefulDrain.minDelaySeconds) 5) (gt (int $gracefulDrain.retryAfterSeconds) 5) }}
+{{- fail "gracefulDrain propagation and retry delays must not exceed the 5-second transport retry bound" }}
+{{- end }}
+{{- if le (int $gracefulDrain.terminationGracePeriodSeconds) (add (int $gracefulDrain.timeoutSeconds) 5) }}
+{{- fail "gracefulDrain.terminationGracePeriodSeconds must exceed timeoutSeconds by more than 5 seconds" }}
+{{- end }}
+{{- end }}
 {{- $legacyAutoscaling := default dict .Values.workerSandbox.autoscaling }}
 {{- if get $legacyAutoscaling "enabled" }}
 {{- fail "workerSandbox.autoscaling.enabled was replaced by workerSandbox.sandboxRunner.autoscaling.enabled; move autoscaling settings under workerSandbox.sandboxRunner.autoscaling" }}
@@ -45,6 +63,9 @@ Split runtime deployments:
 {{- end }}
 {{- range .Values.workerSandbox.sandboxExtraEnv }}
 {{- $name := .name | default "" }}
+{{- if or (hasPrefix "SANDBOX_DRAIN_" $name) (eq $name "SANDBOX_GRACEFUL_DRAIN_ENABLED") }}
+{{- fail "configure gracefulDrain through workerSandbox.sandboxRunner.gracefulDrain, not sandboxExtraEnv" }}
+{{- end }}
 {{- if and $name (or (regexMatch "(?i)(SECRET|TOKEN|PASSWORD|KEY)" $name) (hasPrefix "REDIS_" $name) (hasPrefix "AWS_" $name) (hasPrefix "S3_" $name) (hasPrefix "MINIO_" $name) (hasPrefix "CODEAPI_" $name) (eq $name "FILE_SERVER_URL") (eq $name "TOOL_CALL_SERVER_URL")) }}
 {{- fail (printf "workerSandbox.sandboxExtraEnv may not set sensitive/control-plane env var %s; sandbox-runner must only receive runtime knobs and the chart-managed manifest public verifier" $name) }}
 {{- end }}
@@ -246,6 +267,9 @@ spec:
       serviceAccountName: {{ $sandboxRunnerServiceAccount }}
       {{- end }}
       automountServiceAccountToken: {{ .Values.workerSandbox.sandboxServiceAccount.automountServiceAccountToken }}
+      {{- if $gracefulDrain.enabled }}
+      terminationGracePeriodSeconds: {{ $gracefulDrain.terminationGracePeriodSeconds }}
+      {{- end }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -282,6 +306,16 @@ spec:
               value: {{ $clockSkewLimit | quote }}
             - name: SANDBOX_RUNNER_CLOCK_SKEW_LIVENESS_JITTER_SECONDS
               value: {{ $clockSkewJitter | quote }}
+            {{- if $gracefulDrain.enabled }}
+            - name: SANDBOX_GRACEFUL_DRAIN_ENABLED
+              value: "true"
+            - name: SANDBOX_DRAIN_MIN_DELAY_MS
+              value: {{ mul $gracefulDrain.minDelaySeconds 1000 | quote }}
+            - name: SANDBOX_DRAIN_TIMEOUT_MS
+              value: {{ mul $gracefulDrain.timeoutSeconds 1000 | quote }}
+            - name: SANDBOX_DRAIN_RETRY_AFTER_SECONDS
+              value: {{ $gracefulDrain.retryAfterSeconds | quote }}
+            {{- end }}
             - name: EGRESS_GATEWAY_URL
               value: "http://{{ include "codeapi.fullname" . }}-egress-gateway:{{ .Values.egressGateway.service.port }}"
             - name: SANDBOX_LOG_LEVEL
@@ -388,6 +422,13 @@ spec:
                 - SETFCAP
                 - MKNOD
           {{- end }}
+          {{- if $gracefulDrain.enabled }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /usr/local/bin/sandbox-runner-drain.sh
+          {{- end }}
           livenessProbe:
             exec:
               command:
@@ -399,6 +440,9 @@ spec:
             exec:
               command:
                 - /usr/local/bin/sandbox-runner-healthcheck.sh
+                {{- if $gracefulDrain.enabled }}
+                - --ready
+                {{- end }}
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 7
