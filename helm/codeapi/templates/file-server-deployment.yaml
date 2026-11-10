@@ -9,6 +9,7 @@ Stateless - scales independently.
 {{- if .Values.fileServer.serviceAccount.create }}
 apiVersion: v1
 kind: ServiceAccount
+{{- include "codeapi.automountServiceAccountToken" .Values.fileServer.serviceAccount | nindent 0 }}
 metadata:
   name: {{ .Values.fileServer.serviceAccount.name | default (printf "%s-file-server" (include "codeapi.fullname" .)) }}
   labels:
@@ -25,16 +26,37 @@ metadata:
   name: {{ include "codeapi.fullname" . }}-file-server
   labels:
     {{- include "codeapi.fileServer.labels" . | nindent 4 }}
+  {{- with .Values.fileServer.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
+  {{- with .Values.fileServer.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   replicas: {{ .Values.fileServer.replicaCount }}
   selector:
     matchLabels:
       {{- include "codeapi.fileServer.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- with .Values.fileServer.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
-        {{- include "codeapi.fileServer.selectorLabels" . | nindent 8 }}
+        {{- include "codeapi.podLabels" (dict "root" . "component" "fileServer" "values" .Values.fileServer) | nindent 8 }}
     spec:
+      {{- with .Values.fileServer.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.fileServer.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "codeapi.automountServiceAccountToken" .Values.fileServer.serviceAccount | nindent 6 }}
       {{- if or .Values.fileServer.serviceAccount.create .Values.fileServer.serviceAccount.name }}
       serviceAccountName: {{ .Values.fileServer.serviceAccount.name | default (printf "%s-file-server" (include "codeapi.fullname" .)) }}
       {{- end }}
@@ -44,6 +66,14 @@ spec:
       {{- end }}
       containers:
         - name: file-server
+          {{- with .Values.fileServer.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.fileServer.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           image: "{{ .Values.fileServer.image.repository }}:{{ .Values.fileServer.image.tag }}"
           imagePullPolicy: {{ .Values.fileServer.image.pullPolicy }}
           ports:
@@ -75,13 +105,13 @@ spec:
             - name: MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: minio-access-key
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.s3AccessKey }}
             - name: MINIO_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: minio-secret-key
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.s3SecretKey }}
             {{- end }}
             {{- else }}
             # MinIO configuration
@@ -96,13 +126,13 @@ spec:
             - name: MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: minio-access-key
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.s3AccessKey }}
             - name: MINIO_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: minio-secret-key
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.s3SecretKey }}
             {{- end }}
             # Redis connection
             - name: REDIS_HOST
@@ -112,13 +142,13 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: redis-password
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.redisPassword }}
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: codeapi-internal-service-token
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.internalServiceToken }}
             # Server config
             - name: FILE_SERVER_PORT
               value: {{ .Values.fileServer.service.port | quote }}
@@ -141,6 +171,14 @@ spec:
             {{- toYaml .Values.fileServer.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 ---
