@@ -539,5 +539,11 @@ networkPolicy:
     # egress on the configured Redis port to any destination because standard
     # Kubernetes NetworkPolicy cannot target redis.external.host by DNS name.
     externalCIDRs: []
+  api:
+    # NetworkPolicy peers allowed to reach the API, e.g. only the pods of the
+    # application that calls it. Include your ingress controller when
+    # ingress.enabled, and Prometheus when metrics.enabled, as both use the
+    # same port. Empty allows any source.
+    ingressFrom: []
   toolCallServer:
     allowExternalEgress: false  # Allow tool call server to reach external APIs
