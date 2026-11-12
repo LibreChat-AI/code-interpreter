@@ -380,6 +380,9 @@ fileServer:
     # Use IRSA for authentication (no static credentials needed)
     useIrsa: false
 
+  # Extra environment variables
+  extraEnv: []
+
 # =============================================================================
 # TOOL CALL SERVER (programmatic tool calling, stateless)
 # =============================================================================
@@ -408,6 +411,9 @@ toolCallServer:
     requestTimeout: 300000
     sessionExpiry: 600
 
+  # Extra environment variables
+  extraEnv: []
+
 # =============================================================================
 # EGRESS GATEWAY (only sandbox-runner outbound capability endpoint)
 # =============================================================================
@@ -434,6 +440,9 @@ egressGateway:
 
   config:
     maxToolCallBytes: 1048576
+
+  # Extra environment variables
+  extraEnv: []
 
 # =============================================================================
 # REDIS (Job queue and state store)
