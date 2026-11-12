@@ -197,8 +197,9 @@ api:
 For development only, `LOCAL_MODE=true` bypasses authentication — see
 `values-local.yaml`.
 
-**TLS to Redis.** Set `REDIS_TLS=true` via `extraEnv` on each component when
-your Redis (e.g. a managed cache) requires TLS.
+**TLS to Redis.** Set `REDIS_TLS=true` via `extraEnv` on each component that
+connects to Redis (`api`, `workerSandbox`, `fileServer`, `toolCallServer` and
+`egressGateway`) when your Redis (e.g. a managed cache) requires TLS.
 
 **Package delivery.** KVM deployments default to
 `workerSandbox.packages.source=image`. Build and publish the baked runner target
