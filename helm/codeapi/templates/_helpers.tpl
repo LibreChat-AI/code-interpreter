@@ -34,6 +34,13 @@ We truncate at 63 chars because some Kubernetes name fields are limited to this.
 {{- end }}
 
 {{/*
+The Secret holding the chart's secret values: existingSecret when set, otherwise the one templates/secrets.yaml renders.
+*/}}
+{{- define "codeapi.secretName" -}}
+{{- .Values.existingSecret | default (printf "%s-secrets" (include "codeapi.fullname" .)) }}
+{{- end }}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "codeapi.chart" -}}

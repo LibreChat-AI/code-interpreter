@@ -57,7 +57,7 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: redis-password
             - name: CODEAPI_BRIDGE_PAIRING_ROLLBACK_EPOCH
               valueFrom:
@@ -75,7 +75,7 @@ spec:
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: codeapi-internal-service-token
             - name: EGRESS_GRANT_TTL_SECONDS
               value: {{ .Values.egressGrant.ttlSeconds | quote }}

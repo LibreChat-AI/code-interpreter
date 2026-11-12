@@ -42,12 +42,12 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: redis-password
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: codeapi-internal-service-token
             # Server config
             - name: TOOL_CALL_SERVER_PORT

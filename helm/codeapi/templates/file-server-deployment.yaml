@@ -75,12 +75,12 @@ spec:
             - name: MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: minio-access-key
             - name: MINIO_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: minio-secret-key
             {{- end }}
             {{- else }}
@@ -96,12 +96,12 @@ spec:
             - name: MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: minio-access-key
             - name: MINIO_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: minio-secret-key
             {{- end }}
             # Redis connection
@@ -112,12 +112,12 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: redis-password
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: codeapi-internal-service-token
             # Server config
             - name: FILE_SERVER_PORT
