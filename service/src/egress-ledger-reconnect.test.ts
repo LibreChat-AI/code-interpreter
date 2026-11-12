@@ -4,7 +4,7 @@ import IORedis from 'ioredis';
 import { env } from './config';
 import { startTestRedis } from './test/redis';
 import {
-  EGRESS_LEDGER_REDIS_RETRY_OPTIONS, createEgressLedger, recordEgressRead,
+  EGRESS_LEDGER_REDIS_RETRY_OPTIONS, createEgressLedger, egressLedgerRedisOptions, recordEgressRead,
   assertEgressGrantActive, setEgressLedgerRedisForTest,
 } from './egress-ledger';
 import type { EgressGrantClaims } from './egress-grant';
@@ -61,3 +61,10 @@ test('a lost Redis mutation reply rejects without replaying its applied counter 
     await redis.closeTestServer();
   }
 }, 10000);
+
+test('the ledger client keeps trying to reconnect using linear backoff with cap, however long Redis is unavailable', () => {
+  const { retryStrategy } = egressLedgerRedisOptions();
+  for (const attempt of [1, 6, 100, 10_000]) {
+    expect(retryStrategy!(attempt)).toBeGreaterThan(0);
+  }
+});

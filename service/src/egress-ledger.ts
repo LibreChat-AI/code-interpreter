@@ -1,11 +1,11 @@
 import IORedis from 'ioredis';
-import type { CommonRedisOptions } from 'ioredis';
+import type { RedisOptions } from 'ioredis';
 import type * as tls from 'tls';
 import { env } from './config';
 import type { EgressGrantClaims } from './egress-grant';
 import { EgressGrantError } from './egress-grant';
 import logger from './logger';
-import { redisKeepAliveOptions } from './redis-options';
+import { redisKeepAliveOptions, redisReconnectDelay } from './redis-options';
 import { EGRESS_LEDGER_SCRIPT } from './egress-ledger-script';
 
 type LedgerStatus = 'active' | 'revoked';
@@ -53,18 +53,13 @@ function ttlSeconds(exp: number): number {
   return Math.max(1, exp - Math.floor(Date.now() / 1000) + env.EGRESS_LEDGER_TTL_GRACE_SECONDS);
 }
 
-function redisConnection(): IORedis {
-  if (redis) return redis;
-  const retryStrategy: CommonRedisOptions['retryStrategy'] = times => {
-    if (times > 5) return null;
-    return 2000;
-  };
-  redis = new IORedis({
+export function egressLedgerRedisOptions(): RedisOptions {
+  return {
     host: process.env.REDIS_HOST ?? 'redis',
     port: Number(process.env.REDIS_PORT) || 6379,
     password: process.env.REDIS_PASSWORD,
     ...EGRESS_LEDGER_REDIS_RETRY_OPTIONS,
-    retryStrategy,
+    retryStrategy: redisReconnectDelay,    // Use linear backoff with a cap for reconnect attempts, otherwise Redis outages do not recover automatically
     enableReadyCheck: true,
     connectTimeout: 10000,
     ...redisKeepAliveOptions(),
@@ -74,7 +69,12 @@ function redisConnection(): IORedis {
     ...(env.REDIS_USE_ALTERNATIVE_DNS_LOOKUP
       ? { dnsLookup: (address: string, callback: (err: Error | null, addr: string) => void): void => callback(null, address) }
       : {}),
-  });
+  };
+}
+
+function redisConnection(): IORedis {
+  if (redis) return redis;
+  redis = new IORedis(egressLedgerRedisOptions());
   redis.on('error', error => logger.error('Egress ledger Redis error', { error }));
   return redis;
 }
