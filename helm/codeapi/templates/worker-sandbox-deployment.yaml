@@ -13,10 +13,10 @@ Split runtime deployments:
 {{- end }}
 {{- $serviceWorkerServiceAccount := .Values.workerSandbox.serviceAccount.name | default (printf "%s-service-worker" (include "codeapi.fullname" .)) }}
 {{- $sandboxRunnerServiceAccount := .Values.workerSandbox.sandboxServiceAccount.name | default (printf "%s-sandbox-runner" (include "codeapi.fullname" .)) }}
-{{- if not .Values.executionManifest.privateKey }}
+{{- if not (or .Values.executionManifest.privateKey .Values.existingSecret) }}
 {{- fail "workerSandbox.enabled requires executionManifest.privateKey so service-worker can sign sandbox execute manifests. The chart ships no default keypair; generate your own Ed25519 keypair (see helm/codeapi/README.md 'Execution manifest signing keys') and set it via --set or a values file (base64 DER or PEM with escaped newlines). For minikube local dev use -f values-local.yaml" }}
 {{- end }}
-{{- if not .Values.executionManifest.publicKey }}
+{{- if not (or .Values.executionManifest.publicKey .Values.existingSecret) }}
 {{- fail "workerSandbox.enabled requires executionManifest.publicKey so sandbox-runner can verify signed execute manifests without a signing secret. The chart ships no default keypair; derive the public key from your Ed25519 private key (see helm/codeapi/README.md 'Execution manifest signing keys') and set it via --set or a values file (base64 DER or PEM with escaped newlines). For minikube local dev use -f values-local.yaml" }}
 {{- end }}
 {{- $packagesSource := .Values.workerSandbox.packages.source | default "image" }}
@@ -162,17 +162,17 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: redis-password
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: codeapi-internal-service-token
             - name: CODEAPI_EXECUTION_MANIFEST_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: codeapi-execution-manifest-private-key
             - name: EXECUTION_MANIFEST_TTL_SECONDS
               value: {{ .Values.executionManifest.ttlSeconds | quote }}
@@ -333,7 +333,14 @@ spec:
             - name: SANDBOX_REQUIRE_EGRESS_MANIFEST
               value: "true"
             - name: SANDBOX_EXECUTION_MANIFEST_PUBLIC_KEY
+              {{- if .Values.executionManifest.publicKey }}
               value: {{ .Values.executionManifest.publicKey | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codeapi.secretName" . }}
+                  key: codeapi-execution-manifest-public-key
+              {{- end }}
             {{- with .Values.workerSandbox.sandboxExtraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

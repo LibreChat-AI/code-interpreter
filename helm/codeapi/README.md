@@ -47,6 +47,47 @@ to a values file.
 is publicly known (the same keypair is hardcoded in the unit tests), so never
 use it outside local development.
 
+## Using an existing Secret
+
+By default the chart renders a Secret from `internalServiceAuth.token`,
+`egressGrant.secret`, `executionManifest.privateKey` and the Redis and MinIO
+credentials in values. To keep these secrets out of your values file entirely,
+for example when rendering with `helm template`, or when the Secret is written
+by External Secrets, set `existingSecret` to the name of a Secret you manage.
+
+The chart then renders no Secret resource, ignores those values, and reads these
+keys from your existing Secret instead:
+
+| Key | Needed |
+|-----|--------|
+| `codeapi-internal-service-token` | Always |
+| `codeapi-egress-grant-secret` | Always |
+| `redis-password` | Always (may be empty if Redis has no password) |
+| `codeapi-execution-manifest-private-key` | With `workerSandbox.enabled` |
+| `codeapi-execution-manifest-public-key` | With `workerSandbox.enabled`, unless `executionManifest.publicKey` is set |
+| `minio-access-key`, `minio-secret-key` | Unless using S3 with `fileServer.s3.useIrsa` |
+
+For example:
+
+```bash
+kubectl create secret generic codeapi-secrets \
+  --from-literal=codeapi-internal-service-token="$(openssl rand -hex 32)" \
+  --from-literal=codeapi-egress-grant-secret="$(openssl rand -hex 32)" \
+  --from-literal=redis-password="$(openssl rand -hex 32)" \
+  --from-literal=codeapi-execution-manifest-private-key="$PRIVATE_KEY" \
+  --from-literal=codeapi-execution-manifest-public-key="$PUBLIC_KEY"
+
+helm install codeapi . \
+  --set existingSecret=codeapi-secrets \
+  --set redis.auth.existingSecret=codeapi-secrets \
+  --set redis.auth.existingSecretPasswordKey=redis-password
+```
+
+The bundled Redis reads its password separately, so also point `redis.auth` at
+the same Secret. Similarly, the bundled MinIO has its own
+`minio.auth.existingSecret`, while `minio.useSimple` still takes MinIO's root
+credentials from values.
+
 ## Production deployment notes
 
 This chart deploys the full service stack on a single cluster and is the
