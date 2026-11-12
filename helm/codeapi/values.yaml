@@ -539,5 +539,14 @@ networkPolicy:
     # egress on the configured Redis port to any destination because standard
     # Kubernetes NetworkPolicy cannot target redis.external.host by DNS name.
     externalCIDRs: []
+  fileServer:
+    # Used only when fileServer.s3.enabled=true, to allow egress to S3 (and STS,
+    # with IRSA). If empty, NetworkPolicy permits TCP egress on 443 to any
+    # destination, because standard Kubernetes NetworkPolicy cannot target the
+    # S3 and STS endpoints by DNS name. To restrict it, list e.g. the subnets of
+    # your S3 and STS VPC interface endpoints, or the S3 ranges published at
+    # https://ip-ranges.amazonaws.com/ip-ranges.json. Note: Those change over time,
+    # and don't include STS, which IRSA also needs.
+    s3CIDRs: []
   toolCallServer:
     allowExternalEgress: false  # Allow tool call server to reach external APIs

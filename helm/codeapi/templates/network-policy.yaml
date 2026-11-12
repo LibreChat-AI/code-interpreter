@@ -246,6 +246,22 @@ spec:
         - protocol: TCP
           port: 9000
     {{- end }}
+    {{- if .Values.fileServer.s3.enabled }}
+    {{- with .Values.networkPolicy.fileServer.s3CIDRs }}
+    {{- range . }}
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- else }}
+    - ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- end }}
     {{- include "codeapi.redisEgress" . | nindent 4 }}
 ---
 apiVersion: networking.k8s.io/v1
