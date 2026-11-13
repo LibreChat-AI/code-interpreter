@@ -982,7 +982,7 @@ test('restricts Git and GitHub CLI credential substitution to their respective h
     {
       name: 'GH_TOKEN',
       extract: '^(.+)$',
-      injectHosts: ['api.github.com'],
+      injectHosts: ['api.github.com', 'uploads.github.com'],
     },
   ]);
   assert.deepEqual(gitHubMaskedCredentialVariables('github.example.test'), [
@@ -997,6 +997,33 @@ test('restricts Git and GitHub CLI credential substitution to their respective h
       injectHosts: ['github.example.test'],
     },
   ]);
+});
+
+test('upload authentication does not authorize other GitHub subdomains or external hosts', () => {
+  const variables = gitHubMaskedCredentialVariables('github.com');
+  const cli = variables.find(variable => variable.name === 'GH_TOKEN')!;
+  const git = variables.find(
+    variable => variable.name === GITHUB_CREDENTIAL_ENV_NAME,
+  )!;
+
+  assert.ok(GITHUB_ALLOWED_DOMAINS.includes('*.github.com'));
+  assert.ok(
+    cli.injectHosts.includes(
+      new URL('https://uploads.github.com/user-attachments/assets').hostname,
+    ),
+  );
+  assert.ok(!git.injectHosts.includes('uploads.github.com'));
+  for (const host of [
+    'github.com',
+    '*.github.com',
+    'untrusted.github.com',
+    'uploads.github.com.attacker.test',
+    'uploads.githubusercontent.com',
+    'github-cloud.s3.amazonaws.com',
+    'attacker.test',
+  ]) {
+    assert.ok(!cli.injectHosts.includes(host), host);
+  }
 });
 
 test('composes the masked credential with SRT Git configuration inside the sandbox', () => {
