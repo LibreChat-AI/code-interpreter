@@ -711,7 +711,12 @@ export function gitHubMaskedCredentialVariables(host: string): Array<{
     {
       name: gitHubCliTokenEnvironmentName(host),
       extract: '^(.+)$',
-      injectHosts: [gitHubApiHost(host)],
+      // Egress permission for *.github.com does not restore masked credentials.
+      // gh sends native PR/issue attachments to this separate HTTPS origin.
+      injectHosts:
+        host === 'github.com'
+          ? [gitHubApiHost(host), 'uploads.github.com']
+          : [gitHubApiHost(host)],
     },
   ];
 }
