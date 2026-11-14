@@ -275,6 +275,13 @@ the resolver handoff and rootfs assembly without requiring KVM.
 Setting `KVM_ENABLED=false` still selects the directory-root target and the
 host package mount automatically for direct NsJail development.
 
+Compose reads the execution limits from `.env`: `SANDBOX_RUN_TIMEOUT` and
+`SANDBOX_RUN_CPU_TIME` (default `300000` ms each), `SANDBOX_OUTPUT_MAX_SIZE`
+(default `65536` bytes per stream), `JOB_TIMEOUT` (default `300000` ms, applied
+to the API, worker and egress gateway) and `MAX_FILE_SIZE` (default `26214400`
+bytes per uploaded file). Raise `JOB_TIMEOUT` together with
+`SANDBOX_RUN_TIMEOUT`; the job deadline also covers file transfer.
+
 Local Docker Compose files set `CODEAPI_INTERNAL_SERVICE_TOKEN` to a shared
 development value by default. Production deployments must override it with a
 strong secret; when it is unset, file object routes and Tool Call Server
