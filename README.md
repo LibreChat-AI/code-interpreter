@@ -75,6 +75,23 @@ Two modes are supported:
 - **NsJail mode** (`kvmEnabled: false`): Direct NsJail sandboxing with Linux namespaces and cgroups
 - **MicroVM mode** (`kvmEnabled: true`): libkrun microVM with its own kernel, NsJail runs inside the guest
 
+### KVM guest time
+
+Linux KVM guests use chrony and the native `/dev/ptp0` KVM virtual PTP clock to
+keep their wall clock aligned with the host. Without continuous correction,
+clock-rate differences can eventually make fresh execution manifests appear
+to come from the future. Changing the guest clocksource or restarting the
+runner does not provide ongoing synchronization.
+
+The KVM bootstrap waits for synchronization before starting the API, then
+supervises both processes: losing the clock daemon stops the guest workload.
+Only the first clock update may step time; subsequent corrections slew it.
+The guest kernel must expose a working, UTC host-referenced KVM PTP device;
+boot fails closed if synchronization is unavailable. Clock control stays in a
+root-only guest-private `/run` directory, with no network NTP source, new host
+capability, or change to user-job clock restrictions or manifest tolerance.
+Direct NsJail, local OCI/macOS and Lambda startup do not run this guest daemon.
+
 ## Remote stateful environments
 
 The `remote-bridge` backend keeps the Code API as the policy and queue boundary
