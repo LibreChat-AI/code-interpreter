@@ -297,6 +297,11 @@ jobs:
       - name: Build service
         run: bun run build
 
+      - name: Verify patched dependency compatibility under Node and Bun
+        run: |
+          node --test scripts/dependency-compat.test.cjs
+          bun test scripts/dependency-compat.test.cjs
+
       - name: Bun tests
         run: bun run test
 
