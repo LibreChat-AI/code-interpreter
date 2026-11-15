@@ -94,6 +94,7 @@ RUN chmod +x /package-init.sh && FORCE_REBUILD=true /package-init.sh
 FROM oven/bun:1.4.4 AS worker-builder
 WORKDIR /app
 COPY service/package.json service/bun.lock ./
+COPY service/patches ./patches
 RUN bun install --frozen-lockfile
 COPY service/src ./src
 COPY packages/code/src /packages/code/src
@@ -263,6 +264,7 @@ RUN chmod +x /usr/local/bin/launcher-entrypoint.sh /usr/local/bin/start-direct-s
 # --- Worker ---
 WORKDIR /worker
 COPY service/package.json service/bun.lock ./
+COPY service/patches ./patches
 RUN bun install --frozen-lockfile --production
 COPY --from=worker-builder /app/.build ./.build
 COPY --from=worker-builder /app/src ./src

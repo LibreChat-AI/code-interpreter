@@ -74,9 +74,20 @@
     "typescript": "^5.5.4"
   },
   "overrides": {
+    "@types/minimatch": "5.1.2",
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.1"
+    },
     "decode-uri-component": "0.5.1",
     "uuid": "11.1.1",
     "qs": "6.16.1",
-    "proxy-addr": "2.0.8"
+    "proxy-addr": "2.0.8",
+    "minio": {
+      "stream-json": "3.9.0"
+    }
+  },
+  "patchedDependencies": {
+    "deepmerge@4.3.1": "patches/deepmerge@4.3.1.patch",
+    "minio@8.0.7": "patches/minio@8.0.7.patch"
   }
 }

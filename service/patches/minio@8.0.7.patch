@@ -1,0 +1,66 @@
+diff --git a/dist/esm/notification.mjs b/dist/esm/notification.mjs
+index 2fe075b73a9f98ece945993ebc151f601e0d52ee..6b315fdde51a8893275324a8a5ed1d7f1c858179 100644
+--- a/dist/esm/notification.mjs
++++ b/dist/esm/notification.mjs
+@@ -15,7 +15,7 @@
+  */
+ 
+ import { EventEmitter } from 'eventemitter3';
+-import jsonLineParser from 'stream-json/jsonl/Parser.js';
++import jsonLineParser from 'stream-json/jsonl/parser.js';
+ import { DEFAULT_REGION } from "./helpers.mjs";
+ import { pipesetup, uriEscape } from "./internal/helper.mjs";
+ 
+@@ -176,7 +176,7 @@ export class NotificationPoller extends EventEmitter {
+       bucketName: this.bucketName,
+       query
+     }, '', [200], region).then(response => {
+-      const asm = jsonLineParser.make();
++      const asm = jsonLineParser.asStream();
+       pipesetup(response, asm).on('data', data => {
+         // Data is flushed periodically (every 5 seconds), so we should
+         // handle it after flushing from the JSON parser.
+diff --git a/dist/main/notification.js b/dist/main/notification.js
+index 8d8e8b389bc313de072c603b302e4c39d373d345..34cea64c9ce2fac01012e12743afb1d7d3878593 100644
+--- a/dist/main/notification.js
++++ b/dist/main/notification.js
+@@ -4,7 +4,7 @@ Object.defineProperty(exports, "__esModule", {
+   value: true
+ });
+ var _eventemitter = require("eventemitter3");
+-var _Parser = require("stream-json/jsonl/Parser.js");
++var _Parser = require("stream-json/jsonl/parser.js");
+ var _helpers = require("./helpers.js");
+ var _helper = require("./internal/helper.js");
+ /*
+@@ -196,7 +196,7 @@ class NotificationPoller extends _eventemitter.EventEmitter {
+       bucketName: this.bucketName,
+       query
+     }, '', [200], region).then(response => {
+-      const asm = _Parser.make();
++      const asm = _Parser.default.asStream();
+       (0, _helper.pipesetup)(response, asm).on('data', data => {
+         // Data is flushed periodically (every 5 seconds), so we should
+         // handle it after flushing from the JSON parser.
+diff --git a/src/notification.ts b/src/notification.ts
+index 64c24112d225a234d3b5acf06043020e9fe414af..782ef265f50751101d002b9148800495f992b85c 100644
+--- a/src/notification.ts
++++ b/src/notification.ts
+@@ -15,7 +15,7 @@
+  */
+ 
+ import { EventEmitter } from 'eventemitter3'
+-import jsonLineParser from 'stream-json/jsonl/Parser.js'
++import jsonLineParser from 'stream-json/jsonl/parser.js'
+ 
+ import { DEFAULT_REGION } from './helpers.ts'
+ import type { TypedClient } from './internal/client.ts'
+@@ -216,7 +216,7 @@ export class NotificationPoller extends EventEmitter<{
+ 
+     this.client.makeRequestAsync({ method, bucketName: this.bucketName, query }, '', [200], region).then(
+       (response) => {
+-        const asm = jsonLineParser.make()
++        const asm = jsonLineParser.asStream()
+ 
+         pipesetup(response, asm)
+           .on('data', (data) => {
