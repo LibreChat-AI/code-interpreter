@@ -335,7 +335,7 @@ jobs:
 
   macos-storage-tests:
     name: macOS Storage ACL Tests
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: packages/code
