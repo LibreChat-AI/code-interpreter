@@ -577,6 +577,10 @@ To keep every worktree, add `--no-worktree-retirement` (or
     the bridge response and quarantine/retry behavior are unchanged. A worker
     package update is required; a Code API restart alone does not enable this.
     These records cover assignment failures, not failures before worker startup.
+-   **Every `import_file` returns `403 IMPORT_SOURCE_UNAUTHORIZED`, or uploads
+    fail with `UPLOAD_SESSION_UNKNOWN`:** Code API and its file server are on
+    different Redis instances. See
+    [File server and Redis pairing](./README.md#file-server-and-redis-pairing).
 -   **Setup repeats on restart:** setup is intentionally per-start; make it
     idempotent, remove it, or opt in to the bounded `setup.reuse` readiness
     contract in the [worker package guide](../../packages/code/README.md#reusing-a-prepared-checkout).

@@ -312,6 +312,8 @@ export const env = {
   SANDBOX_ENDPOINT: process.env.SANDBOX_ENDPOINT ?? 'http://localhost:2000/api/v2',
   EGRESS_GATEWAY_URL: process.env.EGRESS_GATEWAY_URL ?? '',
   FILE_SERVER_URL: process.env.FILE_SERVER_URL ?? 'http://localhost:3000',
+  /** Verify at startup that `FILE_SERVER_URL` shares this API's Redis (see `store-pairing.ts`). */
+  FILE_SERVER_STORE_CHECK: process.env.CODEAPI_FILE_SERVER_STORE_CHECK !== 'false',
   TOOL_CALL_SERVER_URL: process.env.TOOL_CALL_SERVER_URL ?? 'http://localhost:3033',
   EGRESS_GATEWAY_PORT: Number(process.env.EGRESS_GATEWAY_PORT) || 3190,
   EGRESS_GATEWAY_FILE_SERVER_URL: process.env.EGRESS_GATEWAY_FILE_SERVER_URL ?? process.env.FILE_SERVER_URL ?? 'http://localhost:3000',
