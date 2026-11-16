@@ -197,8 +197,37 @@ api:
 For development only, `LOCAL_MODE=true` bypasses authentication — see
 `values-local.yaml`.
 
-**TLS to Redis.** Set `REDIS_TLS=true` via `extraEnv` on each component when
-your Redis (e.g. a managed cache) requires TLS.
+**External Redis and TLS.** Set `redis.enabled=false` to use your own Redis
+instead of the bundled subchart, and configure it under `redis.external`:
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `redis.external.host` | `""` | Redis hostname. |
+| `redis.external.port` | `6379` | Redis port. |
+| `redis.external.password` | `""` | Redis password / AUTH token. |
+| `redis.external.tls` | `false` | Connect over TLS (sets `REDIS_TLS=true`). Required by managed caches with in-transit encryption, e.g. AWS ElastiCache. |
+| `redis.external.useAlternativeDnsLookup` | `false` | Skip DNS resolution of the host before the TLS handshake (sets `REDIS_USE_ALTERNATIVE_DNS_LOOKUP=true`), as ioredis recommends for ElastiCache with TLS. |
+
+The TLS settings are rendered on every control-plane container that talks to
+Redis (api, service-worker, file-server, tool-call-server, egress-gateway). The
+sandbox-runner never receives Redis configuration. They only apply when
+`redis.enabled=false`; the bundled subchart is not configured for TLS.
+
+AWS ElastiCache only allows AUTH with in-transit encryption enabled, so use
+both options together:
+
+```yaml
+redis:
+  enabled: false
+  external:
+    host: master.my-group.xxxxxx.euc1.cache.amazonaws.com
+    port: 6379
+    password: <auth token>   # better: --set redis.external.password=...
+    tls: true
+    useAlternativeDnsLookup: true
+```
+
+The clients do not yet verify the Redis server certificate.
 
 **Package delivery.** KVM deployments default to
 `workerSandbox.packages.source=image`. Build and publish the baked runner target

@@ -43,6 +43,9 @@ jobs:
       - name: Sandbox-runner metrics discovery and network policy
         run: tests/sandbox_runner_metrics.sh
 
+      - name: Redis TLS environment
+        run: tests/redis_tls_env.sh
+
       - name: Bridge pairing rollout safety
         run: tests/bridge_pairing_rollout.sh
 
