@@ -1989,7 +1989,7 @@ export class RedisBridgeStore {
       settlement.status === 'rejected'
     ) {
       // The dispatcher may already have timed out and finished its cleanup.
-      // Release only this settled reservation, retaining a quarantine marker.
+      // Release this settled reservation and its fence; a quarantine marker stays.
       await this.commitPendingWorkspace(assignment, settlement);
       await this.cleanupWithRetry(workerId, assignmentId, assignment);
     }
@@ -2664,7 +2664,10 @@ export class RedisBridgeStore {
             [
               "if redis.call('EXISTS', KEYS[2]) == 0 then return 0 end",
               "redis.call('HSET', KEYS[2], 'resultCommitted', '1')",
-              "if redis.call('HGET', KEYS[2], 'localCleanup') == '1' and redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]) end",
+              // A worker rejects only work that left the root unchanged, so its fence need not
+              // wait for a cleanup acknowledgement that a stopping worker may never deliver.
+              // A quarantine receipt has already replaced the fence and is never released here.
+              "if (ARGV[2] == 'rejected' or redis.call('HGET', KEYS[2], 'localCleanup') == '1') and redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]) end",
               'return 1',
             ].join('\n'),
             2,
@@ -2674,6 +2677,7 @@ export class RedisBridgeStore {
             ),
             workspaceFenceReceiptKey(assignment.assignmentId),
             assignment.assignmentId,
+            settlement.status,
           ),
           this.redisCommandTimeoutMs,
           'Bridge native workspace result commit',
