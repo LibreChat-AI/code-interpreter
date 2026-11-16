@@ -43,6 +43,12 @@ jobs:
       - name: Sandbox-runner metrics discovery and network policy
         run: tests/sandbox_runner_metrics.sh
 
+      - name: Helm deployment customization
+        run: |
+          python3 -m venv "$RUNNER_TEMP/helm-test-venv"
+          "$RUNNER_TEMP/helm-test-venv/bin/pip" install PyYAML==6.0.3
+          "$RUNNER_TEMP/helm-test-venv/bin/python" tests/helm_customization.py
+
       - name: Bridge pairing rollout safety
         run: tests/bridge_pairing_rollout.sh
 

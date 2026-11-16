@@ -1,32 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-values=helm/codeapi/values.yaml
-deployment=helm/codeapi/templates/api-deployment.yaml
-rollback=helm/codeapi/scripts/safe-pairing-rollback.sh
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+rollback="$ROOT/helm/codeapi/scripts/safe-pairing-rollback.sh"
+deployment="$TMP_DIR/api.yaml"
 
-if ! grep -A 12 '^api:$' "$values" | grep -q '^  strategy:$'; then
-  echo 'api.strategy must be configured for pairing-safe rollouts' >&2
-  exit 1
-fi
-if ! grep -A 2 '^  strategy:$' "$values" | grep -q '^    type: Recreate$'; then
-  echo 'api.strategy.type must default to Recreate while pre-fence replicas may exist' >&2
-  exit 1
-fi
-if ! grep -A 3 '^  strategy:$' "$values" | grep -q '^    rollingUpdate: null$'; then
-  echo 'api.strategy must clear rollingUpdate when switching existing deployments to Recreate' >&2
-  exit 1
-fi
-if ! grep -q 'toYaml .Values.api.strategy' "$deployment"; then
-  echo 'the API Deployment must render api.strategy' >&2
+# Assert on rendered behavior, independent of values ordering/template helpers.
+mkdir "$TMP_DIR/chart"
+cp "$ROOT/helm/codeapi/values.yaml" "$TMP_DIR/chart/values.yaml"
+cp -R "$ROOT/helm/codeapi/templates" "$TMP_DIR/chart/templates"
+awk '/^dependencies:/{exit} {print}' "$ROOT/helm/codeapi/Chart.yaml" > "$TMP_DIR/chart/Chart.yaml"
+render() {
+  helm template codeapi "$TMP_DIR/chart" \
+    --set executionManifest.privateKey=test \
+    --set executionManifest.publicKey=test \
+    --show-only templates/api-deployment.yaml "$@"
+}
+render > "$deployment"
+if ! grep -q '^    type: Recreate$' "$deployment" ||
+   grep -q '^    rollingUpdate:' "$deployment"; then
+  echo 'API rollouts must default to Recreate and clear rollingUpdate' >&2
   exit 1
 fi
 if ! grep -q 'codeapi.librechat.ai/pairing-fence-version: "1"' "$deployment"; then
   echo 'the first pairing-fence chart upgrade must revise the API pod template' >&2
   exit 1
 fi
-if ! grep -A 8 '^  image:$' "$values" | grep -q '^    pullPolicy: Always$'; then
+if ! grep -q 'imagePullPolicy: Always' "$deployment"; then
   echo 'the fenced API rollout must pull the current image even when the default tag is mutable' >&2
+  exit 1
+fi
+render --set api.strategy.type=RollingUpdate \
+  --set api.strategy.rollingUpdate.maxSurge=1 > "$TMP_DIR/override.yaml"
+if ! grep -q '^    type: RollingUpdate$' "$TMP_DIR/override.yaml" ||
+   ! grep -q '^      maxSurge: 1$' "$TMP_DIR/override.yaml"; then
+  echo 'the API Deployment must render an explicit api.strategy override' >&2
   exit 1
 fi
 if [[ ! -x "$rollback" ]]; then

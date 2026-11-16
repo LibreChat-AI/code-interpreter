@@ -14,6 +14,23 @@ global:
   # Storage class for persistent volumes
   storageClass: ""
 
+# Additional resource labels. Selector labels and chart identity are reserved.
+# Subcharts use their own commonLabels settings (e.g. redis.commonLabels).
+commonLabels: {}
+
+# Use a Secret provisioned outside Helm instead of creating <fullname>-secrets.
+# It must exist before the pods start. See README for Redis/MinIO subchart setup.
+secrets:
+  existingSecret: ""
+  keys:
+    internalServiceToken: codeapi-internal-service-token
+    egressGrantSecret: codeapi-egress-grant-secret
+    executionManifestPrivateKey: codeapi-execution-manifest-private-key
+    executionManifestPublicKey: sandbox-execution-manifest-public-key
+    redisPassword: redis-password
+    s3AccessKey: minio-access-key
+    s3SecretKey: minio-secret-key
+
 # Shared token for internal service-to-service requests between the public API,
 # file-server, tool-call-server, worker, and sandbox API. Override for every
 # production install.
@@ -59,8 +76,8 @@ egressGrant:
 # There is intentionally NO default keypair: deployments MUST provide their own
 # Ed25519 keypair (see README.md "Execution manifest signing keys" for
 # generation commands). `helm install`/`upgrade` fails when
-# workerSandbox.enabled=true and these are unset. For minikube local dev,
-# values-local.yaml ships a test-only keypair.
+# workerSandbox.enabled=true, secrets.existingSecret is empty and these are unset.
+# For minikube local dev, values-local.yaml ships a test-only keypair.
 executionManifest:
   privateKey: ""
   publicKey: ""
@@ -70,6 +87,20 @@ executionManifest:
 # API SERVICE (HTTP handlers, scales based on traffic)
 # =============================================================================
 api:
+  # Optional Deployment/pod customizations; selector labels remain chart-owned.
+  deploymentAnnotations: {}
+  podLabels: {}
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  extraVolumes: []
+  extraVolumeMounts: []
+  serviceAccount:
+    create: false
+    name: ""
+    annotations: {}
+    # null preserves the ServiceAccount/Kubernetes default; false disables tokens.
+    automountServiceAccountToken: null
   enabled: true
   replicaCount: 2  # Start with 2 API pods
 
@@ -118,6 +149,7 @@ api:
 
   # Horizontal Pod Autoscaler
   autoscaling:
+    behavior: {}
     enabled: false
     minReplicas: 2
     maxReplicas: 10
@@ -196,6 +228,7 @@ workerSandbox:
     create: true
     name: ""
     annotations: {}
+    automountServiceAccountToken: null
 
   sandboxServiceAccount:
     create: true
@@ -207,6 +240,21 @@ workerSandbox:
   # nodeSelector/tolerations/affinity below. Use sandboxRunner to place only the
   # untrusted-code tier on KVM-capable nodes.
   serviceWorker:
+    initContainerSecurityContext: {}
+    initImage:
+      repository: busybox
+      tag: 1.36.1
+    # Optional Deployment/pod customizations; selector labels remain chart-owned.
+    deploymentAnnotations: {}
+    podLabels: {}
+    podAnnotations: {}
+    podSecurityContext: {}
+    securityContext: {}
+    extraVolumes: []
+    extraVolumeMounts: []
+    strategy: {}
+    # Empty resources inherit workerSandbox.resources; nonempty replaces it.
+    resources: {}
     # Defaults to workerSandbox.replicaCount when unset.
     # Keep this as fixed HA capacity; scale sandboxRunner for execution throughput.
     replicaCount: null
@@ -216,6 +264,17 @@ workerSandbox:
     affinity: {}
 
   sandboxRunner:
+    # Optional Deployment/pod customizations; selector labels remain chart-owned.
+    deploymentAnnotations: {}
+    podLabels: {}
+    podAnnotations: {}
+    podSecurityContext: {}
+    securityContext: {}
+    extraVolumes: []
+    extraVolumeMounts: []
+    strategy: {}
+    # Empty resources inherit workerSandbox.resources; nonempty replaces it.
+    resources: {}
     # Defaults to workerSandbox.replicaCount when unset.
     replicaCount: null
     # Restart a sandbox-runner before launcher/VMM host-side fd retention can
@@ -235,6 +294,7 @@ workerSandbox:
     tolerations: []
     affinity: {}
     autoscaling:
+      behavior: {}
       enabled: false
       minReplicas: 1
       maxReplicas: 20
@@ -337,6 +397,15 @@ workerSandbox:
 # FILE SERVER (S3/MinIO integration, stateless)
 # =============================================================================
 fileServer:
+  # Optional Deployment/pod customizations; selector labels remain chart-owned.
+  deploymentAnnotations: {}
+  podLabels: {}
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  extraVolumes: []
+  extraVolumeMounts: []
+  strategy: {}
   objectIndexEnabled: false
   metadataConcurrency: 1
   enabled: true
@@ -365,6 +434,7 @@ fileServer:
     create: true
     name: ""
     annotations: {}
+    automountServiceAccountToken: null
     # For IRSA on EKS, add:
     # annotations:
     #   eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT_ID:role/codeapi-fileserver-role"
@@ -384,6 +454,21 @@ fileServer:
 # TOOL CALL SERVER (programmatic tool calling, stateless)
 # =============================================================================
 toolCallServer:
+  # Optional Deployment/pod customizations; selector labels remain chart-owned.
+  deploymentAnnotations: {}
+  podLabels: {}
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  extraVolumes: []
+  extraVolumeMounts: []
+  strategy: {}
+  serviceAccount:
+    create: false
+    name: ""
+    annotations: {}
+    # null preserves the ServiceAccount/Kubernetes default; false disables tokens.
+    automountServiceAccountToken: null
   enabled: true
   replicaCount: 1
 
@@ -412,6 +497,25 @@ toolCallServer:
 # EGRESS GATEWAY (only sandbox-runner outbound capability endpoint)
 # =============================================================================
 egressGateway:
+  initContainerSecurityContext: {}
+  initImage:
+    repository: busybox
+    tag: 1.36.1
+  # Optional Deployment/pod customizations; selector labels remain chart-owned.
+  deploymentAnnotations: {}
+  podLabels: {}
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  extraVolumes: []
+  extraVolumeMounts: []
+  strategy: {}
+  serviceAccount:
+    create: false
+    name: ""
+    annotations: {}
+    # null preserves the ServiceAccount/Kubernetes default; false disables tokens.
+    automountServiceAccountToken: null
   enabled: true
   replicaCount: 1
 

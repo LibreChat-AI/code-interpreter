@@ -10,16 +10,40 @@ metadata:
   name: {{ include "codeapi.fullname" . }}-egress-gateway
   labels:
     {{- include "codeapi.egressGateway.labels" . | nindent 4 }}
+  {{- with .Values.egressGateway.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
+  {{- with .Values.egressGateway.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   replicas: {{ .Values.egressGateway.replicaCount }}
   selector:
     matchLabels:
       {{- include "codeapi.egressGateway.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- with .Values.egressGateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
-        {{- include "codeapi.egressGateway.selectorLabels" . | nindent 8 }}
+        {{- include "codeapi.podLabels" (dict "root" . "component" "egressGateway" "values" .Values.egressGateway) | nindent 8 }}
     spec:
+      {{- with .Values.egressGateway.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.egressGateway.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.egressGateway.serviceAccount.create .Values.egressGateway.serviceAccount.name }}
+      serviceAccountName: {{ .Values.egressGateway.serviceAccount.name | default (printf "%s-egress-gateway" (include "codeapi.fullname" .)) }}
+      {{- end }}
+      {{- include "codeapi.automountServiceAccountToken" .Values.egressGateway.serviceAccount | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -27,11 +51,23 @@ spec:
       {{- if or .Values.egressGrant.ledgerRequired .Values.hardenedSandboxMode }}
       initContainers:
         - name: wait-for-redis
-          image: busybox:1.36.1
+          {{- with .Values.egressGateway.initContainerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.egressGateway.initImage.repository }}:{{ .Values.egressGateway.initImage.tag }}"
           command: ['sh', '-c', 'until nc -z {{ include "codeapi.redis.host" . }} {{ include "codeapi.redis.port" . }}; do echo waiting for redis; sleep 2; done']
       {{- end }}
       containers:
         - name: egress-gateway
+          {{- with .Values.egressGateway.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.egressGateway.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           image: "{{ .Values.egressGateway.image.repository }}:{{ .Values.egressGateway.image.tag }}"
           imagePullPolicy: {{ .Values.egressGateway.image.pullPolicy }}
           ports:
@@ -67,13 +103,13 @@ spec:
             - name: CODEAPI_EGRESS_GRANT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: codeapi-egress-grant-secret
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.egressGrantSecret }}
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: codeapi-internal-service-token
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.internalServiceToken }}
             - name: REDIS_HOST
               value: {{ include "codeapi.redis.host" . }}
             - name: REDIS_PORT
@@ -81,8 +117,8 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
-                  key: redis-password
+                  name: {{ include "codeapi.secretName" . }}
+                  key: {{ .Values.secrets.keys.redisPassword }}
           livenessProbe:
             httpGet:
               path: /live
