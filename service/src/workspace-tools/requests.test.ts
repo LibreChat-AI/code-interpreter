@@ -723,7 +723,8 @@ test('a rejected lane releases its fence even when its cleanup acknowledgement i
   const queued = (await leaseAnySlot())!;
   expect(queued.request).toMatchObject({ operation: 'list_files', worktree: 'review' });
   // A late acknowledgement for the refused assignment never releases the lane's next owner.
-  await bridge.confirmWorkspaceCleanup(workerId, refused.assignmentId, rejection(refused, 'local cleanup confirmed'));
+  await expect(bridge.confirmWorkspaceCleanup(workerId, refused.assignmentId,
+    rejection(refused, 'local cleanup confirmed'))).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
   expect(await redis.get(laneFence)).toBe(queued.assignmentId);
   await settle(queued, false); await tick(requests);
   expect((await requests.get(owner, 'request-00000000002'))?.state).toBe('failed');
@@ -819,3 +820,44 @@ test('a durable detached command is refused for a worker that does not advertise
     .rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
   expect(await redis.zcard(queueKey)).toBe(0);
 });
+
+test.each(['active', 'completed', 'quarantined'].flatMap(state =>
+  [false, true].map(legacyReceipt => [state, legacyReceipt] as const),
+))(
+  'late quarantine from a rejected lane cannot replace its %s successor (legacy receipt=%s)', async (state, legacyReceipt) => {
+    const requests = await setup(2, true);
+    await submitLane(requests, requestId, { operation: 'execute_command', command: 'git status' });
+    await submitLane(requests, 'request-00000000002', { operation: 'list_files' });
+    await tick(requests);
+    const refused = (await leaseAnySlot())!;
+    await bridge.acknowledgeLease(workerId, incarnationId, refused.assignmentId, refused.generation, refused.leaseToken);
+    await bridge.settle(workerId, refused.assignmentId, rejection(refused, 'No linked worktree'));
+    if (legacyReceipt) {
+      // Receipts from before per-assignment epochs must also lose authority.
+      await redis.hset(`codeapi:bridge:v1:assignment:${refused.assignmentId}:workspace-fence-owner`, 'epoch', '0');
+      await redis.set(`${laneFence}:epoch`, '0', 'PX', await redis.pttl(`${laneFence}:epoch`));
+    }
+    await tick(requests); await tick(requests);
+    const successor = (await leaseAnySlot())!;
+    expect(await redis.get(laneFence)).toBe(successor.assignmentId);
+    if (state === 'completed') {
+      await settle(successor, false); await tick(requests);
+    } else if (state === 'quarantined') {
+      await bridge.settle(workerId, successor.assignmentId, rejection(successor, 'Workspace requires inspection'),
+        undefined, undefined, true);
+    }
+    const fence = await redis.get(laneFence);
+    expect(fence).toBe(state === 'completed' ? null : state === 'quarantined'
+      ? `quarantined:${successor.assignmentId}` : successor.assignmentId);
+    await expect(bridge.settle(workerId, refused.assignmentId, rejection(refused, 'Late quarantine'),
+      undefined, undefined, true)).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+    expect(await redis.get(laneFence)).toBe(fence);
+    await expect(bridge.confirmWorkspaceCleanup(workerId, refused.assignmentId,
+      rejection(refused, 'Late cleanup'))).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+    expect(await redis.get(laneFence)).toBe(fence);
+    if (state === 'active') {
+      await settle(successor, false); await tick(requests);
+      expect((await requests.get(owner, 'request-00000000002'))?.state).toBe('failed');
+    }
+  },
+);

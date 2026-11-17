@@ -2571,8 +2571,10 @@ export class RedisBridgeStore {
       'end',
       "if ARGV[9] == 'lane' then redis.call('SADD', KEYS[11], KEYS[7]) end",
       'if keyCount >= 9 then',
+      // A successor invalidates every older receipt, even if its predecessor
+      // rejected before cleanup and the successor later releases its fence.
+      "  redis.call('INCR', KEYS[9])",
       "  local epoch = redis.call('GET', KEYS[9])",
-      '  if type(epoch) ~= \'string\' then epoch = \'0\'; redis.call(\'SET\', KEYS[9], epoch, \'EX\', ARGV[12]) end',
       '  if redis.call(\'PTTL\', KEYS[9]) < tonumber(ARGV[12]) * 1000 then redis.call(\'EXPIRE\', KEYS[9], ARGV[12]) end',
       "  redis.call('HSET', KEYS[8], 'metadata', ARGV[8], 'epoch', epoch)",
       '  redis.call(\'EXPIRE\', KEYS[8], ARGV[12])',
