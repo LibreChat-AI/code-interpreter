@@ -22,6 +22,8 @@ import type * as t from './types';
 import { metricsHandler, fileUploads, fileDownloads } from './metrics';
 import { httpMetricsMiddleware } from './middleware/httpMetrics';
 import { internalServiceAuthEnabled, requireInternalServiceAuth } from './internal-service-auth';
+import { createStoreProbeRouter } from './store-pairing';
+import { recordUpload, resolveUploadSessionKey, UploadSessionUnknownError } from './upload-record';
 import { shutdownTelemetry, traceHttpRequest } from './telemetry';
 import logger from './fileServerLogger';
 import { env } from './config';
@@ -237,8 +239,17 @@ async function uploadFile(
     metaData['X-Amz-Meta-Read-Only'] = 'true';
   }
 
+  let sessionKey: string;
+  try {
+    sessionKey = await resolveUploadSessionKey(redisClient, session_id);
+  } catch (error) {
+    /* Nothing is stored for a session this Redis does not know (see
+     * `upload-record.ts`). Discard the body so the request, and a multipart
+     * parser waiting on this part, can still complete. */
+    fileStream.resume();
+    throw error;
+  }
   /* Note: this returns UploadedObjectInfo */
-  const sessionKey = await redisClient.get(`session:${session_id}`);
   const peeked = await peekStreamForEmpty(fileStream);
   if (peeked.empty) {
     /* Empty file: explicit single PUT with size=0 — multipart fails with
@@ -258,7 +269,7 @@ async function uploadFile(
   }
   await objectResolver.remember(session_id, fileId, objectName);
   logger.info(`[${INSTANCE_ID}] File ID: ${fileId} | Filename: ${filename} | Session key: ${sessionKey}`);
-  await redisClient.set(`upload:${sessionKey}${session_id}${fileId}`, 'true', 'EX', env.SESSION_CACHE_TTL);
+  await recordUpload(redisClient, { sessionKey, session_id, fileId }, env.SESSION_CACHE_TTL);
   fileUploads.inc();
 
   return {
@@ -316,6 +327,9 @@ if (!internalServiceAuthEnabled()) {
 }
 
 app.use('/sessions', requireInternalServiceAuth);
+app.use(createStoreProbeRouter(redisClient, (error) => {
+  logger.warn('Store probe could not read Redis', { error });
+}));
 
 app.post('/sessions/:session_id/objects', async (req: express.Request, res: express.Response) => {
   const { session_id } = req.params;
@@ -333,6 +347,8 @@ app.post('/sessions/:session_id/objects', async (req: express.Request, res: expr
     preservePath: true,
   });
   const uploadPromises: Promise<t.UploadResult | null>[] = [];
+  /** Every part shares the request's session, so one unknown session fails them all. */
+  let sessionUnknown: UploadSessionUnknownError | undefined;
 
   busboy.on('file', (fieldname: string, file: Readable, info: b.FileInfo) => {
     const { filename: combinedFilename, encoding: _e, mimeType } = info;
@@ -353,6 +369,10 @@ app.post('/sessions/:session_id/objects', async (req: express.Request, res: expr
     logger.info(`[${INSTANCE_ID}] Processing file: ${filename} with ID: ${fileId}`);
 
     const uploadPromise = uploadFile(session_id, file, filename, mimeType, fileId, readOnly).catch(err => {
+      if (err instanceof UploadSessionUnknownError) {
+        sessionUnknown ??= err;
+        return null;
+      }
       logger.error(`[${INSTANCE_ID}] Error uploading file ${filename}:`, { error: err });
       return null;
     });
@@ -362,6 +382,10 @@ app.post('/sessions/:session_id/objects', async (req: express.Request, res: expr
   busboy.on('finish', async () => {
     try {
       const results = await Promise.all(uploadPromises);
+      if (sessionUnknown) {
+        logger.error(`[${INSTANCE_ID}] ${sessionUnknown.message}`, { session_id });
+        return res.status(sessionUnknown.status).json(sessionUnknown.body);
+      }
       const successfulUploads = results.filter((result): result is t.UploadResult => result !== null);
 
       logger.info(`[${INSTANCE_ID}] Successfully uploaded ${successfulUploads.length} files for session ${session_id}`);
@@ -414,6 +438,10 @@ app.put('/sessions/:session_id/objects/:fileId', async (req: express.Request, re
     logger.info(`[${INSTANCE_ID}] File uploaded successfully: ${result.filename}`);
     return res.status(200).json(result);
   } catch (err) {
+    if (err instanceof UploadSessionUnknownError) {
+      logger.error(`[${INSTANCE_ID}] ${err.message}`, { session_id, fileId });
+      return res.status(err.status).json(err.body);
+    }
     logger.error(`[${INSTANCE_ID}] Error uploading file ${decodedFilename}:`, { error: err });
     return res.status(500).json({ error: 'Error uploading file.' });
   }

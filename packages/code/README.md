@@ -386,7 +386,14 @@ standard Git LFS filters; hosts using LFS must install `git-lfs`, and checkout
 fails instead of silently leaving pointer files when it is unavailable.
 SRT replaces each real credential with a sentinel inside the sandbox and
 substitutes the real value in its host proxy only for the corresponding Git or
-GitHub API host. TLS termination is enabled for that substitution. The worker
+GitHub API host. On GitHub.com, the CLI token is also substituted for the exact
+`uploads.github.com` host used by native issue and PR attachments. This does not
+authorize credential injection into arbitrary GitHub subdomains or asset-storage
+hosts. Use a GitHub CLI version that supports `--attach`; GitHub still decides
+whether the credential has permission to upload, including which GitHub Apps it
+accepts. Enterprise host substitution is unchanged.
+
+TLS termination is enabled for that substitution. The worker
 restores the parent environment immediately after constructing the sandbox
 command; it never writes credentials into the repository, a remote URL, Git
 config, or the GitHub CLI credential store.

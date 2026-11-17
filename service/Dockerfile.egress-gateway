@@ -5,10 +5,12 @@ WORKDIR /app
 FROM base AS install
 RUN mkdir -p /temp/dev
 COPY service/package.json service/bun.lock /temp/dev/
+COPY service/patches /temp/dev/patches
 RUN cd /temp/dev && bun install --frozen-lockfile
 
 RUN mkdir -p /temp/prod
 COPY service/package.json service/bun.lock /temp/prod/
+COPY service/patches /temp/prod/patches
 RUN cd /temp/prod && bun install --frozen-lockfile --production
 
 FROM oven/bun:1.4.4 AS production

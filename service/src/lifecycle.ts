@@ -21,6 +21,7 @@ import logger from './logger';
 import { shutdownTelemetry } from './telemetry';
 import { configureExecutionProfileMetrics } from './metrics';
 import { closeHostedAppQueueResources } from './hosted-app/queue';
+import { createStorePairingMonitor, probeFileServerStore } from './store-pairing';
 
 const { INSTANCE_ID } = env;
 let isShuttingDown = false;
@@ -45,6 +46,34 @@ async function shutdownTracing(): Promise<void> {
 
 async function validateLifecycleAuthConfig(): Promise<void> {
   await validateStartupAuthConfig();
+}
+
+function fileServerHost(): string {
+  try {
+    return new URL(env.FILE_SERVER_URL).host;
+  } catch {
+    return 'invalid FILE_SERVER_URL';
+  }
+}
+
+const fileServerStore = createStorePairingMonitor({
+  probe: () => probeFileServerStore({ store: connection, fileServerUrl: env.FILE_SERVER_URL }),
+  log: logger,
+  fileServer: fileServerHost(),
+});
+
+/**
+ * Waits for the first store check only, which is bounded: an unreachable or
+ * older file server is inconclusive and never holds startup.
+ */
+async function verifyFileServerStore(): Promise<void> {
+  if (!env.FILE_SERVER_STORE_CHECK || env.FILE_SERVER_URL.trim() === '') return;
+  await fileServerStore.start();
+}
+
+/** True once the configured file server is known to use a different Redis. */
+export function checkFileServerStoreMismatch(): boolean {
+  return fileServerStore.status() === 'split';
 }
 
 // Flag to track if this process runs workers
@@ -111,6 +140,7 @@ export async function startupApiOnly(): Promise<void> {
    * combined startups own that validation. */
   await validateLifecycleAuthConfig();
   configureProfileMetrics();
+  await verifyFileServerStore();
 
   // Set up queue listeners for monitoring (optional, for observability)
   setupQueueListeners(pyQueue, 'Python');
@@ -175,6 +205,7 @@ async function gracefulStartup(): Promise<void> {
   validateApiBridgePolicy();
   await validateLifecycleAuthConfig();
   configureProfileMetrics();
+  await verifyFileServerStore();
 
   try {
     logger.info('Setting up queues...');
@@ -237,6 +268,7 @@ export async function gracefulShutdown(): Promise<void> {
   isShuttingDown = true;
 
   logger.info('Initiating graceful shutdown...');
+  fileServerStore.stop();
 
   const shutdownTimeout = setTimeout(() => {
     logger.error('Shutdown timeout reached, forcing exit');
