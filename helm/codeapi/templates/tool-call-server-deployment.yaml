@@ -56,6 +56,9 @@ spec:
               value: {{ .Values.toolCallServer.config.requestTimeout | quote }}
             - name: TOOL_CALL_SESSION_EXPIRY
               value: {{ .Values.toolCallServer.config.sessionExpiry | quote }}
+            {{- with .Values.toolCallServer.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /health
