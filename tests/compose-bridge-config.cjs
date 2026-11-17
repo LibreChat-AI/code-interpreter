@@ -23,6 +23,11 @@ function render(overrides) {
       CODEAPI_BRIDGE_RECOVERY_MAX_CHALLENGES_PER_MINUTE: '',
       CODEAPI_BRIDGE_RECOVERY_MAX_ATTEMPTS_PER_MINUTE: '',
       CODEAPI_BRIDGE_RECOVERY_MAX_UNTRUSTED_PER_MINUTE: '',
+      SANDBOX_RUN_TIMEOUT: '',
+      SANDBOX_RUN_CPU_TIME: '',
+      SANDBOX_OUTPUT_MAX_SIZE: '',
+      JOB_TIMEOUT: '',
+      MAX_FILE_SIZE: '',
       ...overrides,
     },
   }));
@@ -76,4 +81,34 @@ for (const overrides of [
   assert.ok(config.services.redis.volumes.some(volume => volume.target === '/data' && volume.type === 'volume'));
 }
 assert.equal(render({}).services.api.environment.CODEAPI_BRIDGE_TOKEN, '');
-console.log('Compose bridge configuration passed (pairing, opt-in recovery, durable Redis).');
+
+const limitServices = {
+  SANDBOX_RUN_TIMEOUT: ['sandbox-runner'],
+  SANDBOX_RUN_CPU_TIME: ['sandbox-runner'],
+  SANDBOX_OUTPUT_MAX_SIZE: ['sandbox-runner'],
+  JOB_TIMEOUT: ['api', 'service-worker', 'egress_gateway'],
+  MAX_FILE_SIZE: ['api'],
+};
+const limitDefaults = {
+  SANDBOX_RUN_TIMEOUT: '300000',
+  SANDBOX_RUN_CPU_TIME: '300000',
+  SANDBOX_OUTPUT_MAX_SIZE: '65536',
+  JOB_TIMEOUT: '300000',
+  MAX_FILE_SIZE: '26214400',
+};
+const limitOverrides = {
+  SANDBOX_RUN_TIMEOUT: '600000',
+  SANDBOX_RUN_CPU_TIME: '600000',
+  SANDBOX_OUTPUT_MAX_SIZE: '16384',
+  JOB_TIMEOUT: '615000',
+  MAX_FILE_SIZE: '104857600',
+};
+for (const [overrides, expected] of [[{}, limitDefaults], [limitOverrides, limitOverrides]]) {
+  const config = render(overrides);
+  for (const [name, services] of Object.entries(limitServices)) {
+    for (const service of services) {
+      assert.equal(config.services[service].environment[name], expected[name], `${service} ${name}`);
+    }
+  }
+}
+console.log('Compose bridge configuration passed (pairing, opt-in recovery, durable Redis, execution limits).');
