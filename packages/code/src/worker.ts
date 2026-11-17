@@ -140,6 +140,8 @@ const DEFAULT_CANCELLATION_TRANSPORT_TIMEOUT_MS = 2_000;
 const CREDENTIAL_REFRESH_SETTLEMENT_GRACE_MS = 1_000;
 const MIN_REGISTRATION_HEARTBEAT_MS = 25;
 const REGISTRATION_RETRY_DELAY_MS = 100;
+/** Consecutive transient heartbeat failures a concurrent run absorbs before stopping every slot. */
+const CONCURRENT_HEARTBEAT_RETRIES = 1;
 const CREDENTIAL_REFRESH_RETRY_DELAY_MS = 100;
 const SETTLEMENT_RETRY_DELAY_MS = 100;
 const REJECTION_ACK_GRACE_MS = 30_000;
@@ -500,6 +502,8 @@ export class BridgeWorker {
   private maintenanceOnly = false;
   private mutationGuardArmed = false;
   private readonly quarantinedWorkspaces = new Set<string>();
+  /** Lane quarantine receipts a stopped run could not deliver, by assignment ID. */
+  private readonly undeliveredQuarantineReceipts = new Map<string, BridgeAssignment>();
   private readonly activeWorkspaceAssignments = new Map<
     string,
     { id: string; done: Promise<void> }
@@ -1167,7 +1171,17 @@ export class BridgeWorker {
       controller.abort(error);
     };
     this.concurrentRunning = true;
-    const heartbeat = this.maintainRegistration(controller.signal).catch(fail);
+    const heartbeat = this.maintainRegistration(
+      controller.signal,
+      CONCURRENT_HEARTBEAT_RETRIES,
+    ).catch(fail);
+    // Code API offers only unsettled work again, so nothing else re-sends these receipts.
+    for (const pending of [...this.undeliveredQuarantineReceipts.values()]) {
+      if (controller.signal.aborted) break;
+      await this.deliverQuarantineReceipt(pending, controller.signal).catch(
+        (error) => this.options.onError?.(error),
+      );
+    }
     const lane = async (slot?: number): Promise<void> => {
       let retries = 0;
       while (!controller.signal.aborted) {
@@ -1184,12 +1198,9 @@ export class BridgeWorker {
           ) {
             // The durable local guard is retained. A distinct receipt tells
             // Code API to release this slot without declaring the root clean.
+            // A stopping run still delivers it: the lane's fence outlives this run.
             try {
-              await this.reportWorkspaceOwnership(
-                assignment,
-                'quarantine',
-                controller.signal,
-              );
+              await this.deliverQuarantineReceipt(assignment);
               this.options.onError?.(error);
               continue;
             } catch (quarantineError) {
@@ -2260,7 +2271,7 @@ export class BridgeWorker {
         const recoveryHeartbeatController = new AbortController();
         const recoveryHeartbeat = this.maintainRegistration(
           recoveryHeartbeatController.signal,
-          true,
+          Number.POSITIVE_INFINITY,
         ).catch(() => undefined);
         const rejectionAckGraceMs = Math.max(
           0,
@@ -2333,11 +2344,8 @@ export class BridgeWorker {
       }
       if (assignment.workspaceLeaseSlot !== undefined) {
         try {
-          await this.reportWorkspaceOwnership(
-            assignment,
-            'workspace-cleanup',
-            signal,
-          );
+          // The settlement has committed, so a stopping run must still release the lane's fence.
+          await this.reportWorkspaceOwnership(assignment, 'workspace-cleanup');
         } catch (error) {
           throw new BridgeWorkspaceQuarantinedError(
             'Workspace cleanup acknowledgement could not be confirmed',
@@ -2353,6 +2361,28 @@ export class BridgeWorker {
         await heartbeat;
         signal?.removeEventListener('abort', abortExecution);
       }
+    }
+  }
+
+  /** Deliver a lane quarantine receipt, keeping it for the next run while delivery is uncertain. */
+  private async deliverQuarantineReceipt(
+    assignment: BridgeAssignment,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    try {
+      await this.reportWorkspaceOwnership(assignment, 'quarantine', signal);
+      this.undeliveredQuarantineReceipts.delete(assignment.assignmentId);
+    } catch (error) {
+      const refused =
+        error instanceof BridgeProtocolError &&
+        error.status != null &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        error.status !== 408 &&
+        error.status !== 429;
+      if (refused) this.undeliveredQuarantineReceipts.delete(assignment.assignmentId);
+      else this.undeliveredQuarantineReceipts.set(assignment.assignmentId, assignment);
+      throw error;
     }
   }
 
@@ -2497,8 +2527,9 @@ export class BridgeWorker {
 
   private async maintainRegistration(
     signal: AbortSignal,
-    retryTransient = false,
+    transientRetries = 0,
   ): Promise<void> {
+    let failures = 0;
     while (!signal.aborted) {
       const heartbeatIntervalMs = Math.max(
         MIN_REGISTRATION_HEARTBEAT_MS,
@@ -2515,6 +2546,7 @@ export class BridgeWorker {
           signal,
           this.mutationGuardArmed || this.armedWorkspaces.size > 0,
         );
+        failures = 0;
       } catch (error) {
         const terminal =
           error instanceof BridgeProtocolError &&
@@ -2522,7 +2554,9 @@ export class BridgeWorker {
             error.status === 403 ||
             error.code === 'WORKER_FENCED' ||
             error.code === 'WORKER_QUARANTINED');
-        if (!retryTransient || terminal || signal.aborted) throw error;
+        if (failures >= transientRetries || terminal || signal.aborted)
+          throw error;
+        failures += 1;
         await this.delay(REGISTRATION_RETRY_DELAY_MS, signal);
       }
     }
@@ -2535,7 +2569,7 @@ export class BridgeWorker {
     const heartbeatController = new AbortController();
     const heartbeat = this.maintainRegistration(
       heartbeatController.signal,
-      true,
+      Number.POSITIVE_INFINITY,
     ).catch(() => undefined);
     try {
       await this.settleWithRetry(
