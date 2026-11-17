@@ -617,6 +617,9 @@ router.post(
         ...(options.store.laneGitEnabled
           ? { supportedWorkspaceCommandResultFeatures: ['lane_git'] }
           : {}),
+        ...(options.store.detachedCommandsOffered
+          ? { supportedWorkspaceCommandFeatures: ['detached'] }
+          : {}),
         supportedWorkspaceProgrammaticLanguages: ['bash'],
         supportedWorkspaceInstanceTypes: ['git_worktree'],
         supportedWorkspaceScopes: ['git_linked_worktree'],

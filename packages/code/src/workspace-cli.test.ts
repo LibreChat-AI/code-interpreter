@@ -11,6 +11,8 @@ import test from 'node:test';
 import {
   defaultWorkspaceQuarantinePath,
   defaultWorkspacePath,
+  detachedWorkspaceMutationQuarantineDirectory,
+  detachedWorkspaceMutationQuarantinePath,
   saveWorkspaceMutationQuarantine,
 } from './storage.js';
 
@@ -405,6 +407,95 @@ test('CLI refuses quarantined mutation registration until an operator clears it'
     await assert.rejects(access(quarantine));
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('CLI refuses a detached command marker left behind until an operator clears it', async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), 'librechat-code-cli-detached-'),
+  );
+  const workspace = join(directory, 'workspace');
+  const quarantine = join(directory, 'quarantine.json');
+  await mkdir(workspace);
+  try {
+    await saveWorkspaceMutationQuarantine(
+      detachedWorkspaceMutationQuarantinePath(quarantine, 'assignment-1'),
+      {
+        version: 1,
+        workerId: 'engineering-vm',
+        workspaceId: 'primary',
+        ownerId: 'incarnation-previous:assignment-1',
+        quarantinedAt: new Date().toISOString(),
+        reason: 'Workspace mutation execute_command is pending settlement',
+      },
+    );
+    await assert.rejects(access(quarantine));
+    const env = {
+      ...process.env,
+      LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+      LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+      LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+      LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE: quarantine,
+    };
+    const run = () =>
+      spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('./cli.js', import.meta.url)),
+          'run',
+          '--worker-dir',
+          workspace,
+          '--allow-workspace-writes',
+        ],
+        { encoding: 'utf8', env, timeout: 2_000 },
+      );
+    const blocked = run();
+    assert.notEqual(blocked.status, 0);
+    assert.match(
+      blocked.stderr,
+      /workspace mutations are quarantined.*execute_command is pending settlement/i,
+    );
+
+    const cleared = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('./cli.js', import.meta.url)),
+        'clear-workspace-quarantine',
+      ],
+      { encoding: 'utf8', env },
+    );
+    assert.equal(cleared.status, 0, cleared.stderr);
+    await assert.rejects(access(detachedWorkspaceMutationQuarantineDirectory(quarantine)));
+    assert.doesNotMatch(run().stderr, /quarantined/i);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('CLI rejects a malformed detached command setting at startup', async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'librechat-code-cli-detached-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const run = (value: string, ...extra: string[]) =>
+    spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL('./cli.js', import.meta.url)), 'run', '--worker-dir', workspace, ...extra],
+      {
+        encoding: 'utf8',
+        timeout: 2_000,
+        env: {
+          ...process.env,
+          LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+          LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+          LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+          LIBRECHAT_CODE_DETACHED_COMMANDS: value,
+        },
+      },
+    );
+  const malformed = run('sometimes');
+  assert.notEqual(malformed.status, 0);
+  assert.match(malformed.stderr, /LIBRECHAT_CODE_DETACHED_COMMANDS must be true or false/);
+  for (const accepted of [run('false'), run('true', '--no-detached-commands')]) {
+    assert.doesNotMatch(accepted.stderr, /LIBRECHAT_CODE_DETACHED_COMMANDS/);
   }
 });
 

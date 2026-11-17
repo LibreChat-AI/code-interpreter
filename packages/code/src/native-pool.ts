@@ -15,16 +15,49 @@ interface Entry {
   > &
     Partial<Pick<NativeProcessWorkspaceCommandSandbox, 'executeProgrammatic'>>;
   busy: boolean;
+  /** Set on a dedicated executor: the root whose detached command it runs. */
+  root?: string;
+}
+
+/** Dedicated executors are keyed apart from every root, whose IDs never contain NUL. */
+const DETACHED_EXECUTOR_KEY_PREFIX = '\0detached\0';
+
+/**
+ * Whether this worker offers detached commands. On by default wherever it holds:
+ * a native executor pool with more than one lease slot, so a dedicated executor
+ * can run beside its root's own. `--no-detached-commands` or
+ * `LIBRECHAT_CODE_DETACHED_COMMANDS=false` opts out; any other value of that
+ * variable fails startup rather than silently choosing either way.
+ */
+export function detachedCommandsEnabled(input: {
+  optOut: boolean;
+  enabled?: string;
+  pooled: boolean;
+  workspaceLeaseSlots: number;
+}): boolean {
+  const enabled = input.enabled?.trim().toLowerCase() ?? '';
+  if (enabled !== '' && enabled !== 'true' && enabled !== 'false') {
+    throw new Error('LIBRECHAT_CODE_DETACHED_COMMANDS must be true or false');
+  }
+  return (
+    !input.optOut &&
+    enabled !== 'false' &&
+    input.pooled &&
+    input.workspaceLeaseSlots > 1
+  );
 }
 
 /** Bounded persistent executor cache. Each child owns one root's SRT policy;
  * only idle children may be evicted, and ambiguous failures are never retried.
+ * A detached command runs in a dedicated executor for its root, created for the
+ * command and closed after it, so the root's own executor stays free for other work.
  */
 export class NativeWorkspaceCommandPool {
   readonly mutationFailuresAreAtomic = true as const;
   private readonly entries = new Map<string, Entry>();
   private allocation: Promise<unknown> = Promise.resolve();
   private closing = false;
+  private detachedSequence = 0;
   constructor(
     roots: ReadonlyMap<string, NativeProcessSandboxOptions>,
     private readonly capacity: number,
@@ -49,15 +82,14 @@ export class NativeWorkspaceCommandPool {
   /** Confirm executor cleanup before a failed provisioning attempt removes its root. */
   async unregisterRoot(id: string): Promise<void> {
     const pending = this.allocation.then(async () => {
-      const entry = this.entries.get(id);
-      if (entry?.busy) {
+      const owned = this.executors(id);
+      if (owned.some(([, entry]) => entry.busy)) {
         throw new WorkspaceToolError(
           'Native workspace still executing',
           'COMMAND_UNAVAILABLE'
         );
       }
-      if (entry) await entry.sandbox.close();
-      this.entries.delete(id);
+      await this.closeExecutors(owned);
       this.roots.delete(id);
     });
     this.allocation = pending.catch(() => undefined);
@@ -94,24 +126,36 @@ export class NativeWorkspaceCommandPool {
       ) {
         return;
       }
-      const entry = this.entries.get(id);
-      if (entry?.busy) {
+      const owned = this.executors(id);
+      if (owned.some(([, entry]) => entry.busy)) {
         throw new WorkspaceToolError(
           'Native workspace changed during execution',
           'REGISTRATION_INVALID'
         );
       }
-      if (entry) {
-        await entry.sandbox.close();
-        this.entries.delete(id);
-      }
+      await this.closeExecutors(owned);
       this.roots.set(id, options);
     });
     this.allocation = pending.catch(() => undefined);
     await pending;
   }
 
-  private allocate(root: string): Promise<Entry> {
+  /** A root's own executor and any dedicated executor still open for it. */
+  private executors(root: string): [string, Entry][] {
+    return [...this.entries].filter(
+      ([key, entry]) => key === root || entry.root === root
+    );
+  }
+
+  private async closeExecutors(owned: [string, Entry][]): Promise<void> {
+    for (const [key, entry] of owned) {
+      await entry.sandbox.close();
+      this.entries.delete(key);
+    }
+  }
+
+  /** `key` defaults to the root's own executor; any other key names a dedicated one. */
+  private allocate(root: string, key = root): Promise<Entry> {
     const pending = this.allocation.then(async () => {
       const options = this.roots.get(root);
       if (this.closing || !options)
@@ -119,7 +163,7 @@ export class NativeWorkspaceCommandPool {
           'Native workspace unavailable',
           'REGISTRATION_INVALID'
         );
-      let entry = this.entries.get(root);
+      let entry = this.entries.get(key);
       if (entry?.busy)
         throw new WorkspaceToolError(
           'Native workspace already executing',
@@ -151,12 +195,13 @@ export class NativeWorkspaceCommandPool {
         entry = {
           sandbox: this.createSandbox(options),
           busy: false,
+          ...(key === root ? {} : { root }),
         };
       }
       entry.busy = true;
       // Map insertion order is the idle eviction order.
-      this.entries.delete(root);
-      this.entries.set(root, entry);
+      this.entries.delete(key);
+      this.entries.set(key, entry);
       return entry;
     });
     const checked = pending.catch((error) => {
@@ -199,10 +244,44 @@ export class NativeWorkspaceCommandPool {
     );
   }
 
+  /**
+   * The executor never sees `detached`: it is this pool's routing decision. The
+   * result is returned as soon as the command ends; closing the executor queues
+   * ahead of later allocations, which therefore still find capacity accounted for.
+   */
+  private async executeDetached(
+    request: WorkspaceExecuteCommandRequest,
+    signal?: AbortSignal
+  ): Promise<WorkspaceExecuteCommandResult> {
+    const { detached: _detached, ...command } = request;
+    const key = `${DETACHED_EXECUTOR_KEY_PREFIX}${++this.detachedSequence}`;
+    const entry = await this.allocate(request.workspaceId, key);
+    try {
+      if (signal?.aborted)
+        throw new WorkspaceToolError(
+          'Command cancelled before dispatch',
+          'EXECUTION_ABORTED'
+        );
+      return await entry.sandbox.execute(command, signal);
+    } finally {
+      this.allocation = this.allocation.then(async () => {
+        try {
+          await entry.sandbox.close();
+          this.entries.delete(key);
+        } catch {
+          /* Retain ownership for subsequent cleanup/shutdown. */
+        } finally {
+          entry.busy = false;
+        }
+      });
+    }
+  }
+
   async execute(
     request: WorkspaceExecuteCommandRequest,
     signal?: AbortSignal
   ): Promise<WorkspaceExecuteCommandResult> {
+    if (request.detached === true) return this.executeDetached(request, signal);
     const entry = await this.allocate(request.workspaceId);
     let enteredExecutor = false;
     try {

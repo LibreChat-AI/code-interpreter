@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   open,
+  readdir,
   rename,
   rm,
   stat,
@@ -612,6 +613,68 @@ export async function loadWorkspaceMutationQuarantine(
   return record;
 }
 
+const DETACHED_QUARANTINE_ASSIGNMENT_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Beside a workspace's own marker: one marker per detached command running in it. */
+export function detachedWorkspaceMutationQuarantineDirectory(path: string): string {
+  return `${path}.detached`;
+}
+
+/** A detached command arms this marker, never the workspace's own, which an ordinary mutation may hold. */
+export function detachedWorkspaceMutationQuarantinePath(
+  path: string,
+  assignmentId: string,
+): string {
+  if (!DETACHED_QUARANTINE_ASSIGNMENT_PATTERN.test(assignmentId)) {
+    throw new BridgeProtocolError(
+      'Detached command quarantine requires a filename-safe assignment ID',
+    );
+  }
+  return join(detachedWorkspaceMutationQuarantineDirectory(path), `${assignmentId}.json`);
+}
+
+async function detachedWorkspaceMutationQuarantinePaths(path: string): Promise<string[]> {
+  const directory = detachedWorkspaceMutationQuarantineDirectory(path);
+  let names: string[];
+  try {
+    names = await readdir(directory);
+  } catch (error) {
+    if (isMissingPathError(error)) return [];
+    throw error;
+  }
+  /* An emptied directory is evidence too: another account able to write it could have removed a marker. */
+  await assertReadPathPrivate(directory);
+  return names.map((name) => join(directory, name));
+}
+
+/** The workspace's own marker followed by the marker of every detached command in it. */
+export async function loadWorkspaceMutationQuarantines(
+  path: string,
+): Promise<WorkspaceMutationQuarantineRecord[]> {
+  assertPrivateStorageSupported();
+  const [own, detachedPaths] = await Promise.all([
+    loadWorkspaceMutationQuarantine(path),
+    detachedWorkspaceMutationQuarantinePaths(path),
+  ]);
+  const detached = await Promise.all(detachedPaths.map(loadWorkspaceMutationQuarantine));
+  return [own, ...detached].filter(
+    (record): record is WorkspaceMutationQuarantineRecord => record != null,
+  );
+}
+
+async function clearDetachedWorkspaceMutationQuarantines(path: string): Promise<void> {
+  const directory = detachedWorkspaceMutationQuarantineDirectory(path);
+  try {
+    await lstat(directory);
+  } catch (error) {
+    if (isMissingPathError(error)) return;
+    throw error;
+  }
+  await rm(directory, { recursive: true, force: true });
+  await syncParentDirectory(directory);
+}
+
+/** Without an owner this is an operator's reset, which also removes every detached command marker. */
 export async function clearWorkspaceMutationQuarantine(
   path: string,
   ownerId?: string,
@@ -625,6 +688,8 @@ export async function clearWorkspaceMutationQuarantine(
         'Workspace quarantine is owned by another worker incarnation',
       );
     }
+  } else {
+    await clearDetachedWorkspaceMutationQuarantines(path);
   }
   try {
     await lstat(path);

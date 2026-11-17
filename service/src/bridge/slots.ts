@@ -13,6 +13,10 @@ export const MAX_WORKSPACE_LEASE_SLOTS = 8;
  * with every lane beneath it. Sibling lanes run concurrently. A waiting checkout
  * request also holds back newer lanes beneath it, so root operations such as
  * `git worktree add` cannot be starved by a steady stream of lane work.
+ *
+ * A detached command key (`\0detached-command\0<assignment>`) conflicts with
+ * nothing and is held back by nothing but capacity. Detached commands may hold
+ * at most `capacity - 1` slots, so one slot always remains for other work.
  */
 export class BridgeWorkspaceSlots {
   constructor(private readonly redis: Redis) {}
@@ -74,11 +78,16 @@ export class BridgeWorkspaceSlots {
           '  if last == nil or last <= #lanePrefix + 1 then return nil end',
           '  return string.sub(key, #lanePrefix + 1, last - 1)',
           'end',
+          'local detachedPrefix = "\\0detached-command\\0"',
+          'local function isDetached(key)',
+          '  return string.sub(key, 1, #detachedPrefix) == detachedPrefix',
+          'end',
           "local lock = redis.call('GET', KEYS[2])",
           "local owner = 'workspace-slots:' .. ARGV[1]",
           'if lock and lock ~= owner then return -1 end',
           'local busy = {}',
           'local busyChildren = {}',
+          'local detachedHeld = 0',
           'local free = nil',
           'local latest = tonumber(ARGV[5])',
           `for slot = 0, ${MAX_WORKSPACE_LEASE_SLOTS - 1} do`,
@@ -101,6 +110,7 @@ export class BridgeWorkspaceSlots {
           '      busy[entry[3]] = true',
           '      local busyParent = parentOf(entry[3])',
           '      if busyParent then busyChildren[busyParent] = true end',
+          '      if isDetached(entry[3]) then detachedHeld = detachedHeld + 1 end',
           '      latest = math.max(latest, tonumber(entry[4]))',
           '    end',
           '  end',
@@ -108,6 +118,8 @@ export class BridgeWorkspaceSlots {
           'end',
           'local function conflicts(key)',
           '  if busy[key] then return true end',
+          // Beyond its own reservation, only the cap on detached holders holds a detached command back.
+          '  if isDetached(key) then return detachedHeld >= tonumber(ARGV[4]) - 1 end',
           '  local parent = parentOf(key)',
           '  if parent then return busy[parent] == true end',
           '  return busyChildren[key] == true',
@@ -130,7 +142,7 @@ export class BridgeWorkspaceSlots {
           '  local parent = parentOf(workspace)',
           '  local held = conflicts(workspace) or (parent ~= nil and waitingCheckouts[parent] == true)',
           '  if not held then selected = id; break end',
-          '  if parent == nil then waitingCheckouts[workspace] = true end',
+          '  if parent == nil and not isDetached(workspace) then waitingCheckouts[workspace] = true end',
           'end',
           'if selected ~= ARGV[2] then return -1 end',
           "redis.call('HSET', KEYS[1], 'a:' .. free, ARGV[2], 'i:' .. free, ARGV[1], 'w:' .. free, ARGV[3], 'e:' .. free, ARGV[5])",

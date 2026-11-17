@@ -153,6 +153,8 @@ export interface SandboxWorkspaceToolsOptions {
   commandWorkspaces: string[];
   /** Optional execution-scoped languages supplied by the same command sandbox. */
   programmaticLanguages?: BridgeWorkspaceToolCapabilities['programmaticLanguages'];
+  /** Command request features the command sandbox itself can honor. */
+  commandFeatures?: BridgeWorkspaceToolCapabilities['commandFeatures'];
 }
 
 const MAX_SEARCH_CANDIDATE_BYTES = 1024 * 1024;
@@ -2618,6 +2620,9 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
       ...(base.listFileFeatures != null
         ? { listFileFeatures: base.listFileFeatures }
         : {}),
+      ...(options.commandFeatures?.length
+        ? { commandFeatures: [...options.commandFeatures] }
+        : {}),
       ...(options.programmaticLanguages?.length
         ? { programmaticLanguages: [...options.programmaticLanguages] }
         : {}),
@@ -2654,6 +2659,9 @@ export class SandboxWorkspaceTools implements WorkspaceToolExecutor {
     }
     if (request.environmentAction) {
       throw new WorkspaceToolError('Environment action was not resolved by this worker', 'INVALID_REQUEST');
+    }
+    if (request.detached === true && !this.capabilities.commandFeatures?.includes('detached')) {
+      throw new WorkspaceToolError('Detached commands are unavailable in this command sandbox', 'INVALID_REQUEST');
     }
     if (!this.commandWorkspaces.has(request.workspaceId)) {
       throw new WorkspaceToolError(
