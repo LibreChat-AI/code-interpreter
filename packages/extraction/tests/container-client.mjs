@@ -72,6 +72,21 @@ assert.equal(
         .segments[0].text,
     'Compressed page text'
 );
+const wrappedTable = await send(
+    'pdf',
+    readFileSync(`${fixtures}/wrapped-table.pdf`)
+);
+assert.equal(wrappedTable.status, 200);
+assert.equal(wrappedTable.value.segments.length, 1);
+assert.equal(wrappedTable.value.segments[0].kind, 'page');
+assert.equal(wrappedTable.value.segments[0].index, 1);
+assert.deepEqual(wrappedTable.value.segments[0].text.trim().split(/\s+/), [
+    'Row',
+    'Alpha',
+    'Beta',
+    'Gamma',
+    'Delta',
+]);
 const docx = await send('docx', readFileSync(`${fixtures}/body.docx`));
 assert.equal(docx.status, 200);
 assert.deepEqual(docx.value.segments, [
