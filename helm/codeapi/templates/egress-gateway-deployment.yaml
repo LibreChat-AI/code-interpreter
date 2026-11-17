@@ -67,12 +67,12 @@ spec:
             - name: CODEAPI_EGRESS_GRANT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: codeapi-egress-grant-secret
             - name: CODEAPI_INTERNAL_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: codeapi-internal-service-token
             - name: REDIS_HOST
               value: {{ include "codeapi.redis.host" . }}
@@ -81,7 +81,7 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "codeapi.fullname" . }}-secrets
+                  name: {{ include "codeapi.secretName" . }}
                   key: redis-password
           livenessProbe:
             httpGet:

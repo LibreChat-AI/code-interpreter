@@ -14,6 +14,12 @@ global:
   # Storage class for persistent volumes
   storageClass: ""
 
+# Name of an existing Secret to use instead of rendering one from the values
+# below, so that no secret values need to be passed to Helm. It must contain the
+# keys listed in README.md "Using an existing Secret". The Redis subchart reads
+# its password separately, so also set redis.auth.existingSecret to the same name.
+existingSecret: ""
+
 # Shared token for internal service-to-service requests between the public API,
 # file-server, tool-call-server, worker, and sandbox API. Override for every
 # production install.
