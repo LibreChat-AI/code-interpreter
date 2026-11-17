@@ -168,6 +168,10 @@ spec:
     - ports:
         - protocol: TCP
           port: {{ .Values.api.service.port }}
+      {{- with (.Values.networkPolicy.api | default dict).ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
   egress:
     - to:
         - namespaceSelector: {}
