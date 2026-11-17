@@ -71,6 +71,32 @@ from pypdf.generic import (
     ArrayObject, DecodedStreamObject, DictionaryObject, EncodedStreamObject,
     NameObject, NumberObject,
 )
+def wrapped_table_pdf():
+    # Adjacent cells wrap above and below the row label's baseline. Keep every
+    # word separate even when the extractor keeps the fragments on one line.
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    font = writer._add_object(DictionaryObject({
+        NameObject('/Type'): NameObject('/Font'), NameObject('/Subtype'): NameObject('/Type1'),
+        NameObject('/BaseFont'): NameObject('/Helvetica'),
+        NameObject('/Encoding'): NameObject('/WinAnsiEncoding'),
+    }))
+    page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+    stream = DecodedStreamObject()
+    stream.set_data(
+        b'BT /F1 10 Tf '
+        b'1 0 0 1 72 700 Tm (Row) Tj '
+        b'1 0 0 1 160 706 Tm (Alpha) Tj '
+        b'1 0 0 1 160 694 Tm (Beta) Tj '
+        b'1 0 0 1 240 706 Tm (Gamma) Tj '
+        b'1 0 0 1 240 694 Tm (Delta) Tj ET'
+    )
+    page[NameObject('/Contents')] = writer._add_object(stream)
+    with (root / 'wrapped-table.pdf').open('wb') as file:
+        writer.write(file)
+
+wrapped_table_pdf()
+
 for name, mode in [('form-limit.pdf', 'limit'), ('form-filter.pdf', 'filter'), ('form-valid.pdf', 'valid')]:
     writer = PdfWriter()
     writer.append(root / 'pages.pdf')
