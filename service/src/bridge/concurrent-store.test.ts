@@ -176,7 +176,7 @@ test('late quarantine after confirmed cleanup cannot fence a newer assignment', 
     undefined,
     0,
   ))!;
-  await store.settle(
+  await expect(store.settle(
     workerId,
     assignment.assignmentId,
     {
@@ -190,7 +190,7 @@ test('late quarantine after confirmed cleanup cannot fence a newer assignment', 
     undefined,
     undefined,
     true,
-  );
+  )).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
   await settle(next);
   await expect(second).resolves.toMatchObject({ status: 'rejected' });
 });
