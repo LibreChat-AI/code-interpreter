@@ -99,6 +99,27 @@ assert.deepEqual(docx.value.segments, [
 const form = await send('pdf', readFileSync(`${fixtures}/form-valid.pdf`));
 assert.equal(form.status, 200);
 assert.match(form.value.segments[0].text, /Form content/);
+for (const filter of [
+    'Fl',
+    'FlateDecode',
+    'AHx',
+    'ASCIIHexDecode',
+    'A85',
+    'ASCII85Decode',
+]) {
+    for (const shape of ['scalar', 'array']) {
+        const name = `filter-${filter}-${shape}.pdf`;
+        const response = await send('pdf', readFileSync(`${fixtures}/${name}`));
+        assert.equal(response.status, 200, name);
+        assert.deepEqual(response.value.segments, result.value.segments, name);
+    }
+}
+for (const filter of ['Fl', 'AHx', 'A85']) {
+    const name = `filter-form-${filter}.pdf`;
+    const response = await send('pdf', readFileSync(`${fixtures}/${name}`));
+    assert.equal(response.status, 200, name);
+    assert.deepEqual(response.value.segments, form.value.segments, name);
+}
 const nested = await send('docx', readFileSync(`${fixtures}/nested.docx`));
 assert.equal(nested.status, 200);
 assert.match(
@@ -211,6 +232,10 @@ for (const [name, expected] of [
     assert.equal(response.value.segments[0].text, expected, name);
 }
 const rejectedFixtures = [
+    ['filter-limit-scalar.pdf', 'pdf', 'DECOMPRESSION_LIMIT'],
+    ['filter-limit-array.pdf', 'pdf', 'DECOMPRESSION_LIMIT'],
+    ['filter-unsupported.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
+    ['filter-chain.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
     ['font-replacement.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
     ['font-partial-simple.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
     ['font-no-resources.pdf', 'pdf', 'UNSUPPORTED_ENCODING'],
