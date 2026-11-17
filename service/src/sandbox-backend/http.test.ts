@@ -14,7 +14,16 @@ type CapturedRequest = {
 
 let server: ReturnType<typeof Bun.serve>;
 let captured: CapturedRequest[] = [];
-let nextResponse: { status: number; body: unknown; delayMs?: number; location?: string } = { status: 200, body: {} };
+type TestResponse = {
+  status: number;
+  body: unknown;
+  delayMs?: number;
+  location?: string;
+  headers?: Record<string, string>;
+};
+
+let nextResponse: TestResponse = { status: 200, body: {} };
+let responseSequence: TestResponse[] = [];
 
 const savedEndpoint = env.SANDBOX_ENDPOINT;
 
@@ -28,12 +37,13 @@ beforeAll(() => {
         rawBody: await req.text(),
         headers: Object.fromEntries(req.headers.entries()),
       });
-      if (nextResponse.delayMs) {
-        await new Promise((resolve) => setTimeout(resolve, nextResponse.delayMs));
+      const response = responseSequence.shift() ?? nextResponse;
+      if (response.delayMs !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, response.delayMs));
       }
-      return new Response(JSON.stringify(nextResponse.body), {
-        status: nextResponse.status,
-        headers: { 'Content-Type': 'application/json', ...(nextResponse.location ? { Location: nextResponse.location } : {}) },
+      return new Response(JSON.stringify(response.body), {
+        status: response.status,
+        headers: { 'Content-Type': 'application/json', ...response.headers, ...(response.location !== undefined ? { Location: response.location } : {}) },
       });
     },
   });
@@ -48,6 +58,7 @@ afterAll(() => {
 afterEach(() => {
   captured = [];
   nextResponse = { status: 200, body: {} };
+  responseSequence = [];
 });
 
 function payloadBody(): t.PayloadBody {
@@ -149,6 +160,58 @@ describe('HttpSandboxBackend', () => {
         expect(error.response?.data).toEqual({ message: 'sandbox exploded' });
       }
     }
+  });
+
+  test('retries an explicit runner_draining response before execution', async () => {
+    responseSequence = [
+      {
+        status: 503,
+        body: { error: 'runner_draining', message: 'Sandbox runner is draining for shutdown' },
+        headers: { 'Retry-After': '0' },
+      },
+      {
+        status: 200,
+        body: { session_id: 'sess_exec_1', language: 'python', version: '3.14.4', files: [] },
+      },
+    ];
+
+    const result = await new HttpSandboxBackend().execute(request(), context());
+
+    expect(captured).toHaveLength(2);
+    expect(result).toEqual({
+      session_id: 'sess_exec_1',
+      language: 'python',
+      version: '3.14.4',
+      files: [],
+    });
+  });
+
+  test('does not retry a generic sandbox 503', async () => {
+    nextResponse = { status: 503, body: { error: 'sandbox_execution_failed' } };
+
+    await expect(new HttpSandboxBackend().execute(request(), context())).rejects.toMatchObject({
+      response: { status: 503 },
+    });
+    expect(captured).toHaveLength(1);
+  });
+
+  test('bounds retries when every runner rejects admission', async () => {
+    nextResponse = { status: 503, body: { error: 'runner_draining' }, headers: { 'Retry-After': '0' } };
+    await expect(new HttpSandboxBackend().execute(request(), context())).rejects.toMatchObject({
+      response: { status: 503 },
+    });
+    expect(captured).toHaveLength(3);
+  });
+
+  test('cancellation interrupts the retry delay without dispatching another execution', async () => {
+    nextResponse = { status: 503, body: { error: 'runner_draining' }, headers: { 'Retry-After': '999' } };
+    const controller = new AbortController();
+    const pending = new HttpSandboxBackend().execute(request(), context({ signal: controller.signal }));
+    for (let i = 0; i < 100 && captured.length === 0; i++) await Bun.sleep(2);
+    await Bun.sleep(10);
+    controller.abort(new Error('cancelled during drain retry'));
+    await expect(pending).rejects.toThrow('cancelled during drain retry');
+    expect(captured).toHaveLength(1);
   });
 
   test('propagates the worker abort signal as an axios cancellation', async () => {

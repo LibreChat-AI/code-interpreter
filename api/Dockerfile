@@ -255,6 +255,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     libkrun \
     socat \
     curl \
+    openssl \
     util-linux \
     grep \
     gawk \
@@ -268,8 +269,9 @@ COPY --from=nsjail-builder /usr/local/bin/sandbox-rootfs-setup /sandbox-rootfs-s
 COPY launcher/entrypoint.sh /usr/local/bin/launcher-entrypoint.sh
 COPY docker/start-direct-sandbox.sh /usr/local/bin/start-direct-sandbox.sh
 COPY docker/sandbox-runner-healthcheck.sh /usr/local/bin/sandbox-runner-healthcheck.sh
+COPY docker/sandbox-runner-drain.sh /usr/local/bin/sandbox-runner-drain.sh
 COPY docker/sandbox-entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/launcher-entrypoint.sh /usr/local/bin/start-direct-sandbox.sh /usr/local/bin/sandbox-runner-healthcheck.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/launcher-entrypoint.sh /usr/local/bin/start-direct-sandbox.sh /usr/local/bin/sandbox-runner-healthcheck.sh /usr/local/bin/sandbox-runner-drain.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 2000/tcp
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

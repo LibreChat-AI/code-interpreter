@@ -49,6 +49,28 @@ use it outside local development.
 
 ## Production deployment notes
 
+**Runner shutdown.** Set `workerSandbox.sandboxRunner.gracefulDrain.enabled=true`
+to stop accepting executions before termination. Readiness fails during drain;
+liveness keeps the existing workspace, file-descriptor, and guest-clock checks.
+The preStop hook and SIGTERM share one drain deadline. Defaults are a 5-second
+minimum wait, a 45-second execution deadline, and a 60-second pod grace period.
+Use the `gracefulDrain` settings rather than environment overrides; the chart
+requires the grace period to exceed the drain deadline by more than 5 seconds.
+The worker retries only a `503` with `error: runner_draining`, at most twice;
+network failures and ambiguous execution results are not retried.
+The advertised retry delay covers the propagation floor; both settings must
+fit the worker's 5-second maximum delay. With defaults, `Retry-After` is 5.
+The preStop exec hook signs a request with a per-pod Ed25519 private key on the
+host. Only its public verifier enters the guest. Remote requests without that
+signature, including signatures from another pod, cannot activate drain.
+
+Validate first in a development cluster: start an execution with a known result,
+terminate its runner while it is active, and confirm the result arrives once,
+readiness fails, new work reaches a ready runner, and the old pod exits within
+its grace period. Repeat with an execution exceeding the drain deadline to
+verify bounded shutdown. Promote to staging, repeat these checks, then promote
+to production. A successful health check alone does not validate active drain.
+
 This chart deploys the full service stack on a single cluster and is the
 supported path for self-hosting. A few things are intentionally left to your
 platform rather than templated here: external ingress/service mesh, KEDA-style
