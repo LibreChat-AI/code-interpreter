@@ -5,6 +5,7 @@ import Redis from 'ioredis';
 import { RedisBridgeStore } from '../bridge/store';
 import { BridgeAdmissionQueue } from '../bridge/admission';
 import type { CodeBridgeAssignment } from '../bridge/store';
+import { workspaceDetachedCommandKey } from '../../../packages/code/src/protocol';
 import type { BridgeRejectedSettlement, WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 import { RedisWorkspaceRequests } from './requests';
 import { workspaceRequestCoordinationScope } from './coordination';
@@ -25,7 +26,7 @@ const queueKey = `codeapi:bridge:v1:worker:${workerId}:admission`;
 // Only a disposable test Redis may be supplied.
 afterEach(async () => { await redis.flushall(); });
 
-async function setup(slots = 1, lanes = false): Promise<RedisWorkspaceRequests> {
+async function setup(slots = 1, lanes = false, detached = false): Promise<RedisWorkspaceRequests> {
   const generation = await bridge.register({ protocolVersion: 1, workerId, incarnationId,
     capabilities: {
       sandboxProfile: 'native-srt', statefulWorkspace: false, runtimes: ['bash'],
@@ -34,7 +35,8 @@ async function setup(slots = 1, lanes = false): Promise<RedisWorkspaceRequests> 
         workspaces: [
           { id: 'primary', ...(lanes ? { workspaceScopes: ['git_linked_worktree' as const] } : {}) },
           { id: 'independent' },
-        ] },
+        ],
+        ...(detached ? { commandFeatures: ['detached' as const] } : {}) },
     },
   });
   if (slots > 1) await bridge.confirmReady(workerId, incarnationId, generation);
@@ -762,4 +764,58 @@ test.each(['quarantined after rejection', 'interrupted'])('an uncertain lane out
   expect(await requests.get(owner, 'request-00000000002')).toMatchObject({
     state: 'failed', error: { code: 'WORKSPACE_QUARANTINED' },
   });
+});
+
+async function completeCommand(assignment: CodeBridgeAssignment): Promise<void> {
+  await bridge.acknowledgeLease(workerId, incarnationId, assignment.assignmentId,
+    assignment.generation, assignment.leaseToken);
+  await bridge.settle(workerId, assignment.assignmentId, {
+    protocolVersion: 1, incarnationId, generation: assignment.generation, leaseToken: assignment.leaseToken,
+    status: 'fulfilled', result: { protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary',
+      exitCode: 0, stdout: assignment.assignmentId, stderr: '', truncated: false, timedOut: false },
+  });
+  await bridge.confirmWorkspaceCleanup(workerId, assignment.assignmentId, rejection(assignment, 'local cleanup confirmed'));
+}
+
+test('a durable detached command runs beside its lane and settles independently', async () => {
+  const requests = await setup(2, true, true);
+  await submitLane(requests, requestId, { operation: 'execute_command', command: 'git status' });
+  await submitLane(requests, 'request-00000000002', { operation: 'execute_command', command: 'npm test', detached: true });
+  await submitLane(requests, 'request-00000000003', { operation: 'list_files' });
+  await tick(requests); await tick(requests);
+  const ordinary = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0))!;
+  const background = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 1))!;
+  expect(ordinary.request).toMatchObject({ command: 'git status', worktree: 'review' });
+  expect(background.request).toMatchObject({ command: 'npm test', worktree: 'review', detached: true });
+  expect(background.assignmentId.startsWith('durable-')).toBe(true);
+  expect((await requests.get(owner, 'request-00000000003'))?.state).toBe('queued');
+
+  const detachedFence = fenceKey(`native-workspace:${workspaceDetachedCommandKey(background.assignmentId)}`);
+  expect(await redis.get(laneFence)).toBe(ordinary.assignmentId);
+  expect(await redis.get(detachedFence)).toBe(background.assignmentId);
+  expect(await redis.ttl(laneFence)).toBe(-1);
+  const fenceTtl = await redis.ttl(detachedFence);
+  expect(fenceTtl).toBeGreaterThan(23 * 60 * 60);
+  expect(fenceTtl).toBeLessThanOrEqual(24 * 60 * 60);
+
+  await completeCommand(ordinary); await tick(requests);
+  expect(await requests.get(owner, requestId)).toMatchObject({ state: 'completed', result: { stdout: ordinary.assignmentId } });
+  expect((await requests.get(owner, 'request-00000000002'))?.state).toBe('admitted');
+  await tick(requests);
+  const queued = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0))!;
+  expect(queued.request).toMatchObject({ operation: 'list_files', worktree: 'review' });
+  expect(await redis.get(laneFence)).toBe(queued.assignmentId);
+  expect(await redis.get(detachedFence)).toBe(background.assignmentId);
+
+  await completeCommand(background); await tick(requests);
+  expect(await requests.get(owner, 'request-00000000002')).toMatchObject({ state: 'completed', result: { stdout: background.assignmentId } });
+  expect(await redis.exists(detachedFence)).toBe(0);
+  expect(await redis.get(laneFence)).toBe(queued.assignmentId);
+});
+
+test('a durable detached command is refused for a worker that does not advertise the feature', async () => {
+  const requests = await setup(2, true);
+  await expect(submitLane(requests, requestId, { operation: 'execute_command', command: 'npm test', detached: true }))
+    .rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+  expect(await redis.zcard(queueKey)).toBe(0);
 });

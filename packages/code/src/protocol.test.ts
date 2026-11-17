@@ -11,7 +11,9 @@ import {
   isWorkspaceToolErrorCode,
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
+  isWorkspaceDetachedCommandKey,
   WORKSPACE_TOOL_ERROR_CODE_FALLBACKS,
+  workspaceDetachedCommandKey,
   workspaceIsolationKey,
   workspaceIsolationKeysConflict,
   workspaceIsolationParent,
@@ -1047,4 +1049,71 @@ test('workspace capabilities advertise linked-worktree scopes exactly', () => {
   assert.equal(isValidBridgeWorkerCapabilities(capabilities(['git_worktree'])), false);
   assert.equal(isValidBridgeWorkerCapabilities(capabilities([])), false);
   assert.equal(isValidBridgeWorkerCapabilities(capabilities('git_linked_worktree')), false);
+});
+
+test('command requests accept detached only as true and never with an environment action', () => {
+  const base = { protocolVersion: 1, operation: 'execute_command', workspaceId: 'repo', command: 'npm test' };
+  assert.equal(isWorkspaceToolRequest(base), true);
+  assert.equal(isWorkspaceToolRequest({ ...base, detached: true }), true);
+  assert.equal(isWorkspaceToolRequest({ ...base, detached: true, worktree: 'task-a', timeoutMs: 90_000 }), true);
+  assert.equal(isWorkspaceToolRequest({ ...base, detached: true, workspaceInstanceId: 'a'.repeat(64) }), true);
+  for (const detached of [false, 'true', 1, 0, null, {}, []]) {
+    assert.equal(isWorkspaceToolRequest({ ...base, detached }), false, JSON.stringify(detached));
+  }
+  const environmentAction = { name: 'test', fingerprint: 'f'.repeat(64) };
+  assert.equal(isWorkspaceToolRequest({ ...base, environmentAction }), true);
+  assert.equal(isWorkspaceToolRequest({ ...base, environmentAction, detached: true }), false);
+  assert.equal(
+    isWorkspaceToolRequest({ protocolVersion: 1, operation: 'read_file', workspaceId: 'repo', path: 'README.md', detached: true }),
+    false,
+  );
+});
+
+test('workspace capabilities advertise the detached command feature exactly', () => {
+  const capabilities = (operations: string[], commandFeatures: unknown) => ({
+    statefulWorkspace: false,
+    sandboxProfile: 'anthropic-srt',
+    runtimes: [],
+    workspaceTools: {
+      protocolVersion: 1,
+      operations,
+      workspaces: [{ id: 'repo' }],
+      commandFeatures,
+    },
+  });
+  assert.equal(isValidBridgeWorkerCapabilities(capabilities(['execute_command'], ['detached'])), true);
+  assert.equal(isValidBridgeWorkerCapabilities(capabilities(['read_file', 'execute_command'], undefined)), true);
+  assert.equal(isValidBridgeWorkerCapabilities(capabilities(['read_file'], ['detached'])), false);
+  for (const commandFeatures of [[], ['lane_git'], ['detached', 'detached'], 'detached', null, [true]]) {
+    assert.equal(
+      isValidBridgeWorkerCapabilities(capabilities(['execute_command'], commandFeatures)),
+      false,
+      JSON.stringify(commandFeatures),
+    );
+  }
+});
+
+test('a detached command key never equals or nests with a checkout or lane key', () => {
+  const instanceId = 'a'.repeat(64);
+  const detached = workspaceDetachedCommandKey('assignment-1');
+  const others = [
+    'repo',
+    'assignment-1',
+    workspaceIsolationKey('repo', instanceId),
+    workspaceIsolationKey('repo', undefined, 'task-a'),
+    workspaceIsolationKey('repo', instanceId, 'task-a'),
+    workspaceIsolationKey('repo', undefined, 'assignment-1'),
+    workspaceDetachedCommandKey('assignment-2'),
+  ];
+  assert.equal(isWorkspaceDetachedCommandKey(detached), true);
+  assert.equal(workspaceIsolationParent(detached), undefined);
+  assert.equal(workspaceIsolationKeysConflict(detached, detached), true);
+  for (const other of others) {
+    assert.notEqual(detached, other);
+    assert.equal(workspaceIsolationKeysConflict(detached, other), false, JSON.stringify(other));
+    assert.equal(workspaceIsolationKeysConflict(other, detached), false, JSON.stringify(other));
+  }
+  for (const other of others.slice(0, -1)) {
+    assert.equal(isWorkspaceDetachedCommandKey(other), false, JSON.stringify(other));
+  }
 });

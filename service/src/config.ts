@@ -429,6 +429,12 @@ export const env = {
    */
   BRIDGE_LANE_GIT: process.env.CODEAPI_BRIDGE_LANE_GIT === 'true',
   /**
+   * Offer `detached` commands to workers: an `execute_command` marked `detached` holds a
+   * worker slot but not its worktree. On by default wherever more than one workspace lease
+   * slot is allowed; set to `false` to keep every command serialized with its worktree.
+   */
+  BRIDGE_DETACHED_COMMANDS: process.env.CODEAPI_BRIDGE_DETACHED_COMMANDS !== 'false',
+  /**
    * Largest stored object relayed into a worker by `import_file`. The operation
    * is offered only when EGRESS_GATEWAY_URL can mint its one-object grant.
    */

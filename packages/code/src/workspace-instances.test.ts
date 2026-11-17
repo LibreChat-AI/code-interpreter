@@ -6,11 +6,14 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 
-import { GitWorktreeWorkspaceTools } from './workspace-instances.js';
+import { NativeWorkspaceCommandPool } from './native-pool.js';
+import { GitWorktreeWorkspaceTools, internalWorkspaceId } from './workspace-instances.js';
 import { LocalWorkspaceTools } from './workspace.js';
 import { GitWorktreeManager } from './worktrees.js';
 import { readRepositoryInstructions } from './instructions.js';
 import { captureWorkspaceRootIdentity } from './root-identity.js';
+
+import type { WorkspaceExecuteCommandRequest } from './protocol.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -231,4 +234,87 @@ test('leaves legacy requests on the selected source workspace', async (t) => {
   });
   assert.equal(result.operation, 'read_file');
   assert.equal(result.content, 'source');
+});
+
+test('a detached conversation command runs in its own executor for the conversation worktree', async (t) => {
+  const fixture = await repository();
+  t.after(() => rm(fixture.parent, { recursive: true, force: true }));
+  const delegate = await LocalWorkspaceTools.create({
+    repositoryInstructions: false,
+    workspaces: [{ id: 'primary', root: fixture.root, writable: true }],
+  });
+  const manager = new GitWorktreeManager({
+    maxCount: 4,
+    root: join(fixture.parent, 'instances'),
+    sources: new Map([['primary', await source(fixture.root)]]),
+  });
+  const executors: Array<{ root: string; requests: WorkspaceExecuteCommandRequest[]; closed: boolean }> = [];
+  let releaseBackground!: () => void;
+  const backgroundFinished = new Promise<void>((resolve) => { releaseBackground = resolve; });
+  let backgroundStarted!: () => void;
+  const backgroundRunning = new Promise<void>((resolve) => { backgroundStarted = resolve; });
+  const commandPool = new NativeWorkspaceCommandPool(
+    new Map([['primary', { workspaceRoot: fixture.root }]]),
+    2,
+    (options) => {
+      const executor = { root: options.workspaceRoot, requests: [] as WorkspaceExecuteCommandRequest[], closed: false };
+      executors.push(executor);
+      return {
+        async prepare() {},
+        async close() {
+          executor.closed = true;
+        },
+        async execute(request) {
+          executor.requests.push(request);
+          if (request.command === 'npm test') {
+            backgroundStarted();
+            await backgroundFinished;
+          }
+          return { ...request, stdout: request.command, stderr: '', exitCode: 0, timedOut: false, truncated: false };
+        },
+      };
+    },
+  );
+  const tools = new GitWorktreeWorkspaceTools({
+    commandPool,
+    delegate,
+    manager,
+    sources: new Map([
+      ['primary', { command: { workspaceRoot: fixture.root }, repositoryInstructions: false, writable: true }],
+    ]),
+  });
+  const instanceId = 'c'.repeat(64);
+  const command = {
+    protocolVersion: 1 as const,
+    operation: 'execute_command' as const,
+    workspaceId: 'primary',
+    workspaceInstanceId: instanceId,
+  };
+  const id = internalWorkspaceId('primary', instanceId);
+
+  const background = tools.execute({ ...command, command: 'npm test', detached: true });
+  await backgroundRunning;
+  const ordinary = await tools.execute({ ...command, command: 'git status' });
+  assert.equal(ordinary.workspaceId, 'primary');
+  const instance = await manager.resolve('primary', instanceId);
+  assert.deepEqual(executors, [
+    {
+      root: instance.root,
+      requests: [{ protocolVersion: 1, operation: 'execute_command', workspaceId: id, command: 'npm test' }],
+      closed: false,
+    },
+    {
+      root: instance.root,
+      requests: [{ protocolVersion: 1, operation: 'execute_command', workspaceId: id, command: 'git status' }],
+      closed: false,
+    },
+  ]);
+  await assert.rejects(commandPool.unregisterRoot(id), /still executing/);
+
+  releaseBackground();
+  const result = await background;
+  assert.equal(result.workspaceId, 'primary');
+  await commandPool.unregisterRoot(id);
+  assert.deepEqual(executors.map((executor) => executor.closed), [true, true]);
+  await commandPool.close();
 });

@@ -31,9 +31,10 @@ import {
   defaultBridgeIdentityPath,
   defaultWorkspaceQuarantinePath,
   defaultWorkspacePath,
+  detachedWorkspaceMutationQuarantineDirectory,
   ensurePrivateWorkspaceDirectory,
   loadBridgeIdentity,
-  loadWorkspaceMutationQuarantine,
+  loadWorkspaceMutationQuarantines,
   saveBridgeIdentity,
   saveWorkspaceMutationQuarantine,
   prepareEnvironmentPreparationDirectory,
@@ -47,7 +48,7 @@ import {
 } from './runtime.js';
 import { RuntimeWorkspaceCommandSandbox } from './workspace-runtime.js';
 import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
-import { NativeWorkspaceCommandPool } from './native-pool.js';
+import { NativeWorkspaceCommandPool, detachedCommandsEnabled } from './native-pool.js';
 import { GitWorktreeWorkspaceTools, internalWorkspaceId } from './workspace-instances.js';
 import { LaneGitWorkspaceTools, ownsGitMetadata, ownsLinkedWorktreeMetadata } from './lane-git.js';
 import { LINKED_WORKTREE_DIRECTORY, LinkedWorktreeWorkspaceTools, verifyLinkedWorktree } from './linked-worktrees.js';
@@ -856,6 +857,10 @@ async function run(
       }),
     ]),
   );
+  const rootQuarantineStatePaths = [...rootQuarantinePaths.values()].flatMap((path) => [
+    path,
+    detachedWorkspaceMutationQuarantineDirectory(path),
+  ]);
   for (const path of setupProtectedPaths) {
     const namespace = await lstat(path).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') return undefined;
@@ -885,13 +890,13 @@ async function run(
   })));
   await assertEnvironmentResourceIsolation(environments.flatMap(environment => environment.resources ?? []), roots.map(root => root.root), [
     identityPath, ...setupProtectedPaths, preparationDirectory, github.privateKeyPath,
-    ...environments.map(environment => environment.path), ...rootQuarantinePaths.values(),
+    ...environments.map(environment => environment.path), ...rootQuarantineStatePaths,
   ].filter((path): path is string => path != null));
   await assertEnvironmentDefinitionsOutsideRoots(resourceRoots, roots);
   const snapshotStores = environments.flatMap(environment => environment.snapshotStore ? [environment.snapshotStore] : []);
   await assertEnvironmentResourceIsolation(snapshotStores.map(store => ({ kind: 'npm-cache' as const, path: store.store, access: 'read-only' as const })), roots.map(root => root.root), [
     identityPath, ...setupProtectedPaths, preparationDirectory, github.privateKeyPath, ...environments.map(environment => environment.path),
-    ...rootQuarantinePaths.values(), ...environments.flatMap(environment => (environment.resources ?? []).map(resource => resource.path)),
+    ...rootQuarantineStatePaths, ...environments.flatMap(environment => (environment.resources ?? []).map(resource => resource.path)),
   ].filter((path): path is string => path != null));
   await assertEnvironmentDefinitionsOutsideRoots(snapshotStores.map(store => ({ path: store.store, sourceParents: store.controlPaths,
     definition: { name: 'dependency-store', root: store.store }, fingerprint: '' })), roots);
@@ -1139,7 +1144,7 @@ async function run(
       ...(environments.some(environment => environment.definition.setup?.reuse) ? [preparationDirectory] : []),
       ...snapshotStores.map(store => store.store),
             ...environments.map(environment => environment.path),
-      ...rootQuarantinePaths.values(),
+      ...rootQuarantineStatePaths,
       github.privateKeyPath,
     ].filter((path): path is string => path != null),
     allowedDomains: commandAllowedDomains,
@@ -1204,6 +1209,12 @@ async function run(
           )
         : new NativeProcessWorkspaceCommandSandbox(nativeOptionsForWorkspace(roots[0].id))
       : undefined;
+  const detachedCommands = detachedCommandsEnabled({
+    optOut: args.includes('--no-detached-commands'),
+    enabled: process.env.LIBRECHAT_CODE_DETACHED_COMMANDS,
+    pooled: nativeCommandSandbox instanceof NativeWorkspaceCommandPool,
+    workspaceLeaseSlots,
+  });
   if (allowWorkspaceCommands && workspaceTools) {
     workspaceTools = new SandboxWorkspaceTools({
       workspaceTools,
@@ -1211,6 +1222,7 @@ async function run(
       ...(nativeProgrammaticEnabled
         ? { programmaticLanguages: ['bash'] }
         : {}),
+      ...(detachedCommands ? { commandFeatures: ['detached'] } : {}),
       commandSandbox:
         nativeCommandSandbox ??
         new RuntimeWorkspaceCommandSandbox({
@@ -1408,7 +1420,7 @@ async function run(
                     workerId,
                     workspaceRoot: join(source.root, LINKED_WORKTREE_DIRECTORY, worktree),
                   });
-            return (await loadWorkspaceMutationQuarantine(path)) != null;
+            return (await loadWorkspaceMutationQuarantines(path)).length > 0;
           },
           log(level, message) {
             if (level === 'debug' && !debugLogs) return;
@@ -1633,8 +1645,7 @@ async function run(
         roots.length === 1
           ? {
               async assertAvailable() {
-                              const record =
-                                  await loadWorkspaceMutationQuarantine(
+                const [record] = await loadWorkspaceMutationQuarantines(
                   mutationQuarantinePath,
                 );
                 if (record != null) {

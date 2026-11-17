@@ -366,6 +366,13 @@ execution.
   (`worktree: <name>`) nests beneath its checkout's key: sibling lanes run
   concurrently, while a lane and its checkout exclude each other, and a lane
   cannot start while its checkout is quarantined.
+- An `execute_command` request marked `detached` takes a slot under a key of
+  its own instead of its worktree's, so other operations there are admitted
+  while it runs and it is admitted while they run. Detached commands may hold
+  at most one slot fewer than the negotiated count. Code API offers the feature
+  only above one slot (`CODEAPI_BRIDGE_DETACHED_COMMANDS=false` opts out) and
+  refuses the field for a worker that does not advertise
+  `commandFeatures: ['detached']`.
 - Workspace tool admission waits for capacity up to 30 seconds without a
   `X-LibreChat-Workspace-Queue-Wait-Ms` header. A caller can advertise a longer
   per-request allowance, bounded by five minutes and any server queue ceiling.

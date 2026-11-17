@@ -15,9 +15,11 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
+    isWorkspaceDetachedCommandKey,
     isWorkspaceMutationOperation,
     isWorkspaceToolRequest,
     isWorkspaceToolResult,
+    workspaceDetachedCommandKey,
     workspaceIsolationKey,
     workspaceIsolationParent,
 } from '../../../packages/code/src/protocol';
@@ -146,6 +148,26 @@ function workspaceFenceParent(fence: string): string | undefined {
     : `${NATIVE_WORKSPACE_FENCE_PREFIX}${parent}`;
 }
 
+/** A detached command's fence belongs to its assignment alone and is never reset by an operator. */
+function isDetachedCommandFence(fence: string | undefined): boolean {
+  return (
+    fence?.startsWith(NATIVE_WORKSPACE_FENCE_PREFIX) === true &&
+    isWorkspaceDetachedCommandKey(fence.slice(NATIVE_WORKSPACE_FENCE_PREFIX.length))
+  );
+}
+
+/** Fences of the worktree a detached command runs in and of the checkout that worktree nests beneath. */
+function detachedCommandWorktreeFences(assignment: StoredAssignment): string[] {
+  const request = assignment.request as WorkspaceToolRequest;
+  const worktree = `${NATIVE_WORKSPACE_FENCE_PREFIX}${workspaceAdmissionId(
+    request.workspaceId,
+    request.workspaceInstanceId,
+    request.worktree,
+  )}`;
+  const parent = workspaceFenceParent(worktree);
+  return parent === undefined ? [worktree] : [worktree, parent];
+}
+
 function workspaceFenceReceiptKey(assignmentId: string): string {
   return `${assignmentKey(assignmentId)}:workspace-fence-owner`;
 }
@@ -173,9 +195,14 @@ function isWorkspaceMutation(request: WorkspaceToolRequest): boolean {
   return isWorkspaceMutationOperation(request.operation);
 }
 
+function isDetachedCommand(request: WorkspaceToolRequest): boolean {
+  return request.operation === 'execute_command' && request.detached === true;
+}
+
 function supportsWorkspaceTool(
   registration: RegisteredBridgeWorker,
   request: WorkspaceToolRequest,
+  detachedCommands: boolean,
 ): boolean {
   const capabilities = registration.capabilities.workspaceTools;
   const workspace = capabilities?.workspaces.find(
@@ -204,6 +231,13 @@ function supportsWorkspaceTool(
   }
   if (request.operation === 'list_files' && request.afterPath !== undefined) {
     return capabilities?.listFileFeatures?.includes('after_path') === true;
+  }
+  if (isDetachedCommand(request)) {
+    return (
+      detachedCommands &&
+      (registration.capabilities.workspaceLeaseSlots ?? 1) > 1 &&
+      capabilities.commandFeatures?.includes('detached') === true
+    );
   }
   if (request.operation === 'write_file') {
     const mode = request.overwrite === false ? 'create' : 'replace';
@@ -295,6 +329,17 @@ export function workspaceAdmissionId(
   worktree?: string,
 ): string {
   return workspaceIsolationKey(workspaceId, instanceId, worktree);
+}
+
+/** The key a workspace tool request is admitted and fenced under. A detached command is
+ * keyed by its own assignment, so it neither waits for nor holds its worktree. */
+export function workspaceToolAdmissionId(
+  request: WorkspaceToolRequest,
+  assignmentId: string,
+): string {
+  return isDetachedCommand(request)
+    ? workspaceDetachedCommandKey(assignmentId)
+    : workspaceAdmissionId(request.workspaceId, request.workspaceInstanceId, request.worktree);
 }
 
 function workerKey(workerId: string): string {
@@ -483,6 +528,8 @@ export class RedisBridgeStore {
     private readonly maxWorkspaceLeaseSlots = 1,
     /** Accept `laneGit` on command results and offer `lane_git` at registration. Off by default. */
     public readonly laneGitEnabled = false,
+    /** Schedule `detached` commands apart from their worktree. On by default; needs more than one slot. */
+    private readonly detachedCommandsEnabled = true,
   ) {
     if (
       !Number.isSafeInteger(maxWorkspaceLeaseSlots) ||
@@ -497,6 +544,11 @@ export class RedisBridgeStore {
 
   workspaceLeaseCapacity(requested = 1): number {
     return Math.min(this.maxWorkspaceLeaseSlots, requested);
+  }
+
+  /** Whether registration offers `detached`: one slot always stays free of detached commands. */
+  get detachedCommandsOffered(): boolean {
+    return this.detachedCommandsEnabled && this.maxWorkspaceLeaseSlots > 1;
   }
 
   private async dispatchCommand<T>(
@@ -831,7 +883,7 @@ export class RedisBridgeStore {
       throw new BridgeStoreError('WORKER_UNAUTHORIZED', 'Code environment is not authorized for this tenant');
     }
     if ((registration.capabilities.workspaceLeaseSlots ?? 1) > this.maxWorkspaceLeaseSlots ||
-      !supportsWorkspaceTool(registration, args.request)) {
+      !supportsWorkspaceTool(registration, args.request, this.detachedCommandsOffered)) {
       throw new BridgeStoreError('WORKER_MISMATCH', 'Code environment does not support the requested workspace operation');
     }
     return registration;
@@ -855,7 +907,7 @@ export class RedisBridgeStore {
         throw new BridgeStoreError('WORKER_FENCED', 'Code environment changed while the request was waiting');
       }
       const admission = new BridgeAdmissionQueue(this.redis);
-      const workspace = workspaceAdmissionId(record.request.workspaceId, record.request.workspaceInstanceId, record.request.worktree);
+      const workspace = workspaceToolAdmissionId(record.request, record.id);
       const capacity = registration.capabilities.workspaceLeaseSlots ?? 1;
       if (capacity === 1 && !await admission.isHead(record.workerId, record.id)) return;
       const expiresAtMs = Date.now() + record.executionTimeoutMs;
@@ -890,7 +942,7 @@ export class RedisBridgeStore {
       if (ready.registration.incarnationId !== registration.incarnationId ||
         ready.registration.identityId !== registration.identityId ||
         ready.registration.binding?.tenantId !== registration.binding?.tenantId ||
-        !supportsWorkspaceTool(ready.registration, record.request)) {
+        !supportsWorkspaceTool(ready.registration, record.request, this.detachedCommandsOffered)) {
         throw new BridgeStoreError('WORKER_FENCED', 'Code environment changed before admission');
       }
       await this.enqueueForActiveIncarnation(assignment, assignmentTtlSeconds(Date.parse(assignment.expiresAt)), ready.readyToken, guard);
@@ -1059,7 +1111,7 @@ export class RedisBridgeStore {
     }
     if (
       args.workspaceRequest != null &&
-      !supportsWorkspaceTool(registration, args.workspaceRequest)
+      !supportsWorkspaceTool(registration, args.workspaceRequest, this.detachedCommandsOffered)
     ) {
       throw new BridgeStoreError(
         'WORKER_MISMATCH',
@@ -1113,14 +1165,16 @@ export class RedisBridgeStore {
       args.workspaceRequest?.workspaceInstanceId ?? workspaceInstanceId(args.body);
     const selectedWorktree =
       args.workspaceRequest?.worktree ?? workspaceWorktree(args.body);
-    const selectedWorkspaceAdmissionId =
-      selectedWorkspaceId == null
-        ? undefined
-        : workspaceAdmissionId(
-            selectedWorkspaceId,
-            selectedWorkspaceInstanceId,
-            selectedWorktree,
-          );
+    let selectedWorkspaceAdmissionId: string | undefined;
+    if (args.workspaceRequest != null) {
+      selectedWorkspaceAdmissionId = workspaceToolAdmissionId(args.workspaceRequest, assignmentId);
+    } else if (selectedWorkspaceId != null) {
+      selectedWorkspaceAdmissionId = workspaceAdmissionId(
+        selectedWorkspaceId,
+        selectedWorkspaceInstanceId,
+        selectedWorktree,
+      );
+    }
     const workspaceSlots =
       selectedWorkspaceId != null &&
       (registration.capabilities.workspaceLeaseSlots ?? 1) > 1
@@ -1241,7 +1295,11 @@ export class RedisBridgeStore {
         }
         if (
           (args.workspaceRequest != null &&
-            !supportsWorkspaceTool(current.registration, args.workspaceRequest)) ||
+            !supportsWorkspaceTool(
+              current.registration,
+              args.workspaceRequest,
+              this.detachedCommandsOffered,
+            )) ||
           (args.workspaceId != null &&
             !supportsWorkspaceProgrammatic(
               current.registration,
@@ -1357,6 +1415,7 @@ export class RedisBridgeStore {
           !supportsWorkspaceTool(
             replacement.registration,
             args.workspaceRequest,
+            this.detachedCommandsOffered,
           )
         ) {
           throw new BridgeStoreError(
@@ -1408,12 +1467,17 @@ export class RedisBridgeStore {
           await boundedCommand(this.redis.eval(
             [
               "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
-              "redis.call('SET', KEYS[1], 'quarantined:' .. ARGV[1])",
+              "if ARGV[2] ~= '' then",
+              "  redis.call('SET', KEYS[1], 'quarantined:' .. ARGV[1], 'EX', ARGV[2])",
+              'else',
+              "  redis.call('SET', KEYS[1], 'quarantined:' .. ARGV[1])",
+              'end',
               'return 1',
             ].join('\n'),
             1,
             workspaceQuarantineKey(args.workerId, assignment.workspaceFence),
             assignment.assignmentId,
+            this.detachedFenceTtlSeconds(assignment),
           ), this.redisCommandTimeoutMs, 'Bridge native workspace finalization quarantine');
         } else if (assignmentWorkspace(assignment) !== undefined) {
           await this.quarantine(
@@ -2162,7 +2226,11 @@ export class RedisBridgeStore {
             // A completed cleanup receipt is terminal: a lost response must
             // not let a late quarantine overwrite a newer root owner.
             "  if redis.call('HGET', KEYS[1], 'localCleanup') == '1' and redis.call('HGET', KEYS[1], 'resultCommitted') == '1' then return 1 end",
-            "  redis.call('SET', KEYS[5], 'quarantined:' .. ARGV[5])",
+            "  if ARGV[9] ~= '' then",
+            "    redis.call('SET', KEYS[5], 'quarantined:' .. ARGV[5], 'EX', ARGV[9])",
+            '  else',
+            "    redis.call('SET', KEYS[5], 'quarantined:' .. ARGV[5])",
+            '  end',
             // Never replace a committed result. Before settlement, terminate the waiter.
             "  redis.call('SET', KEYS[6], ARGV[6], 'EX', ARGV[7], 'NX')",
             'else',
@@ -2200,6 +2268,7 @@ export class RedisBridgeStore {
           JSON.stringify(settlement),
           assignmentOutcomeTtlSeconds(receipt),
           quarantine ? '1' : '0',
+          this.detachedFenceTtlSeconds(receipt),
         ),
         signal,
         'Workspace quarantine fence commit',
@@ -2429,6 +2498,13 @@ export class RedisBridgeStore {
     );
   }
 
+  /** Expiry of a detached command's fence or quarantine receipt; empty for a worktree fence, which never expires. */
+  private detachedFenceTtlSeconds(assignment: AssignmentOwnership): string {
+    return isDetachedCommandFence(assignment.workspaceFence)
+      ? String(assignmentOutcomeTtlSeconds(assignment))
+      : '';
+  }
+
   private async cancel(
     assignmentId: string,
     assignment?: AssignmentOwnership,
@@ -2464,6 +2540,13 @@ export class RedisBridgeStore {
       "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
       'if ARGV[7] ~= "" and redis.call(\'GET\', KEYS[6]) ~= ARGV[7] then return 0 end',
       'if keyCount >= 7 and redis.call(\'EXISTS\', KEYS[7]) == 1 then return -1 end',
+      // A detached command holds no worktree, but still refuses a quarantined one.
+      "if ARGV[9] == 'detached' then",
+      '  for i = 10, keyCount do',
+      "    local held = redis.call('GET', KEYS[i])",
+      "    if held and string.sub(held, 1, 12) == 'quarantined:' then return -1 end",
+      '  end',
+      'end',
       // A lane refuses a quarantined checkout. A checkout reaches enqueue only once no
       // lane beneath it holds a slot, so any lane fence still indexed here is stuck.
       "if ARGV[9] == 'lane' and redis.call('EXISTS', KEYS[10]) == 1 then return -1 end",
@@ -2478,7 +2561,14 @@ export class RedisBridgeStore {
         ? ['redis.call(\'SET\', KEYS[4], ARGV[1], \"PX\", ARGV[5])']
         : []),
       'redis.call(\'SET\', KEYS[5], "1", \"PXAT\", ARGV[6])',
-      'if keyCount >= 7 then redis.call(\'SET\', KEYS[7], ARGV[4]) end',
+      'if keyCount >= 7 then',
+      // Nobody resets a detached command's fence, so it expires with the assignment outcome.
+      "  if ARGV[13] ~= '' then",
+      "    redis.call('SET', KEYS[7], ARGV[4], 'EX', ARGV[13])",
+      '  else',
+      "    redis.call('SET', KEYS[7], ARGV[4])",
+      '  end',
+      'end',
       "if ARGV[9] == 'lane' then redis.call('SADD', KEYS[11], KEYS[7]) end",
       'if keyCount >= 9 then',
       "  local epoch = redis.call('GET', KEYS[9])",
@@ -2524,14 +2614,21 @@ export class RedisBridgeStore {
       expiresAt: assignment.expiresAt,
       durableRequestKey: assignment.durableRequestKey,
     };
-    let fenceScope: '' | 'lane' | 'checkout' = '';
+    let fenceScope: '' | 'lane' | 'checkout' | 'detached' = '';
     if (assignment.workspaceLeaseSlot !== undefined) {
       keys.push(
         workspaceFenceReceiptKey(assignment.assignmentId),
         `${workspaceQuarantineKey(assignment.workerId, assignment.workspaceFence!)}:epoch`,
       );
       const parent = workspaceFenceParent(assignment.workspaceFence!);
-      if (parent !== undefined) {
+      if (isDetachedCommandFence(assignment.workspaceFence)) {
+        keys.push(
+          ...detachedCommandWorktreeFences(assignment).map((fence) =>
+            workspaceQuarantineKey(assignment.workerId, fence),
+          ),
+        );
+        fenceScope = 'detached';
+      } else if (parent !== undefined) {
         const parentFence = workspaceQuarantineKey(assignment.workerId, parent);
         keys.push(parentFence, workspaceLaneFenceIndexKey(parentFence));
         fenceScope = 'lane';
@@ -2568,6 +2665,7 @@ export class RedisBridgeStore {
       keyCount,
       guard?.token ?? '',
       guard == null ? ttlSeconds : assignmentOutcomeTtlSeconds(assignment),
+      this.detachedFenceTtlSeconds(assignment),
     );
     if (Number(result) === -1) {
       throw new BridgeStoreError(
