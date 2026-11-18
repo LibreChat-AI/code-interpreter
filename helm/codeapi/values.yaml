@@ -207,6 +207,8 @@ workerSandbox:
   # nodeSelector/tolerations/affinity below. Use sandboxRunner to place only the
   # untrusted-code tier on KVM-capable nodes.
   serviceWorker:
+    # Defaults to jobTimeout (rounded up to seconds) + 100 seconds.
+    terminationGracePeriodSeconds: null
     # Defaults to workerSandbox.replicaCount when unset.
     # Keep this as fixed HA capacity; scale sandboxRunner for execution throughput.
     replicaCount: null

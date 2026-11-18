@@ -103,6 +103,7 @@ services:
   # Local Service API (combined API + Workers, no auth required)
   # For production, split into api + worker-sandbox pods
   service:
+    stop_grace_period: 400s
     build:
       context: .
       dockerfile: service/Dockerfile.local
@@ -111,6 +112,7 @@ services:
     ports:
       - 3112:3112
     environment:
+      - CODEAPI_SHUTDOWN_TIMEOUT_MS=${CODEAPI_SHUTDOWN_TIMEOUT_MS:-}
       - LOCAL_MODE=${LOCAL_MODE:-true}
       - SANDBOX_ENDPOINT=http://sandbox:2000/api/v2
       - FILE_SERVER_URL=http://file_server:3000
