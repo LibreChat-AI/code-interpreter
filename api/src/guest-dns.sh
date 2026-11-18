@@ -41,7 +41,8 @@ run_guest_command() {
     # DNS separate from /tmp, which the normal API entrypoint mounts later.
     mount -t tmpfs -o size=1m,mode=0755 tmpfs "$root/run" || return 1
     configure_guest_dns "$root" || return 1
-    exec -- "$@"
+    source "$(dirname "${BASH_SOURCE[0]}")/guest-clock.sh"
+    run_clock_synchronized_guest "$root" "$@"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then

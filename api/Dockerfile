@@ -98,6 +98,7 @@ RUN apt-get update && \
     bsdextrautils \
     locales \
     procps \
+    chrony \
     iptables \
     bc \
     file \
@@ -168,6 +169,7 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
 COPY api/src/guest-dns.sh ./guest-dns.sh
+COPY api/src/guest-clock.sh ./guest-clock.sh
 COPY api/src/hosted-app-launcher.sh /usr/local/bin/codeapi-hosted-app-launcher
 RUN chmod +x ./entrypoint.sh /usr/local/bin/codeapi-hosted-app-launcher
 

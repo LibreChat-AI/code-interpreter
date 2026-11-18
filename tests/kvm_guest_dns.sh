@@ -288,6 +288,32 @@ PY
 # The wrapper configures DNS before a custom guest executable, independently
 # of the normal API entrypoint and its later /tmp mount.
 rm -rf "$TEST_DIR/guest/run/codeapi-resolver"
+mkdir -p "$TEST_DIR/guest/sandbox_api/config"
+cp "$ROOT/api/config/guest-chrony.conf" "$TEST_DIR/guest/sandbox_api/config/guest-chrony.conf"
+cat > "$TEST_DIR/bin/chronyd" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+cfg=""
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "-f" ]]; then
+        cfg="$2"
+        shift 2
+    else
+        shift
+    fi
+done
+root="${cfg%/sandbox_api/config/guest-chrony.conf}"
+sock="${root}/run/codeapi-clock/chronyd.sock"
+mkdir -p "$(dirname "$sock")"
+touch "$sock"
+trap 'rm -f "$sock"; exit 0' TERM INT EXIT
+while true; do sleep 0.1; done
+STUB
+cat > "$TEST_DIR/bin/chronyc" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$TEST_DIR/bin/chronyd" "$TEST_DIR/bin/chronyc"
 cat > "$TEST_DIR/bin/mount" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail

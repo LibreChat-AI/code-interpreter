@@ -60,6 +60,7 @@ RUN apt-get update && \
     bsdextrautils \
     locales \
     procps \
+    chrony \
     iptables \
     socat \
     libnl-route-3-200 \
@@ -110,6 +111,7 @@ RUN rm -f /usr/bin/nsenter /usr/bin/unshare /usr/bin/chroot /usr/sbin/chroot \
 
 COPY api/src/entrypoint.sh ./entrypoint.sh
 COPY api/src/guest-dns.sh ./guest-dns.sh
+COPY api/src/guest-clock.sh ./guest-clock.sh
 RUN chmod +x ./entrypoint.sh
 
 # ============================================================================
