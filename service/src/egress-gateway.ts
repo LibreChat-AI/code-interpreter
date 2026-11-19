@@ -696,7 +696,7 @@ app.get('/sessions/:sessionHandle/objects/:objectHandle', async (req, res) => {
       ),
       { redirect: 'error', headers: injectTraceHeaders(internalServiceHeaders(expectedVersion ? { 'X-CodeAPI-Input-Version': expectedVersion } : {})) },
     );
-    const headerOverrides = isOpaqueObjectContentDisposition(
+    const headerOverrides: Record<string, string> = isOpaqueObjectContentDisposition(
       upstream.headers.get('content-disposition'),
       object.id,
     )
