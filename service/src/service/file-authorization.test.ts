@@ -304,6 +304,106 @@ describe('resolveOutputBucketSessionKey', () => {
 });
 
 describe('authorizeRequestedFiles', () => {
+  test('coalesces repeated destinations while preserving distinct names for one object', async () => {
+    const req = request({ tenantId: TENANT_ID, userId: USER_ID });
+    const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
+    const alias = validFile({ name: 'extract/Transport_Phenomena/appendix-a1b2c3.pdf' });
+    const inherited = { ...alias, name: 'extract/Transport Phenomena/appendix.pdf' };
+    await expect(authorizeRequestedFiles({
+      req, files: [alias, inherited, { ...alias }, { ...inherited }], store: ownedStore(sessionKey),
+    })).resolves.toEqual([alias, inherited]);
+  });
+
+  test('keeps distinct destinations even when their object ids match', async () => {
+    const req = request({ tenantId: TENANT_ID, userId: USER_ID });
+    const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
+    const files = [
+      validFile(),
+      validFile({ id: 'file_abcdefghijklmnop', name: 'inputs/second.csv' }),
+      validFile({ storage_session_id: 'sess_abcdefghijklmnop', name: 'inputs/third.csv' }),
+    ];
+    const store = ownedStore(sessionKey);
+    for (const file of files) {
+      store.set(`session:${file.storage_session_id}`, sessionKey);
+      store.set(`upload:${sessionKey}${file.storage_session_id}${file.id}`, 'true');
+    }
+    await expect(authorizeRequestedFiles({ req, files, store })).resolves.toEqual(files);
+  });
+
+  test('selects the last distinct user ref per path without letting an earlier echo replace it', async () => {
+    const req = request({ tenantId: TENANT_ID, userId: USER_ID });
+    const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
+    const earlier = validFile({ name: 'report.py' });
+    const replacement = validFile({
+      name: earlier.name, id: 'file_abcdefghijklmnop', storage_session_id: 'sess_abcdefghijklmnop',
+    });
+    const unrelated = validFile({ id: 'file_0000000000000000', name: 'report.csv' });
+    const store = ownedStore(sessionKey, earlier);
+    for (const file of [replacement, unrelated]) {
+      store.set(`session:${file.storage_session_id}`, sessionKey);
+      store.set(`upload:${sessionKey}${file.storage_session_id}${file.id}`, 'true');
+    }
+    for (const files of [
+      [earlier, unrelated, replacement],
+      [earlier, unrelated, replacement, { ...earlier }],
+    ]) {
+      await expect(authorizeRequestedFiles({ req, files, store })).resolves.toEqual([unrelated, replacement]);
+    }
+    await expect(authorizeRequestedFiles({
+      req, files: [replacement, unrelated, earlier], store,
+    })).resolves.toEqual([unrelated, earlier]);
+    const alias = { ...earlier, name: 'original-report.py' };
+    await expect(authorizeRequestedFiles({
+      req, files: [earlier, alias, replacement, { ...earlier }], store,
+    })).resolves.toEqual([alias, replacement]);
+  });
+
+  test('authorizes superseded user refs before selecting a destination', async () => {
+    const req = request({ tenantId: TENANT_ID, userId: USER_ID });
+    const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
+    for (const unauthorized of [
+      validFile({ storage_session_id: 'sess_abcdefghijklmnop' }),
+      validFile({ id: 'file_abcdefghijklmnop' }),
+    ]) {
+      for (const files of [[unauthorized, validFile()], [validFile(), unauthorized]]) {
+        await expectAuthError(authorizeRequestedFiles({
+          req, files, store: ownedStore(sessionKey),
+        }), 403);
+      }
+    }
+  });
+
+  test('preserves shared input collisions for the sandbox to reject', async () => {
+    const req = request({ tenantId: TENANT_ID, userId: USER_ID });
+    const userSessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
+    for (const scope of [
+      { kind: 'skill' as const, resource_id: SKILL_ID, version: 1 },
+      { kind: 'agent' as const, resource_id: AGENT_ID },
+    ]) {
+      const shared = validFile({ ...scope, storage_session_id: 'sess_abcdefghijklmnop' });
+      const otherShared = { ...shared, id: 'file_abcdefghijklmnop' };
+      const sharedKey = resolveSessionKey(req, { kind: scope.kind, id: scope.resource_id, version: scope.version });
+      const store = ownedStore(userSessionKey);
+      store.set(`session:${shared.storage_session_id}`, sharedKey);
+      for (const file of [shared, otherShared]) {
+        store.set(`upload:${sharedKey}${file.storage_session_id}${file.id}`, 'true');
+      }
+      for (const files of [[shared, validFile()], [validFile(), shared], [shared, otherShared]]) {
+        await expect(authorizeRequestedFiles({ req, files, store })).resolves.toEqual(files);
+      }
+    }
+  });
+
+  test('still rejects an unauthorized scope on a duplicate object', async () => {
+    const req = request({ tenantId: TENANT_ID, userId: USER_ID });
+    const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
+    await expectAuthError(authorizeRequestedFiles({
+      req,
+      files: [validFile(), validFile({ kind: 'agent', resource_id: AGENT_ID })],
+      store: ownedStore(sessionKey),
+    }), 403);
+  });
+
   test('allows files owned by the resolved user sessionKey', async () => {
     const req = request({ tenantId: TENANT_ID, userId: USER_ID });
     const sessionKey = resolveSessionKey(req, { kind: 'user', id: USER_ID });
