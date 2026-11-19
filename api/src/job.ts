@@ -542,7 +542,7 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.ics', '.ical', '.ifb', '.icalendar',
   '.conf', '.env', '.gitignore', '.ini', '.properties', '.toml',
   '.doc', '.docx', '.pdf', '.ppt', '.pptx', '.xls', '.xlsx',
-  '.odt', '.ods', '.odp', '.rtf',
+  '.odt', '.ods', '.odp', '.rtf', '.hwp', '.hwpx',
   '.avif', '.bmp', '.gif', '.ico', '.jpeg', '.jpg', '.png',
   '.tif', '.tiff', '.webp',
   '.eot', '.ttf', '.woff', '.woff2',

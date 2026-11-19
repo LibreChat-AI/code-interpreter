@@ -592,6 +592,21 @@ describe('walkDir / regular file handling', () => {
     expect(names).toEqual(['keep.py']);
   });
 
+  it('keeps Hancom word processor documents', async () => {
+    await fsp.writeFile(path.join(tmpDir, 'report.hwp'), 'hwp');
+    await fsp.writeFile(path.join(tmpDir, 'report.hwpx'), 'hwpx');
+    await fsp.writeFile(path.join(tmpDir, 'UPPER.HWP'), 'hwp');
+
+    const job = makeJob();
+    const internals = asInternals(job);
+    internals.submissionDir = tmpDir;
+
+    await internals.walkDir(tmpDir, 0, new Map());
+
+    const names = internals.generatedFiles.map(f => f.name).sort();
+    expect(names).toEqual(['UPPER.HWP', 'report.hwp', 'report.hwpx']);
+  });
+
   it('keeps supported extensionless output basenames', async () => {
     await fsp.writeFile(path.join(tmpDir, 'Dockerfile'), 'FROM scratch');
     await fsp.mkdir(path.join(tmpDir, 'ci'));
