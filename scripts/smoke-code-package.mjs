@@ -196,7 +196,8 @@ async function checkConsumer(expected) {
     assert.equal(reply.id, 'package-smoke');
     assert.equal(reply.ok, false);
     assert.equal(reply.code, 'COMMAND_UNAVAILABLE');
-    assert.deepEqual(reply.diagnostic, { stage: 'cleanup', reason: 'cleanup_failed' });
+    assert.deepEqual(reply.diagnostic, { stage: 'cleanup', reason: 'cleanup_failed', errorName: 'Error' });
+    assert.equal('errorMessage' in reply, false);
     assert.equal(reply.mutation, false);
     assert.equal(reply.requiresQuarantine, false);
     assert.equal(reply.fatal, false);
