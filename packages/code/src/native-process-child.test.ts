@@ -37,3 +37,41 @@ for (const signal of ['SIGINT', 'SIGHUP', 'SIGTERM'] as const) {
     },
   );
 }
+
+test(
+  'executor replies to a non-workspace failure with its sanitized cause and no message',
+  { skip: process.platform === 'win32', timeout: 10_000 },
+  async (t) => {
+    const child = fork(
+      new URL('./native-process-child.js', import.meta.url),
+      [],
+      {
+        execArgv: [],
+        env: nativeExecutorEnvironment(process.env),
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      },
+    );
+    t.after(() => {
+      child.kill('SIGKILL');
+    });
+    const reply = new Promise<unknown>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('message', resolve);
+    });
+    // An execute before prepare fails with a plain Error, not a WorkspaceToolError.
+    child.send({ id: 'unprepared-execute', type: 'execute' });
+    assert.deepEqual(await reply, {
+      id: 'unprepared-execute',
+      ok: false,
+      diagnostic: {
+        stage: 'dispatch',
+        reason: 'executor_rejected',
+        errorName: 'Error',
+      },
+      code: 'COMMAND_UNAVAILABLE',
+      mutation: false,
+      requiresQuarantine: false,
+      fatal: false,
+    });
+  },
+);

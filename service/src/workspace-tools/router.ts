@@ -15,6 +15,7 @@ import { checkServiceShutDown } from '../lifecycle';
 import {
   isWorkspaceToolRequest,
   isBridgeWorkspaceImportFileRequest,
+  readBridgeCommandFailure,
   BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS,
   BRIDGE_WORKSPACE_IMPORT_FILE_TIMEOUT_MS,
 } from '../../../packages/code/src/protocol';
@@ -290,9 +291,12 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
         if (settlement.errorCode === 'WRITE_LIMIT_EXCEEDED') status = 413;
         if (settlement.errorCode === 'WRITE_UNAVAILABLE') status = 503;
         if (settlement.errorCode === 'EDIT_CONFLICT') status = 409;
+        const commandFailure = readBridgeCommandFailure(settlement.commandFailure);
+        outcome.commandFailure = commandFailure;
         res.status(status).json({
           error: settlement.error,
           code: settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED',
+          ...(commandFailure !== undefined ? { commandFailure } : {}),
         });
         return;
       }

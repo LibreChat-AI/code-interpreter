@@ -8,6 +8,8 @@ import type { CodeBridgeAssignment } from '../bridge/store';
 import { workspaceDetachedCommandKey } from '../../../packages/code/src/protocol';
 import type { BridgeRejectedSettlement, WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 import { RedisWorkspaceRequests } from './requests';
+import type { StoredWorkspaceRequest } from './requests';
+import { admissionTransitionAttributes } from './outcome';
 import { workspaceRequestCoordinationScope } from './coordination';
 import type { WorkspaceRequestCoordinationPolicy } from './coordination';
 
@@ -73,6 +75,100 @@ async function mutateRecord(update: (record: Record<string, unknown>) => void): 
   update(record);
   await redis.hset(key, 'record', JSON.stringify(record));
 }
+
+const commandFailure = { stage: 'dispatch', reason: 'executor_rejected', osCode: 'EAGAIN', errorName: 'Error' } as const;
+
+async function rejectCommand(
+  extra: Record<string, unknown>,
+  transitions: StoredWorkspaceRequest[] = [],
+): Promise<{ requests: RedisWorkspaceRequests; assignment: CodeBridgeAssignment; rejection: BridgeRejectedSettlement }> {
+  await setup();
+  const requests = new RedisWorkspaceRequests(redis, bridge, record => { transitions.push(record); });
+  await requests.submit({ owner, requestId, workerId, requireTenantBinding: false,
+    request: { protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo token=secret' },
+    queueWaitMs: 300_000, executionTimeoutMs: 35_000,
+  });
+  await tick(requests);
+  const assignment = (await bridge.lease(workerId, incarnationId, 0))!;
+  await bridge.acknowledgeLease(workerId, incarnationId, assignment.assignmentId, assignment.generation, assignment.leaseToken);
+  const rejection = {
+    protocolVersion: 1 as const, incarnationId, generation: assignment.generation, leaseToken: assignment.leaseToken,
+    status: 'rejected' as const, errorCode: 'COMMAND_UNAVAILABLE' as const, error: 'Native executor request failed', ...extra,
+  };
+  await bridge.settle(workerId, assignment.assignmentId, rejection);
+  return { requests, assignment, rejection };
+}
+
+async function storedSettlement(assignment: CodeBridgeAssignment): Promise<Record<string, unknown>> {
+  return JSON.parse((await redis.get(`codeapi:bridge:v1:assignment:${assignment.assignmentId}:settlement`))!);
+}
+
+test('a rejected command stores, logs and returns the cause its worker reported', async () => {
+  const transitions: StoredWorkspaceRequest[] = [];
+  const { requests, assignment } = await rejectCommand({ commandFailure }, transitions);
+  expect((await storedSettlement(assignment)).commandFailure).toEqual(commandFailure);
+  await tick(requests);
+  expect(await requests.get(owner, requestId)).toMatchObject({
+    state: 'failed',
+    error: { code: 'COMMAND_UNAVAILABLE', message: 'Native executor request failed', commandFailure },
+  });
+  const failed = transitions.find(record => record.state === 'failed');
+  expect(failed).toBeDefined();
+  const attributes = admissionTransitionAttributes(failed!);
+  expect(attributes).toMatchObject({
+    'codeapi.admission.state': 'failed',
+    'codeapi.admission.error_code': 'COMMAND_UNAVAILABLE',
+    'codeapi.command_failure.stage': 'dispatch',
+    'codeapi.command_failure.reason': 'executor_rejected',
+    'codeapi.command_failure.os_code': 'EAGAIN',
+    'codeapi.command_failure.error_name': 'Error',
+  });
+  expect(attributes).not.toHaveProperty(['codeapi.command_failure.node_code']);
+});
+
+test.each([
+  ['an older worker', {}],
+  ['an unknown stage', { commandFailure: { ...commandFailure, stage: 'future_stage' } }],
+  ['a non-object', { commandFailure: '/private/path: spawn EAGAIN' }],
+])('a rejected command from %s settles without a cause', async (_case, extra) => {
+  const transitions: StoredWorkspaceRequest[] = [];
+  const { requests, assignment } = await rejectCommand(extra, transitions);
+  expect(await storedSettlement(assignment)).not.toHaveProperty('commandFailure');
+  await tick(requests);
+  const status = await requests.get(owner, requestId);
+  expect(status).toMatchObject({ state: 'failed', error: { code: 'COMMAND_UNAVAILABLE', message: 'Native executor request failed' } });
+  expect(status?.error).not.toHaveProperty('commandFailure');
+  const failed = transitions.find(record => record.state === 'failed');
+  expect(failed).toBeDefined();
+  expect(Object.keys(admissionTransitionAttributes(failed!)).some(key => key.startsWith('codeapi.command_failure.'))).toBe(false);
+});
+
+test('a rejected command keeps the valid fields of its cause and drops the rest', async () => {
+  const { requests, assignment } = await rejectCommand({
+    commandFailure: { ...commandFailure, osCode: 'EPRIVATE', nodeCode: '/private/path', message: 'token=secret' },
+  });
+  const kept = { stage: 'dispatch', reason: 'executor_rejected', errorName: 'Error' } as const;
+  expect((await storedSettlement(assignment)).commandFailure).toEqual(kept);
+  await tick(requests);
+  expect((await requests.get(owner, requestId))?.error)
+    .toEqual({ code: 'COMMAND_UNAVAILABLE', message: 'Native executor request failed', commandFailure: kept });
+});
+
+test('a retried rejection is accepted whichever way each replica handled its cause', async () => {
+  const { assignment, rejection } = await rejectCommand({ commandFailure });
+  await bridge.settle(workerId, assignment.assignmentId, rejection);
+  // A replica that predates the field stores the worker's cause as sent, valid or not.
+  const futureCause: Record<string, unknown> = { commandFailure: { ...commandFailure, stage: 'future_stage' } };
+  const unvalidated = { ...rejection, ...futureCause };
+  const key = `codeapi:bridge:v1:assignment:${assignment.assignmentId}:settlement`;
+  await redis.set(key, JSON.stringify(unvalidated), 'KEEPTTL');
+  await bridge.settle(workerId, assignment.assignmentId, unvalidated);
+  const { commandFailure: _commandFailure, ...withoutCause } = rejection;
+  await bridge.settle(workerId, assignment.assignmentId, withoutCause);
+  await expect(bridge.settle(workerId, assignment.assignmentId, { ...rejection, error: 'different failure' }))
+    .rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+  expect(await redis.get(key)).toBe(JSON.stringify(unvalidated));
+});
 
 test('submission is idempotent across replicas, scoped by principal, and conflicts do not move FIFO position', async () => {
   const requests = await setup();

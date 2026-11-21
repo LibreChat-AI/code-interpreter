@@ -12,6 +12,7 @@ import {
   isWorkspaceToolRequest,
   isWorkspaceToolResult,
   isWorkspaceDetachedCommandKey,
+  readBridgeCommandFailure,
   WORKSPACE_TOOL_ERROR_CODE_FALLBACKS,
   workspaceDetachedCommandKey,
   workspaceIsolationKey,
@@ -32,6 +33,65 @@ test('every added workspace error code falls back to a legacy code', () => {
     assert.equal(legacy in WORKSPACE_TOOL_ERROR_CODE_FALLBACKS, false);
   }
   assert.equal(WORKSPACE_TOOL_ERROR_CODE_FALLBACKS.NOT_FOUND, 'INVALID_PATH');
+});
+
+test('settled command failures keep only allowlisted, bounded fields', () => {
+  const complete = {
+    stage: 'dispatch',
+    reason: 'executor_rejected',
+    osCode: 'EAGAIN',
+    nodeCode: 'ERR_IPC_CHANNEL_CLOSED',
+    errorName: 'TypeError',
+  };
+  assert.deepEqual(readBridgeCommandFailure(complete), complete);
+  assert.deepEqual(
+    readBridgeCommandFailure({ ...complete, message: 'secret', path: '/private', command: 'echo token' }),
+    complete,
+  );
+  for (const [field, invalid] of [
+    ['osCode', 'EPRIVATE'],
+    ['osCode', 'eagain'],
+    ['osCode', 11],
+    ['nodeCode', 'ERR_'],
+    ['nodeCode', `ERR_${'A'.repeat(61)}`],
+    ['nodeCode', 'ERR_/private/path'],
+    ['nodeCode', 'ERR_A\nsecret'],
+    ['errorName', 'PrivateProviderError'],
+    ['errorName', { name: 'TypeError' }],
+  ] as const) {
+    const { [field]: _dropped, ...rest } = complete;
+    assert.deepEqual(readBridgeCommandFailure({ ...complete, [field]: invalid }), rest, `${field}: ${String(invalid)}`);
+  }
+  assert.deepEqual(readBridgeCommandFailure({ ...complete, nodeCode: `ERR_${'A'.repeat(60)}` }),
+    { ...complete, nodeCode: `ERR_${'A'.repeat(60)}` });
+  for (const invalid of [
+    undefined,
+    null,
+    'dispatch',
+    [complete],
+    {},
+    { ...complete, stage: 'remote_stage' },
+    { ...complete, reason: 'remote_reason' },
+    { ...complete, stage: 1 },
+  ]) {
+    assert.equal(readBridgeCommandFailure(invalid), undefined, JSON.stringify(invalid));
+  }
+  let getterRead = false;
+  const withGetter = Object.defineProperty({ ...complete }, 'osCode', {
+    enumerable: true,
+    get() {
+      getterRead = true;
+      return 'EAGAIN';
+    },
+  });
+  const { osCode: _osCode, ...withoutOsCode } = complete;
+  assert.deepEqual(readBridgeCommandFailure(withGetter), withoutOsCode);
+  assert.equal(getterRead, false);
+  assert.equal(readBridgeCommandFailure(new Proxy({}, {
+    getOwnPropertyDescriptor() {
+      throw new Error('private proxy');
+    },
+  })), undefined);
 });
 
 test('accepts gateway directory markers as artifacts', () => {

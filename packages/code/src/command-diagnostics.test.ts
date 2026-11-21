@@ -7,7 +7,7 @@ import {
     readCommandFailureDiagnostic,
 } from './command-diagnostics.js';
 
-test('command diagnostics retain only fixed classifications and allowlisted errno', () => {
+test('command diagnostics retain only fixed classifications, allowlisted codes and error names', () => {
     const error = Object.assign(
         new Error('token secret /private/path echo password'),
         {
@@ -22,6 +22,7 @@ test('command diagnostics retain only fixed classifications and allowlisted errn
             stage: 'sandbox_startup',
             reason: 'startup_failed',
             osCode: 'ENOSPC',
+            errorName: 'Error',
         },
     );
     assert.deepEqual(
@@ -30,6 +31,50 @@ test('command diagnostics retain only fixed classifications and allowlisted errn
         }),
         { stage: 'credential_resolution', reason: 'credential_failed' },
     );
+});
+
+test('command diagnostics keep the errno, Node.js code and built-in class of an executor failure', () => {
+    const spawnFailure = Object.assign(
+        new Error('spawn /private/workspace/bin/sh EAGAIN'),
+        {
+            code: 'EAGAIN',
+            errno: -11,
+            syscall: 'spawn /private/workspace/bin/sh',
+            path: '/private/workspace/bin/sh',
+            spawnargs: ['-c', 'echo token=secret'],
+        },
+    );
+    const ipcFailure = Object.assign(new TypeError('Channel closed'), {
+        code: 'ERR_IPC_CHANNEL_CLOSED',
+    });
+    const customClass = Object.assign(new Error('secret'), {
+        name: 'PrivateProviderError',
+        code: 'ERR_/private/path',
+    });
+    const diagnostics = [
+        commandFailureDiagnostic('dispatch', 'executor_rejected', spawnFailure),
+        commandFailureDiagnostic('dispatch', 'executor_rejected', ipcFailure),
+        commandFailureDiagnostic('dispatch', 'executor_rejected', customClass),
+    ];
+    assert.deepEqual(diagnostics, [
+        {
+            stage: 'dispatch',
+            reason: 'executor_rejected',
+            osCode: 'EAGAIN',
+            errorName: 'Error',
+        },
+        {
+            stage: 'dispatch',
+            reason: 'executor_rejected',
+            nodeCode: 'ERR_IPC_CHANNEL_CLOSED',
+            errorName: 'TypeError',
+        },
+        { stage: 'dispatch', reason: 'executor_rejected' },
+    ]);
+    const serialized = JSON.stringify(diagnostics);
+    for (const leaked of ['private', 'secret', 'spawn', 'Channel closed']) {
+        assert.equal(serialized.includes(leaked), false, leaked);
+    }
 });
 
 test('IPC diagnostics are reconstructed rather than forwarding arbitrary metadata', () => {
@@ -120,6 +165,20 @@ test('diagnostic extraction cannot invoke exception getters or mask a failure', 
             throw new Error('private getter');
         },
     };
+    let nameRead = false;
+    const named = Object.create(
+        Object.defineProperty({}, 'name', {
+            get() {
+                nameRead = true;
+                return 'TypeError';
+            },
+        }),
+    ) as object;
+    assert.deepEqual(
+        commandFailureDiagnostic('dispatch', 'executor_rejected', named),
+        { stage: 'dispatch', reason: 'executor_rejected' },
+    );
+    assert.equal(nameRead, false);
     assert.deepEqual(
         commandFailureDiagnostic(
             'credential_resolution',

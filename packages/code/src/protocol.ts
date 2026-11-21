@@ -1139,6 +1139,11 @@ export interface BridgeRejectedSettlement {
   status: 'rejected';
   error: string;
   errorCode?: WorkspaceToolErrorCode;
+  /**
+   * Why a `COMMAND_UNAVAILABLE` command could not run. Older workers omit it, and a Code API
+   * drops a value `readBridgeCommandFailure` does not accept rather than refusing the settlement.
+   */
+  commandFailure?: BridgeCommandFailure;
 }
 
 export type WorkspaceToolErrorCode =
@@ -1196,6 +1201,133 @@ export function isWorkspaceToolErrorCode(
     typeof value === 'string' &&
     WORKSPACE_TOOL_ERROR_CODES.has(value as WorkspaceToolErrorCode)
   );
+}
+
+const BRIDGE_COMMAND_FAILURE_STAGES = [
+  'allocation',
+  'sandbox_startup',
+  'programmatic_preflight',
+  'credential_resolution',
+  'command_wrapping',
+  'dispatch',
+  'executor_transport',
+  'cleanup',
+] as const;
+export type BridgeCommandFailureStage = (typeof BRIDGE_COMMAND_FAILURE_STAGES)[number];
+
+const BRIDGE_COMMAND_FAILURE_REASONS = [
+  'workspace_busy',
+  'capacity_exhausted',
+  'allocation_failed',
+  'startup_failed',
+  'prerequisite_failed',
+  'credential_failed',
+  'wrapping_failed',
+  'executor_rejected',
+  'executor_unavailable',
+  'executor_lost',
+  'send_failed',
+  'rpc_timeout',
+  'cleanup_failed',
+] as const;
+export type BridgeCommandFailureReason = (typeof BRIDGE_COMMAND_FAILURE_REASONS)[number];
+
+const commandFailureStages = new Set<string>(BRIDGE_COMMAND_FAILURE_STAGES);
+const commandFailureReasons = new Set<string>(BRIDGE_COMMAND_FAILURE_REASONS);
+const commandFailureOsCodes = new Set([
+  'E2BIG',
+  'EACCES',
+  'EAGAIN',
+  'EBADF',
+  'EBUSY',
+  'ECHILD',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EDQUOT',
+  'EIO',
+  'EMFILE',
+  'ENFILE',
+  'ENOBUFS',
+  'ENOENT',
+  'ENOEXEC',
+  'ENOMEM',
+  'ENOSPC',
+  'EPERM',
+  'EPIPE',
+  'EROFS',
+  'ESRCH',
+  'ETIMEDOUT',
+]);
+/** Node.js assigns these fixed identifiers itself, such as `ERR_IPC_CHANNEL_CLOSED`. */
+const NODE_ERROR_CODE_PATTERN = /^ERR_[A-Z0-9_]{1,60}$/;
+const commandFailureErrorNames = new Set([
+  'Error',
+  'AggregateError',
+  'EvalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+  'SystemError',
+  'AbortError',
+  'TimeoutError',
+]);
+
+/**
+ * Why a worker could not run a command. Every field is a fixed classification or an allowlisted
+ * identifier, so it never carries a path, command text, environment value, credential or
+ * free-form error message.
+ */
+export interface BridgeCommandFailure {
+  stage: BridgeCommandFailureStage;
+  reason: BridgeCommandFailureReason;
+  /** The underlying errno code, such as `EAGAIN` or `ENOSPC`. */
+  osCode?: string;
+  /** The underlying Node.js error code, such as `ERR_IPC_CHANNEL_CLOSED`. */
+  nodeCode?: string;
+  /** The underlying error's class name, such as `TypeError`. */
+  errorName?: string;
+}
+
+function ownDataValue(value: object, key: string): unknown {
+  return Object.getOwnPropertyDescriptor(value, key)?.value;
+}
+
+/**
+ * Rebuild a command failure from untrusted input, keeping only allowlisted values. Unknown
+ * optional fields are dropped one by one; an unknown stage or reason drops the whole value.
+ * Never throws and never invokes getters, so a bad diagnostic cannot replace the failure it
+ * describes.
+ */
+export function readBridgeCommandFailure(
+  value: unknown,
+): BridgeCommandFailure | undefined {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  try {
+    const stage = ownDataValue(value, 'stage');
+    const reason = ownDataValue(value, 'reason');
+    if (
+      typeof stage !== 'string' ||
+      typeof reason !== 'string' ||
+      !commandFailureStages.has(stage) ||
+      !commandFailureReasons.has(reason)
+    ) {
+      return undefined;
+    }
+    const osCode = ownDataValue(value, 'osCode');
+    const nodeCode = ownDataValue(value, 'nodeCode');
+    const errorName = ownDataValue(value, 'errorName');
+    return {
+      stage: stage as BridgeCommandFailureStage,
+      reason: reason as BridgeCommandFailureReason,
+      ...(typeof osCode === 'string' && commandFailureOsCodes.has(osCode) ? { osCode } : {}),
+      ...(typeof nodeCode === 'string' && NODE_ERROR_CODE_PATTERN.test(nodeCode) ? { nodeCode } : {}),
+      ...(typeof errorName === 'string' && commandFailureErrorNames.has(errorName) ? { errorName } : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export type BridgeSettlement<TResult = object> =

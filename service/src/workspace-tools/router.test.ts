@@ -294,6 +294,50 @@ test.each([
   });
 });
 
+type DispatchWorkspaceTool = NonNullable<Parameters<typeof createWorkspaceToolsRouter>[0]['store']>['dispatchWorkspaceTool'];
+
+test.each([
+  ['a valid', { stage: 'dispatch', reason: 'executor_rejected', nodeCode: 'ERR_IPC_CHANNEL_CLOSED' },
+    { stage: 'dispatch', reason: 'executor_rejected', nodeCode: 'ERR_IPC_CHANNEL_CLOSED' }],
+  ['an invalid', { stage: 'remote_stage', reason: 'executor_rejected', message: '/private/path' }, undefined],
+  ['no', undefined, undefined],
+] as const)('a rejected command with %s cause returns and logs only a validated one', async (_case, sent, expected) => {
+  const app = express();
+  app.use(json());
+  app.use((req, _res, next) => {
+    applyPrincipal(req, { userId: 'user-1', tenantId: 'tenant-1', principalSource: 'librechat_jwt', codeWorkerId: 'user-worker' });
+    next();
+  });
+  const dispatchWorkspaceTool = (async () => ({
+    protocolVersion: 1, generation: 1, leaseToken: 'lease-token', incarnationId: 'incarnation-1',
+    status: 'rejected', error: 'Native executor request failed', errorCode: 'COMMAND_UNAVAILABLE',
+    ...(sent !== undefined ? { commandFailure: sent } : {}),
+  })) as unknown as DispatchWorkspaceTool;
+  app.use(createWorkspaceToolsRouter({
+    backend: 'remote-bridge', configuredWorkerId: 'user-worker', dynamicWorkers: false,
+    store: { dispatchWorkspaceTool },
+  }));
+  server = createServer(app);
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+  const response = await fetch(`http://127.0.0.1:${address.port}/workspace-tools/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo ok' }),
+  });
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual({
+    error: 'Native executor request failed',
+    code: 'COMMAND_UNAVAILABLE',
+    ...(expected !== undefined ? { commandFailure: expected } : {}),
+  });
+  await logCompleted.promise;
+  expect(logSpy).toHaveBeenCalledWith('warn', 'Workspace tool request completed', expect.objectContaining({
+    errorCode: 'COMMAND_UNAVAILABLE', commandFailure: expected,
+  }));
+});
+
 test('dispatches an authenticated workspace tool request to the principal-bound worker', async () => {
   let dispatchArgs: Record<string, unknown> | undefined;
   const app = express();

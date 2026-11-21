@@ -416,7 +416,7 @@ test('programmatic prerequisite failures retain their stage before executor disp
       assert.equal(error.requiresQuarantine, false);
       assert.deepEqual(error.commandDiagnostic, {
         stage: 'programmatic_preflight', reason: 'prerequisite_failed',
-        ...(failure === 'private_storage' ? { osCode: 'ENOSPC' } : {}),
+        ...(failure === 'private_storage' ? { osCode: 'ENOSPC', errorName: 'Error' } : {}),
       });
       assert.equal(JSON.stringify(error.commandDiagnostic).includes('secret'), false);
       return true;

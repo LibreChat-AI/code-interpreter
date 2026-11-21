@@ -229,7 +229,7 @@ export class WorkspaceToolError extends Error {
     public readonly mutationMayHaveCommitted = false,
     /** Retain the durable mutation guard when process or write settlement is uncertain. */
     public readonly requiresQuarantine = mutationMayHaveCommitted,
-    /** Worker-local diagnostic metadata; never serialized into bridge settlements. */
+    /** Settled to the bridge only for `COMMAND_UNAVAILABLE`, rebuilt from its allowlisted fields. */
     public readonly commandDiagnostic?: CommandFailureDiagnostic,
   ) {
     super(message);

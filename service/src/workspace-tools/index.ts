@@ -13,6 +13,7 @@ import { isBridgeEnabled, isWorkspaceImportEnabled } from '../bridge/enabled';
 import { createWorkspaceImportService } from './import';
 import { createGatewayEgressGrant, revokeGatewayEgressGrant } from '../egress-gateway-client';
 import { workspaceRequestCoordinationScope } from './coordination';
+import { admissionTransitionAttributes } from './outcome';
 
 const router = Router();
 const coordinationScope = workspaceRequestCoordinationScope({
@@ -22,19 +23,7 @@ const coordinationScope = workspaceRequestCoordinationScope({
   maxWorkspaceLeaseSlots: env.BRIDGE_MAX_WORKSPACE_LEASE_SLOTS, maxCommandTimeoutMs: env.JOB_TIMEOUT,
 });
 const requests = coordinationScope === undefined ? undefined : new RedisWorkspaceRequests(connection, bridgeStore, record => {
-  const attributes = {
-    'codeapi.request.id': record.id,
-    'codeapi.admission.state': record.state,
-    'codeapi.worker.id': record.workerId,
-    'codeapi.workspace.id': record.request.workspaceId,
-    'codeapi.workspace.instance_id': record.request.workspaceInstanceId ?? '',
-    'codeapi.workspace.worktree': record.request.worktree ?? '',
-    ...(record.request.operation === 'execute_command' && record.request.detached === true
-      ? { 'codeapi.workspace.detached': true }
-      : {}),
-    'codeapi.admission.wait_ms': Math.max(0, (record.admittedAtMs ?? Math.min(record.finishedAtMs ?? Date.now(), record.queueDeadlineAtMs)) - record.createdAtMs),
-    'codeapi.admission.error_code': record.error?.code ?? '',
-  };
+  const attributes = admissionTransitionAttributes(record);
   logger.info('Durable workspace admission transition', attributes);
   void withSpan('codeapi.workspace.admission.transition', attributes, () => undefined).catch(error => {
     logger.warn('Admission transition telemetry failed', { error });
