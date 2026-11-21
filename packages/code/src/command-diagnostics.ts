@@ -1,32 +1,17 @@
-import { BRIDGE_WORKER_ID_PATTERN } from './protocol.js';
+import {
+    BRIDGE_WORKER_ID_PATTERN,
+    readBridgeCommandFailure,
+} from './protocol.js';
+import type {
+    BridgeCommandFailure,
+    BridgeCommandFailureReason,
+    BridgeCommandFailureStage,
+} from './protocol.js';
 
-/** Worker-local diagnostics: never add these fields to bridge settlements. */
-export type CommandFailureStage =
-    | 'allocation'
-    | 'sandbox_startup'
-    | 'programmatic_preflight'
-    | 'credential_resolution'
-    | 'command_wrapping'
-    | 'dispatch'
-    | 'executor_transport'
-    | 'cleanup';
-
-const reasons = [
-    'workspace_busy',
-    'capacity_exhausted',
-    'allocation_failed',
-    'startup_failed',
-    'prerequisite_failed',
-    'credential_failed',
-    'wrapping_failed',
-    'executor_rejected',
-    'executor_unavailable',
-    'executor_lost',
-    'send_failed',
-    'rpc_timeout',
-    'cleanup_failed',
-] as const;
-export type CommandFailureReason = (typeof reasons)[number];
+/** A bridge settlement carries these only through `readBridgeCommandFailure`. */
+export type CommandFailureStage = BridgeCommandFailureStage;
+export type CommandFailureReason = BridgeCommandFailureReason;
+export type CommandFailureDiagnostic = BridgeCommandFailure;
 
 const setupReasons = {
     sandbox_startup: 'startup_failed',
@@ -42,35 +27,23 @@ export function commandSetupFailureDiagnostic(
 ): CommandFailureDiagnostic {
     return commandFailureDiagnostic(stage, setupReasons[stage], error);
 }
-export interface CommandFailureDiagnostic {
-    stage: CommandFailureStage;
-    reason: CommandFailureReason;
-    osCode?: string;
+
+const MAX_ERROR_PROTOTYPE_DEPTH = 8;
+
+/** The nearest `name` data property; an accessor ends the search unread. */
+function errorName(error: object): unknown {
+    let target: object | null = error;
+    for (
+        let depth = 0;
+        target != null && depth < MAX_ERROR_PROTOTYPE_DEPTH;
+        depth++
+    ) {
+        const descriptor = Object.getOwnPropertyDescriptor(target, 'name');
+        if (descriptor != null) return descriptor.value;
+        target = Object.getPrototypeOf(target) as object | null;
+    }
+    return undefined;
 }
-const stages = new Set<string>([
-    'allocation',
-    'sandbox_startup',
-    'programmatic_preflight',
-    'credential_resolution',
-    'command_wrapping',
-    'dispatch',
-    'executor_transport',
-    'cleanup',
-]);
-const osCodes = new Set([
-    'ENOSPC',
-    'EDQUOT',
-    'EACCES',
-    'EPERM',
-    'ENOMEM',
-    'EMFILE',
-    'ENFILE',
-    'EIO',
-    'ENOENT',
-    'EPIPE',
-    'ECONNRESET',
-    'ETIMEDOUT',
-]);
 
 export function commandFailureDiagnostic(
     stage: CommandFailureStage,
@@ -78,32 +51,29 @@ export function commandFailureDiagnostic(
     error?: unknown,
 ): CommandFailureDiagnostic {
     let code: unknown;
+    let name: unknown;
     try {
         // Diagnostic extraction must not execute an exception object's getters.
         if (error != null && typeof error === 'object') {
             code = Object.getOwnPropertyDescriptor(error, 'code')?.value;
+            name = errorName(error);
         }
     } catch {
         // Even an unusual provider error/proxy cannot replace the original failure.
     }
-    return {
-        stage,
-        reason,
-        ...(typeof code === 'string' && osCodes.has(code)
-            ? { osCode: code }
-            : {}),
-    };
+    return (
+        readBridgeCommandFailure({
+            stage,
+            reason,
+            osCode: code,
+            nodeCode: code,
+            errorName: name,
+        }) ?? { stage, reason }
+    );
 }
 
 /** Reconstruct only allowlisted fields, even across the trusted executor IPC. */
-export function readCommandFailureDiagnostic(
-    value: unknown,
-): CommandFailureDiagnostic | undefined {
-    if (value == null || typeof value !== 'object') return;
-    const v = value as Partial<CommandFailureDiagnostic>;
-    if (!stages.has(v.stage ?? '') || !reasons.includes(v.reason!)) return;
-    return commandFailureDiagnostic(v.stage!, v.reason!, { code: v.osCode });
-}
+export const readCommandFailureDiagnostic = readBridgeCommandFailure;
 
 export interface CommandFailureEvent extends CommandFailureDiagnostic {
     event: 'workspace_command_unavailable';

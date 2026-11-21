@@ -102,6 +102,24 @@ components:
           properties:
             code: { type: string }
             message: { type: string }
+            commandFailure: { $ref: '#/components/schemas/CommandFailure' }
+
+    CommandFailure:
+      type: object
+      description: >-
+        Why a worker could not run a command that failed with
+        `COMMAND_UNAVAILABLE`. Every field is a fixed classification or an
+        allowlisted identifier, never a path, command text, environment value,
+        credential or error message. Absent when the worker predates it or
+        reported no valid cause. New values may appear; treat unknown ones as
+        opaque text.
+      required: [stage, reason]
+      properties:
+        stage: { type: string, example: dispatch }
+        reason: { type: string, example: executor_rejected }
+        osCode: { type: string, description: Underlying errno code., example: EAGAIN }
+        nodeCode: { type: string, description: Underlying Node.js error code., example: ERR_IPC_CHANNEL_CLOSED }
+        errorName: { type: string, description: Underlying built-in error class., example: TypeError }
 
     FileRef:
       type: object

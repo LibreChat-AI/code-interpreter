@@ -9,6 +9,7 @@ import {
   isValidLinkedWorktreeName,
   isWorkspaceMutationOperation,
   isWorkspaceToolResult,
+  readBridgeCommandFailure,
   workspaceDetachedCommandKey,
   workspaceIsolationKey,
   workspaceIsolationKeysConflict,
@@ -25,6 +26,7 @@ import type { CommandFailureEvent } from './command-diagnostics.js';
 import type {
   WorkspaceCommandResultFeature,
   BridgeAssignment,
+  BridgeCommandFailure,
   BridgeLeaseResponse,
   BridgeSandboxRequest,
   BridgeSettlement,
@@ -2210,6 +2212,7 @@ export class BridgeWorker {
         result: payload,
       };
     } catch (error) {
+      let commandFailure: BridgeCommandFailure | undefined;
       if (
         error instanceof WorkspaceToolError &&
         error.code === 'COMMAND_UNAVAILABLE' &&
@@ -2219,6 +2222,7 @@ export class BridgeWorker {
             assignment.request.operation === 'execute_command'))
       ) {
         try {
+          commandFailure = readBridgeCommandFailure(error.commandDiagnostic);
           const event = commandFailureEvent(error.commandDiagnostic, {
             assignmentId: assignment.assignmentId,
             workerId: this.options.workerId,
@@ -2291,6 +2295,7 @@ export class BridgeWorker {
             ? error.message
             : 'Sandbox execution failed'
         ).slice(0, MAX_SETTLEMENT_ERROR_LENGTH),
+        ...(commandFailure != null ? { commandFailure } : {}),
       };
     }
 

@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from 'crypto';
 import type Redis from 'ioredis';
 import type { WorkspaceToolRequest, WorkspaceToolResult } from '../../../packages/code/src/protocol';
-import type { RedisBridgeStore, RegisteredBridgeWorker, DurableWorkspaceAssignment, CodeBridgeWorkspaceSettlement } from '../bridge/store';
+import type {
+  RedisBridgeStore, RegisteredBridgeWorker, DurableWorkspaceAssignment, DurableWorkspaceError, CodeBridgeWorkspaceSettlement,
+} from '../bridge/store';
 import { BridgeAdmissionQueue } from '../bridge/admission';
 import { BridgeStoreError, workspaceToolAdmissionId } from '../bridge/store';
 
@@ -37,7 +39,7 @@ export interface StoredWorkspaceRequest {
   state: 'queued' | 'admitted' | 'completed' | 'failed' | 'cancelled';
   cancelRequested?: boolean;
   result?: WorkspaceToolResult;
-  error?: { code: string; message: string };
+  error?: DurableWorkspaceError;
 }
 
 export interface WorkspaceRequestStatus {

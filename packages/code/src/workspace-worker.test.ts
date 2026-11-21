@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { BridgeProtocolError } from './protocol.js';
-import type { WorkspaceToolRequest } from './protocol.js';
+import type { WorkspaceExecuteCommandRequest, WorkspaceToolRequest } from './protocol.js';
+import { NativeProcessWorkspaceCommandSandbox } from './native-process.js';
 import { BridgeWorker, BridgeWorkspaceQuarantinedError } from './worker.js';
 import { SandboxWorkspaceTools, WorkspaceToolError } from './workspace.js';
 
 const incarnationId = 'incarnation-00000001';
 
-test('worker logs command failures locally without changing bridge settlements', async () => {
+test('worker logs command failures locally and settles only their sanitized cause', async () => {
   for (const sink of ['sync', 'async', 'pending'] as const) {
   for (const operation of ['execute_command', 'list_files'] as const) {
     const events: unknown[] = [];
@@ -58,8 +62,70 @@ test('worker logs command failures locally without changing bridge settlements',
     assert.equal(settlement?.status, 'rejected');
     assert.equal(settlement?.errorCode, 'COMMAND_UNAVAILABLE');
     assert.equal('diagnostic' in settlement!, false);
+    if (operation === 'execute_command') {
+      assert.deepEqual(settlement?.commandFailure, { stage: 'credential_resolution', reason: 'credential_failed' });
+    } else assert.equal('commandFailure' in settlement!, false);
     assert.equal(JSON.stringify(events).includes('secret'), false);
   }
+  }
+});
+
+test('worker settles a native executor failure with its cause but without its path or message', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'command-failure-settlement-'));
+  const workspaceRoot = join(directory, 'missing-private-root');
+  const sandbox = new NativeProcessWorkspaceCommandSandbox({ workspaceRoot });
+  t.after(async () => {
+    await sandbox.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const capabilities = {
+    protocolVersion: 1 as const,
+    operations: ['execute_command' as const],
+    workspaces: [{ id: 'primary' }],
+  };
+  const events: unknown[] = [];
+  let settlement: Record<string, unknown> | undefined;
+  const worker = new BridgeWorker({
+    codeApiUrl: 'https://code.example/v1', token: 'worker-secret', workerId: 'vm-1', incarnationId,
+    sandboxEndpoint: 'http://127.0.0.1:2000/api/v2',
+    capabilities: { statefulWorkspace: false, sandboxProfile: 'anthropic-srt', runtimes: [], workspaceTools: capabilities },
+    workspaceTools: {
+      capabilities, mutationFailuresAreAtomic: true,
+      execute: request => sandbox.execute(request as WorkspaceExecuteCommandRequest),
+    },
+    workspaceQuarantines: new Map([['primary', mutationQuarantine()]]),
+    onCommandFailure(event) {
+      events.push(event);
+    },
+    fetchImpl: async (_input, init) => {
+      settlement = JSON.parse(String(init?.body));
+      return Response.json({ protocolVersion: 1, accepted: true });
+    },
+  });
+  await worker.executeAndSettle({
+    protocolVersion: 1, assignmentId: 'assignment-1', workerId: 'vm-1', incarnationId, generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing', expiresAt: new Date(Date.now() + 5000).toISOString(),
+    executionKind: 'workspace_tool',
+    request: { protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary', command: 'echo token=secret' },
+  });
+  assert.deepEqual(settlement, {
+    protocolVersion: 1,
+    generation: 4,
+    leaseToken: 'lease-token-that-is-long-enough-for-testing',
+    incarnationId,
+    status: 'rejected',
+    errorCode: 'COMMAND_UNAVAILABLE',
+    error: 'Native executor request failed',
+    commandFailure: { stage: 'sandbox_startup', reason: 'startup_failed', osCode: 'ENOENT', errorName: 'Error' },
+  });
+  assert.deepEqual(events, [{
+    event: 'workspace_command_unavailable', stage: 'sandbox_startup', reason: 'startup_failed',
+    osCode: 'ENOENT', errorName: 'Error', assignmentId: 'assignment-1', workerId: 'vm-1', incarnationId,
+    workspaceId: 'primary', operation: 'execute_command', mutationMayHaveCommitted: false, requiresQuarantine: false,
+  }]);
+  const serialized = JSON.stringify(settlement);
+  for (const leaked of [directory, 'missing-private-root', 'secret', 'echo']) {
+    assert.equal(serialized.includes(leaked), false, leaked);
   }
 });
 
@@ -1451,6 +1517,7 @@ test('worker keeps a selected workspace usable after an atomic programmatic setu
   }]);
   assert.equal('commandDiagnostic' in settlement!, false);
   assert.equal('diagnostic' in settlement!, false);
+  assert.equal('commandFailure' in settlement!, false);
 });
 
 test('worker keeps a selected workspace usable after confirmed programmatic cancellation cleanup', async () => {

@@ -1,5 +1,6 @@
 import type { RequestHandler, Response } from 'express';
-import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
+import type { BridgeCommandFailure, WorkspaceToolRequest } from '../../../packages/code/src/protocol';
+import type { StoredWorkspaceRequest } from './requests';
 import logger from '../logger';
 import { env } from '../config';
 import { hostedAppRequestHostname, hostedAppRuntimeIdFromHostname } from '../hosted-app/preview-access';
@@ -8,6 +9,7 @@ interface WorkspaceToolOutcome {
   operation?: WorkspaceToolRequest['operation'];
   workerId?: string;
   errorCode?: string;
+  commandFailure?: BridgeCommandFailure;
   deadlineBudgetMs?: number;
   dispatchDurationMs?: number;
   dispatchPending: boolean;
@@ -46,6 +48,7 @@ export function getWorkspaceToolOutcome(res: Response, route = '/workspace-tools
         status: finished ? res.statusCode : undefined,
         outcome: finished ? 'completed' : 'disconnected',
         errorCode: outcome.errorCode ?? (finished ? earlyErrorCodes[res.statusCode] : undefined),
+        commandFailure: outcome.commandFailure,
         durationMs: Math.round(responseEndedAt - startedAt),
         dispatchDurationMs: outcome.dispatchDurationMs,
         deadlineBudgetMs: outcome.deadlineBudgetMs,
@@ -64,6 +67,37 @@ export function getWorkspaceToolOutcome(res: Response, route = '/workspace-tools
   res.once('finish', onResponseEnd);
   res.once('close', onResponseEnd);
   return outcome;
+}
+
+type AdmissionAttribute = string | number | boolean;
+
+function commandFailureAttributes(failure?: BridgeCommandFailure): Record<string, string> {
+  if (failure === undefined) return {};
+  return {
+    'codeapi.command_failure.stage': failure.stage,
+    'codeapi.command_failure.reason': failure.reason,
+    ...(failure.osCode !== undefined ? { 'codeapi.command_failure.os_code': failure.osCode } : {}),
+    ...(failure.nodeCode !== undefined ? { 'codeapi.command_failure.node_code': failure.nodeCode } : {}),
+    ...(failure.errorName !== undefined ? { 'codeapi.command_failure.error_name': failure.errorName } : {}),
+  };
+}
+
+/** Flat log and span attributes for one durable workspace request state change. */
+export function admissionTransitionAttributes(record: StoredWorkspaceRequest): Record<string, AdmissionAttribute> {
+  return {
+    'codeapi.request.id': record.id,
+    'codeapi.admission.state': record.state,
+    'codeapi.worker.id': record.workerId,
+    'codeapi.workspace.id': record.request.workspaceId,
+    'codeapi.workspace.instance_id': record.request.workspaceInstanceId ?? '',
+    'codeapi.workspace.worktree': record.request.worktree ?? '',
+    ...(record.request.operation === 'execute_command' && record.request.detached === true
+      ? { 'codeapi.workspace.detached': true }
+      : {}),
+    'codeapi.admission.wait_ms': Math.max(0, (record.admittedAtMs ?? Math.min(record.finishedAtMs ?? Date.now(), record.queueDeadlineAtMs)) - record.createdAtMs),
+    'codeapi.admission.error_code': record.error?.code ?? '',
+    ...commandFailureAttributes(record.error?.commandFailure),
+  };
 }
 
 export function recordWorkspaceToolRejection(res: Response, errorCode: string): void {

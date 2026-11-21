@@ -905,6 +905,7 @@ test('executor diagnoses setup stages without dispatching or retaining private e
         stage: failure === 'fork' ? 'sandbox_startup' : failure === 'credential' ? 'credential_resolution' : 'command_wrapping',
         reason: failure === 'fork' ? 'startup_failed' : failure === 'credential' ? 'credential_failed' : 'wrapping_failed',
         osCode: 'ENOSPC',
+        errorName: 'Error',
       });
       assert.equal(JSON.stringify(error.commandDiagnostic).includes('secret'), false);
       return true;
@@ -917,12 +918,18 @@ test('executor diagnoses setup stages without dispatching or retaining private e
 test('executor preserves sanitized child diagnostics and mutation uncertainty', async () => {
   const fake = fixture((child, message) => child.emit('message', {
     id: message.id, ok: false, mutation: true,
-    diagnostic: { stage: 'dispatch', reason: 'executor_rejected', osCode: 'EIO', secret: 'token' },
+    diagnostic: {
+      stage: 'dispatch', reason: 'executor_rejected', osCode: 'EIO', nodeCode: 'ERR_IPC_CHANNEL_CLOSED',
+      errorName: 'TypeError', secret: 'token', message: '/private/path',
+    },
   }));
   const sandbox = new NativeProcessWorkspaceCommandSandbox({ workspaceRoot: '/workspace' }, fake.fork);
   await assert.rejects(sandbox.execute(request), error => {
     assert.ok(error instanceof WorkspaceToolError);
-    assert.deepEqual(error.commandDiagnostic, { stage: 'dispatch', reason: 'executor_rejected', osCode: 'EIO' });
+    assert.equal(error.message, 'Native executor request failed');
+    assert.deepEqual(error.commandDiagnostic, {
+      stage: 'dispatch', reason: 'executor_rejected', osCode: 'EIO', nodeCode: 'ERR_IPC_CHANNEL_CLOSED', errorName: 'TypeError',
+    });
     assert.equal(error.mutationMayHaveCommitted, true);
     assert.equal(error.requiresQuarantine, true);
     return true;
@@ -961,7 +968,9 @@ test('real executor IPC carries a startup errno without including the workspace 
     assert.ok(error instanceof WorkspaceToolError);
     assert.equal(error.code, 'COMMAND_UNAVAILABLE');
     assert.equal(error.mutationMayHaveCommitted, false);
-    assert.deepEqual(error.commandDiagnostic, { stage: 'sandbox_startup', reason: 'startup_failed', osCode: 'ENOENT' });
+    assert.deepEqual(error.commandDiagnostic, {
+      stage: 'sandbox_startup', reason: 'startup_failed', osCode: 'ENOENT', errorName: 'Error',
+    });
     assert.equal(JSON.stringify(error.commandDiagnostic).includes(directory), false);
     return true;
   });

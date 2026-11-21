@@ -566,17 +566,25 @@ To keep every worktree, add `--no-worktree-retirement` (or
     correlate its `assignmentId` with the bridge request. Updated workers emit
     one JSON record for a rejected command or programmatic assignment, with
     `stage`, `reason`, workspace/worker/incarnation IDs, mutation uncertainty,
-    quarantine requirement, and an allowlisted `osCode` when available. Stages
-    distinguish allocation, sandbox startup, programmatic prerequisites,
-    credential resolution, command wrapping, dispatch, executor transport, and
-    cleanup. For example, `sandbox_startup` with `osCode: ENOSPC` points to
-    storage; `credential_resolution` identifies credential setup rather than
-    command execution. Missing errno does not rule out either cause.
-    Commands, arguments, paths, credentials, output, and free-form exception
-    messages are excluded from these records. Diagnostics stay worker-local;
-    the bridge response and quarantine/retry behavior are unchanged. A worker
-    package update is required; a Code API restart alone does not enable this.
-    These records cover assignment failures, not failures before worker startup.
+    quarantine requirement, and, when available, an allowlisted errno
+    `osCode`, a Node.js `nodeCode` (`ERR_*`) and a built-in `errorName`.
+    Stages distinguish allocation, sandbox startup, programmatic
+    prerequisites, credential resolution, command wrapping, dispatch, executor
+    transport, and cleanup. For example, `sandbox_startup` with
+    `osCode: ENOSPC` points to storage; `credential_resolution` identifies
+    credential setup rather than command execution. Missing errno does not rule
+    out either cause. Commands, arguments, paths, credentials, output, and
+    free-form exception messages are excluded from these records.
+    Updated workers also settle the same `stage`, `reason`, `osCode`,
+    `nodeCode` and `errorName` as `commandFailure` on the rejected settlement,
+    so the cause is visible without the worker journal: an updated Code API
+    returns it as `commandFailure` beside `code` in the workspace tool error
+    (`error.commandFailure` for durable requests) and logs it as
+    `codeapi.command_failure.*` on the failed `Durable workspace admission
+    transition`. Older workers omit it, older Code API replicas ignore it, and
+    an invalid value is dropped rather than refused. Quarantine and retry
+    behavior are unchanged. These records cover assignment failures, not
+    failures before worker startup.
 -   **Every `import_file` returns `403 IMPORT_SOURCE_UNAUTHORIZED`, or uploads
     fail with `UPLOAD_SESSION_UNKNOWN`:** Code API and its file server are on
     different Redis instances. See

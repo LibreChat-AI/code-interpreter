@@ -4,6 +4,7 @@ import type Redis from 'ioredis';
 import type * as t from '../types';
 import type {
   BridgeAssignment,
+  BridgeCommandFailure,
   BridgeSettlement,
   BridgeWorkerRegistration,
   WorkspaceToolRequest,
@@ -19,6 +20,7 @@ import {
     isWorkspaceMutationOperation,
     isWorkspaceToolRequest,
     isWorkspaceToolResult,
+    readBridgeCommandFailure,
     workspaceDetachedCommandKey,
     workspaceIsolationKey,
     workspaceIsolationParent,
@@ -107,10 +109,17 @@ export interface DurableWorkspaceGuard {
   token: string;
 }
 
+export interface DurableWorkspaceError {
+  code: string;
+  message: string;
+  /** Why a worker could not run the command, when it reported a valid cause. */
+  commandFailure?: BridgeCommandFailure;
+}
+
 export interface DurableWorkspaceOutcome {
   state: 'completed' | 'failed' | 'cancelled';
   result?: WorkspaceToolResult;
-  error?: { code: string; message: string };
+  error?: DurableWorkspaceError;
   settlement?: CodeBridgeWorkspaceSettlement;
 }
 
@@ -435,6 +444,35 @@ function withoutLaneGit(settlement: AnyCodeBridgeSettlement): AnyCodeBridgeSettl
   if (settlement.status !== 'fulfilled') return settlement;
   const { laneGit: _laneGit, ...result } = settlement.result as unknown as Record<string, unknown>;
   return { ...settlement, result } as AnyCodeBridgeSettlement;
+}
+
+type SettlementWithCommandFailure = AnyCodeBridgeSettlement & { commandFailure?: unknown };
+
+function withoutCommandFailure(settlement: AnyCodeBridgeSettlement): AnyCodeBridgeSettlement {
+  const { commandFailure: _commandFailure, ...rest }: SettlementWithCommandFailure = settlement;
+  return rest as AnyCodeBridgeSettlement;
+}
+
+/**
+ * Keep a rejected settlement's `commandFailure` only as `readBridgeCommandFailure` rebuilds it.
+ * An invalid or unknown value is dropped, never an error: it must not refuse the rejection it
+ * explains. A valid value stays exactly as sent, so a retry still matches byte for byte.
+ */
+function withValidCommandFailure(settlement: AnyCodeBridgeSettlement): AnyCodeBridgeSettlement {
+  const { commandFailure }: SettlementWithCommandFailure = settlement;
+  if (commandFailure === undefined) return settlement;
+  const valid = settlement.status === 'rejected' ? readBridgeCommandFailure(commandFailure) : undefined;
+  if (valid === undefined) return withoutCommandFailure(settlement);
+  if (JSON.stringify(valid) === JSON.stringify(commandFailure)) return settlement;
+  return { ...withoutCommandFailure(settlement), commandFailure: valid } as AnyCodeBridgeSettlement;
+}
+
+/** Whether a stored rejection and its retry differ only in a cause one replica kept and another dropped. */
+function sameRejectionApartFromCommandFailure(existing: string, settlement: AnyCodeBridgeSettlement): boolean {
+  if (settlement.status !== 'rejected') return false;
+  const stored = JSON.parse(existing) as AnyCodeBridgeSettlement;
+  return stored.status === 'rejected' &&
+    JSON.stringify(withoutCommandFailure(stored)) === JSON.stringify(withoutCommandFailure(settlement));
 }
 
 function settlementKey(assignmentId: string): string {
@@ -971,9 +1009,14 @@ export class RedisBridgeStore {
       }
       return { state: 'completed', result: settlement.result, settlement };
     }
+    const commandFailure = readBridgeCommandFailure(settlement.commandFailure);
     return {
       state: record.cancelRequested === true ? 'cancelled' : 'failed',
-      error: { code: settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED', message: settlement.error }, settlement,
+      error: {
+        code: settlement.errorCode ?? 'WORKSPACE_TOOL_REJECTED', message: settlement.error,
+        ...(commandFailure !== undefined ? { commandFailure } : {}),
+      },
+      settlement,
     };
   }
 
@@ -1866,6 +1909,7 @@ export class RedisBridgeStore {
       );
       return;
     }
+    settlement = withValidCommandFailure(settlement);
     let serializedSettlement = JSON.stringify(settlement);
     const existingSettlement = await this.leaseCommand(
       this.redis.get(settlementKey(assignmentId)),
@@ -1884,6 +1928,15 @@ export class RedisBridgeStore {
         settlement = stripped;
         serializedSettlement = existingSettlement;
       }
+    }
+    if (
+      existingSettlement != null &&
+      existingSettlement !== serializedSettlement &&
+      sameRejectionApartFromCommandFailure(existingSettlement, settlement)
+    ) {
+      // A replica that predates the field stores the cause unvalidated; the outcome is the same.
+      settlement = JSON.parse(existingSettlement) as AnyCodeBridgeSettlement;
+      serializedSettlement = existingSettlement;
     }
     if (
       existingSettlement != null &&
