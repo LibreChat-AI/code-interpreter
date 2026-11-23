@@ -44,7 +44,7 @@ class Text:
 def pdf_segments(data):
     import pypdf
     from pypdf import filters, _page
-    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, NullObject, StreamObject
+    from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, NameObject, NullObject, StreamObject
     from pypdf._cmap import charset_encoding
     from pypdf._codecs.core_font_metrics import CORE_FONT_METRICS
     from pypdf._text_extraction._text_extractor import TextExtraction
@@ -106,13 +106,21 @@ def pdf_segments(data):
         return value
 
     def decode(stream):
-        names = stream.get("/Filter", [])
+        declared = stream.get("/Filter", [])
+        names = declared
         if not isinstance(names, list):
             names = [names]
         if len(names) > 1 or any(str(name) not in {
             "/FlateDecode", "/Fl", "/ASCIIHexDecode", "/AHx", "/ASCII85Decode", "/A85"
         } for name in names):
             reject("UNSUPPORTED_ENCODING")
+        # pypdf 7 rejects stream-filter abbreviations. Normalize only the
+        # supported aliases after enforcing the single-filter boundary, while
+        # retaining DecodeParms and the bounded decompressor below.
+        aliases = {"/Fl": "/FlateDecode", "/AHx": "/ASCIIHexDecode", "/A85": "/ASCII85Decode"}
+        if any(str(name) in aliases for name in names):
+            normalized = [NameObject(aliases.get(str(name), str(name))) for name in names]
+            stream[NameObject("/Filter")] = ArrayObject(normalized) if isinstance(declared, list) else normalized[0]
         try:
             return original(stream)
         except Rejected:

@@ -5,7 +5,8 @@ import Redis from 'ioredis';
 import { RedisBridgeStore } from '../bridge/store';
 import { BridgeAdmissionQueue } from '../bridge/admission';
 import type { CodeBridgeAssignment } from '../bridge/store';
-import type { WorkspaceToolRequest } from '../../../packages/code/src/protocol';
+import { workspaceDetachedCommandKey } from '../../../packages/code/src/protocol';
+import type { BridgeRejectedSettlement, WorkspaceToolRequest } from '../../../packages/code/src/protocol';
 import { RedisWorkspaceRequests } from './requests';
 import { workspaceRequestCoordinationScope } from './coordination';
 import type { WorkspaceRequestCoordinationPolicy } from './coordination';
@@ -25,13 +26,17 @@ const queueKey = `codeapi:bridge:v1:worker:${workerId}:admission`;
 // Only a disposable test Redis may be supplied.
 afterEach(async () => { await redis.flushall(); });
 
-async function setup(slots = 1): Promise<RedisWorkspaceRequests> {
+async function setup(slots = 1, lanes = false, detached = false): Promise<RedisWorkspaceRequests> {
   const generation = await bridge.register({ protocolVersion: 1, workerId, incarnationId,
     capabilities: {
       sandboxProfile: 'native-srt', statefulWorkspace: false, runtimes: ['bash'],
       ...(slots > 1 ? { workspaceLeaseSlots: slots, requiresReadyConfirmation: true } : {}),
       workspaceTools: { protocolVersion: 1, operations: ['read_file', 'execute_command', 'list_files', 'search_text', 'preview_edit'],
-        workspaces: [{ id: 'primary' }, { id: 'independent' }] },
+        workspaces: [
+          { id: 'primary', ...(lanes ? { workspaceScopes: ['git_linked_worktree' as const] } : {}) },
+          { id: 'independent' },
+        ],
+        ...(detached ? { commandFeatures: ['detached' as const] } : {}) },
     },
   });
   if (slots > 1) await bridge.confirmReady(workerId, incarnationId, generation);
@@ -669,3 +674,190 @@ test('unconfirmed durable mutation cancellation still reports an unknown outcome
   const fence = `codeapi:bridge:v1:worker:${workerId}:workspace:${createHash('sha256').update('native-workspace:primary').digest('hex')}:quarantined`;
   expect(await redis.get(fence)).toBe(assignment.assignmentId);
 }, 10_000);
+
+const lane = { workspaceId: 'primary', worktree: 'review' };
+
+function fenceKey(fence: string): string {
+  return `codeapi:bridge:v1:worker:${workerId}:workspace:${createHash('sha256').update(fence).digest('hex')}:quarantined`;
+}
+
+const laneFence = fenceKey('native-workspace:\0linked-worktree\0primary\0review');
+
+function submitLane(requests: RedisWorkspaceRequests, id: string, request: Partial<WorkspaceToolRequest>): ReturnType<RedisWorkspaceRequests['submit']> {
+  return requests.submit({ owner, requestId: id, workerId, requireTenantBinding: false,
+    request: { protocolVersion: 1, ...lane, ...request } as WorkspaceToolRequest,
+    queueWaitMs: 300_000, executionTimeoutMs: 30_000,
+  });
+}
+
+async function leaseAnySlot(): Promise<CodeBridgeAssignment | undefined> {
+  for (const slot of [0, 1]) {
+    const assignment = await bridge.lease(workerId, incarnationId, 0, undefined, undefined, slot);
+    if (assignment != null) return assignment;
+  }
+  return undefined;
+}
+
+function rejection(assignment: CodeBridgeAssignment, error: string): BridgeRejectedSettlement {
+  return { protocolVersion: 1 as const, incarnationId, generation: assignment.generation,
+    leaseToken: assignment.leaseToken, status: 'rejected' as const, error };
+}
+
+test('a rejected lane releases its fence even when its cleanup acknowledgement is lost', async () => {
+  const requests = await setup(2, true);
+  await submitLane(requests, requestId, { operation: 'execute_command', command: 'git status' });
+  await submitLane(requests, 'request-00000000002', { operation: 'list_files' });
+  await tick(requests);
+  const refused = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0))!;
+  expect(await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 1)).toBeUndefined();
+  await bridge.acknowledgeLease(workerId, incarnationId, refused.assignmentId, refused.generation, refused.leaseToken);
+  // The worker refuses a lane that does not exist, then stops before acknowledging local cleanup.
+  await bridge.settle(workerId, refused.assignmentId, {
+    ...rejection(refused, 'No linked worktree named review in .worktrees'), errorCode: 'INVALID_REQUEST',
+  });
+  expect(await redis.get(laneFence)).toBeNull();
+  await tick(requests);
+  expect(await requests.get(owner, requestId)).toMatchObject({ state: 'failed', error: { code: 'INVALID_REQUEST' } });
+
+  await tick(requests);
+  const queued = (await leaseAnySlot())!;
+  expect(queued.request).toMatchObject({ operation: 'list_files', worktree: 'review' });
+  // A late acknowledgement for the refused assignment never releases the lane's next owner.
+  await expect(bridge.confirmWorkspaceCleanup(workerId, refused.assignmentId,
+    rejection(refused, 'local cleanup confirmed'))).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+  expect(await redis.get(laneFence)).toBe(queued.assignmentId);
+  await settle(queued, false); await tick(requests);
+  expect((await requests.get(owner, 'request-00000000002'))?.state).toBe('failed');
+
+  await submit(requests, 'request-00000000003'); await tick(requests);
+  const checkout = (await leaseAnySlot())!;
+  expect(checkout.request).toMatchObject({ operation: 'read_file', workspaceId: 'primary' });
+  expect((checkout.request as WorkspaceToolRequest).worktree).toBeUndefined();
+});
+
+test.each(['quarantined after rejection', 'interrupted'])('an uncertain lane outcome still fences the lane and its checkout (%s)', async outcome => {
+  const requests = await setup(2, true);
+  await submitLane(requests, requestId, { operation: 'execute_command', command: 'git status' });
+  await tick(requests);
+  const assignment = (await leaseAnySlot())!;
+  await bridge.acknowledgeLease(workerId, incarnationId, assignment.assignmentId, assignment.generation, assignment.leaseToken);
+  if (outcome === 'interrupted') {
+    const key = (await redis.zrange(activeKey, 0, -1))[0];
+    const stored = JSON.parse((await redis.hget(key, 'assignment'))!);
+    stored.expiresAt = new Date(Date.now() - 1).toISOString();
+    await redis.hset(key, 'assignment', JSON.stringify(stored));
+  } else {
+    // The settlement commits, but the worker cannot clear its local guard and reports the lane instead.
+    await bridge.settle(workerId, assignment.assignmentId, rejection(assignment, 'Command failed atomically'));
+    await bridge.settle(workerId, assignment.assignmentId, rejection(assignment, 'Workspace requires inspection before reset.'),
+      undefined, undefined, true);
+  }
+  await tick(new RedisWorkspaceRequests(redis, bridge));
+  expect((await requests.get(owner, requestId))?.state).toBe('failed');
+  expect(await redis.get(laneFence)).toBe(
+    outcome === 'interrupted' ? assignment.assignmentId : `quarantined:${assignment.assignmentId}`,
+  );
+
+  // Simulate execution-ownership TTL expiry. The lane fence outlives the reservation.
+  await redis.del(`codeapi:bridge:v1:worker:${workerId}:workspace-slots`,
+    `codeapi:bridge:v1:worker:${workerId}:lock`, `codeapi:bridge:v1:worker:${workerId}:lock:incarnation`);
+  await submit(requests, 'request-00000000002'); await tick(requests);
+  expect(await requests.get(owner, 'request-00000000002')).toMatchObject({
+    state: 'failed', error: { code: 'WORKSPACE_QUARANTINED' },
+  });
+});
+
+async function completeCommand(assignment: CodeBridgeAssignment): Promise<void> {
+  await bridge.acknowledgeLease(workerId, incarnationId, assignment.assignmentId,
+    assignment.generation, assignment.leaseToken);
+  await bridge.settle(workerId, assignment.assignmentId, {
+    protocolVersion: 1, incarnationId, generation: assignment.generation, leaseToken: assignment.leaseToken,
+    status: 'fulfilled', result: { protocolVersion: 1, operation: 'execute_command', workspaceId: 'primary',
+      exitCode: 0, stdout: assignment.assignmentId, stderr: '', truncated: false, timedOut: false },
+  });
+  await bridge.confirmWorkspaceCleanup(workerId, assignment.assignmentId, rejection(assignment, 'local cleanup confirmed'));
+}
+
+test('a durable detached command runs beside its lane and settles independently', async () => {
+  const requests = await setup(2, true, true);
+  await submitLane(requests, requestId, { operation: 'execute_command', command: 'git status' });
+  await submitLane(requests, 'request-00000000002', { operation: 'execute_command', command: 'npm test', detached: true });
+  await submitLane(requests, 'request-00000000003', { operation: 'list_files' });
+  await tick(requests); await tick(requests);
+  const ordinary = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0))!;
+  const background = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 1))!;
+  expect(ordinary.request).toMatchObject({ command: 'git status', worktree: 'review' });
+  expect(background.request).toMatchObject({ command: 'npm test', worktree: 'review', detached: true });
+  expect(background.assignmentId.startsWith('durable-')).toBe(true);
+  expect((await requests.get(owner, 'request-00000000003'))?.state).toBe('queued');
+
+  const detachedFence = fenceKey(`native-workspace:${workspaceDetachedCommandKey(background.assignmentId)}`);
+  expect(await redis.get(laneFence)).toBe(ordinary.assignmentId);
+  expect(await redis.get(detachedFence)).toBe(background.assignmentId);
+  expect(await redis.ttl(laneFence)).toBe(-1);
+  const fenceTtl = await redis.ttl(detachedFence);
+  expect(fenceTtl).toBeGreaterThan(23 * 60 * 60);
+  expect(fenceTtl).toBeLessThanOrEqual(24 * 60 * 60);
+
+  await completeCommand(ordinary); await tick(requests);
+  expect(await requests.get(owner, requestId)).toMatchObject({ state: 'completed', result: { stdout: ordinary.assignmentId } });
+  expect((await requests.get(owner, 'request-00000000002'))?.state).toBe('admitted');
+  await tick(requests);
+  const queued = (await bridge.lease(workerId, incarnationId, 0, undefined, undefined, 0))!;
+  expect(queued.request).toMatchObject({ operation: 'list_files', worktree: 'review' });
+  expect(await redis.get(laneFence)).toBe(queued.assignmentId);
+  expect(await redis.get(detachedFence)).toBe(background.assignmentId);
+
+  await completeCommand(background); await tick(requests);
+  expect(await requests.get(owner, 'request-00000000002')).toMatchObject({ state: 'completed', result: { stdout: background.assignmentId } });
+  expect(await redis.exists(detachedFence)).toBe(0);
+  expect(await redis.get(laneFence)).toBe(queued.assignmentId);
+});
+
+test('a durable detached command is refused for a worker that does not advertise the feature', async () => {
+  const requests = await setup(2, true);
+  await expect(submitLane(requests, requestId, { operation: 'execute_command', command: 'npm test', detached: true }))
+    .rejects.toMatchObject({ code: 'WORKER_MISMATCH' });
+  expect(await redis.zcard(queueKey)).toBe(0);
+});
+
+test.each(['active', 'completed', 'quarantined'].flatMap(state =>
+  [false, true].map(legacyReceipt => [state, legacyReceipt] as const),
+))(
+  'late quarantine from a rejected lane cannot replace its %s successor (legacy receipt=%s)', async (state, legacyReceipt) => {
+    const requests = await setup(2, true);
+    await submitLane(requests, requestId, { operation: 'execute_command', command: 'git status' });
+    await submitLane(requests, 'request-00000000002', { operation: 'list_files' });
+    await tick(requests);
+    const refused = (await leaseAnySlot())!;
+    await bridge.acknowledgeLease(workerId, incarnationId, refused.assignmentId, refused.generation, refused.leaseToken);
+    await bridge.settle(workerId, refused.assignmentId, rejection(refused, 'No linked worktree'));
+    if (legacyReceipt) {
+      // Receipts from before per-assignment epochs must also lose authority.
+      await redis.hset(`codeapi:bridge:v1:assignment:${refused.assignmentId}:workspace-fence-owner`, 'epoch', '0');
+      await redis.set(`${laneFence}:epoch`, '0', 'PX', await redis.pttl(`${laneFence}:epoch`));
+    }
+    await tick(requests); await tick(requests);
+    const successor = (await leaseAnySlot())!;
+    expect(await redis.get(laneFence)).toBe(successor.assignmentId);
+    if (state === 'completed') {
+      await settle(successor, false); await tick(requests);
+    } else if (state === 'quarantined') {
+      await bridge.settle(workerId, successor.assignmentId, rejection(successor, 'Workspace requires inspection'),
+        undefined, undefined, true);
+    }
+    const fence = await redis.get(laneFence);
+    expect(fence).toBe(state === 'completed' ? null : state === 'quarantined'
+      ? `quarantined:${successor.assignmentId}` : successor.assignmentId);
+    await expect(bridge.settle(workerId, refused.assignmentId, rejection(refused, 'Late quarantine'),
+      undefined, undefined, true)).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+    expect(await redis.get(laneFence)).toBe(fence);
+    await expect(bridge.confirmWorkspaceCleanup(workerId, refused.assignmentId,
+      rejection(refused, 'Late cleanup'))).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
+    expect(await redis.get(laneFence)).toBe(fence);
+    if (state === 'active') {
+      await settle(successor, false); await tick(requests);
+      expect((await requests.get(owner, 'request-00000000002'))?.state).toBe('failed');
+    }
+  },
+);

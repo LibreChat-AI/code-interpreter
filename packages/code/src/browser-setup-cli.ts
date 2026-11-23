@@ -98,6 +98,6 @@ export async function runBrowserSetupCommand(
     });
   } else {
     const quoted = `'${profilePath.replace(/'/g, "'\\''")}'`;
-    process.stdout.write(`Start it with:\n  librechat-code run${profilePath === resolve(defaultWorkerProfilePath()) ? '' : ` --profile ${quoted}`}\n`);
+    process.stdout.write(`Start it with:\n  lc-code run${profilePath === resolve(defaultWorkerProfilePath()) ? '' : ` --profile ${quoted}`}\n`);
   }
 }

@@ -29,6 +29,9 @@ const requests = coordinationScope === undefined ? undefined : new RedisWorkspac
     'codeapi.workspace.id': record.request.workspaceId,
     'codeapi.workspace.instance_id': record.request.workspaceInstanceId ?? '',
     'codeapi.workspace.worktree': record.request.worktree ?? '',
+    ...(record.request.operation === 'execute_command' && record.request.detached === true
+      ? { 'codeapi.workspace.detached': true }
+      : {}),
     'codeapi.admission.wait_ms': Math.max(0, (record.admittedAtMs ?? Math.min(record.finishedAtMs ?? Date.now(), record.queueDeadlineAtMs)) - record.createdAtMs),
     'codeapi.admission.error_code': record.error?.code ?? '',
   };

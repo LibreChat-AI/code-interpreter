@@ -312,6 +312,18 @@ export function workspaceIsolationKeysConflict(left: string, right: string): boo
     );
 }
 
+const DETACHED_COMMAND_KEY_PREFIX = '\0detached-command\0';
+
+/** Scheduling identity of one detached command. Unique per assignment, it never equals
+ * or nests with a checkout or lane key, so it neither waits for nor holds a worktree. */
+export function workspaceDetachedCommandKey(assignmentId: string): string {
+    return `${DETACHED_COMMAND_KEY_PREFIX}${assignmentId}`;
+}
+
+export function isWorkspaceDetachedCommandKey(key: string): boolean {
+    return key.startsWith(DETACHED_COMMAND_KEY_PREFIX);
+}
+
 export type BridgeWorkspaceToolOperation =
   | 'read_file'
   | 'search_text'
@@ -382,6 +394,8 @@ export function boundedHead(value: unknown): string | null {
 export type WorkspaceListFileFeature = 'after_path';
 /** `lane_git`: `execute_command` results may carry `laneGit`. Sent only when Code API echoes it. */
 export type WorkspaceCommandResultFeature = 'lane_git';
+/** `detached`: `execute_command` requests may carry `detached`. Sent only when Code API offers it. */
+export type WorkspaceCommandFeature = 'detached';
 
 /** Git state of the lane a command ran in. Never carries paths, remotes or repository content. */
 export interface WorkspaceLaneGit {
@@ -438,6 +452,8 @@ export interface BridgeWorkspaceToolCapabilities {
   listFileFeatures?: WorkspaceListFileFeature[];
   /** Omitted by workers that do not report lane Git state on command results. */
   commandResultFeatures?: WorkspaceCommandResultFeature[];
+  /** Omitted by workers that cannot run a command without holding its worktree. */
+  commandFeatures?: WorkspaceCommandFeature[];
   /** Languages that can execute PTC replay inside a selected workspace. */
   programmaticLanguages?: WorkspaceProgrammaticLanguage[];
 }
@@ -677,6 +693,9 @@ export interface WorkspaceExecuteCommandRequest {
   /** Aggregate UTF-8 stdout and stderr budget. */
   maxOutputBytes?: number;
     environmentAction?: { name: string; fingerprint: string };
+  /** Occupies a worker slot without holding its worktree: other operations there are
+   * admitted while it runs. Sent only to workers advertising the `detached` command feature. */
+  detached?: true;
 }
 
 export interface WorkspaceExecuteCommandResult {
@@ -839,6 +858,7 @@ const WORKSPACE_COMMAND_REQUEST_KEYS = new Set([
   'cwd',
   'timeoutMs',
   'maxOutputBytes',
+  'detached',
 ]);
 const WORKSPACE_IMPORT_REQUEST_KEYS = new Set([
   'protocolVersion',
@@ -979,6 +999,8 @@ export interface BridgeWorkerRegistrationResponse {
   supportedWorkspaceScopes?: ['git_linked_worktree'];
   /** Command result fields this Code API accepts in settlements. */
   supportedWorkspaceCommandResultFeatures?: WorkspaceCommandResultFeature[];
+  /** Command request features this Code API can schedule for a capability-aware worker. */
+  supportedWorkspaceCommandFeatures?: WorkspaceCommandFeature[];
   /** Added workspace tool error codes this Code API accepts in settlements. */
   supportedWorkspaceToolErrorCodes?: WorkspaceToolErrorCode[];
 }
@@ -1734,6 +1756,8 @@ export function isWorkspaceToolRequest(
                             .fingerprint,
                     ))) &&
       hasOnlyKeys(request, WORKSPACE_COMMAND_REQUEST_KEYS) &&
+      (request.detached === undefined ||
+        (request.detached === true && request.environmentAction === undefined)) &&
       typeof request.command === 'string' &&
       request.command.trim().length > 0 &&
       Buffer.from(request.command).toString('utf8') === request.command &&
@@ -2101,6 +2125,16 @@ export function isValidBridgeWorkspaceToolCapabilities(
       capabilities.commandResultFeatures.length !== 1 ||
       !capabilities.operations.includes('execute_command') ||
       capabilities.commandResultFeatures[0] !== 'lane_git')
+  ) {
+    return false;
+  }
+
+  if (
+    capabilities.commandFeatures !== undefined &&
+    (!Array.isArray(capabilities.commandFeatures) ||
+      capabilities.commandFeatures.length !== 1 ||
+      !capabilities.operations.includes('execute_command') ||
+      capabilities.commandFeatures[0] !== 'detached')
   ) {
     return false;
   }

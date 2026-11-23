@@ -363,6 +363,6 @@ test('CLI inventories a real checkout without pairing or starting a worker', asy
             fileURLToPath(new URL('./cli.js', import.meta.url)),
             'projects',
         ]),
-        /Usage: librechat-code projects/
+        /Usage: lc-code projects/
     );
 });

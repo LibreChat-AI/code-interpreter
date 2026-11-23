@@ -421,6 +421,11 @@ fn is_allowed_guest_env_key(key: &str, egress_gateway_enabled: bool) -> bool {
         "SANDBOX_COMPILE_TIMEOUT",
         "SANDBOX_DATA_DIRECTORY",
         "SANDBOX_DISABLE_NETWORKING",
+        "SANDBOX_GRACEFUL_DRAIN_ENABLED",
+        "SANDBOX_DRAIN_MIN_DELAY_MS",
+        "SANDBOX_DRAIN_TIMEOUT_MS",
+        "SANDBOX_DRAIN_RETRY_AFTER_SECONDS",
+        "SANDBOX_DRAIN_PUBLIC_KEY",
         "SANDBOX_HTTP_INPUT_CACHE_ENABLED",
         "SANDBOX_HTTP_INPUT_CACHE_MAX_INFLIGHT",
         "SANDBOX_HTTP_INPUT_CACHE_MAX_OBJECTS",
@@ -874,6 +879,23 @@ mod tests {
             "PATH",
         ] {
             assert!(is_allowed_guest_env_key(key, true), "{key} should enter the sandbox guest");
+        }
+    }
+
+    #[test]
+    fn guest_env_allowlist_forwards_drain_settings_in_both_egress_modes() {
+        for egress_gateway_enabled in [false, true] {
+            for key in [
+                "SANDBOX_GRACEFUL_DRAIN_ENABLED",
+                "SANDBOX_DRAIN_MIN_DELAY_MS",
+                "SANDBOX_DRAIN_TIMEOUT_MS",
+                "SANDBOX_DRAIN_RETRY_AFTER_SECONDS",
+                "SANDBOX_DRAIN_PUBLIC_KEY",
+            ] {
+                assert!(is_allowed_guest_env_key(key, egress_gateway_enabled), "{key}");
+            }
+            assert!(!is_allowed_guest_env_key("SANDBOX_DRAIN_SECRET", egress_gateway_enabled));
+            assert!(!is_allowed_guest_env_key("SANDBOX_DRAIN_UNDECLARED", egress_gateway_enabled));
         }
     }
 

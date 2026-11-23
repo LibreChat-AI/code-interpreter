@@ -3,7 +3,7 @@ import type Redis from 'ioredis';
 import type { WorkspaceToolRequest, WorkspaceToolResult } from '../../../packages/code/src/protocol';
 import type { RedisBridgeStore, RegisteredBridgeWorker, DurableWorkspaceAssignment, CodeBridgeWorkspaceSettlement } from '../bridge/store';
 import { BridgeAdmissionQueue } from '../bridge/admission';
-import { BridgeStoreError, workspaceAdmissionId } from '../bridge/store';
+import { BridgeStoreError, workspaceToolAdmissionId } from '../bridge/store';
 
 const PREFIX = 'codeapi:workspace-requests:v1';
 const ACTIVE = `${PREFIX}:active`;
@@ -141,7 +141,7 @@ export class RedisWorkspaceRequests {
     try {
       accepted = await queue.submit({
         workerId: record.workerId, id: record.id, deadlineAtMs: record.queueDeadlineAtMs,
-        workspaceId: workspaceAdmissionId(record.request.workspaceId, record.request.workspaceInstanceId, record.request.worktree),
+        workspaceId: workspaceToolAdmissionId(record.request, record.id),
         key, activeKey: this.activeKey, fingerprint, record: JSON.stringify(record), retentionMs: RETENTION_MS,
       });
     } catch (error) {

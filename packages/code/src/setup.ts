@@ -242,7 +242,7 @@ export async function profileRunConfiguration(
   if (!profile) {
     if (profilePath)
       throw new Error(
-        'Saved profile not found; run librechat-code setup first',
+        'Saved profile not found; run lc-code setup first',
       );
     return { args };
   }

@@ -75,8 +75,13 @@ run_check() {
         TEST_GUEST_DATE='Tue, 04 Aug 2026 08:00:00 GMT' \
         TEST_EXPECTED_URL='http://127.0.0.1:2000/api/v2/health' \
         "$@" \
-        bash "$ROOT/docker/sandbox-runner-healthcheck.sh"
+        bash -c 'exec bash "$1" "${TEST_PROBE_ARGUMENT:-}"' _ "$ROOT/docker/sandbox-runner-healthcheck.sh"
 }
+
+run_check \
+    SANDBOX_RUNNER_CLOCK_SKEW_LIVENESS_LIMIT_SECONDS=0 \
+    TEST_PROBE_ARGUMENT=--ready \
+    TEST_EXPECTED_URL='http://127.0.0.1:2000/api/v2/ready'
 
 run_check \
     SANDBOX_RUNNER_CLOCK_SKEW_LIVENESS_LIMIT_SECONDS=10 \

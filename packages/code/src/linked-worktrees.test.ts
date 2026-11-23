@@ -20,11 +20,12 @@ import {
   linkedWorktreeWorkspaceId,
   verifyLinkedWorktree,
 } from './linked-worktrees.js';
+import { NativeWorkspaceCommandPool as CommandPool } from './native-pool.js';
 import { LocalWorkspaceTools, WorkspaceToolError } from './workspace.js';
 
 import type { NativeWorkspaceCommandPool } from './native-pool.js';
 import type { NativeProcessSandboxOptions } from './native-process.js';
-import type { WorkspaceToolRequest } from './protocol.js';
+import type { WorkspaceExecuteCommandRequest, WorkspaceToolRequest } from './protocol.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -344,4 +345,67 @@ test('a removed lane releases its command root and credential route', async (t) 
     ['register', 'execute', 'unregister'],
   );
   assert.deepEqual(released, [join(root, '.worktrees', 'task-a')]);
+});
+
+test('a detached lane command runs in its own executor while the lane keeps working', async (t) => {
+  const { parent, root } = await checkout();
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const executors: Array<{ root: string; requests: WorkspaceExecuteCommandRequest[]; closed: boolean }> = [];
+  let releaseBackground!: () => void;
+  const backgroundFinished = new Promise<void>((resolve) => { releaseBackground = resolve; });
+  let backgroundStarted!: () => void;
+  const backgroundRunning = new Promise<void>((resolve) => { backgroundStarted = resolve; });
+  const pool = new CommandPool(new Map([['repo', { workspaceRoot: root }]]), 2, (options) => {
+    const executor = { root: options.workspaceRoot, requests: [] as WorkspaceExecuteCommandRequest[], closed: false };
+    executors.push(executor);
+    return {
+      async prepare() {},
+      async close() {
+        executor.closed = true;
+      },
+      async execute(request) {
+        executor.requests.push(request);
+        if (request.command === 'npm test') {
+          backgroundStarted();
+          await backgroundFinished;
+        }
+        return { ...request, stdout: request.command, stderr: '', exitCode: 0, timedOut: false, truncated: false };
+      },
+    };
+  });
+  const tools = await laneTools(root, pool);
+  const command = {
+    protocolVersion: 1 as const,
+    operation: 'execute_command' as const,
+    workspaceId: 'repo',
+    worktree: 'task-a',
+  };
+  const id = linkedWorktreeWorkspaceId('repo', 'task-a');
+  const laneRoot = join(root, '.worktrees', 'task-a');
+
+  const background = tools.execute({ ...command, command: 'npm test', detached: true });
+  await backgroundRunning;
+  const ordinary = await tools.execute({ ...command, command: 'git status' });
+  assert.equal(ordinary.workspaceId, 'repo');
+  assert.deepEqual(await tools.whileIdle('repo', 'task-a', async () => 'retired'), { ran: false });
+  assert.deepEqual(executors, [
+    {
+      root: laneRoot,
+      requests: [{ protocolVersion: 1, operation: 'execute_command', workspaceId: id, command: 'npm test' }],
+      closed: false,
+    },
+    {
+      root: laneRoot,
+      requests: [{ protocolVersion: 1, operation: 'execute_command', workspaceId: id, command: 'git status' }],
+      closed: false,
+    },
+  ]);
+
+  releaseBackground();
+  const result = await background;
+  assert.equal(result.workspaceId, 'repo');
+  assert.equal(result.operation === 'execute_command' && result.stdout, 'npm test');
+  assert.deepEqual(await tools.whileIdle('repo', 'task-a', async () => 'retired'), { ran: true, value: 'retired' });
+  assert.deepEqual(executors.map((executor) => executor.closed), [true, true]);
+  await pool.close();
 });

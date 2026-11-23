@@ -1,5 +1,6 @@
 import express, { json, Router } from 'express';
-import { startServer, gracefulShutdown } from './lifecycle';
+import { startServer, gracefulShutdown, checkFileServerStoreMismatch } from './lifecycle';
+import { createHealthHandler } from './health';
 import { apiKeyAuth } from './middleware/auth';
 import { requestErrorLogger, requestNotFoundLogger } from './middleware/request-error-logger';
 import { executionProfileMiddleware } from './middleware/execution-profile';
@@ -25,15 +26,11 @@ const v1 = Router();
 
 app.use(json({ limit: env.HTTP_JSON_LIMIT })); // Large scripts/tool definitions are configurable.
 
-app.get('/v1/health', async (_, res) => {
-  try {
-    await connection.ping();
-    res.sendStatus(200);
-  } catch (error) {
-    logger.error('Health check failed:', error);
-    res.sendStatus(503);
-  }
-});
+app.get('/v1/health', createHealthHandler({
+  ping: () => connection.ping(),
+  fileServerStoreMismatch: checkFileServerStoreMismatch,
+  onPingError: error => logger.error('Health check failed:', error),
+}));
 
 v1.use('/bridge', bridgeRouter);
 v1.use(apiKeyAuth);

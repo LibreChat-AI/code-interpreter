@@ -1,7 +1,9 @@
 """Create bounded adversarial test documents inside the disposable test container."""
 from pathlib import Path
+import base64
 import struct
 import zipfile
+import zlib
 from docx import Document
 from pypdf import PdfReader, PdfWriter
 
@@ -69,6 +71,32 @@ from pypdf.generic import (
     ArrayObject, DecodedStreamObject, DictionaryObject, EncodedStreamObject,
     NameObject, NumberObject,
 )
+def wrapped_table_pdf():
+    # Adjacent cells wrap above and below the row label's baseline. Keep every
+    # word separate even when the extractor keeps the fragments on one line.
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    font = writer._add_object(DictionaryObject({
+        NameObject('/Type'): NameObject('/Font'), NameObject('/Subtype'): NameObject('/Type1'),
+        NameObject('/BaseFont'): NameObject('/Helvetica'),
+        NameObject('/Encoding'): NameObject('/WinAnsiEncoding'),
+    }))
+    page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+    stream = DecodedStreamObject()
+    stream.set_data(
+        b'BT /F1 10 Tf '
+        b'1 0 0 1 72 700 Tm (Row) Tj '
+        b'1 0 0 1 160 706 Tm (Alpha) Tj '
+        b'1 0 0 1 160 694 Tm (Beta) Tj '
+        b'1 0 0 1 240 706 Tm (Gamma) Tj '
+        b'1 0 0 1 240 694 Tm (Delta) Tj ET'
+    )
+    page[NameObject('/Contents')] = writer._add_object(stream)
+    with (root / 'wrapped-table.pdf').open('wb') as file:
+        writer.write(file)
+
+wrapped_table_pdf()
+
 for name, mode in [('form-limit.pdf', 'limit'), ('form-filter.pdf', 'filter'), ('form-valid.pdf', 'valid')]:
     writer = PdfWriter()
     writer.append(root / 'pages.pdf')
@@ -90,6 +118,42 @@ for name, mode in [('form-limit.pdf', 'limit'), ('form-filter.pdf', 'filter'), (
     stream = page['/Contents'].get_object()
     stream.set_data(stream.get_data() + b'\n/Form Do')
     writer.write(root / name)
+
+# All supported abbreviated filters must reach the same bounded decoders as
+# their full names, both on page streams and nested form XObjects.
+for short, full, encode in [
+    ('Fl', 'FlateDecode', zlib.compress),
+    ('AHx', 'ASCIIHexDecode', lambda data: data.hex().encode() + b'>'),
+    ('A85', 'ASCII85Decode', lambda data: base64.a85encode(data) + b'~>'),
+]:
+    for label in (short, full):
+        for array in (False, True):
+            writer = PdfWriter()
+            writer.append(root / 'pages.pdf')
+            page = writer.pages[0]
+            encoded = EncodedStreamObject()
+            encoded._data = encode(page['/Contents'].get_object().get_data())
+            encoded[NameObject('/Filter')] = ArrayObject([NameObject('/' + label)]) if array else NameObject('/' + label)
+            page[NameObject('/Contents')] = writer._add_object(encoded)
+            writer.write(root / f'filter-{label}-{"array" if array else "scalar"}.pdf')
+    writer = PdfWriter()
+    writer.append(root / 'form-valid.pdf')
+    form = writer.pages[0]['/Resources']['/XObject']['/Form'].get_object()
+    form._data = encode(form.get_data())
+    form[NameObject('/Filter')] = NameObject('/' + short)
+    writer.write(root / f'filter-form-{short}.pdf')
+
+for array in (False, True):
+    writer = PdfWriter()
+    writer.append(root / 'inflate.pdf')
+    stream = writer.pages[0]['/Contents'].get_object()
+    stream[NameObject('/Filter')] = ArrayObject([NameObject('/Fl')]) if array else NameObject('/Fl')
+    writer.write(root / f'filter-limit-{"array" if array else "scalar"}.pdf')
+for label, filters in [('unsupported', ['/LZW']), ('chain', ['/Fl', '/Fl'])]:
+    writer = PdfWriter()
+    writer.append(root / 'compressed.pdf')
+    writer.pages[0]['/Contents'][NameObject('/Filter')] = ArrayObject([NameObject(name) for name in filters])
+    writer.write(root / f'filter-{label}.pdf')
 
 # A valid XML prefix with forged size AND CRC must not hide trailing inflation.
 with zipfile.ZipFile(root / 'body.docx') as source, zipfile.ZipFile(root / 'forged-bomb.docx', 'w', compression=zipfile.ZIP_DEFLATED) as target:

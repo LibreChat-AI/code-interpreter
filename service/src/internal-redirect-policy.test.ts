@@ -14,6 +14,7 @@ const transports: Record<string, number> = {
   'service/programmatic-router.ts': 3,
   'service/replay-state.ts': 2,
   'service/router.ts': 5,
+  'store-pairing.ts': 1,
 };
 
 // Every request to these internal endpoints must stay on its original origin.

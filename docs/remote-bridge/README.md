@@ -67,6 +67,53 @@ Restoring a backup from *before* a revocation can revive trust; reconcile
 revocations after recovery from backup. Use a distinct server ID for each Code
 API deployment and keep it stable when the endpoint changes behind a proxy.
 
+### File server and Redis pairing
+
+Chat uploads, `import_file`, and generated files all pass through a file
+server. `FILE_SERVER_URL` names it for the API (the egress gateway reads
+`EGRESS_GATEWAY_FILE_SERVER_URL`, which defaults to the same value). **That
+file server must use the same Redis as this Code API**: the same
+`REDIS_HOST`/`REDIS_PORT` and logical database.
+
+The two are coupled through Redis and nothing else. Code API registers each
+upload session there before forwarding bytes; the file server reads the session
+back and writes the record that later authorizes the object for download, as an
+execution input, and for `import_file`. An isolated bridge API with its own
+Redis must therefore run its own file server on that Redis. Reusing another
+deployment's file server does not work, even though both answer requests.
+
+Two checks report a mismatch instead of letting it pass silently:
+
+- **At startup**, Code API writes a random key that expires after 60 seconds
+  and asks the file server, over the authenticated internal route
+  `POST /internal/store-probe`, whether it can see it.
+    - Same Redis: `File server shares this API's Redis` is logged once and the
+      check ends.
+    - Different Redis: `File server does not share this API's Redis` is logged
+      as an error and `/v1/health` answers `503` with
+      `{"status":"not ready","checks":{"fileServerStore":"mismatch"}}`. The
+      check repeats every 30 seconds and clears as soon as the file server is
+      corrected; Code API does not need a restart. The Helm chart uses
+      `/v1/health` for both probes, so the pod leaves the Service and is
+      restarted until then.
+    - Cannot tell: the file server is not up yet, predates the route, or
+      rejects the internal service token. Code API logs one warning naming the
+      reason, serves normally, and retries in the background (2 seconds,
+      doubling to 60). This is never treated as a mismatch, so Code API and the
+      file server can be upgraded in either order.
+- **On every upload**, the file server refuses a session it cannot find in its
+  own Redis with `409 UPLOAD_SESSION_UNKNOWN` and logs the cause. It stores
+  nothing. `/upload` then fails, `/upload/batch` reports the file as an error,
+  and a generated file is left out of the execution result. A session older
+  than `SESSION_CACHE_TTL` is refused the same way.
+
+Before these checks, a mismatched file server stored every upload under a
+record no reader looks up, and the only symptom was a later
+`403 IMPORT_SOURCE_UNAUTHORIZED` (or a failed download) for every file.
+
+Set `CODEAPI_FILE_SERVER_STORE_CHECK=false` on Code API to skip the startup
+check. The file server's refusal is not configurable.
+
 Use `strict` instead of `affinity` if every request must include a runtime
 session hint. In hardened mode, startup requires the bridge token to be at least
 32 bytes. `PTC_MODE=blocking` is rejected; replay mode is required because a
@@ -319,6 +366,13 @@ execution.
   (`worktree: <name>`) nests beneath its checkout's key: sibling lanes run
   concurrently, while a lane and its checkout exclude each other, and a lane
   cannot start while its checkout is quarantined.
+- An `execute_command` request marked `detached` takes a slot under a key of
+  its own instead of its worktree's, so other operations there are admitted
+  while it runs and it is admitted while they run. Detached commands may hold
+  at most one slot fewer than the negotiated count. Code API offers the feature
+  only above one slot (`CODEAPI_BRIDGE_DETACHED_COMMANDS=false` opts out) and
+  refuses the field for a worker that does not advertise
+  `commandFeatures: ['detached']`.
 - Workspace tool admission waits for capacity up to 30 seconds without a
   `X-LibreChat-Workspace-Queue-Wait-Ms` header. A caller can advertise a longer
   per-request allowance, bounded by five minutes and any server queue ceiling.

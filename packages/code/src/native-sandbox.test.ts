@@ -35,6 +35,11 @@ import { restoreScratchTraversal } from './native-scratch.js';
 import { browserSetupAttemptPath, browserSetupProtectedPaths } from './browser-setup.js';
 import { WorkspaceToolError } from './workspace.js';
 import { isWorkspaceToolResult } from './protocol.js';
+import {
+  GITHUB_ALLOWED_DOMAINS,
+  gitHubCommandCredentialEnvironment,
+  gitHubMaskedCredentialVariables,
+} from './github.js';
 
 const request = {
   protocolVersion: 1 as const,
@@ -1062,6 +1067,51 @@ test('masks a host credential for only its injection host and restores the paren
     mode: 'mask',
     onExtractNoMatch: 'error',
   });
+});
+
+test('passes upload credential routing to SRT while keeping the GitHub token masked', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'librechat-code-native-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = process.env.GH_TOKEN;
+  const token = 'ghs_test_only_not_a_real_credential';
+  const fake = fakeManager({
+    wrappedEnvironment: { GH_TOKEN: 'fake_value_upload_sentinel' },
+    beforeWrap: async () => {
+      assert.equal(process.env.GH_TOKEN, token);
+    },
+  });
+  const sandbox = new NativeSrtWorkspaceCommandSandbox({
+    workspaceRoot: root,
+    allowedDomains: [...GITHUB_ALLOWED_DOMAINS],
+    maskedEnvironment: {
+      variables: gitHubMaskedCredentialVariables('github.com'),
+      async resolve() {
+        return gitHubCommandCredentialEnvironment({ value: token });
+      },
+    },
+    manager: fake.manager,
+  });
+  t.after(() => sandbox.close());
+
+  const result = await sandbox.execute({
+    ...request,
+    command: 'printf %s "$GH_TOKEN"',
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, 'fake_value_upload_sentinel');
+  assert.equal(process.env.GH_TOKEN, original);
+  assert.deepEqual(
+    fake.config?.credentials?.envVars?.find(variable => variable.name === 'GH_TOKEN'),
+    {
+      name: 'GH_TOKEN',
+      extract: '^(.+)$',
+      injectHosts: ['api.github.com', 'uploads.github.com'],
+      mode: 'mask',
+      onExtractNoMatch: 'error',
+    },
+  );
+  assert.deepEqual(fake.config?.network.tlsTerminate, {});
 });
 
 test('keeps trusted public command context out of credential masking', async t => {

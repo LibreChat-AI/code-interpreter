@@ -110,8 +110,24 @@ test('committed results retain the root fence until cleanup, including receipt e
     status: 'rejected' as const,
     error: 'fixture',
   };
-  await store.settle(workerId, assignment.assignmentId, intent);
-  await pending;
+  await store.settle(workerId, assignment.assignmentId, {
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    incarnationId,
+    generation: assignment.generation,
+    leaseToken: assignment.leaseToken,
+    status: 'fulfilled',
+    result: {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      operation: 'read_file',
+      workspaceId: 'a',
+      path: 'file.txt',
+      content: 'fixture',
+      startLine: 1,
+      endLine: 1,
+      truncated: false,
+    },
+  });
+  await expect(pending).resolves.toMatchObject({ status: 'fulfilled' });
   const fenceKey = (
     await redis.keys(
       `codeapi:bridge:v1:worker:${workerId}:workspace:*:quarantined`,
@@ -160,7 +176,7 @@ test('late quarantine after confirmed cleanup cannot fence a newer assignment', 
     undefined,
     0,
   ))!;
-  await store.settle(
+  await expect(store.settle(
     workerId,
     assignment.assignmentId,
     {
@@ -174,7 +190,7 @@ test('late quarantine after confirmed cleanup cannot fence a newer assignment', 
     undefined,
     undefined,
     true,
-  );
+  )).rejects.toMatchObject({ code: 'ASSIGNMENT_FENCED' });
   await settle(next);
   await expect(second).resolves.toMatchObject({ status: 'rejected' });
 });

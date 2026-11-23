@@ -5,6 +5,7 @@ import type { Server } from 'http';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { config } from '../config';
+import { drainSandbox, resetSandboxDrainForTests } from '../drain';
 import { Job } from '../job';
 import { loadPackage } from '../runtime';
 import { ValidationError } from '../validation';
@@ -42,6 +43,7 @@ afterAll(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 afterEach(() => {
+  resetSandboxDrainForTests();
   Job.prototype.prime = originalPrime;
   Job.prototype.execute = originalExecute;
   Job.prototype.uploadGeneratedFiles = originalUpload;
@@ -92,6 +94,8 @@ for (const outcome of [
       events.push('cleanup-end');
     };
     let responseArrived = false;
+    let drainCompleted = false;
+    let pendingDrain: Promise<unknown> | undefined;
     const pending = fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -111,9 +115,14 @@ for (const outcome of [
           throw new Error(`Response preceded cleanup: ${response.status}`);
         }),
       ]);
+      pendingDrain = drainSandbox(1000, 0).then(result => {
+        drainCompleted = true;
+        expect(result.drained).toBe(true);
+      });
       // Give an incorrectly early res.json() time to reach the client.
       await new Promise(resolve => setTimeout(resolve, 30));
       expect(responseArrived).toBe(false);
+      expect(drainCompleted).toBe(false);
     } finally {
       releaseCleanup();
       const response = await pending;
@@ -125,6 +134,7 @@ for (const outcome of [
           : 500
       );
       await response.text();
+      await pendingDrain;
     }
     expect(events.filter(event => event === 'cleanup-start')).toHaveLength(1);
     expect(events[events.length - 1]).toBe('cleanup-end');

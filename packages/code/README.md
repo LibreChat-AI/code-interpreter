@@ -386,7 +386,14 @@ standard Git LFS filters; hosts using LFS must install `git-lfs`, and checkout
 fails instead of silently leaving pointer files when it is unavailable.
 SRT replaces each real credential with a sentinel inside the sandbox and
 substitutes the real value in its host proxy only for the corresponding Git or
-GitHub API host. TLS termination is enabled for that substitution. The worker
+GitHub API host. On GitHub.com, the CLI token is also substituted for the exact
+`uploads.github.com` host used by native issue and PR attachments. This does not
+authorize credential injection into arbitrary GitHub subdomains or asset-storage
+hosts. Use a GitHub CLI version that supports `--attach`; GitHub still decides
+whether the credential has permission to upload, including which GitHub Apps it
+accepts. Enterprise host substitution is unchanged.
+
+TLS termination is enabled for that substitution. The worker
 restores the parent environment immediately after constructing the sandbox
 command; it never writes credentials into the repository, a remote URL, Git
 config, or the GitHub CLI credential store.
@@ -859,7 +866,8 @@ librechat-code run \
 
 Slots are per machine, not a fleet-wide execution limit. A busy machine does not
 consume another machine's slots. Requests for the same root remain serialized,
-including commands started through background tools. Independent checkouts can
+except a command the caller marks detached (see
+[Detached commands](#detached-commands)). Independent checkouts can
 use different slots; selecting subdirectories beneath one registered parent root
 does not create separate scheduling boundaries.
 
@@ -1073,6 +1081,51 @@ retain the selected root's sandbox boundary, not a shared parent-directory grant
 The `LIBRECHAT_CODE_WORKSPACE_QUARANTINE_FILE` single-file override is rejected
 when multiple roots are configured; unset it to use separate root-derived markers.
 
+#### Detached commands
+
+A long test or build started in the background would otherwise hold its root,
+checkout or lane for its whole run, and every later read, edit or command there
+would queue behind it. A caller can instead mark an `execute_command` request
+`detached: true`. A detached command still takes one slot, but it does not hold
+its worktree: other operations in that worktree, its checkout and its lanes are
+admitted and run while it runs, and it is admitted while they run. Its timeout,
+output, cancellation, settlement and result are those of any other command.
+
+Nothing serializes a detached command with the work beside it, so the caller is
+responsible for choosing commands that tolerate concurrent edits, such as a test
+run or a build, rather than a formatter or a `git` operation that rewrites the
+tree.
+
+The feature is on by default wherever it can hold: Code API offers it when
+`CODEAPI_BRIDGE_MAX_WORKSPACE_LEASE_SLOTS` is above 1, and a worker advertises
+`commandFeatures: ['detached']` when it runs native-srt commands with
+`--workspace-lease-slots` above 1 and Code API offered it. LibreChat reads the
+advertisement from the worker status and sends `detached` only then; a request
+that carries it for a worker that does not advertise it is refused, never run
+serialized. Set `CODEAPI_BRIDGE_DETACHED_COMMANDS=false` on every Code API
+replica, or start the worker with `--no-detached-commands`
+(`LIBRECHAT_CODE_DETACHED_COMMANDS=false`), to opt out. An older Code API never
+offers the feature and an older worker never advertises it, so either side can
+be upgraded first.
+
+- Detached commands may hold at most one slot fewer than the negotiated count,
+  so one slot always remains for other work. Further detached commands wait
+  without holding back the requests queued behind them.
+- Each detached command runs in its own SRT executor for the same root, with
+  the root's sandbox policy, created for the command and closed after it. It
+  counts toward the executor bound, and it never shares the root's own executor,
+  scratch directory or credentials.
+- Each detached command arms its own durable marker in a `.detached` directory
+  beside its worktree's quarantine marker, and clears it after settlement. If the
+  worker stops while one runs, or one ends ambiguously, the marker stays and the
+  worktree is quarantined exactly as for any other uncertain mutation. A detached
+  command also refuses to start in a quarantined worktree.
+  `clear-workspace-quarantine` removes these markers together with the worktree's
+  own, and `--reset-workspace-quarantine` refuses while any remain.
+- A detached command has no server-side fence on its worktree. Its own fence, and
+  the receipt left if it is quarantined, expire with the request's outcome instead
+  of waiting for a reset.
+
 `LIBRECHAT_CODE_WORKSPACE_LEASE_SLOTS` is the equivalent worker setting. Both
 ceilings must be integers from 1 to 8; the lower ceiling wins. An older Code API
 without the negotiation receipt keeps the worker on the serial protocol. Deploy
@@ -1081,7 +1134,7 @@ change while work is active fails closed; stop and drain the worker before
 changing it.
 
 Different roots can run concurrently; requests targeting the **same root remain
-serialized**, even across chats or agents. This is root-level exclusion, not
+serialized**, even across chats or agents, apart from detached commands. This is root-level exclusion, not
 file-level locking. Assign separate project/worktree roots for independent work.
 The admission queue remains bounded at 32 requests per worker. An idle SRT process
 cache is bounded by the local slot setting and evicts only idle executors. Runtime

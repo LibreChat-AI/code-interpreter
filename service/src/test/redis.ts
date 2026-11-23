@@ -4,12 +4,18 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import IORedis from 'ioredis';
 
-/** Real Lua semantics, isolated Unix socket, no TCP listener or durable data. */
-export async function startTestRedis(): Promise<IORedis & { closeTestServer(): Promise<void> }> {
+/**
+ * Real Lua semantics, isolated Unix socket, no durable data. No TCP listener
+ * unless `tcpPort` asks for a loopback one, for a process that takes only
+ * `REDIS_HOST`/`REDIS_PORT`.
+ */
+export async function startTestRedis(
+  opts: { tcpPort?: number } = {},
+): Promise<IORedis & { closeTestServer(): Promise<void> }> {
   const dir = await mkdtemp(path.join(tmpdir(), 'codeapi-redis-'));
   const socket = path.join(dir, 'redis.sock');
   const process = spawn('redis-server', [
-    '--port', '0', '--unixsocket', socket, '--unixsocketperm', '700',
+    '--port', String(opts.tcpPort ?? 0), '--bind', '127.0.0.1', '--unixsocket', socket, '--unixsocketperm', '700',
     '--save', '', '--appendonly', 'no', '--dir', dir,
   ], { stdio: 'ignore' });
   let failure: Error | undefined;

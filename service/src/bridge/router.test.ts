@@ -216,6 +216,70 @@ describe('paired bridge HTTP API', () => {
     });
   }
 
+  for (const [ceiling, enabled] of [[1, true], [2, true], [2, false]] as const) {
+    const offered = ceiling > 1 && enabled;
+    test(`registration ${offered ? 'offers' : 'omits'} detached commands with a ceiling of ${ceiling} and the setting ${enabled ? 'on' : 'off'}`, async () => {
+      const app = express();
+      app.use(json());
+      app.use(
+        '/v1/bridge',
+        createBridgeRouter({
+          store: new RedisBridgeStore(redis, undefined, undefined, ceiling, false, enabled),
+          pairings: new RedisBridgePairingStore(redis),
+          authMode: 'static',
+          adminToken: 'strong-administrator-bootstrap-token',
+          configuredWorkerId: 'vm-1',
+        }),
+      );
+      server = createServer(app);
+      await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      if (address == null || typeof address === 'string') throw new Error('Expected TCP listener');
+      const headers = {
+        Authorization: 'Bearer strong-administrator-bootstrap-token',
+        'Content-Type': 'application/json',
+      };
+      const response = await fetch(`http://127.0.0.1:${address.port}/v1/bridge/workers/register`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          protocolVersion: BRIDGE_PROTOCOL_VERSION,
+          workerId: 'vm-1',
+          incarnationId: 'incarnation-00000001',
+          capabilities: {
+            statefulWorkspace: false,
+            sandboxProfile: 'native-srt',
+            runtimes: [],
+            requiresReadyConfirmation: true,
+            workspaceLeaseSlots: 2,
+            workspaceTools: {
+              protocolVersion: BRIDGE_PROTOCOL_VERSION,
+              operations: ['read_file', 'execute_command'],
+              workspaces: [{ id: 'primary' }],
+              commandFeatures: ['detached'],
+            },
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body.workspaceLeaseSlots).toBe(ceiling);
+      if (offered) expect(body.supportedWorkspaceCommandFeatures).toEqual(['detached']);
+      else expect('supportedWorkspaceCommandFeatures' in body).toBe(false);
+
+      const status = await fetch(`http://127.0.0.1:${address.port}/v1/bridge/workers/vm-1/status`, { headers });
+      expect(status.status).toBe(200);
+      await expect(status.json()).resolves.toMatchObject({
+        workerId: 'vm-1',
+        online: true,
+        capabilities: {
+          workspaceLeaseSlots: ceiling,
+          workspaceTools: { commandFeatures: ['detached'] },
+        },
+      });
+    });
+  }
+
   for (const workspaceImportFile of [false, true]) {
     test(`registration ${workspaceImportFile ? 'offers' : 'omits'} import_file when grants ${workspaceImportFile ? 'can' : 'cannot'} be minted`, async () => {
       const app = express();

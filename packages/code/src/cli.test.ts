@@ -7,6 +7,18 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
+test('CLI help presents lc-code as primary and retains the compatibility alias', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url)), '--help'],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^Usage: lc-code <command>/);
+  assert.match(result.stdout, /Run lc-code setup --help/);
+  assert.match(result.stdout, /librechat-code remains available as a compatibility alias/);
+});
+
 test('CLI rejects an invalid worker ID before entering the run loop', () => {
   const result = spawnSync(
     process.execPath,
