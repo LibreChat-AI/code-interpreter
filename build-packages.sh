@@ -412,7 +412,7 @@ EOF
 chmod +x ${pkg_dest}/run"
 
     docker exec "$CONTAINER_NAME" bash -c "
-        echo 'PATH=${pkg_dest}/bin:${pkg_dest}:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:.' > ${pkg_dest}/.env
+        echo 'PATH=${pkg_dest}/bin:${pkg_dest}:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.' > ${pkg_dest}/.env
         echo 'NODE_PATH=${pkg_dest}/node_modules' >> ${pkg_dest}/.env
         echo 'BUN_INSTALL=${pkg_dest}' >> ${pkg_dest}/.env
     "
@@ -803,7 +803,7 @@ chmod +x ${pkg_dest}/run"
     # to ~/.bun/install/global.
     docker exec "$CONTAINER_NAME" bash -c "
         cat > ${pkg_dest}/.env <<EOF
-PATH=/pkgs/bun/${BUN_VERSION}/bin:/pkgs/bun/${BUN_VERSION}:/pkgs/node/${NODE_VERSION}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:.
+PATH=/pkgs/bun/${BUN_VERSION}/bin:/pkgs/bun/${BUN_VERSION}:/pkgs/node/${NODE_VERSION}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.
 NODE_PATH=/pkgs/node/${NODE_VERSION}/node_modules
 BUN_INSTALL=/pkgs/bun/${BUN_VERSION}
 EOF
