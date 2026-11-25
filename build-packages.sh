@@ -36,7 +36,6 @@ cd "$SCRIPT_DIR"
 PYTHON_VERSION="${PYTHON_VERSION:-3.14.4}"
 NODE_VERSION="${NODE_VERSION:-24.22.1}"
 BUN_VERSION="${BUN_VERSION:-1.4.4}"
-BASH_PACKAGE_VERSION="${BASH_PACKAGE_VERSION:-5.2.0}"
 GO_VERSION="${GO_VERSION:-1.27.4}"
 JAVA_FEATURE_VERSION="${JAVA_FEATURE_VERSION:-27}"
 JAVA_VERSION="${JAVA_VERSION:-27.0.1}"
@@ -325,7 +324,7 @@ install_node_packages() {
     echo "  Installing Node.js packages"
     echo "=============================================="
 
-    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:." "$npm_path" install \
+    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:." "$npm_path" install \
         --prefix "$pkg_dest" \
         --omit=dev \
         --no-audit \
@@ -338,7 +337,7 @@ install_node_packages() {
     # + bin shims on PATH) so `npm list -g`, `npm root -g`, and CLI shims work
     # as LLMs expect. The local tree above is still what feeds the
     # /mnt/data/node_modules symlink used by `require()` from user code.
-    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:." "$npm_path" install -g \
+    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:." "$npm_path" install -g \
         --prefix "$pkg_dest" \
         --omit=dev \
         --no-audit \
@@ -349,10 +348,10 @@ install_node_packages() {
     docker exec "$CONTAINER_NAME" bash -c "echo \$(date +%s)000 > ${pkg_dest}/.package-installed"
 
     echo "Installed Node.js packages (local):"
-    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:." "$npm_path" ls --prefix "$pkg_dest" --depth=0 2>/dev/null | head -40 || true
+    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:." "$npm_path" ls --prefix "$pkg_dest" --depth=0 2>/dev/null | head -40 || true
 
     echo "Installed Node.js packages (global):"
-    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:." "$npm_path" ls -g --prefix "$pkg_dest" --depth=0 2>/dev/null | head -40 || true
+    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:." "$npm_path" ls -g --prefix "$pkg_dest" --depth=0 2>/dev/null | head -40 || true
 }
 
 install_bun() {
@@ -413,7 +412,7 @@ EOF
 chmod +x ${pkg_dest}/run"
 
     docker exec "$CONTAINER_NAME" bash -c "
-        echo 'PATH=${pkg_dest}/bin:${pkg_dest}:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.' > ${pkg_dest}/.env
+        echo 'PATH=${pkg_dest}/bin:${pkg_dest}:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:.' > ${pkg_dest}/.env
         echo 'NODE_PATH=${pkg_dest}/node_modules' >> ${pkg_dest}/.env
         echo 'BUN_INSTALL=${pkg_dest}' >> ${pkg_dest}/.env
     "
@@ -804,7 +803,7 @@ chmod +x ${pkg_dest}/run"
     # to ~/.bun/install/global.
     docker exec "$CONTAINER_NAME" bash -c "
         cat > ${pkg_dest}/.env <<EOF
-PATH=/pkgs/bun/${BUN_VERSION}/bin:/pkgs/bun/${BUN_VERSION}:/pkgs/node/${NODE_VERSION}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.
+PATH=/pkgs/bun/${BUN_VERSION}/bin:/pkgs/bun/${BUN_VERSION}:/pkgs/node/${NODE_VERSION}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:.
 NODE_PATH=/pkgs/node/${NODE_VERSION}/node_modules
 BUN_INSTALL=/pkgs/bun/${BUN_VERSION}
 EOF
