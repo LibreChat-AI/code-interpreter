@@ -66,8 +66,13 @@ Runtimes are auto-discovered from `/pkgs` at startup. Each package provides `com
 - **Python** 3.14 -- includes `matplotlib`, `numpy`, `pandas`, `scipy`, `statsmodels`, chDB (`chdb`), geospatial (`geopandas`, `rasterio`, `rioxarray`, `pyproj`), and other scientific packages
 - **Node.js** 24 -- runs `.js` files with curated offline npm packages
 - **Bun** (JavaScript/TypeScript) -- runs `.js`, `.ts`, and `.bun` files with the same curated offline package set
+- **Go** 1.27 -- single-file programs via `go run` (`GOTOOLCHAIN=local`; toolchain caches live under hidden `/mnt/data` directories)
+- **Java** (Temurin) 27 -- single- and multi-file source programs via the java single-file source launcher (JEP 458)
+- **Rust** 1.100 -- single-file `.rs` programs via `rustc` (edition 2024 by default, override with `RUSTC_EDITION`); a `Cargo.toml` entrypoint runs with `cargo run --offline`
 
-Other package-format-compatible runtimes (Go, Rust, Java, GCC) can be installed but may require additional system libraries to be added to the sandbox image.
+Go and Rust packages place a `.exec-workspace` marker in their package directory: jobs for those runtimes mount the workspace with `noexec` disabled so their toolchains can execute freshly built binaries. The marker is operator-controlled (`/pkgs` is read-only). Bash jobs keep the default `noexec` workspace, so `go run` from a bash script is not supported — request the `go` or `rust` runtime directly instead.
+
+Other package-format-compatible runtimes (GCC, PHP, R) can be installed but may require additional system libraries to be added to the sandbox image.
 
 ## Filesystem Layout Inside the Sandbox
 

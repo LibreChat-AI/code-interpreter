@@ -75,7 +75,7 @@ const EGRESS_GRANT_GRACE_MS = 10 * 60 * 1000;
  * reserve does not consume a full transfer timeout for a tiny request. */
 export const CHECKPOINT_METADATA_TIMEOUT_CAP_MS = 5_000;
 /** Hard caller-side deadline for one direct runtime-session registry command.
- * Keep it beside the checkpoint budget calculation so the optional
+ * Keep this beside the checkpoint budget calculation so the optional
  * post-exec pipeline and the registry implementation share one value without
  * making config import the Redis-backed registry module. */
 export const RUNTIME_SESSION_REDIS_COMMAND_TIMEOUT_MS = 5_000;
@@ -351,7 +351,7 @@ export const env = {
   INPUT_MANIFEST_CONCURRENCY: Math.min(64, Math.max(1, Math.floor(Number(process.env.CODEAPI_INPUT_MANIFEST_CONCURRENCY) || 8))),
   INPUT_MANIFEST_TIMEOUT_MS: Math.max(1, Math.floor(Number(process.env.CODEAPI_INPUT_MANIFEST_TIMEOUT_MS) || 10000)),
   EGRESS_LEDGER_COMPACT: process.env.CODEAPI_EGRESS_LEDGER_COMPACT === 'true',
-  EGRESS_LEDGER_TTL_GRACE_SECONDS: Number(process.env.EGRESS_LEDGER_TTL_GRACE_SECONDS) || 300,
+  EGRESS_LEDGER_TTL_GRACE_SECONDS: Number(process.env.EGRESS_LEDGER_TTL_GRACE_SECONDS) || 300, 
   EGRESS_GRANT_SECRET: process.env.CODEAPI_EGRESS_GRANT_SECRET ?? '',
   EGRESS_GRANT_TTL_SECONDS: resolveEgressGrantTtlSeconds(process.env.EGRESS_GRANT_TTL_SECONDS, defaultJobTimeoutMs),
   PYTHON_CONCURRENCY: Number(process.env.PYTHON_CONCURRENCY) || 1,
