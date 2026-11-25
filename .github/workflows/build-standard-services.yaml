@@ -1,0 +1,91 @@
+name: Build standard services (LibreChat Fork)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  REGISTRY: ghcr.io
+  # Repositorio destino en GHCR
+  IMAGE_PREFIX: ghcr.io/carlos-uy/code-interpreter-librechat
+  # Nombre del "owner" del paquete en GHCR (usuario u organización)
+  PACKAGE_OWNER: carlos-uy
+  # Prefijo del path del paquete dentro de ese owner (repo/proyecto)
+  PACKAGE_NAMESPACE: code-interpreter-librechat
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-standard-services:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- Servicios de la aplicación (service/) ---
+          - service: librechat_api
+            dockerfile: service/Dockerfile
+            target: api
+
+          - service: librechat_service-worker
+            dockerfile: service/Dockerfile
+            target: worker
+
+          - service: librechat_file_server
+            dockerfile: service/Dockerfile
+            target: production
+
+          - service: librechat_egress_gateway
+            dockerfile: service/Dockerfile.egress-gateway
+            target: production
+
+          - service: librechat_tool_call_server
+            dockerfile: service/Dockerfile.tool-call-server
+            target: production
+
+          # --- Ejecutor (microVM, paquetes del host) ---
+          # Se construye desde api/Dockerfile (el mantenido, con el parche de
+          # anonymous-pipes.node); launcher/Dockerfile es una copia atrasada.
+          - service: librechat_sandbox-runner
+            dockerfile: api/Dockerfile
+            target: sandbox-runner
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Iniciar sesión en GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build y Push - ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target != '' && matrix.target || '' }}
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
+
+      # Tras publicar la nueva versión con :latest, la anterior queda sin
+      # tag (huérfana) en GHCR pero sigue ocupando espacio. Este step la
+      # borra, dejando siempre una única versión activa por servicio.
+      - name: Borrar versiones anteriores - ${{ matrix.service }}
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ env.PACKAGE_NAMESPACE }}/${{ matrix.service }}
+          package-type: container
+          min-versions-to-keep: 1
+          delete-only-untagged-versions: true

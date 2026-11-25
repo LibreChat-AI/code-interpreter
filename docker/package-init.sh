@@ -23,6 +23,12 @@ UV_VERSION="${UV_VERSION:-0.11.26}"
 NODE_VERSION="${NODE_VERSION:-24.22.1}"
 BUN_VERSION="${BUN_VERSION:-1.4.4}"
 BASH_PACKAGE_VERSION="${BASH_PACKAGE_VERSION:-5.2.0}"
+# Optional extended runtimes (empty value disables the runtime and its
+# packages_ready check): Go, Java (Temurin), Rust.
+GO_VERSION="${GO_VERSION:-1.27.4}"
+JAVA_FEATURE_VERSION="${JAVA_FEATURE_VERSION:-27}"
+JAVA_VERSION="${JAVA_VERSION:-27.0.1}"
+RUST_VERSION="${RUST_VERSION:-1.100.0}"
 INSTALL_FAILED=false
 JS_PACKAGE_MANIFEST="${JS_PACKAGE_MANIFEST:-${SCRIPT_DIR}/javascript-packages.txt}"
 
@@ -98,6 +104,9 @@ packages_ready() {
     js_packages_ready "/pkgs/node/${NODE_VERSION}" &&
     [ -f "/pkgs/bun/${BUN_VERSION}/.package-installed" ] &&
     js_packages_ready "/pkgs/bun/${BUN_VERSION}" &&
+    { [ -z "${GO_VERSION}" ] || [ -f "/pkgs/go/${GO_VERSION}/.package-installed" ]; } &&
+    { [ -z "${JAVA_VERSION}" ] || [ -f "/pkgs/java/${JAVA_VERSION}/.package-installed" ]; } &&
+    { [ -z "${RUST_VERSION}" ] || [ -f "/pkgs/rust/${RUST_VERSION}/.package-installed" ]; } &&
     [ -f "/pkgs/bash/${BASH_PACKAGE_VERSION}/.package-installed" ]
 }
 
@@ -526,6 +535,330 @@ elif [ "$BUN_INSTALLED" = true ]; then
     INSTALL_FAILED=true
 else
     echo "Skipping Bun package installation because Bun was not installed"
+fi
+
+# ==============================
+# Install Go
+# ==============================
+echo ""
+echo "=============================================="
+echo "  Installing Go ${GO_VERSION}"
+echo "=============================================="
+echo ""
+
+if [ -n "${GO_VERSION}" ]; then
+    GO_ARCH=""
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64) GO_ARCH="amd64" ;;
+        aarch64|arm64) GO_ARCH="arm64" ;;
+        *)
+            echo "ERROR: Unsupported architecture for Go: $ARCH"
+            INSTALL_FAILED=true
+            ;;
+    esac
+
+    if [ -n "$GO_ARCH" ]; then
+        GO_DEST="/pkgs/go/${GO_VERSION}"
+        mkdir -p "$GO_DEST"
+        rm -f "$GO_DEST/.package-installed"
+        GO_INSTALLED=false
+
+        GO_URL="https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+        cd /tmp
+        if curl -fsSL "$GO_URL" -o go.tgz; then
+            if tar -xzf go.tgz --strip-components=1 -C "$GO_DEST"; then
+                rm -f go.tgz
+
+                ACTUAL_GO_VERSION="$("$GO_DEST/bin/go" version | awk '{print $3}' | sed 's/^go//')"
+                if [ "$ACTUAL_GO_VERSION" = "$GO_VERSION" ]; then
+                    GO_INSTALLED=true
+                else
+                    echo "ERROR: Go version mismatch (expected ${GO_VERSION}, got ${ACTUAL_GO_VERSION})"
+                    INSTALL_FAILED=true
+                fi
+            else
+                echo "ERROR: Failed to extract Go archive"
+                rm -f go.tgz
+                INSTALL_FAILED=true
+            fi
+        else
+            echo "ERROR: Failed to download Go"
+            INSTALL_FAILED=true
+        fi
+
+        if [ "$GO_INSTALLED" = true ]; then
+            cat > "$GO_DEST/pkg-info.json" << EOF
+{
+    "language": "go",
+    "version": "${GO_VERSION}",
+    "build_platform": "docker-debian",
+    "aliases": ["golang"],
+    "limit_overrides": {
+        "run_timeout": 60000,
+        "run_cpu_time": 60000
+    }
+}
+EOF
+
+            cat > "$GO_DEST/run" << 'EOF'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "$#" -eq 0 ]; then
+    echo "go: no source file provided" >&2
+    exit 2
+fi
+ENTRY="$1"
+shift
+mkdir -p /mnt/data/.gocache /mnt/data/.gotmp /mnt/data/.gopath 2>/dev/null || true
+if [ -f "${ENTRY}" ] && [[ "${ENTRY}" != *.go ]]; then
+    RUNTMP="$(dirname "${ENTRY}")/.gorun"
+    mkdir -p "${RUNTMP}" 2>/dev/null || true
+    if [ -d "${RUNTMP}" ]; then
+        cp -f "${ENTRY}" "${RUNTMP}/entry.go" && ENTRY="${RUNTMP}/entry.go"
+    fi
+fi
+exec "${SCRIPT_DIR}/bin/go" run "${ENTRY}" "$@"
+EOF
+            chmod +x "$GO_DEST/run"
+
+            cat > "$GO_DEST/.env" << EOF
+PATH=${GO_DEST}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.
+GOTOOLCHAIN=local
+GOCACHE=/mnt/data/.gocache
+GOTMPDIR=/mnt/data/.gotmp
+GOPATH=/mnt/data/.gopath
+EOF
+            touch "$GO_DEST/.exec-workspace"
+            echo "$(date +%s)000" > "$GO_DEST/.package-installed"
+
+            echo "Go ${GO_VERSION} installed: $($GO_DEST/bin/go version)"
+        fi
+    fi
+else
+    echo "Skipping Go (GO_VERSION empty)"
+fi
+
+# ==============================
+# Install Java (Temurin)
+# ==============================
+echo ""
+echo "=============================================="
+echo "  Installing Java ${JAVA_VERSION} (Temurin)"
+echo "=============================================="
+echo ""
+
+if [ -n "${JAVA_VERSION}" ]; then
+    ADOPTIUM_ARCH=""
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64) ADOPTIUM_ARCH="x64" ;;
+        aarch64|arm64) ADOPTIUM_ARCH="aarch64" ;;
+        *)
+            echo "ERROR: Unsupported architecture for Java: $ARCH"
+            INSTALL_FAILED=true
+            ;;
+    esac
+
+    if [ -n "$ADOPTIUM_ARCH" ]; then
+        JAVA_DEST="/pkgs/java/${JAVA_VERSION}"
+        mkdir -p "$JAVA_DEST"
+        rm -f "$JAVA_DEST/.package-installed"
+        JAVA_INSTALLED=false
+
+        JDK_URL="https://api.adoptium.net/v3/binary/latest/${JAVA_FEATURE_VERSION}/ga/linux/${ADOPTIUM_ARCH}/jdk/hotspot/normal/eclipse"
+        cd /tmp
+        if curl -fsSL "$JDK_URL" -o jdk.tgz; then
+            if tar -xzf jdk.tgz --strip-components=1 -C "$JAVA_DEST"; then
+                rm -f jdk.tgz
+
+                ACTUAL_JAVA_VERSION="$("$JAVA_DEST/bin/java" --version | head -n 1 | sed -nE 's/[^0-9]*([0-9]+[.][0-9]+[.][0-9]+).*/\1/p')"
+                if [ "$ACTUAL_JAVA_VERSION" = "$JAVA_VERSION" ]; then
+                    JAVA_INSTALLED=true
+                else
+                    echo "ERROR: Java version mismatch (expected ${JAVA_VERSION}, got ${ACTUAL_JAVA_VERSION})"
+                    INSTALL_FAILED=true
+                fi
+            else
+                echo "ERROR: Failed to extract Java archive"
+                rm -f jdk.tgz
+                INSTALL_FAILED=true
+            fi
+        else
+            echo "ERROR: Failed to download Java"
+            INSTALL_FAILED=true
+        fi
+
+        if [ "$JAVA_INSTALLED" = true ]; then
+            cat > "$JAVA_DEST/pkg-info.json" << EOF
+{
+    "language": "java",
+    "version": "${JAVA_VERSION}",
+    "build_platform": "docker-debian",
+    "aliases": ["openjdk", "jdk"]
+}
+EOF
+
+            cat > "$JAVA_DEST/run" << 'EOF'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "$#" -eq 0 ]; then
+    echo "java: no source file provided" >&2
+    exit 2
+fi
+ENTRY="$1"
+shift
+if [ -f "${ENTRY}" ] && [[ "${ENTRY}" != *.java ]]; then
+    DIR="$(dirname "${ENTRY}")"
+    BASE="$(basename "${ENTRY}")"
+    BASE="${BASE%.*}"
+    if [ -z "${BASE}" ]; then
+        BASE="entry"
+    fi
+    cp -f "${ENTRY}" "${DIR}/.${BASE}.java" && ENTRY="${DIR}/.${BASE}.java"
+fi
+exec "${SCRIPT_DIR}/bin/java" "${ENTRY}" "$@"
+EOF
+            chmod +x "$JAVA_DEST/run"
+
+            cat > "$JAVA_DEST/.env" << EOF
+PATH=${JAVA_DEST}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.
+JAVA_HOME=${JAVA_DEST}
+JDK_JAVA_OPTIONS=-Xmx256m -XX:MaxMetaspaceSize=192m -XX:CompressedClassSpaceSize=192m -XX:ReservedCodeCacheSize=96m
+EOF
+
+            echo "$(date +%s)000" > "$JAVA_DEST/.package-installed"
+
+            echo "Java ${JAVA_VERSION} installed: $($JAVA_DEST/bin/java --version | head -n 1)"
+        fi
+    fi
+else
+    echo "Skipping Java (JAVA_VERSION empty)"
+fi
+
+# ==============================
+# Install Rust
+# ==============================
+echo ""
+echo "=============================================="
+echo "  Installing Rust ${RUST_VERSION}"
+echo "=============================================="
+echo ""
+
+if [ -n "${RUST_VERSION}" ]; then
+    RUST_TARGET=""
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64) RUST_TARGET="x86_64-unknown-linux-gnu" ;;
+        aarch64|arm64) RUST_TARGET="aarch64-unknown-linux-gnu" ;;
+        *)
+            echo "ERROR: Unsupported architecture for Rust: $ARCH"
+            INSTALL_FAILED=true
+            ;;
+    esac
+
+    if [ -n "$RUST_TARGET" ]; then
+        RUST_DEST="/pkgs/rust/${RUST_VERSION}"
+        mkdir -p "$RUST_DEST"
+        rm -f "$RUST_DEST/.package-installed"
+        RUST_INSTALLED=false
+
+        cd /tmp
+        if curl -fsSL -o rustup-init "https://static.rust-lang.org/rustup/dist/${RUST_TARGET}/rustup-init"; then
+            chmod +x rustup-init
+            if RUSTUP_HOME="${RUST_DEST}/rustup" CARGO_HOME="${RUST_DEST}/cargo" ./rustup-init -y \
+                --no-modify-path \
+                --profile minimal \
+                --default-toolchain "${RUST_VERSION}"; then
+                rm -f rustup-init
+
+                RUST_TOOLCHAIN_DIR="$(ls -d "${RUST_DEST}/rustup/toolchains/"* 2>/dev/null | head -n 1)"
+                if [ -n "$RUST_TOOLCHAIN_DIR" ] && [ -x "$RUST_TOOLCHAIN_DIR/bin/rustc" ]; then
+                    ACTUAL_RUST_VERSION="$("$RUST_TOOLCHAIN_DIR/bin/rustc" --version | awk '{print $2}')"
+                    if [ "$ACTUAL_RUST_VERSION" = "$RUST_VERSION" ] && [ -x "$RUST_TOOLCHAIN_DIR/bin/cargo" ]; then
+                        RUST_INSTALLED=true
+                    else
+                        echo "ERROR: Rust version mismatch (expected ${RUST_VERSION}, got ${ACTUAL_RUST_VERSION})"
+                        INSTALL_FAILED=true
+                    fi
+                else
+                    echo "ERROR: Rust toolchain not found after rustup install"
+                    INSTALL_FAILED=true
+                fi
+            else
+                echo "ERROR: rustup-init failed"
+                rm -f rustup-init
+                INSTALL_FAILED=true
+            fi
+        else
+            echo "ERROR: Failed to download rustup-init"
+            INSTALL_FAILED=true
+        fi
+
+        if [ "$RUST_INSTALLED" = true ]; then
+            cat > "$RUST_DEST/pkg-info.json" << EOF
+{
+    "language": "rust",
+    "version": "${RUST_VERSION}",
+    "build_platform": "docker-debian",
+    "aliases": ["rustc"],
+    "limit_overrides": {
+        "run_timeout": 60000,
+        "run_cpu_time": 60000
+    }
+}
+EOF
+
+            cat > "$RUST_DEST/run" << 'EOF'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOLCHAIN_BIN="$(ls -d "${SCRIPT_DIR}"/rustup/toolchains/*/bin 2>/dev/null | head -n 1)"
+if [ -z "${TOOLCHAIN_BIN}" ] || [ ! -x "${TOOLCHAIN_BIN}/rustc" ]; then
+    echo "rust: toolchain not found in ${SCRIPT_DIR}/rustup/toolchains" >&2
+    exit 1
+fi
+if [ "$#" -eq 0 ]; then
+    echo "rust: no source file provided" >&2
+    exit 2
+fi
+ENTRY="$1"
+shift
+if [ -f "${ENTRY}" ] && [ "$(basename "${ENTRY}")" = "Cargo.toml" ]; then
+    mkdir -p /mnt/data/.cargo 2>/dev/null || true
+    cd "$(dirname "${ENTRY}")" || exit 1
+    exec "${TOOLCHAIN_BIN}/cargo" run --offline "$@"
+fi
+if [ -f "${ENTRY}" ] && [[ "${ENTRY}" != *.rs ]]; then
+    DIR="$(dirname "${ENTRY}")"
+    BASE="$(basename "${ENTRY}")"
+    BASE="${BASE%.*}"
+    if [ -z "${BASE}" ]; then
+        BASE="entry"
+    fi
+    cp -f "${ENTRY}" "${DIR}/.${BASE}.rs" && ENTRY="${DIR}/.${BASE}.rs"
+fi
+OUT_DIR=/mnt/data/.rust-build
+mkdir -p "${OUT_DIR}" 2>/dev/null || OUT_DIR=/tmp
+mkdir -p /mnt/data/.rust-tmp 2>/dev/null || true
+"${TOOLCHAIN_BIN}/rustc" --edition "${RUSTC_EDITION:-2021}" -o "${OUT_DIR}/app" "${ENTRY}" || exit 1
+exec "${OUT_DIR}/app" "$@"
+EOF
+            chmod +x "$RUST_DEST/run"
+
+            cat > "$RUST_DEST/.env" << EOF
+PATH=${RUST_TOOLCHAIN_DIR}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.
+CARGO_HOME=/mnt/data/.cargo
+RUSTC_EDITION=2024
+TMPDIR=/mnt/data/.rust-tmp
+EOF
+            touch "$RUST_DEST/.exec-workspace"
+            echo "$(date +%s)000" > "$RUST_DEST/.package-installed"
+
+            echo "Rust ${RUST_VERSION} installed: $($RUST_TOOLCHAIN_DIR/bin/rustc --version)"
+        fi
+    fi
+else
+    echo "Skipping Rust (RUST_VERSION empty)"
 fi
 
 # ==============================

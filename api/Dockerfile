@@ -125,6 +125,15 @@ RUN apt-get update && \
 # in its minimal build.
 RUN [ -x /usr/bin/mawk ] && ln -sf /usr/bin/mawk /usr/bin/awk
 
+# Resolve every update-alternatives symlink in /usr/bin and /usr/sbin to its
+# real target. NsJail mounts /usr read-only but NOT /etc, so links such as
+# `which -> /etc/alternatives/which` dangle inside the jail and the command
+# fails with exit 127 (this broke R's utils/stats loading via Sys.which()).
+RUN for l in $(find /usr/bin /usr/sbin -type l -lname '/etc/alternatives/*'); do \
+      t="$(readlink -f "$l")"; \
+      if [ -e "$t" ]; then ln -sf "$t" "$l"; fi; \
+    done
+
 RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
 COPY --from=nsjail-builder /nsjail/nsjail /usr/sbin/nsjail
@@ -151,6 +160,13 @@ COPY shared /shared
 COPY api/config ./config
 
 RUN bun run build
+
+# The microVM guest does not inherit Dockerfile ENV: the launcher forwards only
+# an allow-list of variables and SANDBOX_PIPE_ADDON is not on it, so
+# pipe-process.ts falls back to /sandbox_api/.build/anonymous-pipes.node, which
+# was never created ("Failed to spawn nsjail: Cannot find module ..."). Place the
+# addon at that fallback path so it resolves without the env var.
+RUN cp /usr/local/lib/anonymous-pipes.node /sandbox_api/.build/anonymous-pipes.node
 
 RUN mkdir -p /pkgs /tmp/sandbox
 

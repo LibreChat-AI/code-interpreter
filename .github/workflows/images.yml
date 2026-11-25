@@ -52,7 +52,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  NAMESPACE: ghcr.io/librechat-ai
+  NAMESPACE: ghcr.io/carlos-uy
 
 jobs:
   plan:

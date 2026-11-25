@@ -142,6 +142,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     gawk \
     findutils \
     ca-certificates \
+    curl \
     && dnf clean all
 
 COPY --from=launcher-builder /launcher/target/release/sandbox-launcher /usr/local/bin/launcher

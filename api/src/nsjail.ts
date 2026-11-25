@@ -207,13 +207,24 @@ function readBaseConfig(): string {
 }
 
 /* Render a `mount {}` block that binds `submissionDir` at /mnt/data with
- * noexec/nosuid/nodev. The destination is fixed; the source path is the
- * per-job workspace. Path comes from createSandboxWorkspace and lives
- * under a known prefix (no user-controlled bytes), but we still escape
- * embedded backslashes and double-quotes defensively in case future
- * callers pass arbitrary paths in. The cfg syntax is C-like so only those
- * two characters need escaping inside a string literal. */
-export function renderJobConfigOverlay(submissionDir: string): string {
+ * nosuid/nodev and noexec unless the runtime package opts in. The
+ * destination is fixed; the source path is the per-job workspace. Path
+ * comes from createSandboxWorkspace and lives under a known prefix (no
+ * user-controlled bytes), but we still escape embedded backslashes and
+ * double-quotes defensively in case future callers pass arbitrary paths
+ * in. The cfg syntax is C-like so only those two characters need
+ * escaping inside a string literal.
+ *
+ * Compiled-language runtimes (Go, Rust, ...) place a `.exec-workspace`
+ * marker in their package directory: their toolchains must execute
+ * binaries they just built into the workspace (`go run` links a temp
+ * binary under GOTMPDIR, `rustc` emits the program itself). The marker
+ * lives under /pkgs, which is read-only and operator-controlled, so
+ * user code cannot opt itself in — only a rebuilt package set can.
+ * Executing a self-built ELF grants no capabilities the interpreted
+ * runtimes don't already have (the jail's real isolation is seccomp,
+ * namespaces and cgroups), and nosuid/nodev stay enforced. */
+export function renderJobConfigOverlay(submissionDir: string, allowExec = false): string {
   const escaped = submissionDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   return [
     '',
@@ -226,7 +237,7 @@ export function renderJobConfigOverlay(submissionDir: string): string {
     '    dst: "/mnt/data"',
     '    is_bind: true',
     '    rw: true',
-    '    noexec: true',
+    `    noexec: ${allowExec ? 'false' : 'true'}`,
     '    nosuid: true',
     '    nodev: true',
     '}',
@@ -268,7 +279,14 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
   const logPath = `/tmp/nsjail-${logId}.log`;
   const cfgPath = `/tmp/nsjail-${logId}.cfg`;
 
-  fs.writeFileSync(cfgPath, readBaseConfig() + renderJobConfigOverlay(submissionDir), { mode: 0o600 });
+  fs.writeFileSync(
+    cfgPath,
+    readBaseConfig() + renderJobConfigOverlay(
+      submissionDir,
+      fs.existsSync(path.join(pkgdir, '.exec-workspace')),
+    ),
+    { mode: 0o600 },
+  );
 
   const nsjailArgs = buildArgs({
     logPath,
@@ -524,7 +542,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
    *
    * (1) Process has ALREADY exited by the time we get here. drainStream
    *     waits on stream 'close' events, which fire BEFORE proc 'close',
-   *     but Node populates proc.exitCode / proc.signalCode synchronously
+     *     but Node populates proc.exitCode / proc.signalCode synchronously
    *     when the underlying wait() returns — so on a signal kill
    *     (e.g. proc.kill('SIGKILL') from the output-overflow path),
    *     proc.signalCode is set before drainStream resolves. If we only
