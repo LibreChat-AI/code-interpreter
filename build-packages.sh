@@ -19,6 +19,13 @@
 #   SKIP_PYTHON=1            # Skip Python installation
 #   FORCE_REBUILD=1          # Delete existing packages first
 #   BUN_PACKAGE_BATCH_SIZE=4 # Positive integer number of direct JS packages per Bun install batch
+#   SKIP_GO=1               # Skip Go installation
+#   SKIP_JAVA=1             # Skip Java installation
+#   SKIP_RUST=1             # Skip Rust installation
+#   GO_VERSION=1.27.4       # Go version to install
+#   JAVA_FEATURE_VERSION=27 # Temurin feature release used for the download URL
+#   JAVA_VERSION=27.0.1     # Temurin version to install (must match the GA build of the feature)
+#   RUST_VERSION=1.100.0    # Rust version to install
 #
 
 set -e
@@ -29,6 +36,11 @@ cd "$SCRIPT_DIR"
 PYTHON_VERSION="${PYTHON_VERSION:-3.14.4}"
 NODE_VERSION="${NODE_VERSION:-24.22.1}"
 BUN_VERSION="${BUN_VERSION:-1.4.4}"
+BASH_PACKAGE_VERSION="${BASH_PACKAGE_VERSION:-5.2.0}"
+GO_VERSION="${GO_VERSION:-1.27.4}"
+JAVA_FEATURE_VERSION="${JAVA_FEATURE_VERSION:-27}"
+JAVA_VERSION="${JAVA_VERSION:-27.0.1}"
+RUST_VERSION="${RUST_VERSION:-1.100.0}"
 PACKAGES_DIR="./data/pkgs"
 JS_PACKAGE_MANIFEST="${JS_PACKAGE_MANIFEST:-${SCRIPT_DIR}/javascript-packages.txt}"
 
@@ -313,7 +325,7 @@ install_node_packages() {
     echo "  Installing Node.js packages"
     echo "=============================================="
 
-    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:." "$npm_path" install \
+    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:." "$npm_path" install \
         --prefix "$pkg_dest" \
         --omit=dev \
         --no-audit \
@@ -326,7 +338,7 @@ install_node_packages() {
     # + bin shims on PATH) so `npm list -g`, `npm root -g`, and CLI shims work
     # as LLMs expect. The local tree above is still what feeds the
     # /mnt/data/node_modules symlink used by `require()` from user code.
-    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:." "$npm_path" install -g \
+    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:." "$npm_path" install -g \
         --prefix "$pkg_dest" \
         --omit=dev \
         --no-audit \
@@ -337,10 +349,10 @@ install_node_packages() {
     docker exec "$CONTAINER_NAME" bash -c "echo \$(date +%s)000 > ${pkg_dest}/.package-installed"
 
     echo "Installed Node.js packages (local):"
-    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:." "$npm_path" ls --prefix "$pkg_dest" --depth=0 2>/dev/null | head -40 || true
+    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:." "$npm_path" ls --prefix "$pkg_dest" --depth=0 2>/dev/null | head -40 || true
 
     echo "Installed Node.js packages (global):"
-    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:." "$npm_path" ls -g --prefix "$pkg_dest" --depth=0 2>/dev/null | head -40 || true
+    docker exec "$CONTAINER_NAME" env "PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:." "$npm_path" ls -g --prefix "$pkg_dest" --depth=0 2>/dev/null | head -40 || true
 }
 
 install_bun() {
@@ -468,6 +480,291 @@ install_bun_packages() {
     docker exec "$CONTAINER_NAME" bash -c "cd ${pkg_dest} && BUN_INSTALL=${pkg_dest} ./bun pm ls -g 2>/dev/null | head -40" || true
 }
 
+install_go() {
+    if [ "${SKIP_GO:-}" = "1" ] || [ -z "${GO_VERSION}" ]; then
+        echo "Skipping Go (SKIP_GO=1 or GO_VERSION empty)"
+        return 0
+    fi
+
+    local pkg_arch
+    pkg_arch="$(docker exec "$CONTAINER_NAME" uname -m)"
+    local go_arch
+    case "$pkg_arch" in
+        x86_64) go_arch="amd64" ;;
+        arm64|aarch64) go_arch="arm64" ;;
+        *) echo "Unsupported architecture for Go: ${pkg_arch}"; return 1 ;;
+    esac
+
+    local pkg_dest="/pkgs/go/${GO_VERSION}"
+
+    echo "=============================================="
+    echo "  Installing Go ${GO_VERSION}"
+    echo "=============================================="
+
+    docker exec "$CONTAINER_NAME" bash -c "
+        set -e
+        mkdir -p ${pkg_dest}
+        rm -f ${pkg_dest}/.package-installed
+        cd /tmp
+        curl -fsSL -o go.tgz https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz
+        tar -xzf go.tgz --strip-components=1 -C ${pkg_dest}
+        rm -f go.tgz
+    "
+
+    local actual_version
+    actual_version="$(docker exec "$CONTAINER_NAME" "${pkg_dest}/bin/go" version | awk '{print $3}' | sed 's/^go//')"
+    if [ "${actual_version}" != "${GO_VERSION}" ]; then
+        echo "ERROR: Go version mismatch (expected ${GO_VERSION}, got ${actual_version})"
+        return 1
+    fi
+
+    docker exec "$CONTAINER_NAME" bash -c "cat > ${pkg_dest}/pkg-info.json << 'EOF'
+{
+    \"language\": \"go\",
+    \"version\": \"${GO_VERSION}\",
+    \"build_platform\": \"docker-debian\",
+    \"aliases\": [\"golang\"],
+    \"limit_overrides\": {
+        \"run_timeout\": 60000,
+        \"run_cpu_time\": 60000
+    }
+}
+EOF"
+
+    docker exec "$CONTAINER_NAME" bash -c "cat > ${pkg_dest}/run << 'EOF'
+#!/bin/bash
+SCRIPT_DIR=\"\$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")\" && pwd)\"
+if [ \"\$#\" -eq 0 ]; then
+    echo \"go: no source file provided\" >&2
+    exit 2
+fi
+ENTRY=\"\$1\"
+shift
+mkdir -p /mnt/data/.gocache /mnt/data/.gotmp /mnt/data/.gopath 2>/dev/null || true
+if [ -f \"\${ENTRY}\" ] && [[ \"\${ENTRY}\" != *.go ]]; then
+    RUNTMP=\"\$(dirname \"\${ENTRY}\")/.gorun\"
+    mkdir -p \"\${RUNTMP}\" 2>/dev/null || true
+    if [ -d \"\${RUNTMP}\" ]; then
+        cp -f \"\${ENTRY}\" \"\${RUNTMP}/entry.go\" && ENTRY=\"\${RUNTMP}/entry.go\"
+    fi
+fi
+exec \"\${SCRIPT_DIR}/bin/go\" run \"\${ENTRY}\" \"\$@\"
+EOF
+chmod +x ${pkg_dest}/run"
+
+    docker exec "$CONTAINER_NAME" bash -c "
+        cat > ${pkg_dest}/.env <<EOF
+PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.
+GOTOOLCHAIN=local
+GOCACHE=/mnt/data/.gocache
+GOTMPDIR=/mnt/data/.gotmp
+GOPATH=/mnt/data/.gopath
+EOF
+        touch ${pkg_dest}/.exec-workspace
+        echo \$(date +%s)000 > ${pkg_dest}/.package-installed
+    "
+
+    echo "Go ${GO_VERSION} installed: $(docker exec "$CONTAINER_NAME" "${pkg_dest}/bin/go" version)"
+}
+
+install_java() {
+    if [ "${SKIP_JAVA:-}" = "1" ] || [ -z "${JAVA_VERSION}" ]; then
+        echo "Skipping Java (SKIP_JAVA=1 or JAVA_VERSION empty)"
+        return 0
+    fi
+
+    local pkg_arch
+    pkg_arch="$(docker exec "$CONTAINER_NAME" uname -m)"
+    local adoptium_arch
+    case "$pkg_arch" in
+        x86_64) adoptium_arch="x64" ;;
+        arm64|aarch64) adoptium_arch="aarch64" ;;
+        *) echo "Unsupported architecture for Java: ${pkg_arch}"; return 1 ;;
+    esac
+
+    local pkg_dest="/pkgs/java/${JAVA_VERSION}"
+    local jdk_url="https://api.adoptium.net/v3/binary/latest/${JAVA_FEATURE_VERSION}/ga/linux/${adoptium_arch}/jdk/hotspot/normal/eclipse"
+
+    echo "=============================================="
+    echo "  Installing Java ${JAVA_VERSION} (Temurin)"
+    echo "=============================================="
+
+    docker exec "$CONTAINER_NAME" bash -c "
+        set -e
+        mkdir -p ${pkg_dest}
+        rm -f ${pkg_dest}/.package-installed
+        cd /tmp
+        curl -fsSL -o jdk.tgz '${jdk_url}'
+        tar -xzf jdk.tgz --strip-components=1 -C ${pkg_dest}
+        rm -f jdk.tgz
+    "
+
+    local actual_version
+    actual_version="$(docker exec "$CONTAINER_NAME" "${pkg_dest}/bin/java" --version | head -n 1 | sed -nE 's/[^0-9]*([0-9]+[.][0-9]+[.][0-9]+).*/\1/p')"
+    if [ "${actual_version}" != "${JAVA_VERSION}" ]; then
+        echo "ERROR: Java version mismatch (expected ${JAVA_VERSION}, got ${actual_version})"
+        return 1
+    fi
+
+    docker exec "$CONTAINER_NAME" bash -c "cat > ${pkg_dest}/pkg-info.json << 'EOF'
+{
+    \"language\": \"java\",
+    \"version\": \"${JAVA_VERSION}\",
+    \"build_platform\": \"docker-debian\",
+    \"aliases\": [\"openjdk\", \"jdk\"]
+}
+EOF"
+
+    docker exec "$CONTAINER_NAME" bash -c "cat > ${pkg_dest}/run << 'EOF'
+#!/bin/bash
+SCRIPT_DIR=\"\$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")\" && pwd)\"
+if [ \"\$#\" -eq 0 ]; then
+    echo \"java: no source file provided\" >&2
+    exit 2
+fi
+ENTRY=\"\$1\"
+shift
+if [ -f \"\${ENTRY}\" ] && [[ \"\${ENTRY}\" != *.java ]]; then
+    DIR=\"\$(dirname \"\${ENTRY}\")\"
+    BASE=\"\$(basename \"\${ENTRY}\")\"
+    BASE=\"\${BASE%.*}\"
+    if [ -z \"\${BASE}\" ]; then
+        BASE=\"entry\"
+    fi
+    cp -f \"\${ENTRY}\" \"\${DIR}/.\${BASE}.java\" && ENTRY=\"\${DIR}/.\${BASE}.java\"
+fi
+exec \"\${SCRIPT_DIR}/bin/java\" \"\${ENTRY}\" \"\$@\"
+EOF
+chmod +x ${pkg_dest}/run"
+
+    docker exec "$CONTAINER_NAME" bash -c "
+        cat > ${pkg_dest}/.env <<EOF
+PATH=${pkg_dest}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.
+JAVA_HOME=${pkg_dest}
+JDK_JAVA_OPTIONS=-Xmx256m -XX:MaxMetaspaceSize=192m -XX:CompressedClassSpaceSize=192m -XX:ReservedCodeCacheSize=96m
+EOF
+        echo \$(date +%s)000 > ${pkg_dest}/.package-installed
+    "
+
+    echo "Java ${JAVA_VERSION} installed: $(docker exec "$CONTAINER_NAME" "${pkg_dest}/bin/java" --version | head -n 1)"
+}
+
+install_rust() {
+    if [ "${SKIP_RUST:-}" = "1" ] || [ -z "${RUST_VERSION}" ]; then
+        echo "Skipping Rust (SKIP_RUST=1 or RUST_VERSION empty)"
+        return 0
+    fi
+
+    local pkg_arch
+    pkg_arch="$(docker exec "$CONTAINER_NAME" uname -m)"
+    local rust_target
+    case "$pkg_arch" in
+        x86_64) rust_target="x86_64-unknown-linux-gnu" ;;
+        arm64|aarch64) rust_target="aarch64-unknown-linux-gnu" ;;
+        *) echo "Unsupported architecture for Rust: ${pkg_arch}"; return 1 ;;
+    esac
+
+    local pkg_dest="/pkgs/rust/${RUST_VERSION}"
+
+    echo "=============================================="
+    echo "  Installing Rust ${RUST_VERSION}"
+    echo "=============================================="
+
+    docker exec "$CONTAINER_NAME" bash -c "
+        set -e
+        mkdir -p ${pkg_dest}
+        rm -f ${pkg_dest}/.package-installed
+        cd /tmp
+        curl -fsSL -o rustup-init https://static.rust-lang.org/rustup/dist/${rust_target}/rustup-init
+        chmod +x rustup-init
+        RUSTUP_HOME=${pkg_dest}/rustup CARGO_HOME=${pkg_dest}/cargo ./rustup-init -y \
+            --no-modify-path \
+            --profile minimal \
+            --default-toolchain ${RUST_VERSION}
+        rm -f rustup-init
+    "
+
+    local toolchain_dir
+    toolchain_dir="$(docker exec "$CONTAINER_NAME" bash -c "ls -d ${pkg_dest}/rustup/toolchains/* | head -n 1")"
+    if [ -z "${toolchain_dir}" ] || ! docker exec "$CONTAINER_NAME" test -x "${toolchain_dir}/bin/rustc"; then
+        echo "ERROR: Rust toolchain not found after rustup install"
+        return 1
+    fi
+
+    local actual_version
+    actual_version="$(docker exec "$CONTAINER_NAME" "${toolchain_dir}/bin/rustc" --version | awk '{print $2}')"
+    if [ "${actual_version}" != "${RUST_VERSION}" ]; then
+        echo "ERROR: Rust version mismatch (expected ${RUST_VERSION}, got ${actual_version})"
+        return 1
+    fi
+    if ! docker exec "$CONTAINER_NAME" test -x "${toolchain_dir}/bin/cargo"; then
+        echo "ERROR: cargo not found in toolchain ${toolchain_dir}"
+        return 1
+    fi
+
+    docker exec "$CONTAINER_NAME" bash -c "cat > ${pkg_dest}/pkg-info.json << 'EOF'
+{
+    \"language\": \"rust\",
+    \"version\": \"${RUST_VERSION}\",
+    \"build_platform\": \"docker-debian\",
+    \"aliases\": [\"rustc\"],
+    \"limit_overrides\": {
+        \"run_timeout\": 60000,
+        \"run_cpu_time\": 60000
+    }
+}
+EOF"
+
+    docker exec "$CONTAINER_NAME" bash -c "cat > ${pkg_dest}/run << 'EOF'
+#!/bin/bash
+SCRIPT_DIR=\"\$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")\" && pwd)\"
+TOOLCHAIN_BIN=\"\$(ls -d \"\${SCRIPT_DIR}\"/rustup/toolchains/*/bin 2>/dev/null | head -n 1)\"
+if [ -z \"\${TOOLCHAIN_BIN}\" ] || [ ! -x \"\${TOOLCHAIN_BIN}/rustc\" ]; then
+    echo \"rust: toolchain not found in \${SCRIPT_DIR}/rustup/toolchains\" >&2
+    exit 1
+fi
+if [ \"\$#\" -eq 0 ]; then
+    echo \"rust: no source file provided\" >&2
+    exit 2
+fi
+ENTRY=\"\$1\"
+shift
+if [ -f \"\${ENTRY}\" ] && [ \"\$(basename \"\${ENTRY}\")\" = \"Cargo.toml\" ]; then
+    mkdir -p /mnt/data/.cargo 2>/dev/null || true
+    cd \"\$(dirname \"\${ENTRY}\")\" || exit 1
+    exec \"\${TOOLCHAIN_BIN}/cargo\" run --offline \"\$@\"
+fi
+if [ -f \"\${ENTRY}\" ] && [[ \"\${ENTRY}\" != *.rs ]]; then
+    DIR=\"\$(dirname \"\${ENTRY}\")\"
+    BASE=\"\$(basename \"\${ENTRY}\")\"
+    BASE=\"\${BASE%.*}\"
+    if [ -z \"\${BASE}\" ]; then
+        BASE=\"entry\"
+    fi
+    cp -f \"\${ENTRY}\" \"\${DIR}/.\${BASE}.rs\" && ENTRY=\"\${DIR}/.\${BASE}.rs\"
+fi
+OUT_DIR=/mnt/data/.rust-build
+mkdir -p \"\${OUT_DIR}\" 2>/dev/null || OUT_DIR=/tmp
+mkdir -p /mnt/data/.rust-tmp 2>/dev/null || true
+\"\${TOOLCHAIN_BIN}/rustc\" --edition \"\${RUSTC_EDITION:-2021}\" -o \"\${OUT_DIR}/app\" \"\${ENTRY}\" || exit 1
+exec \"\${OUT_DIR}/app\" \"\$@\"
+EOF
+chmod +x ${pkg_dest}/run"
+
+    docker exec "$CONTAINER_NAME" bash -c "
+        cat > ${pkg_dest}/.env <<EOF
+PATH=${toolchain_dir}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.
+CARGO_HOME=/mnt/data/.cargo
+RUSTC_EDITION=2024
+TMPDIR=/mnt/data/.rust-tmp
+EOF
+        touch ${pkg_dest}/.exec-workspace
+        echo \$(date +%s)000 > ${pkg_dest}/.package-installed
+    "
+
+    echo "Rust ${RUST_VERSION} installed: $(docker exec "$CONTAINER_NAME" "${toolchain_dir}/bin/rustc" --version)"
+}
+
 install_bash() {
     local bash_package_version
     bash_package_version="${BASH_PACKAGE_VERSION:-5.2.0}"
@@ -550,6 +847,9 @@ main() {
     install_node_packages
     install_bun
     install_bun_packages
+    install_go
+    install_java
+    install_rust
     install_bash
 
     echo "Setting permissions..."
