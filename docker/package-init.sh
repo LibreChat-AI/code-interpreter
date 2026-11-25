@@ -369,7 +369,7 @@ EOF
             write_node_launcher "$NODE_DEST"
 
             {
-                echo "PATH=${NODE_DEST}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:."
+                echo "PATH=${NODE_DEST}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:."
                 echo "NODE_PATH=${NODE_DEST}/node_modules"
             } > "$NODE_DEST/.env"
 
@@ -472,7 +472,7 @@ EOF
             write_bun_launcher "$BUN_DEST"
 
             {
-                echo "PATH=${BUN_DEST}:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:."
+                echo "PATH=${BUN_DEST}:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:."
                 echo "NODE_PATH=${BUN_DEST}/node_modules"
             } > "$BUN_DEST/.env"
 
@@ -846,7 +846,7 @@ EOF
             chmod +x "$RUST_DEST/run"
 
             cat > "$RUST_DEST/.env" << EOF
-PATH=${RUST_TOOLCHAIN_DIR}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:.
+PATH=${RUST_TOOLCHAIN_DIR}/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.
 CARGO_HOME=/mnt/data/.cargo
 RUSTC_EDITION=2024
 TMPDIR=/mnt/data/.rust-tmp
@@ -890,7 +890,7 @@ bash "$@"
 EOF
 chmod +x "$BASH_DEST/run"
 
-echo "PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin/sbin:." > "$BASH_DEST/.env"
+echo "PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:." > "$BASH_DEST/.env"
 echo "$(date +%s)000" > "$BASH_DEST/.package-installed"
 
 echo "Bash ${BASH_PACKAGE_VERSION} registered (using system binary ${SYSTEM_BASH_VERSION})"
