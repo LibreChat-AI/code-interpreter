@@ -187,7 +187,7 @@ const SECCOMP_POLICY = [
    * Deny socketpairs as well; packaged runtime IPC uses anonymous pipes.
    * Keep sendmsg/sendmmsg denied for inherited descriptors too. */
   '    socket(domain) { domain != AF_VSOCK },',
-  '    socketpair'
+  '    socketpair',
   '  }',
   '}',
   'USE sandbox DEFAULT ALLOW',
@@ -542,7 +542,7 @@ export async function execute(opts: ExecuteOptions, setupGate: NsJailSetupGate =
    *
    * (1) Process has ALREADY exited by the time we get here. drainStream
    *     waits on stream 'close' events, which fire BEFORE proc 'close',
-   *     but Node populates proc.exitCode / proc.signalCode synchronously
+     *     but Node populates proc.exitCode / proc.signalCode synchronously
    *     when the underlying wait() returns — so on a signal kill
    *     (e.g. proc.kill('SIGKILL') from the output-overflow path),
    *     proc.signalCode is set before drainStream resolves. If we only
