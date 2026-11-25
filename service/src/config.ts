@@ -11,9 +11,12 @@ import { BRIDGE_WORKSPACE_IMPORT_FILE_DEFAULT_MAX_BYTES } from '../../packages/c
 
 export const languageConfig: Record<Languages | string, t.LanguageConfig | undefined> = {
   [Languages.bash]: { language: 'bash', version: '5.2.0', fileName: 'script.sh' },
+  [Languages.go]: { language: 'go', version: '1.27.4', fileName: 'main.go' },
+  [Languages.java]: { language: 'java', version: '27.0.1', fileName: 'Main.java' },
   [Languages.js]: { language: 'bun-js', version: '1.4.4', fileName: 'index.js' },
   [Languages.node]: { language: 'node', version: '24.22.1', fileName: 'index.js' },
   [Languages.py]: { language: 'python', version: '3.14.4', fileName: 'main.py' },
+  [Languages.rust]: { language: 'rust', version: '1.100.0', fileName: 'main.rs' },
   [Languages.ts]: { language: 'bun-ts', version: '1.4.4', fileName: 'main.ts' },
 };
 
@@ -40,6 +43,20 @@ const languageAliases: Record<string, Languages> = {
   'bun-ts': Languages.ts,
   'bun-typescript': Languages.ts,
 
+  // Go
+  go: Languages.go,
+  golang: Languages.go,
+
+  // Java (Temurin)
+  java: Languages.java,
+  openjdk: Languages.java,
+  jdk: Languages.java,
+
+  // Rust
+  rust: Languages.rust,
+  rs: Languages.rust,
+  rustc: Languages.rust,
+
   // Bash
   bash: Languages.bash,
   sh: Languages.bash,
@@ -58,7 +75,7 @@ const EGRESS_GRANT_GRACE_MS = 10 * 60 * 1000;
  * reserve does not consume a full transfer timeout for a tiny request. */
 export const CHECKPOINT_METADATA_TIMEOUT_CAP_MS = 5_000;
 /** Hard caller-side deadline for one direct runtime-session registry command.
- * Keep this beside the checkpoint budget calculation so the optional
+ * Keep it beside the checkpoint budget calculation so the optional
  * post-exec pipeline and the registry implementation share one value without
  * making config import the Redis-backed registry module. */
 export const RUNTIME_SESSION_REDIS_COMMAND_TIMEOUT_MS = 5_000;
@@ -334,7 +351,7 @@ export const env = {
   INPUT_MANIFEST_CONCURRENCY: Math.min(64, Math.max(1, Math.floor(Number(process.env.CODEAPI_INPUT_MANIFEST_CONCURRENCY) || 8))),
   INPUT_MANIFEST_TIMEOUT_MS: Math.max(1, Math.floor(Number(process.env.CODEAPI_INPUT_MANIFEST_TIMEOUT_MS) || 10000)),
   EGRESS_LEDGER_COMPACT: process.env.CODEAPI_EGRESS_LEDGER_COMPACT === 'true',
-  EGRESS_LEDGER_TTL_GRACE_SECONDS: Number(process.env.CODEAPI_EGRESS_LEDGER_TTL_GRACE_SECONDS) || 300,
+  EGRESS_LEDGER_TTL_GRACE_SECONDS: Number(process.env.EGRESS_LEDGER_TTL_GRACE_SECONDS) || 300,
   EGRESS_GRANT_SECRET: process.env.CODEAPI_EGRESS_GRANT_SECRET ?? '',
   EGRESS_GRANT_TTL_SECONDS: resolveEgressGrantTtlSeconds(process.env.EGRESS_GRANT_TTL_SECONDS, defaultJobTimeoutMs),
   PYTHON_CONCURRENCY: Number(process.env.PYTHON_CONCURRENCY) || 1,

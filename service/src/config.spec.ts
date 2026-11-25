@@ -94,6 +94,51 @@ describe('runtime version configuration', () => {
   });
 });
 
+describe('extended language configuration', () => {
+  it('resolves Go, Java, and Rust aliases', () => {
+    for (const alias of ['go', 'golang']) {
+      expect(resolveLanguage(alias)).toBe(Languages.go);
+    }
+    for (const alias of ['java', 'openjdk', 'jdk']) {
+      expect(resolveLanguage(alias)).toBe(Languages.java);
+    }
+    for (const alias of ['rust', 'rs', 'rustc']) {
+      expect(resolveLanguage(alias)).toBe(Languages.rust);
+    }
+  });
+
+  it('maps Go, Java, and Rust requests to their sandbox runtimes', () => {
+    expect(languageConfig[Languages.go]).toEqual({
+      language: 'go',
+      version: '1.27.4',
+      fileName: 'main.go',
+    });
+    expect(languageConfig[Languages.java]).toEqual({
+      language: 'java',
+      version: '27.0.1',
+      fileName: 'Main.java',
+    });
+    expect(languageConfig[Languages.rust]).toEqual({
+      language: 'rust',
+      version: '1.100.0',
+      fileName: 'main.rs',
+    });
+  });
+
+  it('aligns the extended package installers with the pinned versions', () => {
+    const root = path.resolve(__dirname, '../..');
+    const goVersion = languageConfig[Languages.go]!.version;
+    const javaVersion = languageConfig[Languages.java]!.version;
+    const rustVersion = languageConfig[Languages.rust]!.version;
+    for (const file of ['build-packages.sh', 'docker/package-init.sh']) {
+      const content = readFileSync(path.join(root, file), 'utf8');
+      expect(content).toContain(`GO_VERSION="\${GO_VERSION:-${goVersion}}"`);
+      expect(content).toContain(`JAVA_VERSION="\${JAVA_VERSION:-${javaVersion}}"`);
+      expect(content).toContain(`RUST_VERSION="\${RUST_VERSION:-${rustVersion}}"`);
+    }
+  });
+});
+
 describe('egress grant TTL configuration', () => {
   it('defaults to job timeout plus grace without a fixed 30 minute cap', () => {
     expect(resolveEgressGrantTtlSeconds(undefined, 45 * 60 * 1000)).toBe(55 * 60);
